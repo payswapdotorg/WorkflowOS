@@ -1,0 +1,100 @@
+name: Resolve Step 0 Architecture Clarifications
+
+on:
+  push:
+    branches:
+      - chore/resolve-step0-architecture-blockers
+
+permissions:
+  contents: write
+
+jobs:
+  patch-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: chore/resolve-step0-architecture-blockers
+          fetch-depth: 0
+
+      - name: Patch frozen architecture specifications
+        shell: python
+        run: |
+          from pathlib import Path
+
+          architecture = Path("spec/architecture.md")
+          text = architecture.read_text()
+
+          replacements = [
+              (
+                  """```text\n/auth\n/users\n/organizations\n/projects\n/specifications\n/requirements\n/work-items\n/workflows\n/agent-runs\n/reviews\n/github\n/llm\n/agents\n/notifications\n/audit\n```""",
+                  """```text\n/auth\n/users\n/organizations\n/projects\n/architecture\n/specifications\n/requirements\n/work-items\n/workflows\n/verification\n/reviews\n/llm\n/agents\n/github\n/notifications\n/audit\n```"""
+              ),
+              (
+                  """A work item contains:\n\n* objective\n* requirements covered\n* acceptance criteria\n* dependencies\n* architecture version\n* architecture constraints\n* out-of-scope definition\n* implementation agent assignment\n* associated pull request\n* execution history\n* verification results\n* architect review results\n\nA work item should represent a coherent implementation change that can reasonably be implemented and reviewed as one unit.""",
+                  """A work item contains:\n\n* objective\n* requirements covered\n* acceptance criteria\n* dependencies\n* architecture version\n* architecture constraints\n* out-of-scope definition\n* implementation agent assignment\n* associated pull requests\n* active implementation pull request (at most one)\n* execution history\n* verification results\n* architect review results\n\nA work item may have multiple pull requests over its lifetime, preserving historical PR associations. A work item may have only one active implementation PR at a time. A work item should represent a coherent implementation change that can reasonably be implemented and reviewed as one unit."""
+              ),
+              (
+                  """# 13. Work Item State Machine\n\nThe canonical workflow states are:\n\n```text\nDRAFT\n  ↓\nREADY\n  ↓\nASSIGNED\n  ↓\nIMPLEMENTING\n  ↓\nPR_OPEN\n  ↓\nVERIFYING\n  ↓\nARCHITECT_REVIEW\n  ↓\nAPPROVED\n  ↓\nMERGED\n  ↓\nVERIFIED\n```\n\nAlternative states include:\n\n```text\nCHANGES_REQUESTED\nIMPLEMENTATION_BLOCKED\nVERIFICATION_FAILED\nARCHITECTURE_CHANGE_REQUIRED\n```\n\nThe Workflow Engine owns these state transitions.\n\nExternal agents must not directly mutate workflow state outside authorized APIs.""",
+                  """# 13. Work Item State Machine\n\nThe canonical workflow states and legal transitions are:\n\n```text\nDRAFT\n  ↓\nREADY\n  ↓\nASSIGNED\n  ↓\nIMPLEMENTING\n  ↓\nPR_OPEN\n  ↓\nVERIFYING\n  ├── VERIFICATION_FAILED → IMPLEMENTING\n  └── ARCHITECT_REVIEW\n          ├── CHANGES_REQUESTED → IMPLEMENTING\n          ├── ARCHITECTURE_CHANGE_REQUIRED → ARCHITECTURE_CHANGE_REQUEST\n          └── APPROVED → MERGED → VERIFIED\n```\n\n`IMPLEMENTATION_BLOCKED` may occur during `ASSIGNED`, `IMPLEMENTING`, or `VERIFYING`. When the blocker is resolved, the work item returns to `IMPLEMENTING`.\n\n`ARCHITECTURE_CHANGE_REQUIRED` is terminal for the current implementation attempt until the architecture change is resolved.\n\nThe Workflow Engine owns the workflow state machine and all legal state transitions. External agents must not directly mutate workflow state outside authorized APIs.\n\nState transitions must be deterministic and idempotent."""
+              ),
+              (
+                  """# 9. Architecture Management\n\nArchitecture is a versioned project artifact.\n\nThe model is:\n\n```text\nArchitecture\n    ├── Architecture Version 1\n    ├── Architecture Version 2\n    └── Architecture Version N\n```\n\nAn architecture version may be:\n\n```text\nDRAFT\nFROZEN\nSUPERSEDED\n```\n\nA frozen architecture version is immutable.\n\nA new version is required for architectural changes.\n\nArchitecture versions may reference Architecture Decision Records.\n\nEach work item must reference exactly one architecture version.\n\nThis provides historical traceability between implementation work and the architectural rules that governed it.""",
+                  """# 9. Architecture Management\n\nThe `/architecture` module owns architecture management, Architecture Decision Records, Architecture Change Requests, and Architecture Versions.\n\nArchitecture is a versioned project artifact.\n\nThe model is:\n\n```text\nArchitecture\n    ├── Architecture Version 1\n    ├── Architecture Version 2\n    └── Architecture Version N\n```\n\nAn architecture version may be:\n\n```text\nDRAFT\nFROZEN\nSUPERSEDED\n```\n\nA frozen architecture version is immutable.\n\nArchitectural changes require an Architecture Change Request. Approved architectural changes create a new immutable architecture version.\n\nArchitecture versions may reference Architecture Decision Records.\n\nEach work item must reference exactly one architecture version.\n\nThis provides historical traceability between implementation work and the architectural rules that governed it."""
+              ),
+              (
+                  """# 16. LLM Gateway\n\nAll LLM providers are accessed through a provider-independent interface.""",
+                  """# 16. LLM Gateway\n\nThe `/llm` module owns the LLM Gateway, architect role execution, and Work Order generation.\n\nAll LLM providers are accessed through a provider-independent interface."""
+              ),
+              (
+                  """# 21. GitHub Integration\n\nGitHub is the authoritative source for repository state.""",
+                  """# 21. GitHub Integration\n\nThe `/github` module owns the GitHub App, GitHub webhooks, Pull Requests, and CI integration. GitHub Actions is an external CI provider.\n\nGitHub is the authoritative source for repository state."""
+              ),
+              (
+                  """# 23. Pull Requests\n\nEach implementation PR is associated with one or more WorkflowOS work items.\n\nWorkflowOS tracks:\n\n* repository\n* PR number\n* branch\n* base branch\n* head commit\n* status\n* checks\n* review state\n* associated work items\n\nA pull request is the primary integration boundary between an implementation agent and the target repository.""",
+                  """# 23. Pull Requests\n\nA work item may have multiple PRs over its lifetime, preserving historical PR associations. A work item may have only one active implementation PR at a time. A PR may implement one or more work items, provided each work item is explicitly associated with that PR.\n\nWorkflowOS tracks:\n\n* repository\n* PR number\n* branch\n* base branch\n* head commit\n* status\n* checks\n* review state\n* associated work items\n* active/inactive association state for each work item\n\nA pull request is the primary integration boundary between an implementation agent and the target repository."""
+              ),
+              (
+                  """# 24. Verification\n\nVerification is separate from architecture review.\n\nVerification determines whether required technical checks pass.""",
+                  """# 24. Verification\n\nThe `/verification` module owns verification runs, verification results, evidence, acceptance-criterion evaluation, and evidence-to-criterion mapping. The `/github` module owns GitHub integration and CI result ingestion. GitHub Actions is an external CI provider.\n\nVerification is separate from architecture review.\n\nVerification determines whether required technical checks pass."""
+              ),
+              (
+                  """# 25. Verification Engine\n\nThe Verification Engine maps objective evidence to acceptance criteria.""",
+                  """# 25. Verification Engine\n\nThe Verification Engine is implemented within the `/verification` module and maps objective evidence to acceptance criteria. `/verification` owns verification semantics; `/github` only ingests provider results."""
+              ),
+              (
+                  """# 31. Audit Log\n\nWorkflowOS maintains an append-oriented audit trail.""",
+                  """# 31. Audit Log\n\nWorkflowOS maintains an append-oriented audit trail. The audit module records the authoritative domain events emitted by the owning modules, including architecture changes, work-item state transitions, verification outcomes, review decisions, Pull Request associations, Agent Runs, and workflow executions."""
+              )
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"Expected architecture block not found: {old[:80]!r}")
+              text = text.replace(old, new, 1)
+
+          marker = "# 6. Backend\n"
+          ownership = """# 6. Backend\n\nThe backend is a TypeScript modular monolith.\n\nThe backend owns application and domain logic.\n\nThe frozen module ownership boundaries are:\n\n```text\n/architecture   Architecture Management, ADRs, Architecture Change Requests, Architecture Versions\n/specifications specification documents and specification lifecycle\n/requirements   Requirements, Acceptance Criteria\n/work-items     Work Items, Work Item Dependencies, Work Order state\n/workflows      workflow state machine, legal state transitions, orchestration\n/verification   verification, evidence, criterion evaluation\n/reviews        Architect Reviews, Review Findings\n/llm            LLM Gateway, Architect role execution, Work-order generation\n/agents         Agent Gateway, Agent Runs\n/github         GitHub App, GitHub webhooks, Pull Requests, CI integration\n```\n\nThe `/llm` module provides architect/LLM capabilities. The `/reviews` module owns persisted review records and findings. The `/github` module owns provider-specific GitHub behavior and CI result ingestion, while `/verification` owns verification semantics.\n\n"""
+          start = text.index(marker)
+          next_section = text.index("# 7. Auth and Organizations", start)
+          current_section = text[start:next_section]
+          tail = current_section[current_section.index("The initial modules are:"):]
+          # Replace the entire existing backend section with the frozen module-boundary declaration, preserving no conflicting module list.
+          text = text[:start] + ownership + text[next_section:]
+
+          architecture.write_text(text)
+
+          lock = Path("spec/architecture-lock.md")
+          lock.write_text("""# WorkflowOS Architecture Lock\n\n**Version:** 1.0\n**Status:** FROZEN\n\nThis file is authoritative for the frozen architectural rules of WorkflowOS. Implementation agents must follow `spec/architecture.md` and these enforceable boundaries. No implementation may reinterpret or bypass them.\n\n## System of record\n\n- WorkflowOS application state is authoritative in PostgreSQL.\n- Repository state is authoritative in GitHub.\n- Redis is not authoritative workflow state.\n- Conversational history and LLM memory are not systems of record.\n\n## Workflow authority\n\n- The `/workflows` module owns the workflow state machine, legal state transitions, and orchestration.\n- External agents and LLMs cannot directly mutate workflow state.\n- Workflow transitions are deterministic and idempotent.\n\n## Work item / Pull Request cardinality\n\n- A work item may have multiple PRs over its lifetime and must preserve historical PR associations.\n- A work item may have only one active implementation PR at a time.\n- A PR may implement one or more work items, provided each work item is explicitly associated with that PR.\n\n## Canonical workflow\n\n```text\nDRAFT\n→ READY\n→ ASSIGNED\n→ IMPLEMENTING\n→ PR_OPEN\n→ VERIFYING\n```\n\nFrom `VERIFYING`:\n\n- `VERIFICATION_FAILED` → `IMPLEMENTING`\n- `ARCHITECT_REVIEW`\n\nFrom `ARCHITECT_REVIEW`:\n\n- `CHANGES_REQUESTED` → `IMPLEMENTING`\n- `ARCHITECTURE_CHANGE_REQUIRED` → `ARCHITECTURE_CHANGE_REQUEST`\n- `APPROVED` → `MERGED` → `VERIFIED`\n\n`IMPLEMENTATION_BLOCKED` may occur during `ASSIGNED`, `IMPLEMENTING`, or `VERIFYING` and returns to `IMPLEMENTING` when resolved.\n\n`ARCHITECTURE_CHANGE_REQUIRED` is terminal for the current implementation attempt until the architecture change is resolved.\n\n## Architecture ownership\n\nThe `/architecture` module owns:\n\n- Architecture\n- Architecture Version\n- Architecture Decision\n- Architecture Change Request\n\nApproved architecture changes create a new immutable architecture version. Frozen architecture versions are immutable.\n\n## Verification ownership\n\nThe `/verification` module owns:\n\n- verification runs\n- verification results\n- evidence\n- acceptance-criterion evaluation\n- evidence-to-criterion mapping\n\nGitHub Actions is an external CI provider. The `/github` module owns GitHub integration and CI result ingestion. The `/verification` module owns verification semantics.\n\n## Frozen module boundaries\n\n| Module | Authoritative responsibility |\n|---|---|\n| `/architecture` | Architecture Management; ADRs; Architecture Change Requests; Architecture Versions |\n| `/specifications` | specification documents and specification lifecycle |\n| `/requirements` | Requirements; Acceptance Criteria |\n| `/work-items` | Work Items; Work Item Dependencies; Work Order state |\n| `/workflows` | workflow state machine; legal state transitions; orchestration |\n| `/verification` | verification; evidence; criterion evaluation |\n| `/reviews` | Architect Reviews; Review Findings |\n| `/llm` | LLM Gateway; Architect role execution; Work-order generation |\n| `/agents` | Agent Gateway; Agent Runs |\n| `/github` | GitHub App; GitHub webhooks; Pull Requests; CI integration |\n\nThe `/llm` module provides architect/LLM capabilities. The `/reviews` module owns persisted review records and findings.\n\n## Integration boundaries\n\n- Provider-specific LLM behavior remains behind the LLM Gateway.\n- Provider-specific agent behavior remains behind the Agent Gateway.\n- GitHub-specific behavior remains inside `/github`.\n- CI provider results enter through `/github`; verification meaning is owned by `/verification`.\n- Webhook events are validated, persisted, queued, and processed asynchronously.\n\n## Multi-tenancy and authorization\n\n- WorkflowOS is multi-tenant.\n- Organization/project ownership is authoritative.\n- Access to project resources is enforced server-side.\n- Frontend authorization is never trusted as the security boundary.\n\n## Frozen architecture change rule\n\nOnce an architecture version is frozen, implementation agents must not modify it. Architectural changes require an Architecture Change Request. Approved changes create a new immutable architecture version.\n\nAny implementation that conflicts with these rules is non-conforming to the frozen architecture.\n""")
+
+      - name: Remove temporary patch workflow and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/resolve-step0-architecture.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- spec/architecture.md spec/architecture-lock.md .github/workflows/resolve-step0-architecture.yml
+          git commit -m "docs: resolve Step 0 architecture blockers"
+          git push origin chore/resolve-step0-architecture-blockers
