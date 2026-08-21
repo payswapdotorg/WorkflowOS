@@ -33,7 +33,7 @@ interfaces, execution context, logger, queue/worker) without duplicating them.
 
 ### 2. Redis extensions (DATA-002 / DATA2-AC-01..02)
 
-Reuses the WORK-001 `RedisQueue` + `RedisQueue` + shared `createRedisClient`
+Reuses the WORK-001 `RedisQueue` + shared `createRedisClient`
 unchanged. Adds two explicitly non-authoritative coordination abstractions:
 
 - `platform/redis/transient-lock.ts` — `TransientLock` using
@@ -95,7 +95,7 @@ unchanged. Adds two explicitly non-authoritative coordination abstractions:
 ```
 cd backend
 bun install
-bun run test        # 145 tests pass
+bun run test        # 147 tests pass
 bun run typecheck   # tsc --noEmit — clean
 bun run lint        # eslint — clean
 ```
