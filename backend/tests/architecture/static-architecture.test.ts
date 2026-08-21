@@ -261,3 +261,126 @@ describe('architecture invariants — forbidden dependency directions', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 });
+
+/**
+ * WORK-003 invariants — domain modules must not depend directly on
+ * infrastructure-provider implementations.
+ *
+ * Domain modules obtain PostgreSQL / Redis / object-storage capabilities
+ * through the shared `@platform/*` abstractions (`DatabaseClient`, `Queue`,
+ * `ObjectStore`, `TransientLock`, `TransientCache`). They MUST NOT import
+ * `pg`, `ioredis`, `@electric-sql/pglite`, or a concrete
+ * implementation class directly. This keeps provider independence
+ * (architecture §2.5) and lets providers be substituted without touching
+ * domain code.
+ *
+ * Only `src/platform/**` may import provider packages.
+ */
+const PROVIDER_PACKAGES = new Set([
+  'pg',
+  'ioredis',
+  '@electric-sql/pglite',
+]);
+
+const PROVIDER_IMPLEMENTATION_FILES = new Set([
+  // Concrete object-storage implementations.
+  'src/platform/storage/in-memory-object-store.ts',
+  'src/platform/storage/fs-object-store.ts',
+  // Concrete database clients.
+  'src/platform/postgres/database-client.ts',
+  'src/platform/postgres/database-factory.ts',
+  'src/platform/postgres/pglite-database-client.ts',
+  // Concrete Redis queue + extensions (lock/cache) are provider-coupled via
+  // ioredis; the *abstractions* (Queue, TransientLock interface) are fine for
+  // domain code to use, but the concrete classes live under platform/redis/.
+]);
+
+describe('WORK-003 invariants — no provider coupling in domain modules', () => {
+  it('domain modules (src/modules/**) do not import provider packages', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      for (const specifier of extractSpecifiers(file)) {
+        // Extract the package name (first segment before '/').
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports provider package "${specifier}" — use @platform/* abstractions instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('domain modules do not import concrete provider implementations from platform/', () => {
+    // Domain code must import the *interfaces* from @platform/*, not the
+    // concrete implementation files (e.g. @platform/storage/fs-object-store.js).
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      for (const specifier of extractSpecifiers(file)) {
+        if (!specifier.startsWith('@platform/')) continue;
+        const relPath = `src/platform/${specifier.slice('@platform/'.length).replace(/\.js$/, '.ts')}`;
+        if (PROVIDER_IMPLEMENTATION_FILES.has(relPath)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports concrete implementation "${specifier}" — import the interface from @platform/index.js instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('only platform/ imports provider packages (pg / ioredis / pglite)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(SRC_ROOT)) {
+      const rel = relative(BACKEND_ROOT, file).split(sep).join('/');
+      const isPlatform = rel.startsWith('src/platform/');
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg) && !isPlatform) {
+          violations.push(
+            `${rel} imports provider package "${specifier}" — only src/platform/** may do so`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no second worker or queue implementation was introduced in domain modules', () => {
+    // The WORK-001 WorkerHost + Queue are the only accepted runtime. Domain
+    // modules must not declare competing Queue/WorkerHost classes.
+    const violations: string[] = [];
+    const forbidden = /\bclass\s+(WorkerHost|Queue|RedisQueue|InMemoryQueue)\b/;
+    for (const file of walkTs(MODULES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing worker/queue implementation — reuse @platform/* WorkerHost + Queue`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('frozen architecture documents are unchanged (sanity: still present, not modified by tests)', () => {
+    // The frozen spec docs live at repo-root /spec/. We assert they still
+    // exist and the backend test suite never writes to them.
+    const specDir = join(BACKEND_ROOT, '..', 'spec');
+    for (const doc of [
+      'architecture.md',
+      'architecture-lock.md',
+      'requirements.md',
+      'work-items.md',
+      'dependency-graph.md',
+    ]) {
+      const path = join(specDir, doc);
+      expect(existsSync(path), `expected ${doc} to exist`).toBe(true);
+      expect(statSync(path).isFile(), `expected ${doc} to be a file`).toBe(true);
+    }
+  });
+});

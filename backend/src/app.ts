@@ -1,4 +1,4 @@
-import type { Logger, Queue, WorkerHostOptions, EchoJobOptions } from '@platform/index.js';
+import type { Logger, Queue, WorkerHostOptions, EchoJobOptions, Infrastructure, ObjectStore, DatabaseClient } from '@platform/index.js';
 import {
   InMemoryQueue,
   RedisQueue,
@@ -7,6 +7,11 @@ import {
   createEchoJobHandler,
   createLogger,
   createRedisClient,
+  createDatabaseClient,
+  runMigrations,
+  FsObjectStore,
+  InMemoryObjectStore,
+  buildInfrastructure,
   type HandlerRegistry,
 } from '@platform/index.js';
 import type { AppConfig } from './config.js';
@@ -28,6 +33,8 @@ export interface AppDeps {
   queue: Queue;
   handlers: HandlerRegistry;
   worker: WorkerHost;
+  /** Shared infrastructure (PostgreSQL, Redis extensions, object storage). May be undefined when no DATABASE_URL/OBJECT_STORAGE_DIR is configured. */
+  infrastructure?: Infrastructure;
 }
 
 export interface BuildAppOptions {
@@ -86,8 +93,54 @@ export async function buildApp(
   ]);
   const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
 
+  // --- WORK-003: optional infrastructure wiring (PostgreSQL + object storage).
+  // When DATABASE_URL is set, a real PostgreSQL client is constructed and
+  // migrations are applied. When OBJECT_STORAGE_DIR is set, a filesystem-backed
+  // object store is constructed; otherwise an in-memory store is used for dev.
+  // Domain modules obtain these from the Infrastructure container rather than
+  // constructing their own clients.
+  let infrastructure: Infrastructure | undefined;
+  let ownsDatabase = false;
+  let database: DatabaseClient | undefined;
+  if (config.databaseUrl) {
+    database = createDatabaseClient({ connectionString: config.databaseUrl });
+    ownsDatabase = true;
+    await runMigrations(database, logger);
+  }
+  let objectStore: ObjectStore;
+  if (config.objectStorageDir) {
+    objectStore = new FsObjectStore(config.objectStorageDir);
+  } else {
+    objectStore = new InMemoryObjectStore();
+    if (!options.queue) {
+      logger.warn('app.object_store.in_memory', {
+        reason: 'OBJECT_STORAGE_DIR not set; using non-durable in-memory object store',
+      });
+    }
+  }
+  // infrastructure requires a Redis client (for locks/cache) and a database.
+  // If we have a Redis client (created above for the queue), reuse it.
+  if (redisClient && database) {
+    infrastructure = buildInfrastructure({
+      database,
+      redis: redisClient,
+      queue,
+      objectStore,
+      logger,
+    });
+  } else if (database) {
+    // No Redis configured — infrastructure is partial (DB + object store only).
+    // We still build it so domain code can use the database; lock/cache will
+    // be present only if redisClient exists. For WORK-003 we keep it simple:
+    // require Redis for the full Infrastructure container.
+    infrastructure = undefined;
+    logger.warn('app.infrastructure.partial', {
+      reason: 'REDIS_URL not set; infrastructure container requires Redis for locks/cache',
+    });
+  }
+
   const handle: AppHandle = {
-    deps: { logger, queue, handlers, worker },
+    deps: { logger, queue, handlers, worker, infrastructure },
     start: async () => {
       if (options.startWorker !== false) {
         await worker.start();
@@ -102,6 +155,9 @@ export async function buildApp(
       await queue.close();
       if (ownsRedis && redisClient) {
         await redisClient.quit();
+      }
+      if (ownsDatabase && database) {
+        await database.close();
       }
     },
   };

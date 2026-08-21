@@ -18,6 +18,8 @@ export interface AppConfig {
   port: number;
   host: string;
   redisUrl?: string;
+  databaseUrl?: string;
+  objectStorageDir?: string;
   logLevel: string;
 }
 
@@ -36,11 +38,21 @@ function resolveRole(): ProcessRole {
 }
 
 export function loadConfig(): AppConfig {
+  // Only treat DATABASE_URL as a postgres connection when it actually points
+  // at postgres. This guards against ambient non-postgres DATABASE_URL values
+  // (e.g. a SQLite file URL leaked from a sibling project in shared envs).
+  const rawDatabaseUrl = process.env.DATABASE_URL;
+  const databaseUrl =
+    rawDatabaseUrl && rawDatabaseUrl.startsWith('postgres')
+      ? rawDatabaseUrl
+      : undefined;
   return {
     role: resolveRole(),
     port: Number(process.env.PORT ?? DEFAULT_PORT),
     host: process.env.HOST ?? '0.0.0.0',
     redisUrl: process.env.REDIS_URL,
+    databaseUrl,
+    objectStorageDir: process.env.OBJECT_STORAGE_DIR,
     logLevel: process.env.LOG_LEVEL ?? 'info',
   };
 }
