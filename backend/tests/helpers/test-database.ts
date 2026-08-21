@@ -147,11 +147,46 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
   }
 
   const reset = async () => {
-    // Truncate infrastructure tables (preserve schema_migrations). Safe within
-    // the per-call schema / isolated pglite instance.
+    // Truncate infrastructure + WORK-002 auth/identity tables (preserve
+    // schema_migrations). Safe within the per-call schema / isolated pglite
+    // instance. Order: child tables first, then parents.
     await client.exec(`
+      TRUNCATE wfos_api_key_credentials RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_project_access RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_organization_memberships RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_projects RESTART IDENTITY CASCADE;
       TRUNCATE wfos_fixture_child, wfos_fixture_parent RESTART IDENTITY CASCADE;
       TRUNCATE wfos_artifact_metadata;
+      TRUNCATE wfos_users RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_organizations RESTART IDENTITY CASCADE;
+      -- Re-seed the system-defined role/permission seed rows (TRUNCATE
+      -- CASCADE above cleared wfos_role_permissions + wfos_roles +
+      -- wfos_permissions; re-insert the canonical set so tests have it).
+      INSERT INTO wfos_roles (id, name) VALUES
+        ('owner', 'Owner'),
+        ('admin', 'Administrator'),
+        ('member', 'Member')
+      ON CONFLICT (id) DO NOTHING;
+      INSERT INTO wfos_permissions (id, name) VALUES
+        ('project.read',   'Read project'),
+        ('project.write',  'Write project'),
+        ('project.admin',  'Administer project'),
+        ('org.admin',      'Administer organization'),
+        ('org.members',    'Manage organization membership')
+      ON CONFLICT (id) DO NOTHING;
+      INSERT INTO wfos_role_permissions (role_id, permission_id) VALUES
+        ('owner', 'project.read'),
+        ('owner', 'project.write'),
+        ('owner', 'project.admin'),
+        ('owner', 'org.admin'),
+        ('owner', 'org.members'),
+        ('admin', 'project.read'),
+        ('admin', 'project.write'),
+        ('admin', 'project.admin'),
+        ('admin', 'org.members'),
+        ('member', 'project.read'),
+        ('member', 'project.write')
+      ON CONFLICT DO NOTHING;
     `);
   };
 

@@ -27,6 +27,17 @@ async function main(): Promise<void> {
     server = await buildServer({
       queue: app.deps.queue,
       logger: app.deps.logger,
+      ...(app.deps.authProvider && app.deps.userRepository
+        ? { auth: { authProvider: app.deps.authProvider, userRepository: app.deps.userRepository } }
+        : {}),
+      ...(app.deps.authorizationService && app.deps.projectRepository
+        ? {
+            projects: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+            },
+          }
+        : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     app.deps.logger.info('app.api.listening', {

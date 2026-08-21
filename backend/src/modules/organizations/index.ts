@@ -8,20 +8,32 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-002: exposes organization, membership, role, and permission contracts
+ * consumed by /auth for authorization decisions (AUTH-002, AUTH2-AC-02).
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  Organization,
+  CreateOrganizationInput,
+  OrganizationMembership,
+  AssignMembershipInput,
+  Permission,
+  RolePermissions,
+  OrganizationRepository,
+  MembershipRepository,
+  RolePermissionRepository,
+} from './internal/organization.types.js';
+export { PgOrganizationRepository } from './internal/pg-organization-repository.js';
+export {
+  PgMembershipRepository,
+  PgRolePermissionRepository,
+} from './internal/pg-membership-repository.js';
 
 /**
  * Public capabilities exposed by the /organizations module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface OrganizationsModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional organization-domain methods
 }
 
 /**

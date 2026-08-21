@@ -1,4 +1,4 @@
-import type { Logger, Queue, WorkerHostOptions, EchoJobOptions, Infrastructure, ObjectStore, DatabaseClient } from '@platform/index.js';
+import type { Logger, Queue, WorkerHostOptions, EchoJobOptions, Infrastructure, ObjectStore, DatabaseClient, SecretStore } from '@platform/index.js';
 import {
   InMemoryQueue,
   RedisQueue,
@@ -11,9 +11,29 @@ import {
   runMigrations,
   FsObjectStore,
   InMemoryObjectStore,
+  EnvSecretStore,
   buildInfrastructure,
   type HandlerRegistry,
 } from '@platform/index.js';
+import type { AuthProvider, AuthorizationService } from '@modules/auth/index.js';
+import {
+  ApiKeyAuthProvider,
+  DefaultAuthorizationService,
+  ApiKeyCredentialProvisioner,
+} from '@modules/auth/index.js';
+import type { UserRepository } from '@modules/users/index.js';
+import { PgUserRepository } from '@modules/users/index.js';
+import type { OrganizationRepository } from '@modules/organizations/index.js';
+import {
+  PgOrganizationRepository,
+  PgMembershipRepository,
+  PgRolePermissionRepository,
+} from '@modules/organizations/index.js';
+import type { ProjectRepository } from '@modules/projects/index.js';
+import {
+  PgProjectRepository,
+  PgProjectAccessRepository,
+} from '@modules/projects/index.js';
 import type { AppConfig } from './config.js';
 
 /**
@@ -35,6 +55,18 @@ export interface AppDeps {
   worker: WorkerHost;
   /** Shared infrastructure (PostgreSQL, Redis extensions, object storage). May be undefined when no DATABASE_URL/OBJECT_STORAGE_DIR is configured. */
   infrastructure?: Infrastructure;
+  /** WORK-002: auth provider(s). Present when a database is configured. */
+  authProvider?: AuthProvider;
+  /** WORK-002: reusable backend authorization service. Present when a database is configured. */
+  authorizationService?: AuthorizationService;
+  /** WORK-002: API-key credential provisioner. Present when a database is configured. */
+  apiKeyProvisioner?: ApiKeyCredentialProvisioner;
+  /** WORK-002: user repository. Present when a database is configured. */
+  userRepository?: UserRepository;
+  /** WORK-002: organization repository. Present when a database is configured. */
+  organizationRepository?: OrganizationRepository;
+  /** WORK-002: project repository. Present when a database is configured. */
+  projectRepository?: ProjectRepository;
 }
 
 export interface BuildAppOptions {
@@ -139,8 +171,50 @@ export async function buildApp(
     });
   }
 
+  // --- WORK-002: identity, organizations, authorization, secrets.
+  // When a database is configured, construct the /users, /organizations,
+  // /projects repositories and the /auth authorization service + API-key
+  // auth provider. The SecretStore abstraction is the only sanctioned way to
+  // access raw secret values (SEC-001). Domain code receives these from the
+  // AppDeps container; it never constructs its own clients.
+  let authProvider: AuthProvider | undefined;
+  let authorizationService: AuthorizationService | undefined;
+  let apiKeyProvisioner: ApiKeyCredentialProvisioner | undefined;
+  let userRepository: UserRepository | undefined;
+  let organizationRepository: OrganizationRepository | undefined;
+  let projectRepository: ProjectRepository | undefined;
+  if (database) {
+    const secretStore: SecretStore = new EnvSecretStore();
+    userRepository = new PgUserRepository(database);
+    const membershipRepo = new PgMembershipRepository(database);
+    const rolePermissionRepo = new PgRolePermissionRepository(database);
+    organizationRepository = new PgOrganizationRepository(database);
+    projectRepository = new PgProjectRepository(database);
+    const projectAccessRepo = new PgProjectAccessRepository(database);
+    authProvider = new ApiKeyAuthProvider(database, secretStore);
+    authorizationService = new DefaultAuthorizationService(
+      membershipRepo,
+      rolePermissionRepo,
+      projectRepository,
+      projectAccessRepo,
+    );
+    apiKeyProvisioner = new ApiKeyCredentialProvisioner(database);
+  }
+
   const handle: AppHandle = {
-    deps: { logger, queue, handlers, worker, infrastructure },
+    deps: {
+      logger,
+      queue,
+      handlers,
+      worker,
+      infrastructure,
+      authProvider,
+      authorizationService,
+      apiKeyProvisioner,
+      userRepository,
+      organizationRepository,
+      projectRepository,
+    },
     start: async () => {
       if (options.startWorker !== false) {
         await worker.start();

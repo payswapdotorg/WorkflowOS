@@ -8,20 +8,30 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-002: exposes ONLY the minimal project ownership/access contract
+ * required for tenant isolation (AUTHZ-AC-01..03). Full project configuration,
+ * repository associations, and lifecycle belong to WORK-004 (PROJ-001) and
+ * are intentionally NOT implemented here.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  Project,
+  CreateProjectInput,
+  ProjectAccess,
+  GrantProjectAccessInput,
+  ProjectRepository,
+  ProjectAccessRepository,
+} from './internal/project.types.js';
+export {
+  PgProjectRepository,
+  PgProjectAccessRepository,
+} from './internal/pg-project-repository.js';
 
 /**
  * Public capabilities exposed by the /projects module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface ProjectsModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: WORK-004 will add project-domain methods
 }
 
 /**
