@@ -20,11 +20,11 @@ describe('TransientLock', () => {
 
   beforeEach(async () => {
     redis = await createTestRedisClient();
-    await redis.flushall();
+    await redis.flushdb();
     lock = new TransientLock(redis, createLogger({ level: 'warn', destination: new CaptureStream() }));
   });
-  afterEach(() => {
-    disconnectTestRedis(redis);
+  afterEach(async () => {
+    await disconnectTestRedis(redis);
   });
 
   it('acquires a lock and the holder can release it', async () => {

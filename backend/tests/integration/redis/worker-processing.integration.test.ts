@@ -33,7 +33,7 @@ describe('DATA2-AC-01 — Redis-backed worker processing (reuses WORK-001)', () 
   beforeEach(async () => {
     redis = await createTestRedisClient();
     // Flush any leftover keys so each test starts clean (esp. with real Redis).
-    await redis.flushall();
+    await redis.flushdb();
     queue = new RedisQueue(redis, 'wfos:test:jobs:pending', 'wfos:test:jobs:acked');
     capture = new CaptureStream();
     const logger = createLogger({ level: 'info', destination: capture });
@@ -44,7 +44,7 @@ describe('DATA2-AC-01 — Redis-backed worker processing (reuses WORK-001)', () 
   afterEach(async () => {
     await worker.stop();
     await queue.close();
-    disconnectTestRedis(redis);
+    await disconnectTestRedis(redis);
   });
 
   it('enqueues via RedisQueue and the worker processes the job asynchronously', async () => {

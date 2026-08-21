@@ -21,11 +21,11 @@ describe('DATA2-AC-02 — Redis is not authoritative', () => {
   beforeAll(async () => {
     db = await buildTestDatabase();
     redis = await createTestRedisClient();
-    await redis.flushall();
+    await redis.flushdb();
   });
   afterAll(async () => {
     await db.close();
-    disconnectTestRedis(redis);
+    await disconnectTestRedis(redis);
   });
 
   it('clearing Redis does not destroy PostgreSQL state', async () => {
@@ -41,7 +41,7 @@ describe('DATA2-AC-02 — Redis is not authoritative', () => {
     await cache.set(`parent:${parentId}`, 'durable-record');
 
     // Flush Redis completely.
-    await redis.flushall();
+    await redis.flushdb();
 
     // The cache entry is gone (Redis was transient)...
     expect(await cache.get(`parent:${parentId}`)).toBeNull();
@@ -65,7 +65,7 @@ describe('DATA2-AC-02 — Redis is not authoritative', () => {
     // Simulate "Redis restart from a clean image" by flushing the current
     // Redis (equivalent to a fresh, empty instance). With real Redis in CI
     // this proves the same point: no PostgreSQL state is recovered from Redis.
-    await redis.flushall();
+    await redis.flushdb();
     const freshCache = new TransientCache(redis);
 
     // Redis has NO authoritative state for this record.
@@ -92,7 +92,7 @@ describe('DATA2-AC-02 — Redis is not authoritative', () => {
     expect(child.rows).toHaveLength(1);
 
     // Flush Redis (queue, locks, cache — all transient).
-    await redis.flushall();
+    await redis.flushdb();
 
     // The committed PostgreSQL transaction is intact.
     const recovered = await db.client.query<{ parent_name: string; child_note: string }>(

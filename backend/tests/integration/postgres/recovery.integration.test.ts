@@ -25,12 +25,12 @@ describe('DATA-AC-03 — PostgreSQL remains authoritative without Redis', () => 
   beforeAll(async () => {
     db = await buildTestDatabase();
     redis = await createTestRedisClient();
-    await redis.flushall();
+    await redis.flushdb();
     cache = new TransientCache(redis);
   });
   afterAll(async () => {
     await db.close();
-    disconnectTestRedis(redis);
+    await disconnectTestRedis(redis);
   });
 
   it('authoritative state written to PostgreSQL survives Redis loss', async () => {
@@ -51,7 +51,7 @@ describe('DATA-AC-03 — PostgreSQL remains authoritative without Redis', () => 
     );
 
     // 3. Simulate Redis loss: flush all keys.
-    await redis.flushall();
+    await redis.flushdb();
 
     // 4. The cached value is gone (Redis was transient) ...
     expect(await cache.get(`parent:${parentId}:cached_name`)).toBeNull();
@@ -76,7 +76,7 @@ describe('DATA-AC-03 — PostgreSQL remains authoritative without Redis', () => 
     // Simulate "Redis restart from a clean image" by flushing the current
     // Redis. No state was written to Redis for this row, so after the flush
     // Redis has nothing for it — exactly the point.
-    await redis.flushall();
+    await redis.flushdb();
     const freshCache = new TransientCache(redis);
     expect(await freshCache.get(`parent:${parentId}:cached_name`)).toBeNull();
 
@@ -108,7 +108,7 @@ describe('DATA-AC-03 — PostgreSQL remains authoritative without Redis', () => 
     expect(present.rows).toHaveLength(0);
 
     // And flushing Redis (again simulating loss) does not bring it back.
-    await redis.flushall();
+    await redis.flushdb();
     const present2 = await db.client.query<{ name: string }>(
       'SELECT name FROM wfos_fixture_parent WHERE name = $1',
       ['will-roll-back'],
