@@ -29,11 +29,23 @@ import {
   PgMembershipRepository,
   PgRolePermissionRepository,
 } from './modules/organizations/internal/pg-membership-repository.js';
-import type { ProjectRepository } from '@modules/projects/index.js';
+import type {
+  ProjectRepository,
+  ProjectRepositoryAssociationRepository,
+} from '@modules/projects/index.js';
 import {
   PgProjectRepository,
   PgProjectAccessRepository,
+  PgProjectRepositoryAssociationRepository,
 } from './modules/projects/internal/pg-project-repository.js';
+import type {
+  SpecificationRepository,
+  SpecificationVersionRepository,
+} from '@modules/specifications/index.js';
+import {
+  PgSpecificationRepository,
+  PgSpecificationVersionRepository,
+} from './modules/specifications/internal/pg-specification-repository.js';
 import type { AppConfig } from './config.js';
 
 /**
@@ -67,6 +79,12 @@ export interface AppDeps {
   organizationRepository?: OrganizationRepository;
   /** WORK-002: project repository. Present when a database is configured. */
   projectRepository?: ProjectRepository;
+  /** WORK-004: project repository association repository. Present when a database is configured. */
+  repositoryAssociationRepository?: ProjectRepositoryAssociationRepository;
+  /** WORK-004: specification repository. Present when a database is configured. */
+  specificationRepository?: SpecificationRepository;
+  /** WORK-004: specification version repository. Present when a database is configured. */
+  specificationVersionRepository?: SpecificationVersionRepository;
 }
 
 export interface BuildAppOptions {
@@ -183,6 +201,9 @@ export async function buildApp(
   let userRepository: UserRepository | undefined;
   let organizationRepository: OrganizationRepository | undefined;
   let projectRepository: ProjectRepository | undefined;
+  let repositoryAssociationRepository: ProjectRepositoryAssociationRepository | undefined;
+  let specificationRepository: SpecificationRepository | undefined;
+  let specificationVersionRepository: SpecificationVersionRepository | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
@@ -191,6 +212,9 @@ export async function buildApp(
     organizationRepository = new PgOrganizationRepository(database);
     projectRepository = new PgProjectRepository(database);
     const projectAccessRepo = new PgProjectAccessRepository(database);
+    repositoryAssociationRepository = new PgProjectRepositoryAssociationRepository(database);
+    specificationRepository = new PgSpecificationRepository(database);
+    specificationVersionRepository = new PgSpecificationVersionRepository(database);
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -214,6 +238,9 @@ export async function buildApp(
       userRepository,
       organizationRepository,
       projectRepository,
+      repositoryAssociationRepository,
+      specificationRepository,
+      specificationVersionRepository,
     },
     start: async () => {
       if (options.startWorker !== false) {
