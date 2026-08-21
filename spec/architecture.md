@@ -172,22 +172,23 @@ The backend is a TypeScript modular monolith.
 
 The backend owns application and domain logic.
 
-The initial modules are:
+The frozen module ownership boundaries are documented below. The module paths are:
 
 ```text
 /auth
 /users
 /organizations
 /projects
+/architecture
 /specifications
 /requirements
 /work-items
 /workflows
-/agent-runs
+/verification
 /reviews
-/github
 /llm
 /agents
+/github
 /notifications
 /audit
 ```
@@ -195,6 +196,26 @@ The initial modules are:
 Each module owns its domain entities and business rules.
 
 Modules communicate through explicit application/domain interfaces rather than directly reaching into another module's internal implementation.
+
+## Frozen module ownership
+
+The frozen module boundaries are:
+
+| Module | Responsibility |
+|---|---|
+| `/architecture` | Architecture Management; ADRs; Architecture Change Requests; Architecture Versions |
+| `/specifications` | specification documents and specification lifecycle |
+| `/requirements` | Requirements; Acceptance Criteria |
+| `/work-items` | Work Items; Work Item Dependencies; Work Order state |
+| `/workflows` | workflow state machine; legal state transitions; orchestration |
+| `/verification` | verification; evidence; criterion evaluation |
+| `/reviews` | Architect Reviews; Review Findings |
+| `/llm` | LLM Gateway; Architect role execution; Work-order generation |
+| `/agents` | Agent Gateway; Agent Runs |
+| `/github` | GitHub App; GitHub webhooks; Pull Requests; CI integration |
+
+The `/llm` module provides architect/LLM capabilities. The `/reviews` module owns persisted review records and findings.
+
 
 ---
 
@@ -249,6 +270,8 @@ A project is associated with one or more repositories as supported by the produc
 
 # 9. Architecture Management
 
+The `/architecture` module owns Architecture, Architecture Versions, Architecture Decisions, and Architecture Change Requests.
+
 Architecture is a versioned project artifact.
 
 The model is:
@@ -270,7 +293,7 @@ SUPERSEDED
 
 A frozen architecture version is immutable.
 
-A new version is required for architectural changes.
+A new immutable architecture version is created only from an approved Architecture Change Request.
 
 Architecture versions may reference Architecture Decision Records.
 
@@ -367,7 +390,8 @@ A work item contains:
 * architecture constraints
 * out-of-scope definition
 * implementation agent assignment
-* associated pull request
+* associated pull requests
+* active implementation pull request (at most one)
 * execution history
 * verification results
 * architect review results
@@ -378,7 +402,7 @@ A work item should represent a coherent implementation change that can reasonabl
 
 # 13. Work Item State Machine
 
-The canonical workflow states are:
+The canonical workflow states and legal transitions are:
 
 ```text
 DRAFT
@@ -392,28 +416,20 @@ IMPLEMENTING
 PR_OPEN
   ↓
 VERIFYING
-  ↓
-ARCHITECT_REVIEW
-  ↓
-APPROVED
-  ↓
-MERGED
-  ↓
-VERIFIED
+  ├── VERIFICATION_FAILED → IMPLEMENTING
+  └── ARCHITECT_REVIEW
+          ├── CHANGES_REQUESTED → IMPLEMENTING
+          ├── ARCHITECTURE_CHANGE_REQUIRED → ARCHITECTURE_CHANGE_REQUEST
+          └── APPROVED → MERGED → VERIFIED
 ```
 
-Alternative states include:
+`IMPLEMENTATION_BLOCKED` may occur during `ASSIGNED`, `IMPLEMENTING`, or `VERIFYING` and returns to `IMPLEMENTING` when resolved.
 
-```text
-CHANGES_REQUESTED
-IMPLEMENTATION_BLOCKED
-VERIFICATION_FAILED
-ARCHITECTURE_CHANGE_REQUIRED
-```
+`ARCHITECTURE_CHANGE_REQUIRED` is terminal for the current implementation attempt until the architecture change is resolved.
 
-The Workflow Engine owns these state transitions.
+The Workflow Engine owns the workflow state machine and all legal state transitions. External agents must not directly mutate workflow state outside authorized APIs.
 
-External agents must not directly mutate workflow state outside authorized APIs.
+State transitions are deterministic and idempotent.
 
 ---
 
@@ -467,6 +483,8 @@ Agent output must be treated as claims/evidence inputs rather than authoritative
 ---
 
 # 16. LLM Gateway
+
+The `/llm` module owns the LLM Gateway, architect role execution, and Work-order generation.
 
 All LLM providers are accessed through a provider-independent interface.
 
@@ -597,6 +615,8 @@ The findings are persisted so correction cycles remain traceable.
 
 # 21. GitHub Integration
 
+The `/github` module owns the GitHub App, GitHub webhooks, Pull Requests, and CI integration. GitHub Actions is an external CI provider.
+
 GitHub is the authoritative source for repository state.
 
 WorkflowOS integrates with GitHub through a GitHub App.
@@ -650,7 +670,7 @@ Workflow transitions must therefore be idempotent.
 
 # 23. Pull Requests
 
-Each implementation PR is associated with one or more WorkflowOS work items.
+A work item may have multiple PRs over its lifetime and must preserve historical PR associations. A work item may have only one active implementation PR at a time. A PR may implement one or more work items, provided each work item is explicitly associated with that PR.
 
 WorkflowOS tracks:
 
@@ -669,6 +689,8 @@ A pull request is the primary integration boundary between an implementation age
 ---
 
 # 24. Verification
+
+The `/verification` module owns verification runs, verification results, evidence, acceptance-criterion evaluation, and evidence-to-criterion mapping. The `/github` module owns GitHub integration and CI result ingestion.
 
 Verification is separate from architecture review.
 
@@ -694,7 +716,7 @@ The initial implementation assumes GitHub Actions is the primary CI provider.
 
 # 25. Verification Engine
 
-The Verification Engine maps objective evidence to acceptance criteria.
+The Verification Engine is implemented within `/verification`, which owns verification semantics and evidence-to-criterion mapping. `/github` only ingests CI provider results.
 
 Conceptual flow:
 

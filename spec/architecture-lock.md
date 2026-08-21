@@ -4,133 +4,75 @@
 
 FROZEN
 
-This document establishes the rules governing implementation of the frozen WorkflowOS architecture.
+This document is authoritative for the frozen architectural rules of WorkflowOS.
 
-The architecture may not be changed implicitly by implementation agents, coding agents, reviewers, or automated workflows.
+## Work item / Pull Request cardinality
 
-## Immutable Architectural Decisions
+- A work item may have multiple PRs over its lifetime, preserving historical PR associations.
+- A work item may have only one active implementation PR at a time.
+- A PR may implement one or more work items, provided each work item is explicitly associated with that PR.
 
-Implementation agents MUST NOT change any of the following without an approved Architecture Change Request:
+## Workflow authority
 
-* system architecture
-* application/module boundaries
-* technology choices
-* database architecture
-* workflow/state-machine architecture
-* API boundaries
-* data ownership
-* authentication and authorization architecture
-* GitHub integration architecture
-* LLM Gateway architecture
-* Agent Gateway architecture
-* verification architecture
-* background-job architecture
-* tenant isolation model
-* credential/security architecture
-* architecture versioning model
+- `/workflows` owns the workflow state machine, legal transitions, and orchestration.
+- External agents and LLMs cannot directly mutate workflow state.
+- Workflow transitions are deterministic and idempotent.
 
-## Architecture Change Rule
+## Canonical workflow
 
-If implementation of a requirement appears to require an architectural change, the implementation agent MUST stop and report:
+```text
+DRAFT
+→ READY
+→ ASSIGNED
+→ IMPLEMENTING
+→ PR_OPEN
+→ VERIFYING
+```
 
-ARCHITECTURE_CHANGE_REQUIRED
+From `VERIFYING`:
+- `VERIFICATION_FAILED` → `IMPLEMENTING`
+- `ARCHITECT_REVIEW`
 
-The implementation agent MUST NOT make the architectural change.
+From `ARCHITECT_REVIEW`:
+- `CHANGES_REQUESTED` → `IMPLEMENTING`
+- `ARCHITECTURE_CHANGE_REQUIRED` → `ARCHITECTURE_CHANGE_REQUEST`
+- `APPROVED` → `MERGED` → `VERIFIED`
 
-A proposed architectural change must instead go through:
+`IMPLEMENTATION_BLOCKED` may occur during `ASSIGNED`, `IMPLEMENTING`, or `VERIFYING` and returns to `IMPLEMENTING` when resolved.
 
-1. Architecture Change Request
-2. Impact analysis
-3. Architect review
-4. Explicit human approval
-5. Creation of a new architecture version
-6. Explicit replacement of the affected frozen version
+`ARCHITECTURE_CHANGE_REQUIRED` is terminal for the current implementation attempt until the architecture change is resolved.
 
-## Source of Truth
+## Architecture ownership
 
-The following are authoritative:
+The `/architecture` module owns Architecture, ArchitectureVersion, ArchitectureDecision, and ArchitectureChangeRequest. Approved architecture changes create a new immutable architecture version. Frozen architecture versions are immutable.
 
-1. `/spec/architecture.md`
-2. `/spec/architecture-lock.md`
-3. Approved Architecture Decision Records
-4. Approved requirement specifications
+## Verification ownership
 
-Conversation history is NOT authoritative.
+The `/verification` module owns verification runs, verification results, evidence, acceptance-criterion evaluation, and evidence-to-criterion mapping. GitHub Actions is an external CI provider. `/github` owns GitHub integration and CI result ingestion; `/verification` owns verification semantics.
 
-LLM-generated text is NOT authoritative unless persisted into the repository or WorkflowOS state.
+## Module boundaries
 
-## Core Architectural Invariants
+- `/architecture`: Architecture Management, ADRs, Architecture Change Requests, Architecture Versions
+- `/specifications`: specification documents and specification lifecycle
+- `/requirements`: Requirements, Acceptance Criteria
+- `/work-items`: Work Items, Work Item Dependencies, Work Order state
+- `/workflows`: workflow state machine, legal state transitions, orchestration
+- `/verification`: verification, evidence, criterion evaluation
+- `/reviews`: Architect Reviews, Review Findings
+- `/llm`: LLM Gateway, Architect role execution, Work-order generation
+- `/agents`: Agent Gateway, Agent Runs
+- `/github`: GitHub App, GitHub webhooks, Pull Requests, CI integration
 
-1. PostgreSQL is the authoritative WorkflowOS workflow state.
+The `/llm` module provides architect/LLM capabilities. The `/reviews` module owns persisted review records and findings.
 
-2. GitHub is the authoritative source for repository state.
+## Existing frozen invariants
 
-3. LLMs are not authoritative evidence of implementation completion.
-
-4. Acceptance criteria must be supported by evidence.
-
-5. The workflow engine controls workflow state transitions.
-
-6. LLMs may make recommendations and decisions within their assigned role but may not bypass workflow policy.
-
-7. Implementation agents cannot modify the frozen architecture.
-
-8. Frozen architecture versions are immutable.
-
-9. Every work item must reference the architecture version under which it was created.
-
-10. Every implementation must produce traceable evidence.
-
-11. Every implementation PR must be associated with one or more work items.
-
-12. Verification must occur before architectural approval.
-
-13. Architectural approval must occur before merge unless an explicitly approved project policy states otherwise.
-
-14. Credentials and secrets must never be stored as ordinary application data.
-
-15. Tenant boundaries must be enforced server-side.
-
-16. External LLM and agent providers must be accessed through provider adapters and must not be directly coupled to domain logic.
-
-## Implementation Rule
-
-Implementation agents must implement the architecture as specified.
-
-They must not:
-
-* redesign the system
-* replace architectural components for convenience
-* introduce new architectural patterns without approval
-* bypass specified module boundaries
-* weaken verification requirements
-* remove requirements to make implementation easier
-* mark incomplete work as complete
-* simulate functionality in place of real implementation
-
-## Evidence Rule
-
-A requirement is not considered complete because an implementation agent says it is complete.
-
-Completion requires appropriate evidence, such as:
-
-* automated tests
-* integration tests
-* end-to-end tests
-* contract validation
-* static analysis
-* architecture checks
-* CI results
-* manual verification where appropriate
-
-## Scope Rule
-
-Implementation work must remain within the assigned work item.
-
-Unrelated refactoring, architectural cleanup, technology substitutions, and feature expansion require explicit approval.
-
-## Human Authority
-
-When an architectural ambiguity, contradiction, or required architectural change is discovered, human approval is required.
-
-The system must favor stopping and escalating over silently inventing an architectural decision.
+- PostgreSQL is the authoritative WorkflowOS application/workflow state.
+- GitHub is authoritative for repository state.
+- Acceptance criteria require traceable evidence.
+- Frozen architecture versions are immutable.
+- Work items reference exactly one architecture version.
+- Tenant boundaries are enforced server-side.
+- Credentials and secrets are not ordinary application data.
+- Provider-specific LLM and agent behavior remains behind their gateways.
+- GitHub-specific behavior remains inside `/github`.
