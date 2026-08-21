@@ -8,20 +8,17 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-002: exposes the {@link UserRepository} contract and {@link User} type
+ * consumed by /auth for identity resolution.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type { User, UserRepository, CreateUserInput } from './internal/user.types.js';
 
 /**
  * Public capabilities exposed by the /users module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface UsersModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional user-domain methods consumed by other modules
 }
 
 /**

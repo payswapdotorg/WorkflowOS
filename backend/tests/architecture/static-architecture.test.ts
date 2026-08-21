@@ -89,23 +89,36 @@ function extractSpecifiers(file: string): string[] {
 }
 
 /** Resolve a specifier relative to an importer file. Returns the resolved
- * absolute path (with .ts extension), or undefined if it cannot be resolved. */
+ * absolute path (with .ts extension), or undefined if it cannot be resolved.
+ *
+ * Handles the TypeScript ESM convention where imports use a `.js` suffix that
+ * refers to a `.ts` source file (e.g. `import { Foo } from './foo.js'` resolves
+ * to `./foo.ts`). The `.js` suffix is stripped BEFORE resolution so the
+ * resolver finds the actual source file. Without this normalization, `.js`
+ * imports would fail to resolve and PLAT-AC-02 boundary checks would silently
+ * pass even when cross-module `internal/` violations exist (architect review,
+ * PR #4).
+ */
 function resolveSpecifier(importer: string, specifier: string): string | undefined {
+  // Normalize: TypeScript ESM imports use `.js` suffixes that refer to `.ts`
+  // source files. Strip the trailing `.js` so the resolver finds the source.
+  // This is the convention used throughout this repository.
+  const normalized = specifier.replace(/\.js$/, '');
   let candidate: string | undefined;
   if (
-    specifier.startsWith('./') ||
-    specifier.startsWith('../') ||
-    specifier.startsWith('/')
+    normalized.startsWith('./') ||
+    normalized.startsWith('../') ||
+    normalized.startsWith('/')
   ) {
-    candidate = resolve(dirname(importer), specifier);
-  } else if (specifier.startsWith('@modules/')) {
-    candidate = join(SRC_ROOT, 'modules', specifier.slice('@modules/'.length));
-  } else if (specifier.startsWith('@platform/')) {
-    candidate = join(SRC_ROOT, 'platform', specifier.slice('@platform/'.length));
-  } else if (specifier.startsWith('@api/')) {
-    candidate = join(SRC_ROOT, 'api', specifier.slice('@api/'.length));
-  } else if (specifier.startsWith('@root/')) {
-    candidate = join(SRC_ROOT, specifier.slice('@root/'.length));
+    candidate = resolve(dirname(importer), normalized);
+  } else if (normalized.startsWith('@modules/')) {
+    candidate = join(SRC_ROOT, 'modules', normalized.slice('@modules/'.length));
+  } else if (normalized.startsWith('@platform/')) {
+    candidate = join(SRC_ROOT, 'platform', normalized.slice('@platform/'.length));
+  } else if (normalized.startsWith('@api/')) {
+    candidate = join(SRC_ROOT, 'api', normalized.slice('@api/'.length));
+  } else if (normalized.startsWith('@root/')) {
+    candidate = join(SRC_ROOT, normalized.slice('@root/'.length));
   } else {
     return undefined; // bare specifier (npm package) — out of scope for this check
   }
@@ -322,6 +335,8 @@ const PROVIDER_IMPLEMENTATION_FILES = new Set([
   'src/platform/worker/worker-host.ts', // WorkerHost
   'src/platform/worker/job-handler.ts', // buildHandlerRegistry
   'src/platform/worker/fixtures/echo.job.ts', // createEchoJobHandler (fixture)
+  // --- WORK-002 secrets (SEC-001) ---
+  'src/platform/secrets/env-secret-store.ts', // EnvSecretStore (concrete secret impl)
 ]);
 
 /**
@@ -363,6 +378,20 @@ const FORBIDDEN_CONCRETE_EXPORTS = new Set([
   'WorkerHost',
   'buildHandlerRegistry',
   'createEchoJobHandler',
+  // WORK-002 secrets (SEC-001)
+  'EnvSecretStore',
+  // WORK-002 auth / identity concrete implementations (owned by /auth, /users,
+  // /organizations, /projects — domain modules must receive them via the
+  // composition root, never construct them directly).
+  'ApiKeyAuthProvider',
+  'DefaultAuthorizationService',
+  'ApiKeyCredentialProvisioner',
+  'PgUserRepository',
+  'PgOrganizationRepository',
+  'PgMembershipRepository',
+  'PgRolePermissionRepository',
+  'PgProjectRepository',
+  'PgProjectAccessRepository',
 ]);
 
 /**
@@ -600,5 +629,223 @@ describe('WORK-003 invariants — no provider coupling in domain modules', () =>
       expect(existsSync(path), `expected ${doc} to exist`).toBe(true);
       expect(statSync(path).isFile(), `expected ${doc} to be a file`).toBe(true);
     }
+  });
+});
+
+/**
+ * WORK-002 invariants — module-interface boundaries + provider independence
+ * for the identity/authorization/secret stack.
+ *
+ * Extends the WORK-001/003 checks with WORK-002-specific rules:
+ *
+ * 1. /auth, /users, /organizations, /projects obey the cross-module interface
+ *    convention (no reaching into another module's internal/ or non-index
+ *    file). This is already covered by PLAT-AC-02 above, but we add explicit
+ *    assertions here so a violation in the new modules is reported by name.
+ *
+ * 2. Domain modules MUST NOT import concrete auth-provider / secret-store
+ *    implementations. They consume the provider-independent interfaces
+ *    (`AuthProvider`, `AuthorizationService`, `SecretStore`,
+ *    `UserRepository`, etc.) and receive concrete instances from the
+ *    composition root.
+ *
+ * 3. No frontend source becomes an authoritative authorization implementation.
+ *    (There is no frontend yet; this is a forward-looking guard that fails
+ *    if any src/frontend or src/client file declares an AuthorizationService
+ *    or AuthProvider.)
+ *
+ * 4. Authorization authority remains backend-owned: the only
+ *    `AuthorizationService` implementation lives under `src/modules/auth/`.
+ */
+describe('WORK-002 invariants — identity/authorization module boundaries', () => {
+  const WORK_002_MODULES = ['auth', 'users', 'organizations', 'projects'];
+
+  it('WORK-002 modules (auth/users/organizations/projects) exist as explicit boundaries', () => {
+    for (const dir of WORK_002_MODULES) {
+      const index = join(MODULES_DIR, dir, 'index.ts');
+      expect(existsSync(index), `expected ${dir}/index.ts to exist`).toBe(true);
+      const internal = join(MODULES_DIR, dir, 'internal');
+      expect(existsSync(internal), `expected ${dir}/internal/ to exist`).toBe(true);
+    }
+  });
+
+  it('WORK-002 modules do not reach into each other internal/ directories', () => {
+    // PLAT-AC-02 already covers this for all modules, but we re-assert
+    // specifically for the WORK-002 quartet so violations are reported by name.
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const importerModule = moduleOf(file);
+      if (!importerModule || !WORK_002_MODULES.includes(importerModule)) continue;
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === importerModule) continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('domain modules do not import concrete auth/secret implementations from @modules/* subpaths', () => {
+    // Domain code must import the *interfaces* (types) from a module's
+    // index.ts, never the concrete implementation files (e.g.
+    // @modules/auth/internal/api-key-auth-provider.js).
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      for (const specifier of extractSpecifiers(file)) {
+        if (!specifier.startsWith('@modules/')) continue;
+        // Any import that reaches into a module's internal/ is forbidden.
+        const rest = specifier.slice('@modules/'.length);
+        if (rest.includes('/internal/') || rest.startsWith('internal/')) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" — use the module's index.ts public interface`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('only src/modules/auth/ declares an AuthorizationService implementation', () => {
+    // Authorization authority stays in /auth. No other module (and no
+    // frontend) may declare a competing AuthorizationService.
+    const violations: string[] = [];
+    for (const file of walkTs(SRC_ROOT)) {
+      const rel = relative(BACKEND_ROOT, file).split(sep).join('/');
+      if (rel === 'src/modules/auth/internal/authorization-service.ts') continue;
+      if (rel === 'src/modules/auth/internal/auth.types.ts') continue; // interface only
+      const src = readFileSync(file, 'utf8');
+      if (/\bclass\s+\w+\s+implements\s+AuthorizationService\b/.test(src)) {
+        violations.push(`${rel} declares an AuthorizationService implementation — only /auth may`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no frontend/client source declares an auth-provider or authorization implementation', () => {
+    // Forward-looking guard: frontend code must not become authoritative for
+    // auth/authorization decisions (architecture §5, AUTHZ-AC-03).
+    const violations: string[] = [];
+    for (const file of walkTs(SRC_ROOT)) {
+      const rel = relative(BACKEND_ROOT, file).split(sep).join('/');
+      if (!/\/(frontend|client|web|ui)\//.test(rel)) continue;
+      const src = readFileSync(file, 'utf8');
+      if (/\bclass\s+\w+\s+implements\s+(AuthProvider|AuthorizationService)\b/.test(src)) {
+        violations.push(
+          `${rel} declares an authoritative auth/authorization implementation — backend-owned only`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('PROJ-001 scope limit: /projects exposes only minimal ownership/access contracts', () => {
+    // WORK-002 must NOT broaden into full project-domain functionality. The
+    // /projects public interface may export only the types/repos required for
+    // authorization; it must NOT export project configuration, repository
+    // associations, or lifecycle methods.
+    const projectsIndex = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'Project',
+      'CreateProjectInput',
+      'ProjectAccess',
+      'GrantProjectAccessInput',
+      'ProjectRepository',
+      'ProjectAccessRepository',
+      // Module contract marker (every frozen module exports one).
+      'projectsModule',
+    ]);
+    // Collect every exported name from the projects barrel.
+    const exported: string[] = [];
+    for (const m of projectsIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of projectsIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(
+      unexpected,
+      `/projects exports unexpected names (WORK-002 scope): ${unexpected.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('module barrels (index.ts) do not export concrete implementations', () => {
+    // Architect review (PR #4): concrete PostgreSQL repository / auth-provider
+    // implementations must NOT be exposed through public module barrels "merely
+    // for composition." The composition root (src/app.ts) wires concrete impls
+    // by importing from module internal/ — the sanctioned wiring boundary.
+    //
+    // This check enforces that module barrels contain ONLY:
+    //   - `export type { ... } from '...'` (type-only re-exports)
+    //   - `export const xxxModule: ModuleContract & ... = { ... }` (the marker)
+    //   - `export default`
+    // Any `export { ConcreteClass } from '...'` (value re-export) is forbidden.
+    const violations: string[] = [];
+    for (const name of FROZEN_MODULE_NAMES) {
+      const dir = moduleDir(name);
+      const index = join(MODULES_DIR, dir, 'index.ts');
+      if (!existsSync(index)) continue;
+      const src = readFileSync(index, 'utf8');
+      // Match value re-exports: `export { Foo } from '...'` (NOT `export type`).
+      // `export\s+` followed by `{` (not preceded by `type`).
+      const valueReExportRe = /export\s+(?!type\b)\{([^}]+)\}\s+from\s+['"]/g;
+      for (const m of src.matchAll(valueReExportRe)) {
+        const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+        for (const n of names) {
+          // The local binding (after `as`) is what matters.
+          const localName = n.includes(' as ') ? n.split(' as ')[1]!.trim() : n;
+          violations.push(
+            `src/modules/${dir}/index.ts value-exports "${localName}" — ` +
+              `module barrels must expose only types/interfaces; concrete impls ` +
+              `belong in internal/ and are wired by the composition root (src/app.ts)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('regression: the resolver normalizes .js ESM imports to .ts source files', () => {
+    // Architect review (PR #4): the resolver MUST strip the `.js` suffix used by
+    // TypeScript ESM imports so it finds the actual `.ts` source file. Without
+    // this, cross-module `internal/` imports using `.js` specifiers would
+    // silently bypass PLAT-AC-02.
+    //
+    // Verify the resolver correctly resolves a known `.js` import to its `.ts`
+    // source. We use a real internal file as the test fixture.
+    const importer = join(MODULES_DIR, 'auth', 'internal', 'authorization-service.ts');
+    // This specifier uses the `.js` suffix convention.
+    const specifier = '../../users/internal/user.types.js';
+    const resolved = resolveSpecifier(importer, specifier);
+    expect(resolved, `expected ${specifier} to resolve to a .ts file`).toBeDefined();
+    expect(resolved!.endsWith('user.types.ts')).toBe(true);
+    expect(existsSync(resolved!)).toBe(true);
+
+    // Also verify the @platform/ path with .js suffix resolves.
+    const platformResolved = resolveSpecifier(
+      join(SRC_ROOT, 'app.ts'),
+      '@platform/index.js',
+    );
+    expect(platformResolved, `expected @platform/index.js to resolve`).toBeDefined();
+    expect(platformResolved!.endsWith('index.ts')).toBe(true);
+  });
+
+  it('regression: a .js import that does NOT correspond to a .ts source is flagged', () => {
+    // If someone writes `import { Foo } from './nonexistent.js'`, the resolver
+    // should return undefined (not silently resolve to something wrong). This
+    // ensures the `.js` normalization does not over-match.
+    const importer = join(MODULES_DIR, 'auth', 'internal', 'authorization-service.ts');
+    const resolved = resolveSpecifier(importer, './does-not-exist.js');
+    expect(resolved).toBeUndefined();
   });
 });

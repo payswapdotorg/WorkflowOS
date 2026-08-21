@@ -104,3 +104,11 @@ export {
   buildInfrastructure,
 } from './persistence/infrastructure.js';
 export type { Infrastructure, BuildInfrastructureOptions } from './persistence/infrastructure.js';
+
+// --- WORK-002: Secret management (SEC-001) ---
+
+export type {
+  SecretRef,
+  SecretStore,
+} from './secrets/secret-store.js';
+export { EnvSecretStore } from './secrets/env-secret-store.js';

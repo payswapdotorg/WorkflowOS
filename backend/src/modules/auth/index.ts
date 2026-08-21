@@ -8,20 +8,30 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-002: exposes the provider-independent authentication + authorization
+ * contracts ({@link AuthProvider}, {@link AuthorizationService}) consumed by
+ * the API layer and future modules.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  AuthenticatedPrincipal,
+  AuthenticationResult,
+  AuthProvider,
+  ProtectedResource,
+  AuthorizationDecision,
+  AuthorizationService,
+  ApiKeyCredentialRef,
+} from './internal/auth.types.js';
+export type {
+  ProvisionApiKeyInput,
+  ProvisionedApiKey,
+} from './internal/authorization-service.js';
 
 /**
  * Public capabilities exposed by the /auth module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface AuthModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional auth-domain methods consumed by other modules
 }
 
 /**
