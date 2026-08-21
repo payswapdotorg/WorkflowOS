@@ -22,10 +22,6 @@ export type {
   ProjectRepository,
   ProjectAccessRepository,
 } from './internal/project.types.js';
-export {
-  PgProjectRepository,
-  PgProjectAccessRepository,
-} from './internal/pg-project-repository.js';
 
 /**
  * Public capabilities exposed by the /projects module to other modules.

@@ -22,15 +22,10 @@ export type {
   AuthorizationService,
   ApiKeyCredentialRef,
 } from './internal/auth.types.js';
-export {
-  DefaultAuthorizationService,
-  ApiKeyCredentialProvisioner,
-} from './internal/authorization-service.js';
 export type {
   ProvisionApiKeyInput,
   ProvisionedApiKey,
 } from './internal/authorization-service.js';
-export { ApiKeyAuthProvider } from './internal/api-key-auth-provider.js';
 
 /**
  * Public capabilities exposed by the /auth module to other modules.

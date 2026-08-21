@@ -16,24 +16,24 @@ import {
   type HandlerRegistry,
 } from '@platform/index.js';
 import type { AuthProvider, AuthorizationService } from '@modules/auth/index.js';
+import { ApiKeyAuthProvider } from './modules/auth/internal/api-key-auth-provider.js';
 import {
-  ApiKeyAuthProvider,
   DefaultAuthorizationService,
   ApiKeyCredentialProvisioner,
-} from '@modules/auth/index.js';
+} from './modules/auth/internal/authorization-service.js';
 import type { UserRepository } from '@modules/users/index.js';
-import { PgUserRepository } from '@modules/users/index.js';
+import { PgUserRepository } from './modules/users/internal/pg-user-repository.js';
 import type { OrganizationRepository } from '@modules/organizations/index.js';
+import { PgOrganizationRepository } from './modules/organizations/internal/pg-organization-repository.js';
 import {
-  PgOrganizationRepository,
   PgMembershipRepository,
   PgRolePermissionRepository,
-} from '@modules/organizations/index.js';
+} from './modules/organizations/internal/pg-membership-repository.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
 import {
   PgProjectRepository,
   PgProjectAccessRepository,
-} from '@modules/projects/index.js';
+} from './modules/projects/internal/pg-project-repository.js';
 import type { AppConfig } from './config.js';
 
 /**

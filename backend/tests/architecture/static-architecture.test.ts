@@ -89,23 +89,36 @@ function extractSpecifiers(file: string): string[] {
 }
 
 /** Resolve a specifier relative to an importer file. Returns the resolved
- * absolute path (with .ts extension), or undefined if it cannot be resolved. */
+ * absolute path (with .ts extension), or undefined if it cannot be resolved.
+ *
+ * Handles the TypeScript ESM convention where imports use a `.js` suffix that
+ * refers to a `.ts` source file (e.g. `import { Foo } from './foo.js'` resolves
+ * to `./foo.ts`). The `.js` suffix is stripped BEFORE resolution so the
+ * resolver finds the actual source file. Without this normalization, `.js`
+ * imports would fail to resolve and PLAT-AC-02 boundary checks would silently
+ * pass even when cross-module `internal/` violations exist (architect review,
+ * PR #4).
+ */
 function resolveSpecifier(importer: string, specifier: string): string | undefined {
+  // Normalize: TypeScript ESM imports use `.js` suffixes that refer to `.ts`
+  // source files. Strip the trailing `.js` so the resolver finds the source.
+  // This is the convention used throughout this repository.
+  const normalized = specifier.replace(/\.js$/, '');
   let candidate: string | undefined;
   if (
-    specifier.startsWith('./') ||
-    specifier.startsWith('../') ||
-    specifier.startsWith('/')
+    normalized.startsWith('./') ||
+    normalized.startsWith('../') ||
+    normalized.startsWith('/')
   ) {
-    candidate = resolve(dirname(importer), specifier);
-  } else if (specifier.startsWith('@modules/')) {
-    candidate = join(SRC_ROOT, 'modules', specifier.slice('@modules/'.length));
-  } else if (specifier.startsWith('@platform/')) {
-    candidate = join(SRC_ROOT, 'platform', specifier.slice('@platform/'.length));
-  } else if (specifier.startsWith('@api/')) {
-    candidate = join(SRC_ROOT, 'api', specifier.slice('@api/'.length));
-  } else if (specifier.startsWith('@root/')) {
-    candidate = join(SRC_ROOT, specifier.slice('@root/'.length));
+    candidate = resolve(dirname(importer), normalized);
+  } else if (normalized.startsWith('@modules/')) {
+    candidate = join(SRC_ROOT, 'modules', normalized.slice('@modules/'.length));
+  } else if (normalized.startsWith('@platform/')) {
+    candidate = join(SRC_ROOT, 'platform', normalized.slice('@platform/'.length));
+  } else if (normalized.startsWith('@api/')) {
+    candidate = join(SRC_ROOT, 'api', normalized.slice('@api/'.length));
+  } else if (normalized.startsWith('@root/')) {
+    candidate = join(SRC_ROOT, normalized.slice('@root/'.length));
   } else {
     return undefined; // bare specifier (npm package) — out of scope for this check
   }
@@ -745,8 +758,6 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'GrantProjectAccessInput',
       'ProjectRepository',
       'ProjectAccessRepository',
-      'PgProjectRepository',
-      'PgProjectAccessRepository',
       // Module contract marker (every frozen module exports one).
       'projectsModule',
     ]);
@@ -766,5 +777,75 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       unexpected,
       `/projects exports unexpected names (WORK-002 scope): ${unexpected.join(', ')}`,
     ).toEqual([]);
+  });
+
+  it('module barrels (index.ts) do not export concrete implementations', () => {
+    // Architect review (PR #4): concrete PostgreSQL repository / auth-provider
+    // implementations must NOT be exposed through public module barrels "merely
+    // for composition." The composition root (src/app.ts) wires concrete impls
+    // by importing from module internal/ — the sanctioned wiring boundary.
+    //
+    // This check enforces that module barrels contain ONLY:
+    //   - `export type { ... } from '...'` (type-only re-exports)
+    //   - `export const xxxModule: ModuleContract & ... = { ... }` (the marker)
+    //   - `export default`
+    // Any `export { ConcreteClass } from '...'` (value re-export) is forbidden.
+    const violations: string[] = [];
+    for (const name of FROZEN_MODULE_NAMES) {
+      const dir = moduleDir(name);
+      const index = join(MODULES_DIR, dir, 'index.ts');
+      if (!existsSync(index)) continue;
+      const src = readFileSync(index, 'utf8');
+      // Match value re-exports: `export { Foo } from '...'` (NOT `export type`).
+      // `export\s+` followed by `{` (not preceded by `type`).
+      const valueReExportRe = /export\s+(?!type\b)\{([^}]+)\}\s+from\s+['"]/g;
+      for (const m of src.matchAll(valueReExportRe)) {
+        const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+        for (const n of names) {
+          // The local binding (after `as`) is what matters.
+          const localName = n.includes(' as ') ? n.split(' as ')[1]!.trim() : n;
+          violations.push(
+            `src/modules/${dir}/index.ts value-exports "${localName}" — ` +
+              `module barrels must expose only types/interfaces; concrete impls ` +
+              `belong in internal/ and are wired by the composition root (src/app.ts)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('regression: the resolver normalizes .js ESM imports to .ts source files', () => {
+    // Architect review (PR #4): the resolver MUST strip the `.js` suffix used by
+    // TypeScript ESM imports so it finds the actual `.ts` source file. Without
+    // this, cross-module `internal/` imports using `.js` specifiers would
+    // silently bypass PLAT-AC-02.
+    //
+    // Verify the resolver correctly resolves a known `.js` import to its `.ts`
+    // source. We use a real internal file as the test fixture.
+    const importer = join(MODULES_DIR, 'auth', 'internal', 'authorization-service.ts');
+    // This specifier uses the `.js` suffix convention.
+    const specifier = '../../users/internal/user.types.js';
+    const resolved = resolveSpecifier(importer, specifier);
+    expect(resolved, `expected ${specifier} to resolve to a .ts file`).toBeDefined();
+    expect(resolved!.endsWith('user.types.ts')).toBe(true);
+    expect(existsSync(resolved!)).toBe(true);
+
+    // Also verify the @platform/ path with .js suffix resolves.
+    const platformResolved = resolveSpecifier(
+      join(SRC_ROOT, 'app.ts'),
+      '@platform/index.js',
+    );
+    expect(platformResolved, `expected @platform/index.js to resolve`).toBeDefined();
+    expect(platformResolved!.endsWith('index.ts')).toBe(true);
+  });
+
+  it('regression: a .js import that does NOT correspond to a .ts source is flagged', () => {
+    // If someone writes `import { Foo } from './nonexistent.js'`, the resolver
+    // should return undefined (not silently resolve to something wrong). This
+    // ensures the `.js` normalization does not over-match.
+    const importer = join(MODULES_DIR, 'auth', 'internal', 'authorization-service.ts');
+    const resolved = resolveSpecifier(importer, './does-not-exist.js');
+    expect(resolved).toBeUndefined();
   });
 });

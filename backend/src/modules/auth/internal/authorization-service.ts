@@ -4,9 +4,9 @@ import type {
   AuthorizationDecision,
   ProtectedResource,
 } from './auth.types.js';
-import type { User } from '../../users/internal/user.types.js';
-import type { MembershipRepository, RolePermissionRepository } from '../../organizations/internal/organization.types.js';
-import type { ProjectRepository, ProjectAccessRepository } from '../../projects/internal/project.types.js';
+import type { User } from '@modules/users/index.js';
+import type { MembershipRepository, RolePermissionRepository } from '@modules/organizations/index.js';
+import type { ProjectRepository, ProjectAccessRepository } from '@modules/projects/index.js';
 
 /**
  * Default backend {@link AuthorizationService} (AUTHZ-AC-01..03).

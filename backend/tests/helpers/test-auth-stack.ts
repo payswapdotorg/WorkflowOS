@@ -1,12 +1,10 @@
-import type { DatabaseClient } from '@platform/postgres/database-client.js';
-import { PgUserRepository } from '@modules/users/index.js';
-import { PgOrganizationRepository, PgMembershipRepository, PgRolePermissionRepository } from '@modules/organizations/index.js';
-import { PgProjectRepository, PgProjectAccessRepository } from '@modules/projects/index.js';
-import {
-  ApiKeyAuthProvider,
-  DefaultAuthorizationService,
-  ApiKeyCredentialProvisioner,
-} from '@modules/auth/index.js';
+import type { DatabaseClient } from '@platform/index.js';
+import { PgUserRepository } from '../../src/modules/users/internal/pg-user-repository.js';
+import { PgOrganizationRepository } from '../../src/modules/organizations/internal/pg-organization-repository.js';
+import { PgMembershipRepository, PgRolePermissionRepository } from '../../src/modules/organizations/internal/pg-membership-repository.js';
+import { PgProjectRepository, PgProjectAccessRepository } from '../../src/modules/projects/internal/pg-project-repository.js';
+import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth-provider.js';
+import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore } from '@platform/index.js';
 import { buildTestDatabase, type TestDatabase } from './test-database.js';
 

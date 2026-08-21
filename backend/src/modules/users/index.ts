@@ -13,7 +13,6 @@
  */
 import type { ModuleContract } from '@platform/module-contract.js';
 export type { User, UserRepository, CreateUserInput } from './internal/user.types.js';
-export { PgUserRepository } from './internal/pg-user-repository.js';
 
 /**
  * Public capabilities exposed by the /users module to other modules.

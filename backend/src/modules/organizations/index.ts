@@ -23,11 +23,6 @@ export type {
   MembershipRepository,
   RolePermissionRepository,
 } from './internal/organization.types.js';
-export { PgOrganizationRepository } from './internal/pg-organization-repository.js';
-export {
-  PgMembershipRepository,
-  PgRolePermissionRepository,
-} from './internal/pg-membership-repository.js';
 
 /**
  * Public capabilities exposed by the /organizations module to other modules.

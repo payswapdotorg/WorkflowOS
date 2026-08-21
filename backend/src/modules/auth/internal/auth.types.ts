@@ -6,7 +6,7 @@
  * backend authorization mechanism later modules consume.
  */
 import type { SecretRef } from '@platform/secrets/secret-store.js';
-import type { User } from '../../users/internal/user.types.js';
+import type { User } from '@modules/users/index.js';
 
 /**
  * An authenticated principal — the result of verifying presented credentials
