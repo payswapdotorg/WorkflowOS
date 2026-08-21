@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type {
   AuthorizationService,
   AuthorizationDecision,
+  OrganizationAuthorizationDecision,
   ProtectedResource,
 } from './auth.types.js';
 import type { User } from '@modules/users/index.js';
@@ -140,6 +141,52 @@ export class DefaultAuthorizationService implements AuthorizationService {
       resource,
       organizationId: project.organizationId,
       deniedReason: 'no-project-access',
+    };
+  }
+
+  async authorizeForOrganization(input: {
+    user: User;
+    permission: string;
+    organizationId: string;
+  }): Promise<OrganizationAuthorizationDecision> {
+    const { user, permission, organizationId } = input;
+
+    // 1. The user MUST be a member of the requested organization (AUTHZ-AC-02).
+    //    This is the direct org-membership check — no synthetic project id.
+    const membership = await this.memberships.findByUserAndOrganization(
+      user.id,
+      organizationId,
+    );
+    if (!membership) {
+      return {
+        allowed: false,
+        userId: user.id,
+        permission,
+        organizationId,
+        deniedReason: 'not-a-member',
+      };
+    }
+
+    // 2. The user's role in this org MUST grant the permission.
+    const permissionIds = await this.rolePermissions.listPermissionsForUserInOrganization(
+      user.id,
+      organizationId,
+    );
+    if (!permissionIds.includes(permission)) {
+      return {
+        allowed: false,
+        userId: user.id,
+        permission,
+        organizationId,
+        deniedReason: 'missing-permission',
+      };
+    }
+
+    return {
+      allowed: true,
+      userId: user.id,
+      permission,
+      organizationId,
     };
   }
 }

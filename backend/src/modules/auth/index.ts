@@ -19,6 +19,7 @@ export type {
   AuthProvider,
   ProtectedResource,
   AuthorizationDecision,
+  OrganizationAuthorizationDecision,
   AuthorizationService,
   ApiKeyCredentialRef,
 } from './internal/auth.types.js';

@@ -7,6 +7,7 @@ import type {
 } from '@modules/projects/index.js';
 import {
   requireProjectAuthorization,
+  requireOrganizationAuthorization,
   runAuthed,
 } from '../plugins/auth.plugin.js';
 
@@ -35,55 +36,21 @@ export interface ProjectsRouteDeps {
 const VALID_STATES: ProjectState[] = ['active', 'archived'];
 
 export async function projectsRoutes(app: FastifyInstance, deps: ProjectsRouteDeps): Promise<void> {
-  // Create a project in an organization. The caller must be a member of that
-  // org with project.write permission (via a synthetic "project" resource
-  // keyed on the org — we authorize org-level by checking membership + role).
+  // Create a project in an organization. The caller MUST be a member of the
+  // requested organization with the `project.write` permission. Authorized
+  // through the reusable AuthorizationService.authorizeForOrganization — no
+  // synthetic project id, no ad-hoc membership logic (architect review PR #5).
   app.post('/organizations/:orgId/projects', async (req, reply) => {
     return runAuthed(req, async () => {
       const { orgId } = req.params as { orgId: string };
-      // Authorize: the user must be a member of this org. We model this as a
-      // resource check: resolve any project in the org (or create-then-grant).
-      // For simplicity, we require the user to be an org owner/admin/member
-      // by checking membership via a lightweight authorize against a synthetic
-      // resource. WORK-002's AuthorizationService authorizes project-scoped
-      // resources; for org-level create, we check membership directly via the
-      // authorization service on a known-nonexistent project id (denied with
-      // resource-not-found is fine; we only need the membership check).
-      //
-      // A cleaner approach would be an org-level authorize method; for WORK-004
-      // we reuse the existing project-scoped boundary by having the org's
-      // owner/admin roles implicitly authorize org-level project creation.
-      // We assert membership by attempting a project.read authorization on the
-      // org's (nonexistent) project and checking the denial reason is NOT
-      // 'not-a-member'.
-      const user = (req as { user?: { id: string } }).user;
-      if (!user) {
-        return reply.code(401).send({ error: 'unauthenticated' });
-      }
+      await requireOrganizationAuthorization(req, reply, deps, {
+        permission: 'project.write',
+        organizationId: orgId,
+      });
       const body = req.body as { name?: string; metadata?: Record<string, unknown> };
       if (!body?.name) {
         return reply.code(400).send({ error: 'name required' });
       }
-      // Check org membership: attempt to authorize against a synthetic project
-      // resource scoped to the org. The AuthorizationService resolves the org
-      // membership; a 'not-a-member' denial means the user cannot create.
-      // We use a random project id; the service will return 'resource-not-found'
-      // for members (fine) or 'not-a-member' for non-members (deny).
-      const decision = await deps.authorizationService.authorize({
-        user: user as never,
-        permission: 'project.write',
-        resource: { kind: 'project', projectId: '00000000-0000-0000-0000-000000000000' },
-      });
-      // We can't easily check org membership this way because the synthetic
-      // project doesn't belong to the target org. Instead, we create the
-      // project and then authorize the user's access to it; if denied, we
-      // delete it. For WORK-004 we keep it simpler: trust the route + the
-      // subsequent per-project authorization on the returned project.
-      //
-      // A proper org-level authorize is a WORK-002 enhancement; for now the
-      // tenant-isolation invariant is preserved because GET/PATCH on the
-      // created project requires per-project authorization.
-      void decision;
       const project = await deps.projectRepository.create({
         organizationId: orgId,
         name: body.name,

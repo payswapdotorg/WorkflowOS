@@ -96,6 +96,46 @@ describe('PROJ-AC-01/02/03 — project domain', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  // --- PROJ-AC-01: project-creation authorization (architect review PR #5) ---
+
+  it('PROJ-AC-01 (positive): an authorized Org A user can create a project in Org A', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/organizations/${orgA.id}/projects`,
+      headers: { 'x-api-key': 'raw-key-proj-a' },
+      payload: { name: 'Authorized Create' },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { organizationId: string };
+    expect(body.organizationId).toBe(orgA.id);
+  });
+
+  it('PROJ-AC-01 (negative): an Org A user CANNOT create a project in Org B', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/organizations/${orgB.id}/projects`,
+      headers: { 'x-api-key': 'raw-key-proj-a' },
+      payload: { name: 'Cross-Tenant Create Attempt' },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json() as { error: string; reason: string; organizationId: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.reason).toBe('not-a-member');
+    expect(body.organizationId).toBe(orgB.id);
+    // The project must NOT have been created.
+    const list = await stack.projectRepository.listForOrganization(orgB.id);
+    expect(list.find((p) => p.name === 'Cross-Tenant Create Attempt')).toBeUndefined();
+  });
+
+  it('PROJ-AC-01 (negative): an unauthenticated request cannot create a project', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/organizations/${orgA.id}/projects`,
+      payload: { name: 'Unauth Create' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
   // --- PROJ-AC-02: repository association persists ---
 
   it('PROJ-AC-02: a project can be associated with an external repository (provider-independent)', async () => {
