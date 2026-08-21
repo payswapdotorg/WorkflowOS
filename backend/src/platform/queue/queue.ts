@@ -11,7 +11,7 @@
  * Two implementations exist:
  *
  * - {@link InMemoryQueue} — in-process FIFO used for local dev and tests.
- * - {@link RedisQueue} — Redis-backed (LPUSH/LPOP) used in production.
+ * - {@link RedisQueue} — Redis-backed (RPUSH/LPOP, FIFO) used in production.
  *
  * Both satisfy the same interface, so the worker host and call sites remain
  * implementation-agnostic. Redis is the backing store for production; it is

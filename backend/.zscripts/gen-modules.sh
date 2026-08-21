@@ -7,7 +7,13 @@
 # Out of scope per WORK-001: any domain logic. These are boundary markers only.
 set -euo pipefail
 
-MODULES_DIR="/home/z/WorkflowOS/backend/src/modules"
+# Derive the backend root from this script's location so the script is
+# portable across developer machines and CI environments (do NOT hard-code
+# an absolute path). This file lives at <backend>/.zscripts/gen-modules.sh,
+# so the backend root is one directory up from the script's directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MODULES_DIR="$BACKEND_DIR/src/modules"
 mkdir -p "$MODULES_DIR"
 
 # name|canonical|responsibility

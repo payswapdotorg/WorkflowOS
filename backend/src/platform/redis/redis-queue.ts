@@ -11,10 +11,12 @@ import { generateExecutionId } from '../ids.js';
  * Redis-backed {@link Queue} implementation.
  *
  * Production queue implementation for the WorkflowOS modular monolith. Jobs
- * are serialized as JSON and pushed onto a Redis list (LPUSH). Workers pop
- * (LPOP) and acknowledge via a Redis set of completed job ids. Redis is the
- * backing store for the queue only; it is NOT authoritative application
- * state (architecture §29 — `DATA-002`, `DATA2-AC-02`).
+ * are serialized as JSON and appended to a Redis list (RPUSH). Workers pop
+ * from the head (LPOP) and acknowledge via a Redis set of completed job ids.
+ * RPUSH (tail) + LPOP (head) yields FIFO ordering, matching
+ * {@link InMemoryQueue}. Redis is the backing store for the queue only; it is
+ * NOT authoritative application state (architecture §29 — `DATA-002`,
+ * `DATA2-AC-02`).
  *
  * `dequeue` is intentionally non-blocking (LPOP) so the worker host can poll
  * without busy-spinning and so this implementation is trivially testable

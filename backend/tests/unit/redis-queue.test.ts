@@ -4,7 +4,7 @@ import { RedisQueue } from '@platform/redis/redis-queue.js';
 
 /**
  * Verifies that the Redis-backed queue implementation uses Redis list commands
- * (LPUSH/LPOP) correctly. Uses an in-memory ioredis-compatible mock so the
+ * (RPUSH/LPOP) correctly. Uses an in-memory ioredis-compatible mock so the
  * test runs without a real Redis server while still exercising the actual
  * Redis code path.
  *
@@ -12,17 +12,42 @@ import { RedisQueue } from '@platform/redis/redis-queue.js';
  * (architecture §27, §29). Redis is NOT authoritative application state.
  */
 describe('RedisQueue', () => {
-  it('enqueues via LPUSH and dequeues via LPOP (FIFO preserved)', async () => {
+  it('enqueues via RPUSH and dequeues via LPOP, preserving FIFO order', async () => {
     const redis = new RedisMock();
     const queue = new RedisQueue(redis, 'wfos:test:pending', 'wfos:test:acked');
     const a = await queue.enqueue('echo', { n: 1 }, { executionId: 'wf_r1' });
     const b = await queue.enqueue('echo', { n: 2 }, { executionId: 'wf_r2' });
 
-    // LPUSH pushes to head, so the tail is the oldest -> LPOP returns oldest.
+    // RPUSH appends to the tail; LPOP removes from the head. The oldest
+    // enqueued job is returned first => FIFO.
     const first = await queue.dequeue();
     const second = await queue.dequeue();
     expect(first?.id).toBe(a.id);
     expect(second?.id).toBe(b.id);
+    expect(await queue.dequeue()).toBeNull();
+    await queue.close();
+    redis.disconnect();
+  });
+
+  it('regression: FIFO ordering is preserved across many jobs (not LIFO)', async () => {
+    // Regression guard: if anyone ever switches enqueue to LPUSH (head push),
+    // RPUSH+LPOP would still FIFO but LPUSH+LPOP would LIFO. This test pins
+    // FIFO behavior so such a regression is caught.
+    const redis = new RedisMock();
+    const queue = new RedisQueue(redis, 'wfos:test:fifo', 'wfos:test:fifo-ack');
+    const N = 10;
+    const enqueued: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const rec = await queue.enqueue('echo', { i }, { executionId: `wf_fifo_${i}` });
+      enqueued.push(rec.id);
+    }
+    const dequeued: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const job = await queue.dequeue();
+      expect(job).not.toBeNull();
+      dequeued.push(job!.id);
+    }
+    expect(dequeued).toEqual(enqueued); // exact FIFO order
     expect(await queue.dequeue()).toBeNull();
     await queue.close();
     redis.disconnect();
