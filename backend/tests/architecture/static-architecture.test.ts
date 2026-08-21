@@ -261,3 +261,344 @@ describe('architecture invariants — forbidden dependency directions', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 });
+
+/**
+ * WORK-003 invariants — domain modules must not depend directly on
+ * infrastructure-provider implementations.
+ *
+ * Domain modules obtain PostgreSQL / Redis / object-storage capabilities
+ * through the shared `@platform/*` abstractions (`DatabaseClient`, `Queue`,
+ * `ObjectStore`, `TransientLock`, `TransientCache`). They MUST NOT import
+ * `pg`, `ioredis`, `@electric-sql/pglite`, or a concrete
+ * implementation class directly. This keeps provider independence
+ * (architecture §2.5) and lets providers be substituted without touching
+ * domain code.
+ *
+ * Only `src/platform/**` may import provider packages.
+ *
+ * Correction 2 (architect review): the forbidden set now covers ALL concrete
+ * WORK-003 infrastructure implementations — including the Redis
+ * `TransientLock` / `TransientCache` classes, `RedisQueue`, `InMemoryQueue`,
+ * the concrete object-store implementations, the database client/factory
+ * classes, the migration runner, the DI container, and the artifact-metadata
+ * repository. A complementary name-level check parses barrel value-imports
+ * so a domain module cannot import a concrete class/factory by name from
+ * `@platform/index.js` either.
+ */
+const PROVIDER_PACKAGES = new Set([
+  'pg',
+  'ioredis',
+  '@electric-sql/pglite',
+]);
+
+/**
+ * Every concrete infrastructure/provider implementation file under
+ * `src/platform/`. Domain modules MUST NOT import these files directly (via
+ * `@platform/<subpath>`); they must use the provider-independent interfaces
+ * re-exported from `@platform/index.js`.
+ *
+ * This list is exhaustive for the WORK-003 foundation. When a future work
+ * item adds a new concrete implementation, it must be added here too.
+ */
+const PROVIDER_IMPLEMENTATION_FILES = new Set([
+  // --- PostgreSQL (DATA-001) ---
+  'src/platform/postgres/database-client.ts', // PgDatabaseClient (imports pg)
+  'src/platform/postgres/database-factory.ts', // createDatabaseClient (imports pg)
+  'src/platform/postgres/pglite-database-client.ts', // PgliteDatabaseClient (imports pglite)
+  'src/platform/postgres/migration-runner.ts', // runMigrations / resetMigrationsTable
+  // --- Redis queue + extensions (DATA-002; reuses WORK-001 queue) ---
+  'src/platform/redis/redis-client.ts', // createRedisClient (imports ioredis)
+  'src/platform/redis/redis-queue.ts', // RedisQueue (imports ioredis)
+  'src/platform/redis/transient-lock.ts', // TransientLock (imports ioredis)
+  'src/platform/redis/transient-cache.ts', // TransientCache (imports ioredis)
+  'src/platform/queue/in-memory-queue.ts', // InMemoryQueue (concrete queue impl)
+  // --- Object storage (DATA-003) ---
+  'src/platform/storage/in-memory-object-store.ts', // InMemoryObjectStore
+  'src/platform/storage/fs-object-store.ts', // FsObjectStore + createTempFsObjectStore
+  // --- Persistence / DI wiring ---
+  'src/platform/persistence/infrastructure.ts', // buildInfrastructure (DI container)
+  'src/platform/persistence/artifact-metadata-repository.ts', // ArtifactMetadataRepository
+  // --- WORK-001 worker runtime (concrete) ---
+  'src/platform/worker/worker-host.ts', // WorkerHost
+  'src/platform/worker/job-handler.ts', // buildHandlerRegistry
+  'src/platform/worker/fixtures/echo.job.ts', // createEchoJobHandler (fixture)
+]);
+
+/**
+ * Concrete value exports (classes / factories) that domain modules MUST NOT
+ * import as runtime values. They may import the corresponding TYPES (e.g.
+ * `import type { Queue }`) for type annotations, but must not construct or
+ * reference the concrete implementation at runtime.
+ *
+ * Domain modules receive infrastructure from the `Infrastructure` container
+ * (app.ts wiring); they never construct these themselves.
+ *
+ * This complements {@link PROVIDER_IMPLEMENTATION_FILES}: even if a domain
+ * module imports from the barrel (`@platform/index.js`), importing one of
+ * these names as a VALUE is forbidden. `import type { ... }` is allowed.
+ */
+const FORBIDDEN_CONCRETE_EXPORTS = new Set([
+  // PostgreSQL
+  'PgDatabaseClient',
+  'createDatabaseClient',
+  'defaultPoolConfig',
+  'PgliteDatabaseClient',
+  'createPgliteDatabaseClient',
+  'runMigrations',
+  'resetMigrationsTable',
+  // Redis queue + extensions
+  'RedisQueue',
+  'InMemoryQueue',
+  'createRedisClient',
+  'TransientLock',
+  'TransientCache',
+  // Object storage
+  'InMemoryObjectStore',
+  'FsObjectStore',
+  'createTempFsObjectStore',
+  // Persistence / DI
+  'ArtifactMetadataRepository',
+  'buildInfrastructure',
+  // WORK-001 worker runtime (concrete)
+  'WorkerHost',
+  'buildHandlerRegistry',
+  'createEchoJobHandler',
+]);
+
+/**
+ * Extract the VALUE-imported names from a TS source file for `@platform/*`
+ * specifiers. Returns a map of `specifier → [imported local names]` for
+ * runtime-value imports (not type-only).
+ *
+ * Handles:
+ *   import { Foo, Bar } from '@platform/...'        → { Foo, Bar }
+ *   import { type Foo, Bar } from '@platform/...'   → { Bar }          (inline type)
+ *   import { Foo as Bar } from '@platform/...'      → { Bar }          (local name)
+ *   import type { Foo } from '@platform/...'        → {}               (all type)
+ *   import Foo from '@platform/...'                 → { Foo }          (default)
+ *   import * as Foo from '@platform/...'            → { Foo }          (namespace)
+ *
+ * Multi-line imports (`import {\n  Foo,\n  Bar,\n} from '...'`) are supported.
+ */
+function extractPlatformValueImports(file: string): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  const src = readFileSync(file, 'utf8');
+
+  // Match any `import ... from '@platform/...'` statement. The clause between
+  // `import` and `from` may span multiple lines and contain braces.
+  // Group 1: optional `type` keyword.
+  // Group 2: the import clause (default, namespace, or braced names).
+  // Group 3: the specifier (without quotes).
+  const importRe =
+    /import\s+(?:(type)\s+)?([\s\S]+?)\s+from\s+['"](@platform\/[^'"]+)['"]\s*;?/g;
+
+  for (const m of src.matchAll(importRe)) {
+    const isTypeOnly = m[1] === 'type';
+    const clause = m[2]!.trim();
+    const specifier = m[3]!;
+
+    if (isTypeOnly) continue; // `import type { ... }` — no value imports.
+
+    const names: string[] = [];
+
+    if (clause.startsWith('*')) {
+      // import * as Ns from '...'
+      const nsMatch = clause.match(/^\*\s+as\s+(\w+)/);
+      if (nsMatch) names.push(nsMatch[1]!);
+    } else if (clause.startsWith('{')) {
+      // import { A, B as C, type D } from '...'
+      const inner = clause.replace(/^[{]\s*/, '').replace(/\s*[}]$/, '');
+      for (const part of inner.split(',')) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        // Skip inline `type` specifiers: `type Foo` or `type Foo as Bar`.
+        if (/^type\b/.test(trimmed)) continue;
+        // Extract the local name (after `as`, or the first token).
+        const asMatch = trimmed.match(/\bas\s+(\w+)$/);
+        const token = asMatch ? asMatch[1]! : trimmed.split(/\s+/)[0]!;
+        if (token) names.push(token);
+      }
+    } else if (clause) {
+      // import Default from '...' (default import, possibly with type)
+      // e.g. `import Default, { Foo } from '...'` — handle default + named.
+      const parts = clause.split(/,(?![^{]*})/); // split on commas outside braces
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (trimmed.startsWith('{')) continue; // named part handled above if present
+        if (trimmed.startsWith('*')) {
+          const nsMatch = trimmed.match(/^\*\s+as\s+(\w+)/);
+          if (nsMatch) names.push(nsMatch[1]!);
+        } else if (trimmed) {
+          names.push(trimmed.split(/\s+/)[0]!);
+        }
+      }
+    }
+
+    if (names.length > 0) {
+      const existing = result.get(specifier) ?? [];
+      result.set(specifier, [...existing, ...names]);
+    }
+  }
+  return result;
+}
+
+describe('WORK-003 invariants — no provider coupling in domain modules', () => {
+  it('domain modules (src/modules/**) do not import provider packages', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      for (const specifier of extractSpecifiers(file)) {
+        // Extract the package name (first segment before '/').
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports provider package "${specifier}" — use @platform/* abstractions instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('domain modules do not import concrete provider implementation files from platform/', () => {
+    // Domain code must import the *interfaces* from @platform/*, not the
+    // concrete implementation files (e.g. @platform/storage/fs-object-store.js).
+    // This covers ALL concrete WORK-003 implementations including TransientLock,
+    // TransientCache, RedisQueue, the object stores, the database clients, the
+    // migration runner, and the DI container.
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      for (const specifier of extractSpecifiers(file)) {
+        if (!specifier.startsWith('@platform/')) continue;
+        const relPath = `src/platform/${specifier.slice('@platform/'.length).replace(/\.js$/, '.ts')}`;
+        if (PROVIDER_IMPLEMENTATION_FILES.has(relPath)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports concrete implementation "${specifier}" — import the interface from @platform/index.js instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('domain modules do not import forbidden concrete exports (by name) from the platform barrel', () => {
+    // Even when a domain module imports from the barrel (@platform/index.js),
+    // it must not import a concrete infrastructure class/factory by name.
+    // `import type { Queue }` is allowed; `import { RedisQueue }` is not.
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const imports = extractPlatformValueImports(file);
+      for (const [specifier, names] of imports) {
+        for (const name of names) {
+          if (FORBIDDEN_CONCRETE_EXPORTS.has(name)) {
+            violations.push(
+              `${relative(BACKEND_ROOT, file)} imports concrete export "${name}" from "${specifier}" — use the provider-independent interface (import type) or receive it from the Infrastructure container`,
+            );
+          }
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('only platform/ imports provider packages (pg / ioredis / pglite)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(SRC_ROOT)) {
+      const rel = relative(BACKEND_ROOT, file).split(sep).join('/');
+      const isPlatform = rel.startsWith('src/platform/');
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg) && !isPlatform) {
+          violations.push(
+            `${rel} imports provider package "${specifier}" — only src/platform/** may do so`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no second worker or queue implementation was introduced in domain modules', () => {
+    // The WORK-001 WorkerHost + Queue are the only accepted runtime. Domain
+    // modules must not declare competing Queue/WorkerHost classes.
+    const violations: string[] = [];
+    const forbidden = /\bclass\s+(WorkerHost|Queue|RedisQueue|InMemoryQueue)\b/;
+    for (const file of walkTs(MODULES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing worker/queue implementation — reuse @platform/* WorkerHost + Queue`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('the forbidden-exports set covers every concrete value exported by the platform barrel', () => {
+    // Meta-check: ensure FORBIDDEN_CONCRETE_EXPORTS stays in sync with the
+    // barrel. If a new concrete class/factory is added to the barrel without
+    // being added to the forbidden set, this test fails so the architect's
+    // Correction 2 requirement ("cover all concrete WORK-003 infrastructure
+    // implementations") is not accidentally weakened.
+    const barrelPath = join(SRC_ROOT, 'platform', 'index.ts');
+    const barrelSrc = readFileSync(barrelPath, 'utf8');
+    // Collect every value export name from `export { Foo }` / `export { Foo as Bar }`.
+    const exportedNames = new Set<string>();
+    for (const m of barrelSrc.matchAll(/export\s+(?!type\b)\{([^}]+)\}\s+from\s+['"][^'"]+['"]/g)) {
+      const inner = m[1]!;
+      for (const part of inner.split(',')) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const asMatch = trimmed.match(/\bas\s+(\w+)$/);
+        const name = asMatch ? asMatch[1]! : trimmed.split(/\s+/)[0]!;
+        if (name && !name.startsWith('type ')) exportedNames.add(name);
+      }
+    }
+    // Known allowed (non-concrete) runtime exports that domain modules may use.
+    const allowedRuntimeExports = new Set([
+      // Module contract
+      'FROZEN_MODULE_NAMES',
+      // Execution context
+      'runWithExecutionContext',
+      'getExecutionContext',
+      'getExecutionId',
+      'ensureExecutionId',
+      // Logging / metrics / error tracking (integration points, not provider impls)
+      'createLogger',
+      'setMetricsSink',
+      'metrics',
+      'setErrorTracker',
+      'errorTracker',
+      // IDs
+      'generateExecutionId',
+    ]);
+    const uncovered = [...exportedNames].filter(
+      (n) => !allowedRuntimeExports.has(n) && !FORBIDDEN_CONCRETE_EXPORTS.has(n),
+    );
+    expect(
+      uncovered,
+      `barrel exports not classified as allowed or forbidden: ${uncovered.join(', ')}.\n` +
+        `Add each to FORBIDDEN_CONCRETE_EXPORTS (if concrete) or allowedRuntimeExports (if a safe runtime helper).`,
+    ).toEqual([]);
+  });
+
+  it('frozen architecture documents are unchanged (sanity: still present, not modified by tests)', () => {
+    // The frozen spec docs live at repo-root /spec/. We assert they still
+    // exist and the backend test suite never writes to them.
+    const specDir = join(BACKEND_ROOT, '..', 'spec');
+    for (const doc of [
+      'architecture.md',
+      'architecture-lock.md',
+      'requirements.md',
+      'work-items.md',
+      'dependency-graph.md',
+    ]) {
+      const path = join(specDir, doc);
+      expect(existsSync(path), `expected ${doc} to exist`).toBe(true);
+      expect(statSync(path).isFile(), `expected ${doc} to be a file`).toBe(true);
+    }
+  });
+});

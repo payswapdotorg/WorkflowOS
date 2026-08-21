@@ -35,7 +35,10 @@ backend/
 │   │   ├── error-tracker.ts      # error-tracking integration point (OBS-001)
 │   │   ├── ids.ts
 │   │   ├── queue/               # Queue interface + InMemoryQueue
-│   │   ├── redis/               # RedisQueue + redis client
+│   │   ├── redis/               # RedisQueue + redis client + TransientLock + TransientCache
+│   │   ├── postgres/            # DatabaseClient + pg/pglite + migration runner (DATA-001)
+│   │   ├── storage/             # ObjectStore interface + InMemory/Fs stores (DATA-003)
+│   │   ├── persistence/         # ArtifactMetadataRepository + Infrastructure container
 │   │   └── worker/             # WorkerHost, JobHandler, echo fixture
 │   └── modules/               # 16 frozen module boundaries
 │       ├── auth/
@@ -56,8 +59,11 @@ backend/
 │       └── audit/
 └── tests/
     ├── unit/                 # execution-context, logger, queues, worker-host
-    ├── integration/          # PLAT-AC-03, OBS-AC-01, OBS-AC-02
-    └── architecture/         # PLAT-AC-01, PLAT-AC-02 (static check)
+    ├── integration/          # PLAT-AC-03, OBS-AC-01/02, DATA-AC-01..03, DATA2-AC-01..02, DATA3-AC-01..02
+    │   ├── postgres/         # PostgreSQL persistence, FK, recovery
+    │   ├── redis/            # worker processing, non-authoritative, transient lock
+    │   └── storage/          # object storage + artifact boundary
+    └── architecture/         # PLAT-AC-01/02 + WORK-003 provider-coupling invariants
 ```
 
 Each module directory contains:
@@ -155,19 +161,40 @@ bun run start          # run both in one process
 
 ### Configuration
 
-| Env var            | Default     | Description                                                |
-| ------------------ | ----------- | ---------------------------------------------------------- |
-| `WORKFLOWOS_ROLE`  | `all`       | `api`, `worker`, or `all`.                                 |
-| `PORT`             | `3001`      | HTTP port when role includes `api`.                        |
-| `HOST`             | `0.0.0.0`   | HTTP bind host.                                            |
-| `REDIS_URL`        | _(unset)_   | When set, the production `RedisQueue` is used.             |
-| `LOG_LEVEL`        | `info`      | pino log level.                                             |
+| Env var                  | Default     | Description                                                          |
+| ------------------------ | ----------- | -------------------------------------------------------------------- |
+| `WORKFLOWOS_ROLE`        | `all`       | `api`, `worker`, or `all`.                                           |
+| `PORT`                   | `3001`      | HTTP port when role includes `api`.                                   |
+| `HOST`                   | `0.0.0.0`   | HTTP bind host.                                                       |
+| `REDIS_URL`              | _(unset)_   | When set, the production `RedisQueue` + `TransientLock`/`Cache` are used. |
+| `DATABASE_URL`           | _(unset)_   | PostgreSQL connection string (must start with `postgres`). When set, migrations run on startup and `Infrastructure` is wired. |
+| `OBJECT_STORAGE_DIR`     | _(unset)_   | Filesystem root for `FsObjectStore`. When unset, an in-memory store is used. |
+| `LOG_LEVEL`              | `info`      | pino log level.                                                       |
 
-When `REDIS_URL` is unset, an in-memory queue is used with a warning. This is
-acceptable for local development and for the test suite; production deployments
-MUST set `REDIS_URL`.
+When `REDIS_URL` is unset, an in-memory queue is used with a warning. When
+`DATABASE_URL` is unset, the app runs without the persistence container
+(local dev). Production deployments MUST set `REDIS_URL`, `DATABASE_URL`, and
+`OBJECT_STORAGE_DIR`.
+
+### Test configuration
+
+The test harness selects real vs. local-substitute infrastructure:
+
+| Env var                    | When set                                                | When unset (default)                            |
+| -------------------------- | ------------------------------------------------------- | ----------------------------------------------- |
+| `WORKFLOWOS_DATABASE_URL`  | Real PostgreSQL via `pg.Pool` (CI service container)   | `@electric-sql/pglite` (real Postgres WASM)     |
+| `WORKFLOWOS_REDIS_URL` / `REDIS_URL` | Real Redis via `ioredis` (CI service container) | `ioredis-mock`                                  |
+
+Both paths exercise the real `DatabaseClient` / `RedisQueue` code — only the
+transport differs. No fake in-memory database is used as proof of DATA-AC-03.
 
 ## WORK-001 evidence
 
 See [`docs/work-items/WORK-001.md`](../docs/work-items/WORK-001.md) for the
-acceptance-criteria-to-test mapping and the verification summary.
+WORK-001 acceptance-criteria-to-test mapping.
+
+## WORK-003 evidence
+
+See [`docs/work-items/WORK-003.md`](../docs/work-items/WORK-003.md) for the
+WORK-003 (PostgreSQL, Redis, object storage) acceptance-criteria-to-test
+mapping.

@@ -1,8 +1,15 @@
-# Minimal CI for WORK-001.
+# Backend CI for WorkflowOS.
 #
 # Verifies the modular-monolith foundation on every pull request and on every
 # push to `main`. Runs the backend test suite (unit + integration + static
 # architecture checks), the TypeScript typecheck, and ESLint.
+#
+# For WORK-003 the test suite uses real PostgreSQL (via a `postgres` service
+# container) and real Redis (via a `redis` service container) so the
+# infrastructure tests run against the actual production-grade backing stores.
+# When those services are unavailable, tests fall back to pglite (real
+# PostgreSQL compiled to WASM) and ioredis-mock — but CI always exercises the
+# real network services.
 #
 # Out of scope: deployment, release, or any broader CI infrastructure — those
 # belong to later work items (e.g. WORK-023 deployable runtime).
@@ -23,9 +30,42 @@ jobs:
   verify:
     name: test / typecheck / lint
     runs-on: ubuntu-latest
+
+    # Real backing stores for the infrastructure tests (WORK-003).
+    # - postgres: authoritative relational persistence (DATA-001 / DATA-AC-01..03)
+    # - redis: queue / locks / cache (DATA-002 / DATA2-AC-01..02) — non-authoritative
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wfos
+          POSTGRES_PASSWORD: wfos
+          POSTGRES_DB: wfos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wfos -d wfos_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     defaults:
       run:
         working-directory: backend
+
+    env:
+      # Point the test harness at the real service containers.
+      WORKFLOWOS_DATABASE_URL: postgres://wfos:wfos@localhost:5432/wfos_test
+      REDIS_URL: redis://localhost:6379
 
     steps:
       - name: Checkout

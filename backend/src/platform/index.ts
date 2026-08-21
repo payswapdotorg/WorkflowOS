@@ -64,3 +64,43 @@ export type {
   EchoListener,
   EchoJobOptions,
 } from './worker/fixtures/echo.job.js';
+
+// --- WORK-003: PostgreSQL, Redis extensions, object storage, persistence ---
+
+export type {
+  DatabaseClient,
+  DatabaseTx,
+  QueryParams,
+} from './postgres/database-client.js';
+export { PgDatabaseClient } from './postgres/database-client.js';
+export { createDatabaseClient, defaultPoolConfig } from './postgres/database-factory.js';
+export {
+  createPgliteDatabaseClient,
+  PgliteDatabaseClient,
+} from './postgres/pglite-database-client.js';
+export { runMigrations, resetMigrationsTable } from './postgres/migration-runner.js';
+
+export type {
+  ObjectStore,
+  PutObjectInput,
+  PutObjectResult,
+  StoredObject,
+  StoredObjectRef,
+} from './storage/object-store.js';
+export { InMemoryObjectStore } from './storage/in-memory-object-store.js';
+export { FsObjectStore, createTempFsObjectStore } from './storage/fs-object-store.js';
+
+export { TransientLock } from './redis/transient-lock.js';
+export type { AcquiredLock, AcquireOptions } from './redis/transient-lock.js';
+export { TransientCache } from './redis/transient-cache.js';
+export type { CacheGetOptions } from './redis/transient-cache.js';
+
+export { ArtifactMetadataRepository } from './persistence/artifact-metadata-repository.js';
+export type {
+  ArtifactMetadata,
+  CreateArtifactMetadataInput,
+} from './persistence/artifact-metadata-repository.js';
+export {
+  buildInfrastructure,
+} from './persistence/infrastructure.js';
+export type { Infrastructure, BuildInfrastructureOptions } from './persistence/infrastructure.js';
