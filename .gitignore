@@ -1,0 +1,25 @@
+# Dependencies
+**/node_modules/
+
+# Build output
+**/dist/
+**/.next/
+**/coverage/
+
+# Logs
+*.log
+**/dev.log
+
+# Env / local config
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test caches
+**/.vitest-cache/

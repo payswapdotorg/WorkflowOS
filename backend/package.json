@@ -1,0 +1,35 @@
+{
+  "name": "@workflowos/backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WorkflowOS TypeScript modular-monolith backend foundation (WORK-001).",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "arch:check": "vitest run tests/architecture",
+    "start:api": "tsx src/index.ts --role=api",
+    "start:worker": "tsx src/index.ts --role=worker",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "ioredis": "^5.4.1",
+    "pino": "^9.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@typescript-eslint/eslint-plugin": "^8.15.0",
+    "@typescript-eslint/parser": "^8.15.0",
+    "eslint": "^9.15.0",
+    "ioredis-mock": "^8.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}
