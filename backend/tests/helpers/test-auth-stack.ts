@@ -4,6 +4,13 @@ import { PgOrganizationRepository } from '../../src/modules/organizations/intern
 import { PgMembershipRepository, PgRolePermissionRepository } from '../../src/modules/organizations/internal/pg-membership-repository.js';
 import { PgProjectRepository, PgProjectAccessRepository, PgProjectRepositoryAssociationRepository } from '../../src/modules/projects/internal/pg-project-repository.js';
 import { PgSpecificationRepository, PgSpecificationVersionRepository } from '../../src/modules/specifications/internal/pg-specification-repository.js';
+import {
+  PgArchitectureRepository,
+  PgArchitectureVersionRepository,
+  PgArchitectureDecisionRepository,
+  PgArchitectureChangeRequestRepository,
+} from '../../src/modules/architecture/internal/pg-architecture-repository.js';
+import { DefaultArchitectureService } from '../../src/modules/architecture/internal/architecture-service.js';
 import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth-provider.js';
 import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore, InMemoryObjectStore } from '@platform/index.js';
@@ -25,6 +32,11 @@ export interface TestAuthStack {
   repositoryAssociationRepository: PgProjectRepositoryAssociationRepository;
   specificationRepository: PgSpecificationRepository;
   specificationVersionRepository: PgSpecificationVersionRepository;
+  architectureRepository: PgArchitectureRepository;
+  architectureVersionRepository: PgArchitectureVersionRepository;
+  architectureDecisionRepository: PgArchitectureDecisionRepository;
+  architectureChangeRequestRepository: PgArchitectureChangeRequestRepository;
+  architectureService: DefaultArchitectureService;
   authProvider: ApiKeyAuthProvider;
   authorizationService: DefaultAuthorizationService;
   apiKeyProvisioner: ApiKeyCredentialProvisioner;
@@ -56,6 +68,11 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const repositoryAssociationRepository = new PgProjectRepositoryAssociationRepository(db.client);
   const specificationRepository = new PgSpecificationRepository(db.client);
   const specificationVersionRepository = new PgSpecificationVersionRepository(db.client);
+  const architectureRepository = new PgArchitectureRepository(db.client);
+  const architectureVersionRepository = new PgArchitectureVersionRepository(db.client);
+  const architectureDecisionRepository = new PgArchitectureDecisionRepository(db.client);
+  const architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(db.client);
+  const architectureService = new DefaultArchitectureService(db.client);
   const authProvider = new ApiKeyAuthProvider(db.client, secretStore);
   const authorizationService = new DefaultAuthorizationService(
     membershipRepository,
@@ -83,6 +100,11 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     repositoryAssociationRepository,
     specificationRepository,
     specificationVersionRepository,
+    architectureRepository,
+    architectureVersionRepository,
+    architectureDecisionRepository,
+    architectureChangeRequestRepository,
+    architectureService,
     authProvider,
     authorizationService,
     apiKeyProvisioner,

@@ -46,6 +46,20 @@ import {
   PgSpecificationRepository,
   PgSpecificationVersionRepository,
 } from './modules/specifications/internal/pg-specification-repository.js';
+import type {
+  ArchitectureRepository,
+  ArchitectureVersionRepository,
+  ArchitectureDecisionRepository,
+  ArchitectureChangeRequestRepository,
+  ArchitectureService,
+} from '@modules/architecture/index.js';
+import {
+  PgArchitectureRepository,
+  PgArchitectureVersionRepository,
+  PgArchitectureDecisionRepository,
+  PgArchitectureChangeRequestRepository,
+} from './modules/architecture/internal/pg-architecture-repository.js';
+import { DefaultArchitectureService } from './modules/architecture/internal/architecture-service.js';
 import type { AppConfig } from './config.js';
 
 /**
@@ -85,6 +99,16 @@ export interface AppDeps {
   specificationRepository?: SpecificationRepository;
   /** WORK-004: specification version repository. Present when a database is configured. */
   specificationVersionRepository?: SpecificationVersionRepository;
+  /** WORK-005: architecture repository. Present when a database is configured. */
+  architectureRepository?: ArchitectureRepository;
+  /** WORK-005: architecture version repository. */
+  architectureVersionRepository?: ArchitectureVersionRepository;
+  /** WORK-005: architecture decision (ADR) repository. */
+  architectureDecisionRepository?: ArchitectureDecisionRepository;
+  /** WORK-005: architecture change request repository. */
+  architectureChangeRequestRepository?: ArchitectureChangeRequestRepository;
+  /** WORK-005: architecture service (freeze, approve change → replacement version). */
+  architectureService?: ArchitectureService;
 }
 
 export interface BuildAppOptions {
@@ -204,6 +228,11 @@ export async function buildApp(
   let repositoryAssociationRepository: ProjectRepositoryAssociationRepository | undefined;
   let specificationRepository: SpecificationRepository | undefined;
   let specificationVersionRepository: SpecificationVersionRepository | undefined;
+  let architectureRepository: ArchitectureRepository | undefined;
+  let architectureVersionRepository: ArchitectureVersionRepository | undefined;
+  let architectureDecisionRepository: ArchitectureDecisionRepository | undefined;
+  let architectureChangeRequestRepository: ArchitectureChangeRequestRepository | undefined;
+  let architectureService: ArchitectureService | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
@@ -215,6 +244,11 @@ export async function buildApp(
     repositoryAssociationRepository = new PgProjectRepositoryAssociationRepository(database);
     specificationRepository = new PgSpecificationRepository(database);
     specificationVersionRepository = new PgSpecificationVersionRepository(database);
+    architectureRepository = new PgArchitectureRepository(database);
+    architectureVersionRepository = new PgArchitectureVersionRepository(database);
+    architectureDecisionRepository = new PgArchitectureDecisionRepository(database);
+    architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(database);
+    architectureService = new DefaultArchitectureService(database);
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -241,6 +275,11 @@ export async function buildApp(
       repositoryAssociationRepository,
       specificationRepository,
       specificationVersionRepository,
+      architectureRepository,
+      architectureVersionRepository,
+      architectureDecisionRepository,
+      architectureChangeRequestRepository,
+      architectureService,
     },
     start: async () => {
       if (options.startWorker !== false) {

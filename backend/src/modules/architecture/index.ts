@@ -2,26 +2,46 @@
  * architecture module — public interface.
  *
  * Canonical name: /architecture
- * Responsibility (spec/architecture.md): Architecture Management, ADRs, Architecture Change Requests, Architecture Versions.
+ * Responsibility (spec/architecture.md): Architecture Management, ADRs,
+ * Architecture Change Requests, Architecture Versions.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-005: implements the runtime project-specific /architecture domain
+ * (ARCH-001..004). This is distinct from the frozen repository governance
+ * documents (/spec/architecture.md, /spec/architecture-lock.md) which are NOT
+ * modified. The runtime model coexists with the frozen governance model.
+ *
+ * Lifecycle: DRAFT → FROZEN → SUPERSEDED. A frozen version is immutable
+ * (persistence-enforced, not just a service check). A new immutable version is
+ * created only from an approved Architecture Change Request.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  Architecture,
+  CreateArchitectureInput,
+  ArchitectureVersion,
+  ArchitectureVersionState,
+  CreateArchitectureVersionInput,
+  ArchitectureVersionRepository,
+  ArchitectureRepository,
+  ArchitectureDecisionRecord,
+  CreateAdrInput,
+  ArchitectureDecisionRepository,
+  ArchitectureChangeRequest,
+  ChangeRequestStatus,
+  CreateChangeRequestInput,
+  ArchitectureChangeRequestRepository,
+  ArchitectureService,
+} from './internal/architecture.types.js';
 
 /**
  * Public capabilities exposed by the /architecture module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface ArchitectureModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional architecture-domain methods consumed by other modules
 }
 
 /**
