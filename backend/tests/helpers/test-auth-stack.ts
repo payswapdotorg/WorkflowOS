@@ -11,6 +11,12 @@ import {
   PgArchitectureChangeRequestRepository,
 } from '../../src/modules/architecture/internal/pg-architecture-repository.js';
 import { DefaultArchitectureService } from '../../src/modules/architecture/internal/architecture-service.js';
+import {
+  PgRequirementRepository,
+  PgRequirementDependencyRepository,
+  PgAcceptanceCriterionRepository,
+  PgEvidenceReferenceRepository,
+} from '../../src/modules/requirements/internal/pg-requirement-repository.js';
 import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth-provider.js';
 import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore, InMemoryObjectStore } from '@platform/index.js';
@@ -37,6 +43,10 @@ export interface TestAuthStack {
   architectureDecisionRepository: PgArchitectureDecisionRepository;
   architectureChangeRequestRepository: PgArchitectureChangeRequestRepository;
   architectureService: DefaultArchitectureService;
+  requirementRepository: PgRequirementRepository;
+  requirementDependencyRepository: PgRequirementDependencyRepository;
+  acceptanceCriterionRepository: PgAcceptanceCriterionRepository;
+  evidenceReferenceRepository: PgEvidenceReferenceRepository;
   authProvider: ApiKeyAuthProvider;
   authorizationService: DefaultAuthorizationService;
   apiKeyProvisioner: ApiKeyCredentialProvisioner;
@@ -73,6 +83,10 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const architectureDecisionRepository = new PgArchitectureDecisionRepository(db.client);
   const architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(db.client);
   const architectureService = new DefaultArchitectureService(db.client);
+  const requirementRepository = new PgRequirementRepository(db.client);
+  const requirementDependencyRepository = new PgRequirementDependencyRepository(db.client);
+  const acceptanceCriterionRepository = new PgAcceptanceCriterionRepository(db.client);
+  const evidenceReferenceRepository = new PgEvidenceReferenceRepository(db.client);
   const authProvider = new ApiKeyAuthProvider(db.client, secretStore);
   const authorizationService = new DefaultAuthorizationService(
     membershipRepository,
@@ -105,6 +119,10 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     architectureDecisionRepository,
     architectureChangeRequestRepository,
     architectureService,
+    requirementRepository,
+    requirementDependencyRepository,
+    acceptanceCriterionRepository,
+    evidenceReferenceRepository,
     authProvider,
     authorizationService,
     apiKeyProvisioner,

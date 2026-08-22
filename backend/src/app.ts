@@ -60,6 +60,18 @@ import {
   PgArchitectureChangeRequestRepository,
 } from './modules/architecture/internal/pg-architecture-repository.js';
 import { DefaultArchitectureService } from './modules/architecture/internal/architecture-service.js';
+import type {
+  RequirementRepository,
+  RequirementDependencyRepository,
+  AcceptanceCriterionRepository,
+  EvidenceReferenceRepository,
+} from '@modules/requirements/index.js';
+import {
+  PgRequirementRepository,
+  PgRequirementDependencyRepository,
+  PgAcceptanceCriterionRepository,
+  PgEvidenceReferenceRepository,
+} from './modules/requirements/internal/pg-requirement-repository.js';
 import type { AppConfig } from './config.js';
 
 /**
@@ -109,6 +121,14 @@ export interface AppDeps {
   architectureChangeRequestRepository?: ArchitectureChangeRequestRepository;
   /** WORK-005: architecture service (freeze, approve change → replacement version). */
   architectureService?: ArchitectureService;
+  /** WORK-006: requirement repository. */
+  requirementRepository?: RequirementRepository;
+  /** WORK-006: requirement dependency repository. */
+  requirementDependencyRepository?: RequirementDependencyRepository;
+  /** WORK-006: acceptance criterion repository. */
+  acceptanceCriterionRepository?: AcceptanceCriterionRepository;
+  /** WORK-006: evidence reference repository. */
+  evidenceReferenceRepository?: EvidenceReferenceRepository;
 }
 
 export interface BuildAppOptions {
@@ -233,6 +253,10 @@ export async function buildApp(
   let architectureDecisionRepository: ArchitectureDecisionRepository | undefined;
   let architectureChangeRequestRepository: ArchitectureChangeRequestRepository | undefined;
   let architectureService: ArchitectureService | undefined;
+  let requirementRepository: RequirementRepository | undefined;
+  let requirementDependencyRepository: RequirementDependencyRepository | undefined;
+  let acceptanceCriterionRepository: AcceptanceCriterionRepository | undefined;
+  let evidenceReferenceRepository: EvidenceReferenceRepository | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
@@ -249,6 +273,10 @@ export async function buildApp(
     architectureDecisionRepository = new PgArchitectureDecisionRepository(database);
     architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(database);
     architectureService = new DefaultArchitectureService(database);
+    requirementRepository = new PgRequirementRepository(database);
+    requirementDependencyRepository = new PgRequirementDependencyRepository(database);
+    acceptanceCriterionRepository = new PgAcceptanceCriterionRepository(database);
+    evidenceReferenceRepository = new PgEvidenceReferenceRepository(database);
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -280,6 +308,10 @@ export async function buildApp(
       architectureDecisionRepository,
       architectureChangeRequestRepository,
       architectureService,
+      requirementRepository,
+      requirementDependencyRepository,
+      acceptanceCriterionRepository,
+      evidenceReferenceRepository,
     },
     start: async () => {
       if (options.startWorker !== false) {
