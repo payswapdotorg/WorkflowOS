@@ -117,6 +117,40 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.workflowEngine
+        ? {
+            workflow: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              workflowEngine: app.deps.workflowEngine,
+            },
+          }
+        : {}),
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.auditService
+        ? {
+            audit: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              auditQuery: app.deps.auditService,
+            },
+          }
+        : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     app.deps.logger.info('app.api.listening', {

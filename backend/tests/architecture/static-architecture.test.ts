@@ -2373,3 +2373,169 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
     expect(codeOnly).not.toMatch(/completed:\s*true\s*\}\s*as\s*never/);
   });
 });
+
+/**
+ * WORK-020 invariants — /audit module boundaries.
+ */
+describe('WORK-020 invariants — /audit module boundaries', () => {
+  it('/audit does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'audit') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not import provider SDKs', () => {
+    const PROVIDER_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports provider SDK "${specifier}"`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} mutates wfos_workflow_executions — /workflows owns canonical state`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares competing infrastructure`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no other module imports /audit/internal', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const targetModule = moduleOf(file);
+      if (!targetModule || targetModule === 'audit') continue;
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const mod = moduleOf(resolved);
+        if (mod === 'audit' && isInsideInternal(resolved)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ${relative(BACKEND_ROOT, resolved)}`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit barrel exposes only audit-domain contracts', () => {
+    const aIndex = readFileSync(join(MODULES_DIR, 'audit', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'AuditEvent', 'WriteAuditEventInput', 'AuditEventWriter',
+      'AuditEventRepository', 'AuditEventQuery', 'AuditService',
+      'WorkflowAuditEmitter',
+      'auditModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of aIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of aIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/audit exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+
+  // --- REGRESSION (PR #19): 3 blocking fixes ---
+
+  it('REGRESSION (PR #19): app.ts wires DefaultAuditService + DefaultWorkflowEngine with audit emitter', () => {
+    // Issue 1: production workflow transitions must emit audit events.
+    // Verify app.ts imports + constructs both services.
+    const appFile = join(SRC_ROOT, 'app.ts');
+    const src = readFileSync(appFile, 'utf8');
+    expect(src).toMatch(/import.*DefaultAuditService.*from.*audit\/internal\/audit-service/);
+    expect(src).toMatch(/import.*DefaultWorkflowEngine.*from.*workflows\/internal\/workflow-engine/);
+    expect(src).toMatch(/new DefaultAuditService\s*\(/);
+    expect(src).toMatch(/new DefaultWorkflowEngine\s*\(/);
+    // The workflow engine must be constructed with the audit service as the emitter.
+    expect(src).toMatch(/auditService.*WorkflowAuditEmitter|auditService,\s*\/\/ WorkflowAuditEmitter/);
+  });
+
+  it('REGRESSION (PR #19): audit route resolves project BEFORE querying work-item audit', () => {
+    // Issue 2: the work-item audit endpoint must resolve the project from
+    // the work item chain and authorize BEFORE returning any results.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'audit.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The route must NOT return 200 [] without authorization.
+    expect(codeOnly).not.toMatch(/events\.length\s*===\s*0.*\n.*return reply\.code\(200\)\.send\(\[\]\)/s);
+    // The route MUST resolve the project from the work item chain.
+    expect(codeOnly).toMatch(/resolveProjectForWorkItem/);
+    expect(codeOnly).toMatch(/requireProjectAuthorization/);
+  });
+
+  it('REGRESSION (PR #19): audit integrity trigger checks all resource references', () => {
+    // Issue 3: the integrity trigger must check ALL persisted references,
+    // not just work_item_id.
+    const migrationFile = join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0015_audit.sql');
+    const src = readFileSync(migrationFile, 'utf8');
+    // Must check work_item_id (already existed).
+    expect(src).toMatch(/NEW\.work_item_id/);
+    // Must check work_order_id (new).
+    expect(src).toMatch(/NEW\.work_order_id/);
+    // Must check architecture_version_id (new).
+    expect(src).toMatch(/NEW\.architecture_version_id/);
+    // Must check review_id (new).
+    expect(src).toMatch(/NEW\.review_id/);
+    // Must check verification_run_id (new).
+    expect(src).toMatch(/NEW\.verification_run_id/);
+    // Must check agent_run_id (new).
+    expect(src).toMatch(/NEW\.agent_run_id/);
+    // Must check pull_request_association_id (new).
+    expect(src).toMatch(/NEW\.pull_request_association_id/);
+  });
+
+  it('REGRESSION (PR #19 issue 4): index.ts wires workflow + audit routes into production buildServer', () => {
+    // The production entry point (index.ts) must pass the audited
+    // workflowEngine + auditService into buildServer so production
+    // workflow transitions emit audit events and the audit API is served.
+    const indexFile = join(SRC_ROOT, 'index.ts');
+    const src = readFileSync(indexFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Must pass workflowEngine into the workflow route deps.
+    expect(codeOnly).toMatch(/workflowEngine:\s*app\.deps\.workflowEngine/);
+    // Must pass auditService into the audit route deps.
+    expect(codeOnly).toMatch(/auditQuery:\s*app\.deps\.auditService/);
+  });
+});

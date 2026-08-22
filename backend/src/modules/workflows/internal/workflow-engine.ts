@@ -1,5 +1,6 @@
 import type { DatabaseClient } from '@platform/index.js';
 import type { Logger } from '@platform/logger.js';
+import type { WorkflowAuditEmitter } from '@modules/audit/index.js';
 import type {
   WorkflowEngine,
   WorkflowExecution,
@@ -32,6 +33,7 @@ export class DefaultWorkflowEngine implements WorkflowEngine {
     private readonly db: DatabaseClient,
     private readonly logger: Logger,
     private readonly canBeginImplementation?: (workItemId: string) => Promise<boolean>,
+    private readonly auditEmitter?: WorkflowAuditEmitter,
   ) {
     this.execRepo = new PgWorkflowExecutionRepository(db);
     this.transRepo = new PgWorkflowTransitionRepository(db);
@@ -162,6 +164,26 @@ export class DefaultWorkflowEngine implements WorkflowEngine {
         version: updated.version,
         actor: request.actor,
       });
+
+      // WORK-020: emit audit event for the successful transition.
+      // WF-AUDIT-AC-01: Material transitions emit audit events.
+      // WF-AUDIT-AC-02: Replayed idempotent events do not create conflicting
+      // audit state — the idempotency check above returns early for duplicates,
+      // so this code only runs for NEW transitions.
+      if (this.auditEmitter) {
+        // Audit emission is best-effort: if it fails, the transition is still
+        // authoritative (audit is supplementary forensic history). The
+        // emitWorkflowTransition method catches errors internally.
+        await this.auditEmitter.emitWorkflowTransition({
+          workItemId: request.workItemId,
+          fromState,
+          toState: request.toState,
+          transitionType: request.transitionType ?? null,
+          actor: request.actor ?? null,
+          executionId: request.executionId ?? null,
+          metadata: request.metadata ?? {},
+        });
+      }
 
       return {
         success: true,
