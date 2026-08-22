@@ -168,15 +168,31 @@ export async function requirementsRoutes(
   app.post('/requirements/:requirementId/dependencies', async (req, reply) => {
     return runAuthed(req, async () => {
       const { requirementId } = req.params as { requirementId: string };
-      const projectId = await resolveProjectForRequirement(deps, requirementId);
-      if (!projectId) return reply.code(404).send({ error: 'not-found' });
+      const sourceProjectId = await resolveProjectForRequirement(deps, requirementId);
+      if (!sourceProjectId) return reply.code(404).send({ error: 'not-found' });
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write',
-        projectId,
+        projectId: sourceProjectId,
       });
       const body = req.body as { dependsOnId?: string };
       if (!body?.dependsOnId) {
         return reply.code(400).send({ error: 'dependsOnId required' });
+      }
+      // Cross-tenant guard (architect review PR #7): resolve the target
+      // requirement's project and verify it belongs to the SAME project as the
+      // source. A dependency from Tenant A's requirement to Tenant B's
+      // requirement is rejected — both at the API layer AND at the DB level
+      // (the dependency CHECK constraint enforces same architecture_version).
+      const targetProjectId = await resolveProjectForRequirement(deps, body.dependsOnId);
+      if (!targetProjectId) {
+        return reply.code(400).send({ error: 'invalid-dependency', message: 'target requirement not found' });
+      }
+      if (targetProjectId !== sourceProjectId) {
+        return reply.code(403).send({
+          error: 'forbidden',
+          reason: 'cross-tenant-dependency',
+          message: 'requirement dependencies must be within the same project/tenant',
+        });
       }
       try {
         const dep = await deps.requirementDependencyRepository.add(requirementId, body.dependsOnId);

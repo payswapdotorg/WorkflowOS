@@ -208,7 +208,70 @@ describe('REQ/AC — requirements and acceptance criteria', () => {
     });
     await expect(
       stack.requirementDependencyRepository.add(req.id, '00000000-0000-0000-0000-000000000000'),
-    ).rejects.toThrow(/foreign key/i);
+    ).rejects.toThrow(/foreign key|source or target requirement not found/i);
+  });
+
+  it('REQ-AC-03 (cross-tenant DB guard): a dependency across different architecture versions is rejected by PostgreSQL', async () => {
+    // Source requirement in versionA (Org A), target in versionB (Org B).
+    const reqA = await stack.requirementRepository.create({
+      architectureVersionId: versionA.id,
+      requirementId: 'CROSS-DB-SOURCE',
+      title: 'Cross-tenant source',
+    });
+    const reqB = await stack.requirementRepository.create({
+      architectureVersionId: versionB.id,
+      requirementId: 'CROSS-DB-TARGET',
+      title: 'Cross-tenant target',
+    });
+    // The DB trigger rejects this at the persistence level — even a direct
+    // repository call (bypassing the API) is rejected.
+    await expect(
+      stack.requirementDependencyRepository.add(reqA.id, reqB.id),
+    ).rejects.toThrow(/cross-tenant|different architecture versions/i);
+  });
+
+  it('REQ-AC-03 (cross-tenant API guard): User A cannot create a dependency from Org A requirement to Org B requirement', async () => {
+    // Source requirement in versionA (Org A), target in versionB (Org B).
+    const reqA = await stack.requirementRepository.create({
+      architectureVersionId: versionA.id,
+      requirementId: 'CROSS-API-SOURCE',
+      title: 'Cross-tenant API source',
+    });
+    const reqB = await stack.requirementRepository.create({
+      architectureVersionId: versionB.id,
+      requirementId: 'CROSS-API-TARGET',
+      title: 'Cross-tenant API target',
+    });
+    // User A attempts to create A → B dependency via the API.
+    const res = await server.inject({
+      method: 'POST',
+      url: `/requirements/${reqA.id}/dependencies`,
+      headers: { 'x-api-key': 'raw-key-req-a' },
+      payload: { dependsOnId: reqB.id },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json() as { error: string; reason: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.reason).toBe('cross-tenant-dependency');
+    // The dependency was NOT created.
+    const list = await stack.requirementDependencyRepository.listForRequirement(reqA.id);
+    expect(list.find((d) => d.dependsOnId === reqB.id)).toBeUndefined();
+  });
+
+  it('REQ-AC-03 (same-tenant): a dependency within the same architecture version succeeds', async () => {
+    const reqA = await stack.requirementRepository.create({
+      architectureVersionId: versionA.id,
+      requirementId: 'SAME-TENANT-SRC',
+      title: 'Same tenant source',
+    });
+    const reqB = await stack.requirementRepository.create({
+      architectureVersionId: versionA.id,
+      requirementId: 'SAME-TENANT-TGT',
+      title: 'Same tenant target',
+    });
+    const dep = await stack.requirementDependencyRepository.add(reqA.id, reqB.id);
+    expect(dep.requirementId).toBe(reqA.id);
+    expect(dep.dependsOnId).toBe(reqB.id);
   });
 
   // --- AC-AC-01/02/03: acceptance criteria ---

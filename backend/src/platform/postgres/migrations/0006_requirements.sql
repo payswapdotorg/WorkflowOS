@@ -63,6 +63,45 @@ CREATE INDEX wfos_requirement_deps_req_idx ON wfos_requirement_dependencies (req
 CREATE INDEX wfos_requirement_deps_dep_idx ON wfos_requirement_dependencies (depends_on_id);
 
 -- ---------------------------------------------------------------------------
+-- DB-level cross-tenant dependency guard (architect review PR #7).
+--
+-- A BEFORE INSERT/UPDATE trigger that verifies the source and target
+-- requirements belong to the SAME architecture_version. Since each
+-- architecture_version belongs to exactly one architecture → one project →
+-- one organization, same-version implies same-tenant. A cross-tenant
+-- dependency (Tenant A requirement → Tenant B requirement) is rejected by
+-- PostgreSQL at the persistence level — NOT just a service/API check.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION wfos_check_dependency_same_version()
+RETURNS TRIGGER AS $$
+DECLARE
+  source_version UUID;
+  target_version UUID;
+BEGIN
+  SELECT architecture_version_id INTO source_version
+    FROM wfos_requirements WHERE id = NEW.requirement_id;
+  SELECT architecture_version_id INTO target_version
+    FROM wfos_requirements WHERE id = NEW.depends_on_id;
+  IF source_version IS NULL OR target_version IS NULL THEN
+    RAISE EXCEPTION 'cannot create dependency: source or target requirement not found'
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  IF source_version <> target_version THEN
+    RAISE EXCEPTION 'cross-tenant dependency: requirement % and dependency % belong to different architecture versions',
+      NEW.requirement_id, NEW.depends_on_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS wfos_requirement_deps_same_version_check
+  ON wfos_requirement_dependencies;
+CREATE TRIGGER wfos_requirement_deps_same_version_check
+  BEFORE INSERT OR UPDATE ON wfos_requirement_dependencies
+  FOR EACH ROW EXECUTE FUNCTION wfos_check_dependency_same_version();
+
+-- ---------------------------------------------------------------------------
 -- Acceptance Criteria (REQ-002, AC-AC-01..04). Each belongs to exactly one
 -- Requirement. Status constrained to PENDING/PASS/FAIL/BLOCKED (AC-AC-03).
 -- Criterion IDs are unique per requirement (AC-AC-01).
