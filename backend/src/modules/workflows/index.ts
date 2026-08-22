@@ -2,26 +2,34 @@
  * workflows module — public interface.
  *
  * Canonical name: /workflows
- * Responsibility (spec/architecture.md): Workflow state machine, legal state transitions, orchestration.
+ * Responsibility (spec/architecture.md): workflow state machine, legal state
+ * transitions, orchestration.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-009: implements the canonical workflow state machine (WORKFLOW-001..005).
+ * /workflows is the EXCLUSIVE owner of canonical workflow state. No other
+ * module may mutate it or define a competing state enum.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  WorkflowState,
+  WorkflowExecution,
+  WorkflowTransition,
+  TransitionRequest,
+  TransitionResult,
+  WorkflowExecutionRepository,
+  WorkflowTransitionRepository,
+  WorkflowEngine,
+} from './internal/workflow.types.js';
 
 /**
  * Public capabilities exposed by the /workflows module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface WorkflowsModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional workflow-domain methods consumed by other modules
 }
 
 /**

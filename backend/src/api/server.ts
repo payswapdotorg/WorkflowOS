@@ -9,6 +9,7 @@ import { architectureRoutes, type ArchitectureRouteDeps } from './routes/archite
 import { requirementsRoutes, type RequirementsRouteDeps } from './routes/requirements.route.js';
 import { workItemsRoutes, type WorkItemsRouteDeps } from './routes/work-items.route.js';
 import { githubWebhookRoutes, type WebhookRouteDeps } from './routes/github-webhook.route.js';
+import { workflowRoutes, type WorkflowRouteDeps } from './routes/workflow.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -35,6 +36,8 @@ export interface ServerDeps extends JobsRouteDeps {
   workItems?: WorkItemsRouteDeps;
   /** GitHub webhook ingress (isolated from auth — uses signature validation). */
   githubWebhook?: WebhookRouteDeps;
+  /** Workflow state machine routes (backend-authorized). */
+  workflow?: WorkflowRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -65,6 +68,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.githubWebhook) {
     await githubWebhookRoutes(app, deps.githubWebhook);
+  }
+  if (deps.auth && deps.workflow) {
+    await workflowRoutes(app, deps.workflow);
   }
   return app;
 }
