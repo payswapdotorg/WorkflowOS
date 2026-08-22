@@ -2,26 +2,36 @@
  * github module — public interface.
  *
  * Canonical name: /github
- * Responsibility (spec/architecture.md): GitHub App, GitHub webhooks, Pull Requests, CI integration.
+ * Responsibility (spec/architecture.md): GitHub App, GitHub webhooks, Pull
+ * Requests, CI integration.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-008: implements GitHub integration boundary — webhook signature
+ * validation, durable event receipts (PostgreSQL), idempotent async
+ * processing (Redis worker), provider-independent repository/PR contracts.
+ * GitHub SDK/provider code stays inside internal/.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  WebhookEvent,
+  WebhookProcessingState,
+  WebhookEventRepository,
+  GitHubAdapter,
+  GitHubRepositoryInfo,
+  GitHubPullRequestInfo,
+  GitHubInstallation,
+  GitHubInstallationRepository,
+  WebhookProcessingService,
+} from './internal/github.types.js';
 
 /**
  * Public capabilities exposed by the /github module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface GithubModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional GitHub-domain methods consumed by other modules
 }
 
 /**

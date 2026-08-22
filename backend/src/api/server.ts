@@ -8,6 +8,7 @@ import { specificationsRoutes, type SpecificationsRouteDeps } from './routes/spe
 import { architectureRoutes, type ArchitectureRouteDeps } from './routes/architecture.route.js';
 import { requirementsRoutes, type RequirementsRouteDeps } from './routes/requirements.route.js';
 import { workItemsRoutes, type WorkItemsRouteDeps } from './routes/work-items.route.js';
+import { githubWebhookRoutes, type WebhookRouteDeps } from './routes/github-webhook.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -32,6 +33,8 @@ export interface ServerDeps extends JobsRouteDeps {
   requirements?: RequirementsRouteDeps;
   /** When auth is enabled, the protected /work-items route uses this. */
   workItems?: WorkItemsRouteDeps;
+  /** GitHub webhook ingress (isolated from auth — uses signature validation). */
+  githubWebhook?: WebhookRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -59,6 +62,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.requirements) {
     await requirementsRoutes(app, deps.requirements);
+  }
+  if (deps.githubWebhook) {
+    await githubWebhookRoutes(app, deps.githubWebhook);
   }
   return app;
 }
