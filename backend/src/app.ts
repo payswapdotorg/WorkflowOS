@@ -238,7 +238,13 @@ export async function buildApp(
   if (config.databaseUrl) {
     database = createDatabaseClient({ connectionString: config.databaseUrl });
     ownsDatabase = true;
-    await runMigrations(database, logger);
+    // WORK-023: only the API role runs migrations. When the API and worker
+    // start simultaneously (as in docker-compose), both would race to apply
+    // migrations and the loser crashes with a duplicate-key error. The
+    // worker trusts that the API has already applied the schema.
+    if (config.role !== 'worker') {
+      await runMigrations(database, logger);
+    }
   }
   let objectStore: ObjectStore;
   if (config.objectStorageDir) {
