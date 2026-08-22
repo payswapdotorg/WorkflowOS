@@ -354,6 +354,10 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         return this.handleVerificationCompleted(signal);
       case 'review_finalized':
         return this.handleReviewFinalized(signal);
+      case 'begin_verification':
+        return this.handleBeginVerification(signal);
+      case 'begin_architect_review':
+        return this.handleBeginArchitectReview(signal);
       default:
         throw new Error(`convergence: unknown signal type "${signal.signalType}"`);
     }
@@ -668,6 +672,402 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       idempotencyKey,
       metadata: { signalId: signal.id, signalType: signal.signalType },
     });
+  }
+
+  // --- WORK-018: Verification/Review orchestration ---
+
+  // begin_verification: PR_OPEN → VERIFYING + create VerificationRun
+  //
+  // The orchestrator transitions the work item to VERIFYING and creates a
+  // VerificationRun via the existing /verification contract. The orchestrator
+  // does NOT evaluate evidence — it only creates the run. The verification
+  // result comes later via submitVerificationCompleted (which loads the
+  // authoritative persisted result).
+  //
+  // WF-VER-AC-01: VERIFYING cannot advance before required verification completes.
+  // This handler creates the verification run but does NOT advance past VERIFYING
+  // until verification_completed is submitted with the authoritative result.
+
+  async beginVerification(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{ signal: ConvergenceSignal; verificationRunId: string }> {
+    // Resolve the project from the work item.
+    const wi = await this.workItemRepository.findById(input.workItemId);
+    if (!wi) {
+      throw new Error(`convergence: work item ${input.workItemId} not found`);
+    }
+    const version = await this.architectureVersionRepository.findById(wi.architectureVersionId);
+    if (!version) {
+      throw new Error(`convergence: architecture version ${wi.architectureVersionId} not found`);
+    }
+    const arch = await this.architectureRepository.findById(version.architectureId);
+    if (!arch) {
+      throw new Error(`convergence: architecture ${version.architectureId} not found`);
+    }
+    const projectId = arch.projectId;
+
+    // Transition PR_OPEN → VERIFYING synchronously (the caller needs the result).
+    const exec = await this.workflowEngine.getOrCreate(input.workItemId);
+    if (exec.currentState === 'pr_open') {
+      await this.workflowEngine.transition({
+        workItemId: input.workItemId,
+        toState: 'verifying',
+        transitionType: 'convergence:begin_verification',
+        actor: 'workflow-orchestrator',
+        executionId: input.executionId,
+        idempotencyKey: `${input.workItemId}:begin_verification:${input.sourceEventId}:verifying`,
+        metadata: { sourceEventId: input.sourceEventId },
+      });
+    }
+
+    // Create a VerificationRun via the existing /verification contract.
+    const verificationRun = await this.verificationService.createRun({
+      projectId,
+      workItemId: input.workItemId,
+      architectureVersionId: wi.architectureVersionId,
+      source: 'orchestrator',
+      sourceRef: input.executionId,
+      executionId: this.genExecutionId(),
+    });
+
+    // Submit the signal as a record (idempotent — no async processing needed
+    // since the transition + run creation already happened above).
+    const signal = await this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'begin_verification',
+      sourceEventId: input.sourceEventId,
+      executionId: input.executionId,
+      payload: { verificationRunId: verificationRun.id },
+    });
+
+    // Mark it as already processed (the work was done synchronously above).
+    await this.signalRepo.markProcessed(signal.id, 'verifying', null);
+
+    this.logger.info('convergence.begin_verification.created', {
+      workItemId: input.workItemId,
+      verificationRunId: verificationRun.id,
+    });
+
+    return { signal, verificationRunId: verificationRun.id };
+  }
+
+  private async handleBeginVerification(signal: ConvergenceSignal): Promise<WorkflowState | null> {
+    const exec = await this.workflowEngine.getState(signal.workItemId);
+    if (!exec) return null;
+
+    // Only transition if currently PR_OPEN.
+    if (exec.currentState !== 'pr_open') {
+      this.logger.info('convergence.begin_verification.skipped', {
+        workItemId: signal.workItemId,
+        currentState: exec.currentState,
+      });
+      return exec.currentState;
+    }
+
+    // PR_OPEN → VERIFYING
+    const verifyResult = await this.transition(signal, 'verifying');
+    if (!verifyResult.success) return exec.currentState;
+
+    // Create a VerificationRun via the existing /verification contract.
+    const wi = await this.workItemRepository.findById(signal.workItemId);
+    if (!wi) throw new Error(`convergence: work item ${signal.workItemId} not found`);
+
+    const verificationRun = await this.verificationService.createRun({
+      projectId: signal.projectId,
+      workItemId: signal.workItemId,
+      architectureVersionId: wi.architectureVersionId,
+      source: 'orchestrator',
+      sourceRef: signal.executionId,
+      executionId: this.genExecutionId(),
+    });
+
+    // Store the verification run ID in the signal payload (for the caller).
+    await this.signalRepo.markProcessed(
+      signal.id,
+      'verifying',
+      null,
+    );
+    // Update the signal payload with the verification run ID.
+    signal.payload.verificationRunId = verificationRun.id;
+
+    this.logger.info('convergence.begin_verification.created', {
+      workItemId: signal.workItemId,
+      verificationRunId: verificationRun.id,
+    });
+
+    return 'verifying';
+  }
+
+  // begin_architect_review: ARCHITECT_REVIEW → invoke ArchitectService + create + finalize Review
+  //
+  // The orchestrator invokes the existing ArchitectService (via /llm) to
+  // produce the architect verdict, creates a Review (via /reviews), finalizes
+  // it with the verdict, and then submits a review_finalized signal that drives
+  // the correct canonical workflow transition.
+  //
+  // WF-VER-AC-02: Architect review receives persisted verification state/evidence
+  // context. The ArchitectService assembles context from persistent project state.
+  //
+  // The verdict is loaded from the AUTHORITATIVE ArchitectExecutionResult — NOT
+  // from client input. A client cannot forge the outcome.
+
+  async beginArchitectReview(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+    provider?: string;
+    model?: string;
+    task?: string;
+  }): Promise<{ signal: ConvergenceSignal; reviewId: string }> {
+    // Resolve the project from the work item.
+    const wi = await this.workItemRepository.findById(input.workItemId);
+    if (!wi) {
+      throw new Error(`convergence: work item ${input.workItemId} not found`);
+    }
+    const version = await this.architectureVersionRepository.findById(wi.architectureVersionId);
+    if (!version) {
+      throw new Error(`convergence: architecture version ${wi.architectureVersionId} not found`);
+    }
+    const arch = await this.architectureRepository.findById(version.architectureId);
+    if (!arch) {
+      throw new Error(`convergence: architecture ${version.architectureId} not found`);
+    }
+    const projectId = arch.projectId;
+
+    // Only proceed if currently ARCHITECT_REVIEW.
+    const exec = await this.workflowEngine.getState(input.workItemId);
+    if (!exec || exec.currentState !== 'architect_review') {
+      // Submit as a no-op signal.
+      const noopSignal = await this.submitSignalInternal({
+        workItemId: input.workItemId,
+        signalType: 'begin_architect_review',
+        sourceEventId: input.sourceEventId,
+        executionId: input.executionId,
+        payload: { provider: input.provider, model: input.model, task: input.task },
+      });
+      await this.signalRepo.markProcessed(noopSignal.id, exec?.currentState ?? null, null);
+      return { signal: noopSignal, reviewId: '' };
+    }
+
+    // Find the Work Order for this work item.
+    const workOrders = await this.workOrderRepository.listForWorkItem(input.workItemId);
+    const workOrder = workOrders.find((wo) => wo.state === 'generated' || wo.state === 'draft') ?? workOrders[0] ?? null;
+
+    // Invoke the ArchitectService via /llm.
+    const provider = input.provider ?? 'fake';
+    const model = input.model ?? 'test-model';
+    const task = input.task ?? 'Review the implementation against the architecture and requirements';
+    const archExecutionId = this.genExecutionId();
+
+    const archResult = await this.architectService.execute({
+      projectId,
+      architectureVersionId: wi.architectureVersionId,
+      workItemId: wi.id,
+      task,
+      executionId: archExecutionId,
+      provider,
+      model,
+    });
+
+    // Map the architect verdict (lowercase) to ReviewVerdict (uppercase).
+    const verdict = mapArchitectVerdictToReviewVerdict(archResult.verdict);
+
+    // Create a Review via /reviews.
+    const review = await this.reviewService.createReview({
+      projectId,
+      workItemId: wi.id,
+      workOrderId: workOrder?.id ?? null,
+      architectureVersionId: wi.architectureVersionId,
+      architectExecutionId: archExecutionId,
+      source: 'architect-llm',
+      reviewer: `${provider}/${model}`,
+      executionId: archExecutionId,
+      summary: archResult.summary,
+      reviewInput: {
+        architectExecutionId: archExecutionId,
+        verdict: archResult.verdict,
+        reasoning: archResult.reasoning,
+        identifiedRisks: archResult.identifiedRisks,
+        identifiedConstraints: archResult.identifiedConstraints,
+        requiredCorrections: archResult.requiredCorrections,
+      },
+    });
+
+    // Add findings from the architect result (if any corrections were identified).
+    for (const correction of archResult.requiredCorrections) {
+      await this.reviewService.addFinding({
+        projectId,
+        reviewId: review.id,
+        severity: 'major',
+        title: correction,
+        description: archResult.reasoning || 'Required correction identified by architect',
+        requiredCorrection: correction,
+      });
+    }
+
+    // Finalize the review with the verdict.
+    await this.reviewService.finalizeReview(review.id, { outcome: verdict });
+
+    // Submit a review_finalized signal that drives the workflow transition.
+    // This uses the trusted submitReviewFinalized path — it validates the
+    // persisted Review and loads the outcome from the authoritative record.
+    const reviewSignal = await this.submitReviewFinalized({
+      workItemId: input.workItemId,
+      reviewId: review.id,
+      executionId: this.genExecutionId(),
+    });
+    // Process the review_finalized signal synchronously so the workflow
+    // transition happens before this method returns.
+    await this.processSignal(reviewSignal.id);
+
+    // Submit the begin_architect_review signal as a record (already processed).
+    const signal = await this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'begin_architect_review',
+      sourceEventId: input.sourceEventId,
+      executionId: input.executionId,
+      payload: { provider, model, task, reviewId: review.id, verdict },
+    });
+    await this.signalRepo.markProcessed(signal.id, null, null);
+
+    this.logger.info('convergence.begin_architect_review.completed', {
+      workItemId: input.workItemId,
+      reviewId: review.id,
+      verdict,
+    });
+
+    return { signal, reviewId: review.id };
+  }
+
+  private async handleBeginArchitectReview(signal: ConvergenceSignal): Promise<WorkflowState | null> {
+    const exec = await this.workflowEngine.getState(signal.workItemId);
+    if (!exec) return null;
+
+    // Only proceed if currently ARCHITECT_REVIEW.
+    if (exec.currentState !== 'architect_review') {
+      this.logger.info('convergence.begin_architect_review.skipped', {
+        workItemId: signal.workItemId,
+        currentState: exec.currentState,
+      });
+      return exec.currentState;
+    }
+
+    // Load the Work Item + Work Order for architect execution context.
+    const wi = await this.workItemRepository.findById(signal.workItemId);
+    if (!wi) throw new Error(`convergence: work item ${signal.workItemId} not found`);
+
+    // Find the Work Order for this work item (the latest generated/draft one).
+    const workOrders = await this.workOrderRepository.listForWorkItem(signal.workItemId);
+    const workOrder = workOrders.find((wo) => wo.state === 'generated' || wo.state === 'draft') ?? workOrders[0] ?? null;
+
+    // Invoke the ArchitectService via /llm.
+    const provider = (signal.payload.provider as string) ?? 'fake';
+    const model = (signal.payload.model as string) ?? 'test-model';
+    const task = (signal.payload.task as string) ?? 'Review the implementation against the architecture and requirements';
+    const archExecutionId = this.genExecutionId();
+
+    const archResult = await this.architectService.execute({
+      projectId: signal.projectId,
+      architectureVersionId: wi.architectureVersionId,
+      workItemId: wi.id,
+      task,
+      executionId: archExecutionId,
+      provider,
+      model,
+    });
+
+    // Map the architect verdict (lowercase) to ReviewVerdict (uppercase).
+    const verdict = mapArchitectVerdictToReviewVerdict(archResult.verdict);
+
+    // Create a Review via /reviews.
+    const review = await this.reviewService.createReview({
+      projectId: signal.projectId,
+      workItemId: wi.id,
+      workOrderId: workOrder?.id ?? null,
+      architectureVersionId: wi.architectureVersionId,
+      architectExecutionId: archExecutionId,
+      source: 'architect-llm',
+      reviewer: `${provider}/${model}`,
+      executionId: archExecutionId,
+      summary: archResult.summary,
+      reviewInput: {
+        architectExecutionId: archExecutionId,
+        verdict: archResult.verdict,
+        reasoning: archResult.reasoning,
+        identifiedRisks: archResult.identifiedRisks,
+        identifiedConstraints: archResult.identifiedConstraints,
+        requiredCorrections: archResult.requiredCorrections,
+      },
+    });
+
+    // Add findings from the architect result (if any corrections were identified).
+    for (const correction of archResult.requiredCorrections) {
+      await this.reviewService.addFinding({
+        projectId: signal.projectId,
+        reviewId: review.id,
+        severity: 'major',
+        title: correction,
+        description: archResult.reasoning || 'Required correction identified by architect',
+        requiredCorrection: correction,
+      });
+    }
+
+    // Finalize the review with the verdict.
+    await this.reviewService.finalizeReview(review.id, { outcome: verdict });
+
+    // Store the review ID in the signal payload (for the caller).
+    signal.payload.reviewId = review.id;
+
+    // Now submit a review_finalized signal that drives the workflow transition.
+    // This uses the trusted submitReviewFinalized path — it validates the
+    // persisted Review and loads the outcome from the authoritative record.
+    await this.submitReviewFinalized({
+      workItemId: signal.workItemId,
+      reviewId: review.id,
+      executionId: this.genExecutionId(),
+    });
+
+    // Mark the begin_architect_review signal as processed.
+    await this.signalRepo.markProcessed(signal.id, null, null);
+
+    this.logger.info('convergence.begin_architect_review.completed', {
+      workItemId: signal.workItemId,
+      reviewId: review.id,
+      verdict,
+    });
+
+    // The review_finalized signal will have driven the transition.
+    // Return the current state after processing.
+    const updatedExec = await this.workflowEngine.getState(signal.workItemId);
+    return updatedExec?.currentState ?? null;
+  }
+}
+
+// --- Helper: map architect verdict to ReviewVerdict ---
+
+/**
+ * Maps the architect execution verdict (lowercase, e.g. 'approve') to the
+ * canonical ReviewVerdict (uppercase, e.g. 'APPROVE').
+ *
+ * The architect verdict comes from the /llm ArchitectExecutionResult.
+ * The ReviewVerdict is owned by /reviews. This mapping is owned by the
+ * orchestrator (it's the convergence boundary between /llm and /reviews).
+ */
+function mapArchitectVerdictToReviewVerdict(verdict: string): import('@modules/reviews/index.js').ReviewVerdict {
+  switch (verdict.toLowerCase()) {
+    case 'approve':
+      return 'APPROVE';
+    case 'request_changes':
+      return 'REQUEST_CHANGES';
+    case 'architecture_change_required':
+      return 'ARCHITECTURE_CHANGE_REQUIRED';
+    case 'implementation_blocked':
+      return 'IMPLEMENTATION_BLOCKED';
+    default:
+      // Unknown verdict → default to REQUEST_CHANGES (safe — requires human review).
+      return 'REQUEST_CHANGES';
   }
 }
 

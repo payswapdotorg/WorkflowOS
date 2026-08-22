@@ -167,6 +167,62 @@ export async function workflowRoutes(
     });
   });
 
+  // POST /work-items/:workItemId/workflow/begin-verification — begin verification (WORK-018).
+  // Transitions PR_OPEN → VERIFYING + creates a VerificationRun. Does NOT accept
+  // verification outcomes — the result comes from the persisted VerificationRun.
+  app.post('/work-items/:workItemId/workflow/begin-verification', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const executionId = generateExecutionId();
+      const result = await deps.orchestrator.beginVerification({
+        workItemId, executionId, sourceEventId: executionId,
+      });
+      return reply.code(202).send({
+        signalId: result.signal.id, accepted: true,
+        verificationRunId: result.verificationRunId,
+      });
+    });
+  });
+
+  // POST /work-items/:workItemId/workflow/begin-architect-review — begin architect review (WORK-018).
+  // Invokes ArchitectService + creates + finalizes Review + drives workflow transition.
+  // Does NOT accept review outcomes — the verdict comes from the authoritative ArchitectExecutionResult.
+  app.post('/work-items/:workItemId/workflow/begin-architect-review', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const body = (req.body ?? {}) as { provider?: string; model?: string; task?: string };
+      const executionId = generateExecutionId();
+      const result = await deps.orchestrator.beginArchitectReview({
+        workItemId, executionId, sourceEventId: executionId,
+        provider: body.provider, model: body.model, task: body.task,
+      });
+      return reply.code(202).send({
+        signalId: result.signal.id, accepted: true,
+        reviewId: result.reviewId,
+      });
+    });
+  });
+
   // GET /work-items/:workItemId/workflow/convergence — inspect convergence status.
   app.get('/work-items/:workItemId/workflow/convergence', async (req, reply) => {
     return runAuthed(req, async () => {
