@@ -46,6 +46,10 @@ export type {
 export { InMemoryQueue } from './queue/in-memory-queue.js';
 export { RedisQueue } from './redis/redis-queue.js';
 export { createRedisClient } from './redis/redis-client.js';
+// Re-export the Redis type so other layers (health route, etc.) can type
+// Redis clients without importing ioredis directly (WORK-023: provider-package
+// boundary).
+export type { Redis } from './redis/redis-client.js';
 
 export type {
   JobHandler,

@@ -2754,3 +2754,240 @@ describe('WORK-022 invariants -- Frontend web application boundaries', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 });
+
+// ===========================================================================
+// WORK-023 — Deployable runtime invariants.
+//
+// Static checks that verify the frozen deployment topology is not violated:
+//   - no Kubernetes manifests are introduced (DEPLOY-AC-03);
+//   - no separate backend microservices are introduced (DEPLOY-AC-03);
+//   - no deployment file hard-codes secrets (SEC-001);
+//   - the backend remains one modular-monolith codebase;
+//   - the worker uses the existing WorkerHost/queue (not a new framework);
+//   - PostgreSQL remains authoritative (no SQLite/file-based authority);
+//   - Redis remains non-authoritative (no Redis-as-database writes);
+//   - ObjectStore remains behind its abstraction (no direct fs writes in
+//     domain code);
+//   - existing WORK-001 through WORK-022 checks remain intact.
+// ===========================================================================
+
+describe('WORK-023 invariants -- Deployable runtime', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const FE_DIR = join(REPO_ROOT, 'frontend');
+  const DEPLOY_FILES = [
+    join(REPO_ROOT, 'docker-compose.yml'),
+    join(BACKEND_ROOT, 'Dockerfile'),
+    join(FE_DIR, 'Dockerfile'),
+    join(FE_DIR, 'nginx.conf'),
+  ];
+
+  // --- DEPLOY-AC-03: no Kubernetes ---
+
+  it('no Kubernetes manifests are introduced', () => {
+    const violations: string[] = [];
+    // Check for k8s manifest files anywhere in the repo (excluding node_modules).
+    function* walkDir(dir: string): Generator<string> {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === '.git' || entry === 'dist') continue;
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          yield* walkDir(full);
+        } else if (st.isFile() && (entry.endsWith('.yaml') || entry.endsWith('.yml'))) {
+          yield full;
+        }
+      }
+    }
+    const K8S_KINDS = /\bkind:\s*(Pod|Deployment|Service|ConfigMap|Secret|Ingress|StatefulSet|DaemonSet|Job|CronJob|Namespace|ClusterRole|ClusterRoleBinding|Role|RoleBinding|ServiceAccount)\b/;
+    for (const file of walkDir(REPO_ROOT)) {
+      const src = readFileSync(file, 'utf8');
+      if (K8S_KINDS.test(src)) {
+        violations.push(`${relative(REPO_ROOT, file)} contains a Kubernetes manifest`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- DEPLOY-AC-03: no separate backend microservices ---
+
+  it('backend remains one modular-monolith codebase (no separate service dirs)', () => {
+    // The backend has one src/ directory with one entrypoint. There should
+    // be no additional backend service directories (e.g. services/auth/,
+    // services/workflow/) that would indicate microservice extraction.
+    const srcDir = join(BACKEND_ROOT, 'src');
+    const forbiddenDirs = ['services', 'microservices'];
+    const violations: string[] = [];
+    for (const dir of forbiddenDirs) {
+      if (existsSync(join(srcDir, dir))) {
+        violations.push(`${srcDir}/${dir} exists — microservice extraction detected`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('api and worker share the same Dockerfile (no separate images)', () => {
+    // The backend Dockerfile is the single image for both api and worker.
+    // There should not be separate Dockerfiles per role.
+    const dockerfiles = readdirSync(BACKEND_ROOT).filter((f) => f.startsWith('Dockerfile'));
+    // Exactly one Dockerfile in the backend dir.
+    expect(dockerfiles.filter((f) => f === 'Dockerfile')).toHaveLength(1);
+    // No role-specific Dockerfiles.
+    const roleSpecific = dockerfiles.filter((f) => f !== 'Dockerfile');
+    expect(roleSpecific, `found role-specific Dockerfiles: ${roleSpecific.join(', ')}`).toEqual([]);
+  });
+
+  // --- SEC-001: no secrets in deployment files ---
+  //
+  // PR #22 review found that docker-compose.yml hard-coded the PostgreSQL
+  // credential (`POSTGRES_PASSWORD: wfos`) and embedded it in DATABASE_URL
+  // (`postgres://wfos:wfos@...`). The previous version of this check did NOT
+  // catch it because (a) the YAML values were unquoted (the regex required
+  // quotes), and (b) there was an explicit carve-out that allowed the
+  // DATABASE_URL password to match POSTGRES_PASSWORD. Both gaps are now
+  // closed: the check forbids ANY literal credential in a deployment file
+  // and requires `${VAR}` substitution instead.
+
+  it('no deployment file hard-codes secrets (literal passwords / DATABASE_URL with embedded credential)', () => {
+    const violations: string[] = [];
+    for (const file of DEPLOY_FILES) {
+      if (!existsSync(file)) continue;
+      const src = readFileSync(file, 'utf8');
+      // Strip comments (YAML #, Dockerfile #, nginx #, HTML <!-- -->).
+      const codeOnly = src.replace(/^\s*#.*/gm, '').replace(/<!--[\s\S]*?-->/g, '');
+
+      // 1. No literal POSTGRES_PASSWORD value. The value MUST be ${VAR}.
+      //    Matches `POSTGRES_PASSWORD: <value>` or `POSTGRES_PASSWORD=<value>`
+      //    where <value> is NOT a ${...} substitution.
+      const pgPassMatches = codeOnly.matchAll(/POSTGRES_PASSWORD\s*[:=]\s*(\S+)/gi);
+      for (const m of pgPassMatches) {
+        const val = m[1]!.replace(/^['"]|['"]$/g, '');
+        if (!val.startsWith('${')) {
+          violations.push(`${relative(REPO_ROOT, file)} hard-codes POSTGRES_PASSWORD="${val}" — use \${VAR} substitution`);
+        }
+      }
+
+      // 2. No literal DATABASE_URL with an embedded credential. The URL
+      //    password MUST be ${VAR}, not a literal string.
+      const dbUrlMatches = codeOnly.matchAll(/DATABASE_URL\s*[:=]\s*postgres:\/\/[^:]+:([^@]+)@/gi);
+      for (const m of dbUrlMatches) {
+        const pass = m[1]!.replace(/^['"]|['"]$/g, '');
+        if (!pass.startsWith('${')) {
+          violations.push(`${relative(REPO_ROOT, file)} embeds a literal password in DATABASE_URL — use \${VAR} substitution`);
+        }
+      }
+
+      // 3. No other literal secret-like assignments (password, token,
+      //    api_key, secret) with a non-${VAR} value.
+      const SECRET_KEYS = /\b(password|token|api_key|secret_key|private_key)\s*[:=]\s*(\S+)/gi;
+      const secretMatches = codeOnly.matchAll(SECRET_KEYS);
+      for (const m of secretMatches) {
+        const val = m[2]!.replace(/^['"]|['"]$/g, '');
+        if (!val.startsWith('${') && val.length > 0) {
+          violations.push(`${relative(REPO_ROOT, file)} hard-codes ${m[1]}="${val}" — use \${VAR} substitution`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- Worker uses existing WorkerHost/queue ---
+
+  it('worker uses the existing WorkerHost (not a new framework)', () => {
+    // The index.ts entrypoint uses WorkerHost from @platform/index.js.
+    // Verify no competing worker framework is imported.
+    const src = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(src).toMatch(/WorkerHost/);
+    expect(src).not.toMatch(/\bbull\b|\bbullmq\b|\bcelery\b|\bsidekiq\b/i);
+  });
+
+  // --- PostgreSQL remains authoritative ---
+
+  it('PostgreSQL remains authoritative (no SQLite/file-based authority)', () => {
+    // The database factory creates pg.Pool (PostgreSQL) — no SQLite.
+    const factorySrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'database-factory.ts'),
+      'utf8',
+    );
+    expect(factorySrc).toMatch(/pg.*Pool/);
+    // pglite is allowed for tests only (it IS real PostgreSQL compiled to WASM).
+    expect(factorySrc).not.toMatch(/\bsqlite3\b|\bbetter-sqlite3\b/);
+  });
+
+  // --- Redis remains non-authoritative ---
+
+  it('Redis remains non-authoritative (no Redis-as-database writes)', () => {
+    // Redis is used for queue, locks, and cache — NOT for authoritative state.
+    // Verify no Redis SET is used to persist domain state (only queue/lock/cache).
+    const redisDir = join(BACKEND_ROOT, 'src', 'platform', 'redis');
+    const violations: string[] = [];
+    for (const file of walkTs(redisDir)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // Redis SET/HSET/LPUSH/RPUSH are allowed for queue/lock/cache — but
+      // the files should be clearly queue/lock/cache (not domain persistence).
+      // This is a light heuristic: we check that no file creates a Redis
+      // "repository" pattern (e.g. `class *RedisRepository` that SETs domain
+      // records). The existing RedisQueue, TransientLock, TransientCache are
+      // the only allowed Redis consumers.
+      if (/\bclass\s+\w*Repository\w*\b/.test(codeOnly) && /\.set\s*\(/.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} defines a Redis-backed repository (Redis is non-authoritative)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- ObjectStore remains behind its abstraction ---
+
+  it('domain modules do not import fs/promises directly (ObjectStore boundary)', () => {
+    // Domain modules (src/modules/**) must not write to the filesystem
+    // directly — they use the ObjectStore abstraction.
+    const violations: string[] = [];
+    const MODULES = join(BACKEND_ROOT, 'src', 'modules');
+    for (const file of walkTs(MODULES)) {
+      for (const specifier of extractSpecifiers(file)) {
+        if (specifier === 'node:fs/promises' || specifier === 'fs/promises' || specifier === 'fs') {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports fs directly — use ObjectStore instead`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- Health/readiness endpoint exists ---
+
+  it('API exposes /health and /health/ready endpoints', () => {
+    const healthSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'health.route.ts'),
+      'utf8',
+    );
+    expect(healthSrc).toMatch(/app\.get\('\/health'/);
+    expect(healthSrc).toMatch(/app\.get\('\/health\/ready'/);
+  });
+
+  // --- docker-compose.yml has the frozen topology ---
+
+  it('docker-compose.yml defines the frozen six-component topology', () => {
+    const composeFile = join(REPO_ROOT, 'docker-compose.yml');
+    if (!existsSync(composeFile)) {
+      throw new Error('docker-compose.yml not found');
+    }
+    const src = readFileSync(composeFile, 'utf8');
+    // The five services + object storage volume = six topology components.
+    const REQUIRED_SERVICES = ['postgres', 'redis', 'api', 'worker', 'web'];
+    for (const svc of REQUIRED_SERVICES) {
+      expect(src, `docker-compose.yml missing service: ${svc}`).toMatch(new RegExp(`^\\s+${svc}:`, 'm'));
+    }
+    // Object storage is a shared volume.
+    expect(src).toMatch(/objectdata:/);
+  });
+
+  // --- CI deployment validation exists ---
+
+  it('CI workflow for deployment validation exists', () => {
+    const deployYml = join(REPO_ROOT, '.github', 'workflows', 'deploy.yml');
+    expect(existsSync(deployYml), 'deploy.yml workflow not found').toBe(true);
+    const src = readFileSync(deployYml, 'utf8');
+    expect(src).toMatch(/docker compose/);
+    expect(src).toMatch(/validate-deployment/);
+  });
+});

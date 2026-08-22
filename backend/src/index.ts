@@ -27,6 +27,17 @@ async function main(): Promise<void> {
     server = await buildServer({
       queue: app.deps.queue,
       logger: app.deps.logger,
+      // WORK-023: wire health/readiness deps (PostgreSQL, Redis, ObjectStore)
+      // so /health/ready can verify connectivity to authoritative dependencies.
+      ...(app.deps.infrastructure
+        ? {
+            health: {
+              database: app.deps.infrastructure.database,
+              redis: app.deps.infrastructure.redis,
+              objectStore: app.deps.infrastructure.objectStore,
+            },
+          }
+        : {}),
       ...(app.deps.authProvider && app.deps.userRepository
         ? { auth: { authProvider: app.deps.authProvider, userRepository: app.deps.userRepository } }
         : {}),
