@@ -27,6 +27,18 @@ export type {
   LlmExecutionStatus,
   LlmExecutionRecordRepository,
 } from './internal/llm.types.js';
+// WORK-014: Architect Service types.
+export type {
+  ArchitectContext,
+  ArchitectRequirementSummary,
+  ArchitectCriterionSummary,
+  ArchitectRepositoryEvidence,
+  ArchitectVerificationEvidence,
+  ArchitectExecutionRequest,
+  ArchitectExecutionResult,
+  WorkOrderCandidate,
+  ArchitectService,
+} from './internal/architect.types.js';
 
 /**
  * Public capabilities exposed by the /llm module to other modules.
