@@ -1,0 +1,61 @@
+# E2E lifecycle CI for WorkflowOS (WORK-024).
+#
+# Runs the complete end-to-end lifecycle test suite that proves the frozen
+# WorkflowOS architecture composes correctly from project creation through
+# VERIFIED. The test drives the full lifecycle through HTTP API calls against
+# a real Fastify server with real PostgreSQL (pglite), real WorkerHost, and
+# deterministic fake LLM/Agent adapters.
+#
+# This is the final lifecycle proof — it does NOT use mocks to bypass
+# boundaries. It uses real domain services, real workflow engine, real
+# verification engine, and real audit trail.
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: end-to-end lifecycle
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install backend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install frontend dependencies (for backend typecheck of rendered-UI tests)
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Run E2E lifecycle test suite
+        # The E2E test drives the complete frozen lifecycle:
+        #   project creation → GitHub connection → architecture freeze →
+        #   requirements/criteria → work item/work order → workflow convergence →
+        #   agent execution → PR association → CI ingestion → verification →
+        #   architect review (REQUEST_CHANGES) → correction cycle →
+        #   review (APPROVE) → merge gating → GitHub merged → MERGED → VERIFIED →
+        #   next-work selection → audit trace.
+        # Plus authority, tenant-isolation, async/recovery, and persistence proofs.
+        run: bun run vitest run tests/integration/e2e/lifecycle.integration.test.ts
+
+      - name: Run static architecture checks (includes WORK-024 invariants)
+        run: bun run vitest run tests/architecture/static-architecture.test.ts -t "WORK-024"

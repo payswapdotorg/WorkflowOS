@@ -241,6 +241,33 @@ export async function workItemsRoutes(
     });
   });
 
+  // POST /work-items/:workItemId/pr-associations/:prId/merge — mark a PR as
+  // merged (WORK-024 additive API seam).
+  //
+  // In production, this status transition is driven by the authoritative
+  // GitHub webhook (`pull_request` event with `merged: true`). This route
+  // exposes the repository-level mutation through the API so the E2E
+  // lifecycle can drive the merge → MERGED → VERIFIED flow without direct SQL.
+  // It does NOT change any authority — the PR status is still owned by the
+  // backend repository, and the workflow transition is still owned by the
+  // orchestrator/engine.
+  app.post('/work-items/:workItemId/pr-associations/:prId/merge', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId, prId } = req.params as { workItemId: string; prId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) return reply.code(404).send({ error: 'not-found' });
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write',
+        projectId,
+      });
+      const updated = await deps.pullRequestAssociationRepository.markMerged(prId);
+      if (!updated) {
+        return reply.code(409).send({ error: 'pr-not-active-or-not-found' });
+      }
+      return reply.code(200).send(updated);
+    });
+  });
+
   // --- Work Orders ---
 
   app.post('/work-items/:workItemId/work-orders', async (req, reply) => {

@@ -390,6 +390,58 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     const exec = await this.workflowEngine.getOrCreate(signal.workItemId);
     let currentState = exec.currentState;
 
+    // WORK-024: correction cycle — CHANGES_REQUESTED → IMPLEMENTING → PR_OPEN.
+    // When a review produced REQUEST_CHANGES, the work item is in
+    // 'changes_requested'. Re-initiating convergence drives it back to
+    // 'implementing', launches a new agent run (corrected implementation),
+    // and transitions to PR_OPEN so a new verification + review cycle can occur.
+    // This is the same convergence path — the orchestrator still uses the
+    // WorkflowEngine.transition() method, not direct state mutation.
+    if (currentState === 'changes_requested') {
+      const implResult = await this.transition(signal, 'implementing');
+      if (!implResult.success) return currentState;
+      currentState = 'implementing';
+
+      // Launch a new agent run for the corrected implementation.
+      const wi = await this.workItemRepository.findById(signal.workItemId);
+      if (!wi) throw new Error(`convergence: work item ${signal.workItemId} not found`);
+      const workOrders = await this.workOrderRepository.listForWorkItem(signal.workItemId);
+      const workOrder = workOrders.find((wo) => wo.state === 'generated' || wo.state === 'draft') ?? workOrders[0] ?? null;
+      if (workOrder) {
+        const agentExecutionId = this.genExecutionId();
+        const provider = (signal.payload.agentProvider as string) ?? 'fake';
+        try {
+          const agentResult = await this.agentGateway.execute({
+            provider,
+            configuration: (signal.payload.agentConfiguration as Record<string, unknown>) ?? {},
+            workItemId: signal.workItemId,
+            workOrderId: workOrder.id,
+            architectureVersionId: wi.architectureVersionId,
+            executionId: agentExecutionId,
+            input: (signal.payload.agentInput as string) ?? 'Implement the corrected work order',
+          });
+          if (agentResult.status === 'success' && (agentResult.commitRef || agentResult.pullRequestRef)) {
+            if (agentResult.pullRequestRef) {
+              const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
+              const alreadyHasPr = existingPrs.some((p) => p.externalPrId === agentResult.pullRequestRef);
+              if (!alreadyHasPr) {
+                await this.pullRequestAssociationRepository.create({
+                  workItemId: signal.workItemId,
+                  externalPrId: agentResult.pullRequestRef,
+                  headCommit: agentResult.commitRef ?? undefined,
+                });
+              }
+            }
+            const prResult = await this.transition(signal, 'pr_open');
+            if (prResult.success) currentState = 'pr_open';
+          }
+        } catch {
+          // Agent failed → stay in IMPLEMENTING (or transition to IMPLEMENTATION_BLOCKED).
+          this.logger.warn('convergence.correction.agent_failed', { workItemId: signal.workItemId });
+        }
+      }
+    }
+
     // DRAFT → READY
     if (currentState === 'draft') {
       const result = await this.transition(signal, 'ready');
