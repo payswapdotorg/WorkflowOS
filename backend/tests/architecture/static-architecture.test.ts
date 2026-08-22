@@ -2115,3 +2115,154 @@ describe('WORK-016 invariants — /reviews (Architect Reviews) module boundaries
     expect(unexpected, `/reviews exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
   });
 });
+
+/**
+ * WORK-017 invariants — /workflows convergence boundaries.
+ *
+ * Ensures the convergence orchestration layer consumes public contracts from
+ * other modules without importing their internal/ implementations, and that
+ * no other module mutates canonical workflow persistence directly.
+ */
+describe('WORK-017 invariants — /workflows convergence boundaries', () => {
+  it('/workflows does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'workflows'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'workflows') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/workflows does not import GitHub/LLM/agent provider SDKs', () => {
+    const PROVIDER_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'workflows'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports provider SDK "${specifier}" — /workflows consumes public contracts only`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /agents does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'agents'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — /workflows owns canonical workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /verification does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — /workflows owns canonical workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /reviews does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — /workflows owns canonical workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /llm does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — /workflows owns canonical workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /github does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'github'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — /workflows owns canonical workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/workflows does not create duplicate domain stores', () => {
+    // /workflows must NOT create its own Work Item, Work Order, Agent Run,
+    // Review, or Verification persistence — those are owned by their
+    // respective modules.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'workflows'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      const declaresTable = /\bCREATE\s+TABLE\s+\w*(work_item|work_order|agent_run|review|evidence|criterion)\w*/i.test(codeOnly);
+      const declaresRepo = /\bclass\s+\w*(WorkItem|WorkOrder|AgentRun|Review|Evidence|Criterion)\w*\s+(implements|extends)\s*\w*Repository/i.test(codeOnly);
+      if (declaresTable || declaresRepo) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing domain persistence model — /workflows must not duplicate domain stores`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/workflows barrel exposes convergence types alongside existing ones', () => {
+    const wfIndex = readFileSync(join(MODULES_DIR, 'workflows', 'index.ts'), 'utf8');
+    // WORK-009 types must still be exported.
+    expect(wfIndex).toMatch(/WorkflowState/);
+    expect(wfIndex).toMatch(/WorkflowEngine/);
+    // WORK-017 types must be exported.
+    expect(wfIndex).toMatch(/SignalType/);
+    expect(wfIndex).toMatch(/ConvergenceSignal/);
+    expect(wfIndex).toMatch(/WorkflowOrchestrator/);
+  });
+});
