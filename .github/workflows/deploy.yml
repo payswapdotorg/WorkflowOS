@@ -62,17 +62,22 @@ jobs:
       # --- Docker deployment validation ---
       #
       # The docker-compose.yml uses ${VAR} substitution for all credentials
-      # (no secrets are baked into the file). CI supplies the test values
-      # explicitly here. In production, supply these via a real secret
-      # manager / .env file (gitignored).
+      # (no secrets are baked into the file). CI writes a .env file with the
+      # test values — docker compose auto-reads .env so every command (up,
+      # ps, logs, down) has the variables available. In production, supply
+      # these via a real secret manager / .env file (gitignored).
+
+      - name: Create .env for docker compose
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_USER=wfos
+          POSTGRES_PASSWORD=wfos-ci-test
+          POSTGRES_DB=wfos
+          DATABASE_URL=postgres://wfos:wfos-ci-test@postgres:5432/wfos
+          REDIS_URL=redis://redis:6379
+          EOF
 
       - name: Build and start the topology
-        env:
-          POSTGRES_USER: wfos
-          POSTGRES_PASSWORD: wfos-ci-test
-          POSTGRES_DB: wfos
-          DATABASE_URL: postgres://wfos:wfos-ci-test@postgres:5432/wfos
-          REDIS_URL: redis://redis:6379
         run: docker compose up --build -d --wait
 
       - name: Show container status
