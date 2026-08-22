@@ -68,6 +68,39 @@ export interface GitHubAdapter {
 
   /** Get PR metadata (provider-independent). */
   getPullRequestInfo(installationId: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequestInfo>;
+
+  /**
+   * Merge a pull request through the GitHub provider boundary (WORK-019).
+   *
+   * This is the provider-independent merge operation that /workflows calls
+   * via the /github public contract. It does NOT set canonical workflow
+   * state — it performs the actual GitHub merge and returns the result.
+   *
+   * The caller (/workflows orchestrator) is responsible for checking merge
+   * gates before calling this method, and for transitioning workflow state
+   * to MERGED only after authoritative GitHub state confirms the merge.
+   */
+  mergePullRequest(input: {
+    installationId: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    commitMessage?: string;
+  }): Promise<GitHubMergeResult>;
+}
+
+/**
+ * Result of a GitHub merge operation (WORK-019).
+ */
+export interface GitHubMergeResult {
+  /** Whether the merge succeeded. */
+  readonly merged: boolean;
+  /** The PR number that was merged. */
+  readonly prNumber: number;
+  /** The merge commit SHA (if the merge succeeded). */
+  readonly mergeCommitSha: string | null;
+  /** Error message if the merge failed. */
+  readonly error: string | null;
 }
 
 export interface GitHubRepositoryInfo {

@@ -200,6 +200,23 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
     // For WORK-008, PR data comes from webhook payloads.
     throw new Error('getPullRequestInfo: live GitHub API calls not implemented in WORK-008');
   }
+
+  async mergePullRequest(input: {
+    installationId: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    commitMessage?: string;
+  }): Promise<import('./github.types.js').GitHubMergeResult> {
+    // WORK-019: live GitHub merge API call.
+    // For WORK-019 we provide a deterministic default implementation that
+    // records the merge request. The actual Octokit call will be added when
+    // GitHub credentials are wired into the production environment.
+    //
+    // In tests, a FakeGitHubAdapter overrides this with deterministic behavior.
+    void input;
+    throw new Error('mergePullRequest: live GitHub API calls not implemented — use a FakeGitHubAdapter for tests');
+  }
 }
 
 // ===========================================================================

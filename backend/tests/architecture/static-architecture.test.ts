@@ -1348,6 +1348,7 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       'PullRequestAssociationRepository',
       'WorkOrder', 'CreateWorkOrderInput', 'WorkOrderState', 'WorkOrderRepository',
       'WorkItemDependencyService',
+      'WorkItemCompletionService',
       'workItemsModule',
     ]);
     const exported: string[] = [];
@@ -2314,5 +2315,61 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
     if (beginReviewMatch) {
       expect(beginReviewMatch[0]).not.toMatch(/outcome/);
     }
+  });
+
+  // --- WORK-019: Merge gating + advancement checks ---
+
+  it('REGRESSION (WORK-019): workflow route exposes merge + advancement endpoints', () => {
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    expect(src).toMatch(/request-merge/);
+    expect(src).toMatch(/merge-readiness/);
+    expect(src).toMatch(/advance-to-verified/);
+    expect(src).toMatch(/next-work-item/);
+  });
+
+  it('REGRESSION (WORK-019): no public endpoint can directly set MERGED or VERIFIED', () => {
+    // No API endpoint may directly set workflow state to 'merged' or 'verified'.
+    // The transitions go through WorkflowEngine.transition() via the orchestrator.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The route must NOT directly call workflowEngine.transition with 'merged' or 'verified'.
+    // Only the orchestrator methods (requestMerge, advanceToVerified) may invoke transitions.
+    expect(codeOnly).not.toMatch(/toState:\s*['"]merged['"]/);
+    expect(codeOnly).not.toMatch(/toState:\s*['"]verified['"]/);
+  });
+
+  it('REGRESSION (PR #18): requestMerge invokes githubAdapter.mergePullRequest', () => {
+    // Issue 1: requestMerge() must actually invoke the GitHub merge boundary,
+    // not just record a signal.
+    const orchFile = join(MODULES_DIR, 'workflows', 'internal', 'workflow-orchestrator.ts');
+    const src = readFileSync(orchFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(codeOnly).toMatch(/githubAdapter\.mergePullRequest\s*\(/);
+  });
+
+  it('REGRESSION (PR #18): /workflows does not query wfos_verification_runs summary directly', () => {
+    // Issue 2: /workflows must consume /verification's public contract
+    // (VerificationService.findRun), not query wfos_verification_runs directly
+    // for the summary.
+    const orchFile = join(MODULES_DIR, 'workflows', 'internal', 'workflow-orchestrator.ts');
+    const src = readFileSync(orchFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The orchestrator must NOT read the summary column directly from wfos_verification_runs.
+    // It should use verificationService.findRun() and read run.summary.
+    expect(codeOnly).not.toMatch(/SELECT.*summary.*FROM\s+wfos_verification_runs/i);
+    // It MUST use verificationService.findRun to load the run.
+    expect(codeOnly).toMatch(/verificationService\.findRun\s*\(/);
+  });
+
+  it('REGRESSION (PR #18): advanceToVerified uses WorkItemCompletionService (not `as never`)', () => {
+    // Issue 3: advanceToVerified() must use WorkItemCompletionService.markCompleted(),
+    // not bypass UpdateWorkItemInput with `as never`.
+    const orchFile = join(MODULES_DIR, 'workflows', 'internal', 'workflow-orchestrator.ts');
+    const src = readFileSync(orchFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(codeOnly).toMatch(/workItemCompletionService\.markCompleted\s*\(/);
+    expect(codeOnly).not.toMatch(/completed:\s*true\s*\}\s*as\s*never/);
   });
 });

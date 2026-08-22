@@ -31,6 +31,7 @@ export type {
   WorkflowEngine,
 } from './internal/workflow.types.js';
 // WORK-017: Convergence orchestration types.
+// WORK-019: Merge gating + advancement types.
 export type {
   SignalType,
   SignalProcessingState,
@@ -38,6 +39,7 @@ export type {
   SubmitSignalInput,
   ConvergenceSignalRepository,
   WorkflowOrchestrator,
+  MergeGateResult,
 } from './internal/convergence.types.js';
 
 /**

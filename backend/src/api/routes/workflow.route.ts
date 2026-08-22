@@ -241,4 +241,92 @@ export async function workflowRoutes(
       return reply.code(200).send(status);
     });
   });
+
+  // --- WORK-019: Merge gating + advancement routes ---
+
+  // POST /work-items/:workItemId/workflow/request-merge — request merge (WORK-019).
+  // Validates all merge gates. Does NOT set MERGED — that happens via the
+  // pull_request_merged signal (triggered by authoritative GitHub webhook).
+  app.post('/work-items/:workItemId/workflow/request-merge', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const executionId = generateExecutionId();
+      const result = await deps.orchestrator.requestMerge({
+        workItemId, executionId, sourceEventId: executionId,
+      });
+      return reply.code(202).send({
+        signalId: result.signal.id, accepted: true,
+        mergeReady: result.mergeReady, gates: result.gates,
+      });
+    });
+  });
+
+  // GET /work-items/:workItemId/workflow/merge-readiness — inspect merge readiness (WORK-019).
+  app.get('/work-items/:workItemId/workflow/merge-readiness', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const gates = await deps.orchestrator.inspectMergeReadiness(workItemId);
+      return reply.code(200).send(gates);
+    });
+  });
+
+  // POST /work-items/:workItemId/workflow/advance-to-verified — advance MERGED → VERIFIED (WORK-019).
+  app.post('/work-items/:workItemId/workflow/advance-to-verified', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const executionId = generateExecutionId();
+      const result = await deps.orchestrator.advanceToVerified({
+        workItemId, executionId, sourceEventId: executionId,
+      });
+      return reply.code(202).send({
+        signalId: result.signal.id, accepted: true,
+        verified: result.verified, reason: result.reason,
+      });
+    });
+  });
+
+  // GET /projects/:projectId/workflow/next-work-item — select next eligible Work Item (WORK-019).
+  app.get('/projects/:projectId/workflow/next-work-item', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId } = req.params as { projectId: string };
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const nextWorkItemId = await deps.orchestrator.selectNextWorkItem(projectId);
+      return reply.code(200).send({ nextWorkItemId });
+    });
+  });
 }

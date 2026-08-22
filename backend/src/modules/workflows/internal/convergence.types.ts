@@ -43,7 +43,10 @@ export type SignalType =
   | 'review_finalized'       // Architect review was finalized
   // WORK-018: verification/review orchestration signals
   | 'begin_verification'    // PR_OPEN → VERIFYING + create VerificationRun
-  | 'begin_architect_review'; // ARCHITECT_REVIEW → invoke ArchitectService + create + finalize Review
+  | 'begin_architect_review' // ARCHITECT_REVIEW → invoke ArchitectService + create + finalize Review
+  // WORK-019: merge gating + advancement signals
+  | 'request_merge'          // APPROVED → validate merge gates → request GitHub merge → MERGED
+  | 'advance_to_verified';   // MERGED → check post-merge conditions → VERIFIED
 
 export type SignalProcessingState = 'pending' | 'processed' | 'failed';
 
@@ -257,6 +260,86 @@ export interface WorkflowOrchestrator {
     workflowState: WorkflowState | null;
     signals: ConvergenceSignal[];
   }>;
+
+  // --- WORK-019: Merge gating and workflow advancement ---
+
+  /**
+   * Request a merge for a Work Item in APPROVED state. Validates all frozen
+   * merge gates (approved review, active PR association, verification
+   * prerequisites, dependency satisfaction) before requesting the GitHub merge
+   * through the existing provider-independent /github boundary.
+   *
+   * The merge is NOT set optimistically — MERGED is entered only when the PR
+   * association status is 'merged' (set by authoritative GitHub webhook
+   * processing).
+   *
+   * Returns the merge readiness result + whether a merge was requested.
+   */
+  requestMerge(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{
+    signal: ConvergenceSignal;
+    mergeReady: boolean;
+    gates: MergeGateResult;
+  }>;
+
+  /**
+   * Inspect merge readiness without requesting a merge. Returns the gate
+   * check results.
+   */
+  inspectMergeReadiness(workItemId: string): Promise<MergeGateResult>;
+
+  /**
+   * Advance a MERGED Work Item to VERIFIED if the frozen post-merge conditions
+   * are satisfied. The frozen spec does NOT require post-merge verification if
+   * verification was already satisfied before merge (§13: APPROVED → MERGED →
+   * VERIFIED is a direct chain).
+   *
+   * This method checks the frozen conditions and transitions to VERIFIED if
+   * they are met. It also marks the Work Item as completed.
+   */
+  advanceToVerified(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{ signal: ConvergenceSignal; verified: boolean; reason?: string }>;
+
+  /**
+   * Select the next eligible Work Item for a project. Uses the existing
+   * /work-items dependency/eligibility contract. Deterministic ordering by
+   * work_item_id (lexicographic).
+   *
+   * Returns the next eligible Work Item ID, or null if none is eligible.
+   */
+  selectNextWorkItem(projectId: string): Promise<string | null>;
+}
+
+/**
+ * Merge gate check result (WORK-019). Each gate is checked independently.
+ */
+export interface MergeGateResult {
+  /** Whether ALL gates are satisfied. */
+  ready: boolean;
+  /** The current workflow state. */
+  currentState: WorkflowState | null;
+  /** Whether an approved Architect Review exists for this work item. */
+  hasApprovedReview: boolean;
+  /** Whether an active (non-merged) PR association exists. */
+  hasActivePrAssociation: boolean;
+  /** Whether the PR association belongs to the correct work item. */
+  prAssociationMatchesWorkItem: boolean;
+  /** Whether verification prerequisites are satisfied. */
+  verificationSatisfied: boolean;
+  /** Whether all dependencies are satisfied. */
+  dependenciesSatisfied: boolean;
+  /** The approved review ID (if found). */
+  approvedReviewId: string | null;
+  /** The active PR association ID (if found). */
+  activePrAssociationId: string | null;
+  /** Failure reasons (if any gate failed). */
+  reasons: string[];
 }
 
 // --- Re-export for convenience ---

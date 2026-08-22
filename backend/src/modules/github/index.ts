@@ -28,6 +28,7 @@ export type {
   GitHubAdapter,
   GitHubRepositoryInfo,
   GitHubPullRequestInfo,
+  GitHubMergeResult,
   GitHubInstallation,
   GitHubInstallationRepository,
   WebhookProcessingService,
