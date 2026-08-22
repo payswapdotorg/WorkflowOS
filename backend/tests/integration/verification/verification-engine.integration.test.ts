@@ -113,6 +113,8 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       stack.acceptanceCriterionRepository,
       stack.architectureVersionRepository,
       stack.workItemRepository,
+      stack.workItemRequirementRepository,
+      stack.workItemCriterionRepository,
       ciIngestionRepo,
       stack.objectStore,
       stack.db.logger,
@@ -181,6 +183,25 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
 
   async function createWorkItemA(id: string) {
     return stack.workItemRepository.create({ architectureVersionId: versionA.id, workItemId: id, title: id });
+  }
+
+  // Helper: create a Work Item AND associate it with the given criteria + their
+  // parent requirement. This is needed because evaluateForRun()/persistEvaluations()
+  // scope to the Work Item's associated criteria (PR #14 additional finding —
+  // evaluation must not touch unrelated criteria/requirements).
+  async function createWorkItemAWithCriteria(
+    id: string,
+    ...criterionIds: string[]
+  ) {
+    const wi = await stack.workItemRepository.create({ architectureVersionId: versionA.id, workItemId: id, title: id });
+    // Associate the Work Item with the requirement (reqA) so requirement
+    // derivation works.
+    await stack.workItemRequirementRepository.associate(wi.id, reqA.id);
+    // Associate the Work Item with each criterion.
+    for (const cid of criterionIds) {
+      await stack.workItemCriterionRepository.associate(wi.id, cid);
+    }
+    return wi;
   }
 
   function buildWorkflowRunPayload(opts: {
@@ -626,7 +647,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
 
   describe('Requirement derivation (VERIFY-EVAL-AC-03)', () => {
     it('all criteria PASS → requirement satisfied', async () => {
-      const wi = await createWorkItemA('VERIFY-REQ-001');
+      const wi = await createWorkItemAWithCriteria('VERIFY-REQ-001', criterionA1.id, criterionA2.id);
       const run = await verificationService.createRun({
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-001',
@@ -648,7 +669,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
     });
 
     it('a failing criterion → requirement pending (not satisfied)', async () => {
-      const wi = await createWorkItemA('VERIFY-REQ-002');
+      const wi = await createWorkItemAWithCriteria('VERIFY-REQ-002', criterionA1.id, criterionA2.id);
       const run = await verificationService.createRun({
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-002',
@@ -669,7 +690,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
     });
 
     it('a blocked criterion → requirement blocked', async () => {
-      const wi = await createWorkItemA('VERIFY-REQ-003');
+      const wi = await createWorkItemAWithCriteria('VERIFY-REQ-003', criterionA1.id, criterionA2.id);
       const run = await verificationService.createRun({
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-003',
@@ -685,7 +706,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
     });
 
     it('requirement completion does not rely solely on agent claims', async () => {
-      const wi = await createWorkItemA('VERIFY-REQ-004');
+      const wi = await createWorkItemAWithCriteria('VERIFY-REQ-004', criterionA1.id, criterionA2.id);
       const run = await verificationService.createRun({
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-004',
@@ -753,7 +774,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
     });
 
     it('persistEvaluations routes derived statuses through /requirements contract', async () => {
-      const wi = await createWorkItemA('VERIFY-AUTH-003');
+      const wi = await createWorkItemAWithCriteria('VERIFY-AUTH-003', criterionA1.id);
       const run = await verificationService.createRun({
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-auth-003',
@@ -891,6 +912,122 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       const retrieved = await stack.objectStore.get(stored.key);
       expect(retrieved).not.toBeNull();
       expect(retrieved!.body).toEqual(body);
+    });
+  });
+
+  // --- Evaluation scope regression (PR #14 additional finding) ---
+
+  describe('REGRESSION (PR #14 additional): evaluation scoped to Work Item associations', () => {
+    it('persistEvaluations does NOT touch unrelated criteria under the same ArchitectureVersion', async () => {
+      // Work Item A is associated with criterionA1 ONLY (not criterionA2).
+      // Both criteria are under the same requirement (reqA) + ArchitectureVersion.
+      const wi = await createWorkItemAWithCriteria('VERIFY-SCOPE-001', criterionA1.id);
+      const run = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-scope-001',
+      });
+      // Attach authoritative PASS evidence to criterionA1.
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
+      await verificationService.mapEvidenceToCriterion({
+        projectId: projectA.id, verificationRunId: run.id,
+        evidenceId: ev.id, criterionId: criterionA1.id, relevance: 'proves',
+      });
+
+      // Record criterionA2's status BEFORE persistEvaluations.
+      const critA2Before = await stack.acceptanceCriterionRepository.findById(criterionA2.id);
+      const critA2StatusBefore = critA2Before!.status;
+
+      // Persist evaluations for Work Item A's run.
+      await verificationService.persistEvaluations(run.id);
+
+      // criterionA1 → PASS (it was in scope + had passing evidence).
+      const critA1After = await stack.acceptanceCriterionRepository.findById(criterionA1.id);
+      expect(critA1After!.status).toBe('pass');
+
+      // criterionA2 → UNCHANGED (it was NOT associated with Work Item A).
+      const critA2After = await stack.acceptanceCriterionRepository.findById(criterionA2.id);
+      expect(critA2After!.status).toBe(critA2StatusBefore);
+      // Specifically, it must NOT have been overwritten to 'pass' or 'pending'
+      // just because criterionA1 (under the same requirement) passed.
+      expect(critA2After!.status).not.toBe('pass');
+    });
+
+    it('persistEvaluations does NOT persist requirement status when not all criteria are in scope', async () => {
+      // reqA has 2 criteria (criterionA1 + criterionA2). Work Item A is
+      // associated with criterionA1 ONLY. Even if criterionA1 passes, reqA
+      // must NOT be marked 'satisfied' because criterionA2 was not evaluated.
+      const wi = await createWorkItemAWithCriteria('VERIFY-SCOPE-002', criterionA1.id);
+      const run = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-scope-002',
+      });
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
+      await verificationService.mapEvidenceToCriterion({
+        projectId: projectA.id, verificationRunId: run.id,
+        evidenceId: ev.id, criterionId: criterionA1.id, relevance: 'proves',
+      });
+
+      // Record reqA's status BEFORE persistEvaluations.
+      const reqABefore = await stack.requirementRepository.findById(reqA.id);
+      const reqAStatusBefore = reqABefore!.status;
+
+      // Persist evaluations for Work Item A's run.
+      const result = await verificationService.persistEvaluations(run.id);
+
+      // reqA must NOT appear in the requirement derivations — it was skipped
+      // because not all its criteria (criterionA2) are in scope.
+      const reqADerivation = result.requirements.find((r) => r.requirementId === reqA.id);
+      expect(reqADerivation).toBeUndefined();
+
+      // reqA's persisted status must be UNCHANGED.
+      const reqAAfter = await stack.requirementRepository.findById(reqA.id);
+      expect(reqAAfter!.status).toBe(reqAStatusBefore);
+      // Specifically, it must NOT have been marked 'satisfied'.
+      expect(reqAAfter!.status).not.toBe('satisfied');
+    });
+
+    it('a second Work Item with different criterion associations does not overwrite the first', async () => {
+      // Work Item A is associated with criterionA1; Work Item B is associated
+      // with criterionA2. Both are under the same requirement (reqA).
+      const wiA = await createWorkItemAWithCriteria('VERIFY-SCOPE-003A', criterionA1.id);
+      const wiB = await createWorkItemAWithCriteria('VERIFY-SCOPE-003B', criterionA2.id);
+
+      // Run 1 for Work Item A: criterionA1 → PASS.
+      const runA = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wiA.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-scope-003a',
+      });
+      const evA = await attachAuthoritativeCi(runA.id, 'pass');
+      await verificationService.mapEvidenceToCriterion({
+        projectId: projectA.id, verificationRunId: runA.id,
+        evidenceId: evA.id, criterionId: criterionA1.id, relevance: 'proves',
+      });
+      await verificationService.persistEvaluations(runA.id);
+
+      // criterionA1 → PASS.
+      const critA1AfterRunA = await stack.acceptanceCriterionRepository.findById(criterionA1.id);
+      expect(critA1AfterRunA!.status).toBe('pass');
+
+      // Run 2 for Work Item B: criterionA2 → FAIL.
+      const runB = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wiB.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-scope-003b',
+      });
+      const evB = await attachAuthoritativeCi(runB.id, 'fail');
+      await verificationService.mapEvidenceToCriterion({
+        projectId: projectA.id, verificationRunId: runB.id,
+        evidenceId: evB.id, criterionId: criterionA2.id, relevance: 'proves',
+      });
+      await verificationService.persistEvaluations(runB.id);
+
+      // criterionA2 → FAIL (updated by run B).
+      const critA2AfterRunB = await stack.acceptanceCriterionRepository.findById(criterionA2.id);
+      expect(critA2AfterRunB!.status).toBe('fail');
+
+      // criterionA1 → STILL PASS (run B did NOT touch criterionA1 — it was
+      // not associated with Work Item B).
+      const critA1AfterRunB = await stack.acceptanceCriterionRepository.findById(criterionA1.id);
+      expect(critA1AfterRunB!.status).toBe('pass');
     });
   });
 

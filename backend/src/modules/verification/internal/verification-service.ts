@@ -7,7 +7,11 @@ import type {
   RequirementStatus,
 } from '@modules/requirements/index.js';
 import type { ArchitectureVersionRepository } from '@modules/architecture/index.js';
-import type { WorkItemRepository } from '@modules/work-items/index.js';
+import type {
+  WorkItemRepository,
+  WorkItemRequirementRepository,
+  WorkItemCriterionRepository,
+} from '@modules/work-items/index.js';
 import type { CiEvidenceIngestionRepository } from '@modules/github/index.js';
 import type { ObjectStore, PutObjectInput, PutObjectResult } from '@platform/index.js';
 import type {
@@ -102,6 +106,8 @@ export class DefaultVerificationService implements VerificationService {
     private readonly acceptanceCriterionRepository: AcceptanceCriterionRepository,
     architectureVersionRepository: ArchitectureVersionRepository,
     private readonly workItemRepository: WorkItemRepository,
+    private readonly workItemRequirementRepository: WorkItemRequirementRepository,
+    private readonly workItemCriterionRepository: WorkItemCriterionRepository,
     private readonly ciEvidenceIngestionRepository: CiEvidenceIngestionRepository,
     private readonly objectStore: ObjectStore,
     private readonly logger: Logger,
@@ -257,14 +263,72 @@ export class DefaultVerificationService implements VerificationService {
       throw new Error(`evaluateForRun: verification run ${verificationRunId} not found`);
     }
 
-    // Load all requirements + criteria for the ArchitectureVersion.
-    const requirements = await this.requirementRepository.findByArchitectureVersion(run.architectureVersionId);
-    const criteriaByReq = new Map<string, AcceptanceCriterion[]>();
+    // SCOPE (PR #14 architect review — additional finding):
+    //
+    // A VerificationRun is Work Item-scoped, NOT ArchitectureVersion-scoped.
+    // Evaluation must be limited to the Work Item's existing Requirement /
+    // Acceptance Criterion associations (via the /work-items association
+    // repositories) — NOT all requirements/criteria under the
+    // ArchitectureVersion. Without this scoping, one Work Item's verification
+    // run could overwrite unrelated criteria/requirement statuses belonging to
+    // other Work Items under the same ArchitectureVersion.
+    //
+    // The Work Item's associations are the authoritative scope. Criteria not
+    // associated with the Work Item are never evaluated or persisted by this
+    // run, even if evidence was accidentally mapped to them (the mapping
+    // integrity trigger already enforces tenant isolation; this scoping
+    // enforces Work Item isolation within the same tenant).
+
+    // Load the Work Item's associated requirements + criteria.
+    const wiRequirementAssocs = await this.workItemRequirementRepository.listForWorkItem(run.workItemId);
+    const wiCriterionAssocs = await this.workItemCriterionRepository.listForWorkItem(run.workItemId);
+
+    // Build the set of associated requirement IDs + criterion IDs.
+    const associatedRequirementIds = new Set(wiRequirementAssocs.map((a) => a.requirementId));
+    const associatedCriterionIds = new Set(wiCriterionAssocs.map((a) => a.criterionId));
+
+    // If the Work Item has NO criterion associations, the evaluation scope is
+    // empty — the run evaluates nothing. This is a valid state (the Work Item
+    // may not have been associated with any criteria yet).
+    if (associatedCriterionIds.size === 0) {
+      return { run, criteria: [], requirements: [] };
+    }
+
+    // Load the full criterion records for the associated criterion IDs.
+    // (We need the full records to group by requirement for derivation.)
     const allCriteria: AcceptanceCriterion[] = [];
-    for (const req of requirements) {
-      const cs = await this.acceptanceCriterionRepository.listForRequirement(req.id);
-      criteriaByReq.set(req.id, cs);
-      allCriteria.push(...cs);
+    for (const cid of associatedCriterionIds) {
+      const crit = await this.acceptanceCriterionRepository.findById(cid);
+      if (crit) allCriteria.push(crit);
+    }
+
+    // Load the full requirement records for the associated requirement IDs.
+    // Only requirements explicitly associated with the Work Item are derived.
+    // If a criterion's requirement is NOT in the associated set, the
+    // criterion is still evaluated (it was explicitly associated), but its
+    // requirement is NOT derived (to avoid side-effecting an unassociated
+    // requirement).
+    const requirementsByReqId = new Map<string, { id: string }>();
+    for (const rid of associatedRequirementIds) {
+      requirementsByReqId.set(rid, { id: rid });
+    }
+    // Also include requirements for associated criteria whose requirement is
+    // not directly associated — these criteria's evaluations still need a
+    // home in the requirement derivation, but we derive them under their
+    // natural requirement. The key point: we never persist a requirement
+    // status for a requirement that has NO associated criteria in this run.
+    for (const crit of allCriteria) {
+      if (!requirementsByReqId.has(crit.requirementId)) {
+        requirementsByReqId.set(crit.requirementId, { id: crit.requirementId });
+      }
+    }
+
+    // Group criteria by requirement.
+    const criteriaByReq = new Map<string, AcceptanceCriterion[]>();
+    for (const crit of allCriteria) {
+      const list = criteriaByReq.get(crit.requirementId) ?? [];
+      list.push(crit);
+      criteriaByReq.set(crit.requirementId, list);
     }
 
     // Load all active mappings for this run.
@@ -283,7 +347,7 @@ export class DefaultVerificationService implements VerificationService {
       mappingsByCriterion.set(m.criterionId, list);
     }
 
-    // Evaluate each criterion.
+    // Evaluate each ASSOCIATED criterion (not all criteria under the version).
     const criteriaEvals: CriterionEvaluation[] = [];
     const evalByCriterion = new Map<string, CriterionEvaluation>();
     for (const crit of allCriteria) {
@@ -293,14 +357,30 @@ export class DefaultVerificationService implements VerificationService {
       evalByCriterion.set(crit.id, evaluation);
     }
 
-    // Derive each requirement's status from its criteria.
+    // Derive each requirement's status from its criteria — but ONLY for
+    // requirements where ALL of the requirement's criteria are in the run's
+    // scope (i.e., associated with the Work Item). If any criterion is NOT in
+    // scope, the requirement is NOT derived or persisted — its status remains
+    // unchanged. This prevents a Work Item from marking a requirement
+    // 'satisfied' when only some of its criteria have been verified.
     const requirementDerivations: RequirementDerivation[] = [];
-    for (const req of requirements) {
-      const cs = criteriaByReq.get(req.id) ?? [];
+    for (const [reqId, _req] of requirementsByReqId) {
+      // Load ALL criteria for this requirement (not just the scoped ones).
+      const allReqCriteria = await this.acceptanceCriterionRepository.listForRequirement(reqId);
+      // Check if every criterion under this requirement is in the run's scope.
+      const allInScope = allReqCriteria.every((c) => associatedCriterionIds.has(c.id));
+      if (!allInScope) {
+        // Not all criteria are in scope — skip this requirement (don't derive
+        // or persist). Its status remains unchanged.
+        continue;
+      }
+      // All criteria are in scope — safe to derive.
+      const cs = criteriaByReq.get(reqId) ?? [];
+      if (cs.length === 0) continue; // no criteria at all → skip
       const criterionEvals = cs.map((c) => evalByCriterion.get(c.id)!).filter(Boolean);
       const derivedStatus = this.deriveRequirementStatus(criterionEvals);
       requirementDerivations.push({
-        requirementId: req.id,
+        requirementId: reqId,
         derivedStatus,
         criterionEvaluations: criterionEvals,
         rationale: this.requirementRationale(criterionEvals, derivedStatus),
