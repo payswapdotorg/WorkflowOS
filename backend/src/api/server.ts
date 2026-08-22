@@ -12,6 +12,7 @@ import { githubWebhookRoutes, type WebhookRouteDeps } from './routes/github-webh
 import { workflowRoutes, type WorkflowRouteDeps } from './routes/workflow.route.js';
 import { llmRoutes, type LlmRouteDeps } from './routes/llm.route.js';
 import { agentRoutes, type AgentRouteDeps } from './routes/agent.route.js';
+import { architectRoutes, type ArchitectRouteDeps } from './routes/architect.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -44,6 +45,8 @@ export interface ServerDeps extends JobsRouteDeps {
   llm?: LlmRouteDeps;
   /** Agent Gateway routes (backend-authorized). */
   agents?: AgentRouteDeps;
+  /** Architect Service routes (backend-authorized). */
+  architect?: ArchitectRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -83,6 +86,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.agents) {
     await agentRoutes(app, deps.agents);
+  }
+  if (deps.auth && deps.architect) {
+    await architectRoutes(app, deps.architect);
   }
   return app;
 }
