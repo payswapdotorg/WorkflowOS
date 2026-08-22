@@ -8,26 +8,32 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * WORK-002: exposes ONLY the minimal project ownership/access contract
- * required for tenant isolation (AUTHZ-AC-01..03). Full project configuration,
- * repository associations, and lifecycle belong to WORK-004 (PROJ-001) and
- * are intentionally NOT implemented here.
+ * WORK-004: the project domain is now authoritative (PROJ-001). Evolved from
+ * the WORK-002 minimal representation: adds lifecycle state, metadata, and a
+ * provider-independent repository association contract (PROJ-AC-02/03). The
+ * existing project-access relationship from WORK-002 is preserved.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
 export type {
   Project,
   CreateProjectInput,
+  UpdateProjectInput,
+  ProjectState,
+  ProjectLifecycleTransition,
   ProjectAccess,
   GrantProjectAccessInput,
   ProjectRepository,
   ProjectAccessRepository,
+  ProjectRepositoryAssociation,
+  AssociateRepositoryInput,
+  ProjectRepositoryAssociationRepository,
 } from './internal/project.types.js';
 
 /**
  * Public capabilities exposed by the /projects module to other modules.
  */
 export interface ProjectsModuleApi {
-  // future: WORK-004 will add project-domain methods
+  // future: additional project-domain methods
 }
 
 /**

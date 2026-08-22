@@ -745,19 +745,27 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     expect(violations, violations.join('\n')).toEqual([]);
   });
 
-  it('PROJ-001 scope limit: /projects exposes only minimal ownership/access contracts', () => {
-    // WORK-002 must NOT broaden into full project-domain functionality. The
-    // /projects public interface may export only the types/repos required for
-    // authorization; it must NOT export project configuration, repository
-    // associations, or lifecycle methods.
+  it('PROJ-001 scope limit: /projects exposes only project-domain contracts', () => {
+    // WORK-004 evolved the project domain. The /projects public interface
+    // may export project ownership/lifecycle/repository-association contracts;
+    // it must NOT export specification, architecture, requirement, or work-item
+    // domain types (those belong to /specifications, /architecture, etc.).
     const projectsIndex = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
     const allowed = new Set([
+      // WORK-002 minimal types (preserved).
       'Project',
       'CreateProjectInput',
       'ProjectAccess',
       'GrantProjectAccessInput',
       'ProjectRepository',
       'ProjectAccessRepository',
+      // WORK-004 project-domain types (PROJ-AC-01..03).
+      'UpdateProjectInput',
+      'ProjectState',
+      'ProjectLifecycleTransition',
+      'ProjectRepositoryAssociation',
+      'AssociateRepositoryInput',
+      'ProjectRepositoryAssociationRepository',
       // Module contract marker (every frozen module exports one).
       'projectsModule',
     ]);
@@ -847,5 +855,134 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     const importer = join(MODULES_DIR, 'auth', 'internal', 'authorization-service.ts');
     const resolved = resolveSpecifier(importer, './does-not-exist.js');
     expect(resolved).toBeUndefined();
+  });
+});
+
+/**
+ * WORK-004 invariants — project + specification module boundaries.
+ *
+ * Ensures /projects owns project domain logic and /specifications owns
+ * specification domain logic, with no cross-contamination and no GitHub
+ * provider coupling (WORK-008 territory).
+ */
+describe('WORK-004 invariants — project + specification boundaries', () => {
+  it('/projects does not import from /specifications and vice versa', () => {
+    // Project authority and specification authority must not collapse into a
+    // single module (architecture §42). /projects must not import /specifications
+    // internal/ or non-index files; /specifications must not import /projects
+    // beyond the public interface (for the project-id reference).
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const importerModule = moduleOf(file);
+      if (!importerModule) continue;
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === importerModule) continue;
+        // /projects → /specifications forbidden entirely (except the public
+        // interface is also disallowed: projects should not reference specs).
+        if (importerModule === 'projects' && targetModule === 'specifications') {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (/projects must not depend on /specifications)`,
+          );
+        }
+        // /specifications → /projects must use ONLY the public index.ts
+        // (for the Project reference). Reaching into internal/ is forbidden
+        // by PLAT-AC-02 already; this re-asserts it by name.
+        if (importerModule === 'specifications' && targetModule === 'projects' && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (/specifications must use /projects public interface only)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/projects and /specifications do not import GitHub provider packages', () => {
+    // The actual GitHub adapter is WORK-008. /projects may persist a
+    // provider-independent repository reference (PROJ-AC-02) but MUST NOT
+    // couple to the GitHub SDK or any provider runtime.
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'projects'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008`,
+          );
+        }
+      }
+    }
+    for (const file of walkTs(join(MODULES_DIR, 'specifications'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/projects and /specifications do not create their own infrastructure', () => {
+    // Reuse WORK-001/003 infrastructure (DatabaseClient, ObjectStore, etc.).
+    // Neither module may declare a competing DatabaseClient, Pool, ObjectStore,
+    // Queue, or WorkerHost class.
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const mod of ['projects', 'specifications']) {
+      for (const file of walkTs(join(MODULES_DIR, mod))) {
+        const src = readFileSync(file, 'utf8');
+        if (forbidden.test(src)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/specifications barrel exposes only specification-domain contracts', () => {
+    // /specifications must not export project-domain authority (architecture §42).
+    const specIndex = readFileSync(join(MODULES_DIR, 'specifications', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'Specification',
+      'CreateSpecificationInput',
+      'UpdateSpecificationInput',
+      'SpecificationState',
+      'SpecificationLifecycleTransition',
+      'SpecificationVersion',
+      'CreateSpecificationVersionInput',
+      'SpecificationRepository',
+      'SpecificationVersionRepository',
+      'specificationsModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of specIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of specIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(
+      unexpected,
+      `/specifications exports unexpected names: ${unexpected.join(', ')}`,
+    ).toEqual([]);
   });
 });

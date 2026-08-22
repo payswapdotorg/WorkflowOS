@@ -60,6 +60,10 @@ export interface AuthProvider {
  * A resource on which an authorization decision is made. The minimal
  * representation is a project id; the AuthorizationService resolves its owning
  * organization through the project repository (AUTHZ-AC-02).
+ *
+ * For organization-level operations (e.g. creating a project within an org),
+ * use {@link AuthorizationService.authorizeForOrganization} which authorizes
+ * directly against the organization id — no synthetic project id required.
  */
 export interface ProtectedResource {
   readonly kind: 'project';
@@ -86,6 +90,20 @@ export interface AuthorizationDecision {
 }
 
 /**
+ * Authorization decision for an organization-level operation (e.g. creating a
+ * project within an org). Distinct from {@link AuthorizationDecision} because
+ * there is no project resource yet — the decision is about whether the user
+ * may perform an action scoped to the organization itself.
+ */
+export interface OrganizationAuthorizationDecision {
+  readonly allowed: boolean;
+  readonly userId: string;
+  readonly permission: string;
+  readonly organizationId: string;
+  readonly deniedReason?: 'not-a-member' | 'missing-permission';
+}
+
+/**
  * Reusable backend authorization service (AUTHZ-AC-01..03). Later modules
  * ask it whether a principal may perform an action on a resource.
  *
@@ -109,6 +127,25 @@ export interface AuthorizationService {
     permission: string;
     resource: ProtectedResource;
   }): Promise<AuthorizationDecision>;
+
+  /**
+   * Decide whether `user` may exercise `permission` scoped to `organizationId`.
+   *
+   * Used for organization-level operations that are NOT tied to a specific
+   * project resource — e.g. creating a project within an organization
+   * (PROJ-AC-01). The decision chain:
+   *   user → organization membership → role → permission
+   *
+   * A user who is not a member of `organizationId` is denied with
+   * `not-a-member` (AUTHZ-AC-02). This is the sanctioned way to authorize
+   * project creation; do NOT use a synthetic nonexistent project id to infer
+   * membership.
+   */
+  authorizeForOrganization(input: {
+    user: User;
+    permission: string;
+    organizationId: string;
+  }): Promise<OrganizationAuthorizationDecision>;
 }
 
 /**

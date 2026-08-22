@@ -30,11 +30,29 @@ async function main(): Promise<void> {
       ...(app.deps.authProvider && app.deps.userRepository
         ? { auth: { authProvider: app.deps.authProvider, userRepository: app.deps.userRepository } }
         : {}),
-      ...(app.deps.authorizationService && app.deps.projectRepository
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.repositoryAssociationRepository
         ? {
             projects: {
               authorizationService: app.deps.authorizationService,
               projectRepository: app.deps.projectRepository,
+              repositoryAssociationRepository: app.deps.repositoryAssociationRepository,
+            },
+          }
+        : {}),
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.specificationRepository &&
+      app.deps.specificationVersionRepository &&
+      app.deps.infrastructure
+        ? {
+            specifications: {
+              authorizationService: app.deps.authorizationService,
+              specificationRepository: app.deps.specificationRepository,
+              specificationVersionRepository: app.deps.specificationVersionRepository,
+              projectRepository: app.deps.projectRepository,
+              objectStore: app.deps.infrastructure.objectStore,
             },
           }
         : {}),

@@ -113,6 +113,36 @@ export async function requireProjectAuthorization(
 }
 
 /**
+ * Route helper: require an authorization decision for an organization-level
+ * operation (e.g. creating a project within an org). Sends 403 when denied.
+ * Uses the reusable {@link AuthorizationService.authorizeForOrganization} —
+ * no synthetic project id, no ad-hoc membership logic.
+ */
+export async function requireOrganizationAuthorization(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  deps: RequireAuthorizationDeps,
+  input: { permission: string; organizationId: string },
+): Promise<User> {
+  const user = await requireUser(req, reply);
+  const decision = await deps.authorizationService.authorizeForOrganization({
+    user,
+    permission: input.permission,
+    organizationId: input.organizationId,
+  });
+  if (!decision.allowed) {
+    await reply.code(403).send({
+      error: 'forbidden',
+      reason: decision.deniedReason,
+      permission: input.permission,
+      organizationId: input.organizationId,
+    });
+    throw new Error('forbidden');
+  }
+  return user;
+}
+
+/**
  * Run a handler inside the request's execution context (so logs/audit carry
  * the execution id). Convenience for authed routes.
  */

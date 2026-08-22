@@ -2,26 +2,36 @@
  * specifications module — public interface.
  *
  * Canonical name: /specifications
- * Responsibility (spec/architecture.md): Specification documents and specification lifecycle.
+ * Responsibility (spec/architecture.md): specification documents and specification lifecycle.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-004: implements specification persistence + lifecycle + versioned
+ * content traceability (SPEC-001, SPEC-AC-01..03). A specification belongs
+ * to exactly one project; tenant scoping is inherited through the project's
+ * owning organization (AUTHZ). Large content bodies use the existing
+ * ObjectStore abstraction (DATA-003).
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  Specification,
+  CreateSpecificationInput,
+  UpdateSpecificationInput,
+  SpecificationState,
+  SpecificationLifecycleTransition,
+  SpecificationVersion,
+  CreateSpecificationVersionInput,
+  SpecificationRepository,
+  SpecificationVersionRepository,
+} from './internal/specification.types.js';
 
 /**
  * Public capabilities exposed by the /specifications module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface SpecificationsModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional specification-domain methods
 }
 
 /**

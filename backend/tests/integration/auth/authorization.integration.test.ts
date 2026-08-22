@@ -122,6 +122,7 @@ describe('AUTHZ-AC-01 / AUTHZ-AC-02 / AUTHZ-AC-03 — authorization + tenant iso
       projects: {
         authorizationService: stack.authorizationService,
         projectRepository: stack.projectRepository,
+        repositoryAssociationRepository: stack.repositoryAssociationRepository,
       },
     });
     await server.ready();
