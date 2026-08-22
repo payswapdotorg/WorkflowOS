@@ -13,6 +13,12 @@
  * validation, durable event receipts (PostgreSQL), idempotent async
  * processing (Redis worker), provider-independent repository/PR contracts.
  * GitHub SDK/provider code stays inside internal/.
+ *
+ * WORK-015: extends /github with provider-independent CI evidence ingestion
+ * (GITHUB-006). Translates GitHub Actions check_run / workflow_run webhook
+ * events into provider-independent CiRunEvidence rows. /github OWNS the
+ * ingestion + translation; it does NOT evaluate acceptance criteria (that's
+ * /verification — GH6-AC-02 enforced by a static architecture check).
  */
 import type { ModuleContract } from '@platform/module-contract.js';
 export type {
@@ -26,6 +32,14 @@ export type {
   GitHubInstallationRepository,
   WebhookProcessingService,
 } from './internal/github.types.js';
+// WORK-015: CI evidence ingestion contracts (GITHUB-006).
+export type {
+  CiArtifactReference,
+  CiRunEvidence,
+  IngestCiEvidenceInput,
+  CiEvidenceIngestionRepository,
+  CiEvidenceIngestionService,
+} from './internal/ci-evidence.types.js';
 
 /**
  * Public capabilities exposed by the /github module to other modules.

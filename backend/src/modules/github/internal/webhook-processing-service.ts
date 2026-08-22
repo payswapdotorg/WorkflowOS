@@ -7,17 +7,24 @@ import type { JobRecord, JobHandler } from '@platform/index.js';
 import { PgWebhookEventRepository, PgGitHubInstallationRepository } from './pg-github-repository.js';
 import type { ProjectRepositoryAssociationRepository } from '@modules/projects/index.js';
 import type { PullRequestAssociationRepository } from '@modules/work-items/index.js';
+import type { CiEvidenceIngestionService } from './ci-evidence.types.js';
 
 /**
  * Processes GitHub webhook events asynchronously (GITHUB-002).
  *
  * Called by the worker host. Loads the durable receipt, parses the payload,
- * and performs the domain update (PR sync, repo sync). Safe to retry —
- * duplicate processing produces one effective mutation because:
+ * and performs the domain update (PR sync, repo sync, CI evidence ingestion).
+ * Safe to retry — duplicate processing produces one effective mutation because:
  * - the delivery_id UNIQUE constraint prevents duplicate receipts;
  * - the processing_state transition (received → processing → processed)
  *   is atomic;
- * - domain updates use upsert/idempotent operations.
+ * - domain updates use upsert/idempotent operations (CI evidence ingestion
+ *   uses UNIQUE(provider, external_run_id) idempotency — GITHUB-004).
+ *
+ * WORK-015: this service now also routes check_run / workflow_run events to
+ * the {@link CiEvidenceIngestionService} for translation into provider-
+ * independent CI evidence rows. The ingestion service is OPTIONAL so the
+ * webhook processing path still works in tests that don't wire CI ingestion.
  */
 export class DefaultWebhookProcessingService implements WebhookProcessingService {
   private readonly eventRepo: PgWebhookEventRepository;
@@ -30,6 +37,7 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
     private readonly projectRepoAssociationRepo: ProjectRepositoryAssociationRepository,
     private readonly logger: Logger,
     private readonly db: DatabaseClient,
+    private readonly ciEvidenceIngestionService?: CiEvidenceIngestionService,
   ) {
     this.eventRepo = eventRepo;
     this.installationRepo = installationRepo;
@@ -72,7 +80,7 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
     }
   }
 
-  private async processPayload(event: { eventType: string; payload: string; repositoryFullName: string | null }): Promise<void> {
+  private async processPayload(event: { id: string; eventType: string; payload: string; repositoryFullName: string | null }): Promise<void> {
     const payload = JSON.parse(event.payload) as {
       action?: string;
       pull_request?: {
@@ -119,6 +127,23 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
         return;
       }
       await this.syncRepository(projectId, payload.repository);
+    }
+
+    // WORK-015: ingest GitHub Actions check_run / workflow_run events as
+    // provider-independent CI evidence. The ingestion service is owned by
+    // /github (GITHUB-006) and only translates + persists; it does NOT
+    // evaluate acceptance criteria (GH6-AC-02). /verification reads the
+    // resulting CI evidence rows via the CiEvidenceIngestionRepository
+    // contract and interprets them.
+    if (
+      (event.eventType === 'check_run' || event.eventType === 'workflow_run') &&
+      this.ciEvidenceIngestionService
+    ) {
+      await this.ciEvidenceIngestionService.ingestFromWebhookPayload({
+        webhookEventId: event.id,
+        eventType: event.eventType,
+        payload: event.payload,
+      });
     }
   }
 
