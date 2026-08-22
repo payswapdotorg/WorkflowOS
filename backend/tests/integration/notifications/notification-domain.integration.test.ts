@@ -418,9 +418,11 @@ describe('WORK-021 -- Notification boundary', () => {
     });
 
     it('issue 2: missing provider marks notification as FAILED (not delivered)', async () => {
-      // Create a notification service with NO providers.
+      // Create a notification service with NO providers + a SEPARATE queue
+      // (so the main worker with fakeProvider doesn't pick up this notification).
+      const separateQueue = new InMemoryQueue();
       const noProviderService = new DefaultNotificationService(
-        stack.db.client, stack.db.logger, queue, [], // no adapters
+        stack.db.client, stack.db.logger, separateQueue, [], // no adapters
       );
       const notification = await noProviderService.send({
         projectId: projectA.id,
@@ -431,7 +433,7 @@ describe('WORK-021 -- Notification boundary', () => {
         sourceId: 'no-provider-001',
         executionId: generateExecutionId(),
       });
-      // Process it -- no provider is configured.
+      // Process it directly -- no provider is configured.
       await noProviderService.processNotification(notification.id);
       const result = await noProviderService.findById(notification.id);
       // Must be FAILED, NOT delivered.
