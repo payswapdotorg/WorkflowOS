@@ -2,26 +2,35 @@
  * notifications module — public interface.
  *
  * Canonical name: /notifications
- * Responsibility (spec/architecture.md): Optional provider-independent notification boundary.
+ * Responsibility (spec/architecture.md): Optional provider-independent
+ * notification boundary.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-021: implements the provider-independent notification boundary
+ * (NOTIFY-001). Notifications are a side effect — they are NOT authoritative
+ * for workflow/domain state (NOTIFY-AC-02).
  */
 import type { ModuleContract } from '@platform/module-contract.js';
 
+export type {
+  NotificationRequest,
+  NotificationStatus,
+  CreateNotificationInput,
+  NotificationService,
+  NotificationProviderAdapter,
+  NotificationDeliveryInput,
+  NotificationDeliveryResult,
+  NotificationRepository,
+} from './internal/notification.types.js';
+
 /**
  * Public capabilities exposed by the /notifications module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface NotificationsModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional notification-domain methods consumed by other modules
 }
 
 /**
