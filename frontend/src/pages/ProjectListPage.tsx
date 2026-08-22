@@ -21,7 +21,7 @@ export default function ProjectListPage() {
   };
 
   return (
-    <div>
+    <div data-testid="project-list-page">
       <h1>Projects</h1>
       <p>Enter a project ID to view its authoritative state.</p>
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 8, maxWidth: 600 }}>

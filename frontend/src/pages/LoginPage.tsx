@@ -16,7 +16,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div style={{ maxWidth: 400, margin: '100px auto', padding: 20 }}>
+    <div data-testid="login-page" style={{ maxWidth: 400, margin: '100px auto', padding: 20 }}>
       <h1>WorkflowOS</h1>
       <p>Enter your API key to sign in.</p>
       <form onSubmit={handleSubmit}>
