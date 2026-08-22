@@ -2,26 +2,37 @@
  * llm module — public interface.
  *
  * Canonical name: /llm
- * Responsibility (spec/architecture.md): LLM Gateway, architect role execution, Work-order generation.
+ * Responsibility (spec/architecture.md): LLM Gateway, architect role execution,
+ * Work-order generation.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-013: implements the provider-independent LLM Gateway (LLM-001..005).
+ * Provider-specific SDK code stays inside internal/. Credentials via
+ * SecretStore (SEC-001). The gateway owns: provider/model selection, retry
+ * policy, usage recording, error normalization.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  LlmMessage,
+  LlmRequest,
+  LlmResponse,
+  LlmUsage,
+  LlmError,
+  LlmErrorType,
+  LlmGateway,
+  LlmExecutionRecord,
+  LlmExecutionStatus,
+  LlmExecutionRecordRepository,
+} from './internal/llm.types.js';
 
 /**
  * Public capabilities exposed by the /llm module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface LlmModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional LLM-domain methods consumed by other modules
 }
 
 /**
