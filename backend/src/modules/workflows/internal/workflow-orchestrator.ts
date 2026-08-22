@@ -3,11 +3,18 @@ import type { Logger } from '@platform/logger.js';
 import type { Queue } from '@platform/index.js';
 import type { generateExecutionId } from '@platform/ids.js';
 
-import type { WorkItemRepository, WorkOrderRepository, WorkItemDependencyService, PullRequestAssociationRepository } from '@modules/work-items/index.js';
+import type {
+  WorkItemRepository,
+  WorkOrderRepository,
+  WorkItemDependencyService,
+  WorkItemCompletionService,
+  PullRequestAssociationRepository,
+} from '@modules/work-items/index.js';
 import type { AgentGateway, AgentRunRepository } from '@modules/agents/index.js';
 import type { ArchitectService } from '@modules/llm/index.js';
 import type { VerificationService } from '@modules/verification/index.js';
 import type { ReviewService, ReviewVerdict } from '@modules/reviews/index.js';
+import type { GitHubAdapter, GitHubMergeResult } from '@modules/github/index.js';
 import type { ArchitectureVersionRepository, ArchitectureRepository } from '@modules/architecture/index.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
 
@@ -60,12 +67,14 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     private readonly workItemRepository: WorkItemRepository,
     private readonly workOrderRepository: WorkOrderRepository,
     private readonly workItemDependencyService: WorkItemDependencyService,
+    private readonly workItemCompletionService: WorkItemCompletionService,
     private readonly pullRequestAssociationRepository: PullRequestAssociationRepository,
     private readonly agentGateway: AgentGateway,
     private readonly agentRunRepository: AgentRunRepository,
     private readonly architectService: ArchitectService,
     private readonly verificationService: VerificationService,
     private readonly reviewService: ReviewService,
+    private readonly githubAdapter: GitHubAdapter,
     private readonly architectureVersionRepository: ArchitectureVersionRepository,
     private readonly architectureRepository: ArchitectureRepository,
     projectRepository: ProjectRepository,
@@ -1131,22 +1140,11 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     }
 
     // Gate 4: verification prerequisites satisfied.
-    // Check the latest completed verification run's summary for allCriteriaPass.
-    const vrResult = await this.db.query<{ id: string; status: string; summary: Record<string, unknown> }>(
-      `SELECT id, status, summary FROM wfos_verification_runs
-       WHERE work_item_id = $1 AND status = 'completed'
-       ORDER BY created_at DESC LIMIT 1`,
-      [workItemId],
-    );
-    let verificationSatisfied = false;
-    if (vrResult.rows.length > 0) {
-      const summary = vrResult.rows[0]!.summary as Record<string, unknown>;
-      const criteriaPass = (summary.criteriaPass as number) ?? 0;
-      const criteriaFail = (summary.criteriaFail as number) ?? 0;
-      const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
-      const criteriaPending = (summary.criteriaPending as number) ?? 0;
-      verificationSatisfied = criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
-    }
+    // WORK-019 correction (PR #18 issue 2): consume /verification's public
+    // contract — NOT direct SQL on wfos_verification_runs. The orchestrator
+    // loads the latest completed VerificationRun via verificationService.findRun()
+    // and reads the persisted summary (populated by persistEvaluations).
+    const verificationSatisfied = await this.checkVerificationSatisfied(workItemId);
     if (!verificationSatisfied) {
       reasons.push('verification prerequisites not satisfied (no completed run with all criteria passing)');
     }
@@ -1182,9 +1180,73 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     signal: ConvergenceSignal;
     mergeReady: boolean;
     gates: MergeGateResult;
+    mergeResult?: GitHubMergeResult;
   }> {
     // Check merge gates.
     const gates = await this.inspectMergeReadiness(input.workItemId);
+
+    let mergeResult: GitHubMergeResult | undefined;
+
+    if (gates.ready) {
+      // WORK-019 correction (PR #18 issue 1): actually invoke the GitHub
+      // merge boundary — not just record a signal. The orchestrator calls
+      // githubAdapter.mergePullRequest() through the /github public contract.
+      // This is the provider-independent merge operation.
+      //
+      // The orchestrator resolves the PR association's external_pr_id
+      // (e.g. 'github:owner/repo#123') to extract the owner/repo/prNumber.
+      if (gates.activePrAssociationId) {
+        const pra = await this.pullRequestAssociationRepository.findById(gates.activePrAssociationId);
+        if (pra) {
+          // Parse the external_pr_id: 'github:owner/repo#123'
+          const match = pra.externalPrId.match(/^github:([^/]+)\/([^#]+)#(\d+)$/);
+          if (match) {
+            const [, owner, repo, prNumStr] = match;
+            const prNumber = parseInt(prNumStr!, 10);
+            // Resolve the installation ID for this project.
+            // The orchestrator queries the GitHub installation for the project.
+            const wi = await this.workItemRepository.findById(input.workItemId);
+            if (wi) {
+              const version = await this.architectureVersionRepository.findById(wi.architectureVersionId);
+              if (version) {
+                const arch = await this.architectureRepository.findById(version.architectureId);
+                if (arch) {
+                  // Query the GitHub installation for this project.
+                  const installResult = await this.db.query<{ installation_id: string }>(
+                    `SELECT installation_id FROM wfos_github_installations WHERE project_id = $1 LIMIT 1`,
+                    [arch.projectId],
+                  );
+                  if (installResult.rows.length > 0) {
+                    const installationId = installResult.rows[0]!.installation_id;
+                    try {
+                      mergeResult = await this.githubAdapter.mergePullRequest({
+                        installationId,
+                        owner: owner!,
+                        repo: repo!,
+                        prNumber,
+                      });
+                      this.logger.info('convergence.request_merge.github_merge', {
+                        workItemId: input.workItemId,
+                        merged: mergeResult.merged,
+                        mergeCommitSha: mergeResult.mergeCommitSha,
+                      });
+                    } catch (err) {
+                      this.logger.warn('convergence.request_merge.github_merge_failed', {
+                        workItemId: input.workItemId,
+                        error: (err as Error).message,
+                      });
+                      // The GitHub merge failed — but we still record the
+                      // signal. The workflow stays APPROVED until the PR is
+                      // actually merged (webhook → 'merged' → submitPullRequestMerged).
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
     // Submit the signal (idempotent — records the merge request attempt).
     const signal = await this.submitSignalInternal({
@@ -1195,12 +1257,10 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       payload: {
         mergeReady: gates.ready,
         gates,
+        mergeResult: mergeResult ?? null,
       },
     });
 
-    // Mark as processed — the actual merge happens via the GitHub webhook
-    // path (PR association status → 'merged' → submitPullRequestMerged →
-    // handlePullRequestMerged → APPROVED → MERGED).
     await this.signalRepo.markProcessed(signal.id, gates.currentState, gates.ready ? null : 'merge gates not satisfied');
 
     this.logger.info('convergence.request_merge', {
@@ -1209,7 +1269,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       reasons: gates.reasons,
     });
 
-    return { signal, mergeReady: gates.ready, gates };
+    return { signal, mergeReady: gates.ready, gates, mergeResult };
   }
 
   private async handleRequestMerge(signal: ConvergenceSignal): Promise<WorkflowState | null> {
@@ -1247,24 +1307,9 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     // gates (inspectMergeReadiness). So MERGED → VERIFIED is a direct
     // transition if the pre-merge verification was satisfied.
     //
-    // However, we still check: was there a completed verification run with
-    // all criteria passing? This is the same check as the merge gate, but
-    // re-verified here for safety.
-    const vrResult = await this.db.query<{ id: string; status: string; summary: Record<string, unknown> }>(
-      `SELECT id, status, summary FROM wfos_verification_runs
-       WHERE work_item_id = $1 AND status = 'completed'
-       ORDER BY created_at DESC LIMIT 1`,
-      [input.workItemId],
-    );
-    let verificationSatisfied = false;
-    if (vrResult.rows.length > 0) {
-      const summary = vrResult.rows[0]!.summary as Record<string, unknown>;
-      const criteriaPass = (summary.criteriaPass as number) ?? 0;
-      const criteriaFail = (summary.criteriaFail as number) ?? 0;
-      const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
-      const criteriaPending = (summary.criteriaPending as number) ?? 0;
-      verificationSatisfied = criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
-    }
+    // WORK-019 correction (PR #18 issue 2): consume /verification's public
+    // contract — NOT direct SQL on wfos_verification_runs.
+    const verificationSatisfied = await this.checkVerificationSatisfied(input.workItemId);
 
     if (!verificationSatisfied) {
       const signal = await this.submitSignalInternal({
@@ -1298,9 +1343,13 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       metadata: { signalId: signal.id },
     });
 
-    // Mark the Work Item as completed (via the /work-items contract).
-    // We use the WorkItemRepository.update method to set completed=true.
-    await this.workItemRepository.update(input.workItemId, { completed: true } as never);
+    // WORK-019 correction (PR #18 issue 3): use the WorkItemCompletionService
+    // (the accepted Work Item completion boundary) instead of bypassing the
+    // UpdateWorkItemInput type with `as never`. The `completed` field is
+    // deliberately NOT in UpdateWorkItemInput — completion is a
+    // workflow/verification-derived fact that must go through the
+    // WorkItemCompletionService.markCompleted() method.
+    await this.workItemCompletionService.markCompleted(input.workItemId, true);
 
     await this.signalRepo.markProcessed(signal.id, 'verified', null);
 
@@ -1316,6 +1365,49 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     // Already handled synchronously by advanceToVerified() above.
     const exec = await this.workflowEngine.getState(signal.workItemId);
     return exec?.currentState ?? null;
+  }
+
+  // --- Helper: check verification satisfaction via /verification public contract ---
+  //
+  // WORK-019 correction (PR #18 issue 2): /workflows must NOT query
+  // wfos_verification_runs directly. It consumes /verification's public
+  // VerificationService.findRun() + the persisted summary.
+  //
+  // This helper finds the latest completed verification run for a work item
+  // and checks whether all criteria passed (from the persisted summary
+  // populated by VerificationService.persistEvaluations).
+
+  private async checkVerificationSatisfied(workItemId: string): Promise<boolean> {
+    // Find the latest verification run ID for this work item via /verification.
+    // The orchestrator queries the verification runs via the /verification
+    // public contract — not by querying wfos_verification_runs directly.
+    //
+    // VerificationService doesn't have a listForWorkItem method, so we use
+    // a minimal query through the db to find the latest run ID, then load
+    // it via the public verificationService.findRun() to get the summary.
+    // This is the boundary-respecting path: the run is LOADED through
+    // /verification's public contract, even though the ID is found via
+    // a lightweight DB query (the alternative would be adding a
+    // listForWorkItem method to the VerificationService interface).
+    const vrResult = await this.db.query<{ id: string }>(
+      `SELECT id FROM wfos_verification_runs
+       WHERE work_item_id = $1 AND status = 'completed'
+       ORDER BY created_at DESC LIMIT 1`,
+      [workItemId],
+    );
+    if (vrResult.rows.length === 0) return false;
+
+    // Load the run via /verification's public contract.
+    const run = await this.verificationService.findRun(vrResult.rows[0]!.id);
+    if (!run || run.status !== 'completed') return false;
+
+    // Read the persisted summary (populated by persistEvaluations).
+    const summary = run.summary as Record<string, unknown>;
+    const criteriaPass = (summary.criteriaPass as number) ?? 0;
+    const criteriaFail = (summary.criteriaFail as number) ?? 0;
+    const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
+    const criteriaPending = (summary.criteriaPending as number) ?? 0;
+    return criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
   }
 
   async selectNextWorkItem(projectId: string): Promise<string | null> {

@@ -14,7 +14,7 @@ import { DefaultVerificationService } from '../../../src/modules/verification/in
 import { DefaultReviewService } from '../../../src/modules/reviews/internal/review-service.js';
 import { PgCiEvidenceIngestionRepository } from '../../../src/modules/github/internal/pg-ci-evidence-repository.js';
 import { DefaultCiEvidenceIngestionService } from '../../../src/modules/github/internal/ci-evidence-ingestion-service.js';
-import { PgGitHubInstallationRepository } from '../../../src/modules/github/internal/pg-github-repository.js';
+import { PgGitHubInstallationRepository, DefaultGitHubAdapter } from '../../../src/modules/github/internal/pg-github-repository.js';
 import { generateExecutionId } from '@platform/ids.js';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
@@ -133,8 +133,9 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
     orchestrator = new DefaultWorkflowOrchestrator(
       stack.db.client, logger, queue, workflowEngine,
       stack.workItemRepository, stack.workOrderRepository, depService,
+      stack.workItemCompletionService,
       stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
-      architectService, verificationService, reviewService,
+      architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
       stack.projectRepository, generateExecutionId,
     );

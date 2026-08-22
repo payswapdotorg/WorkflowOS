@@ -38,6 +38,7 @@ export type {
   WorkOrderState,
   WorkOrderRepository,
   WorkItemDependencyService,
+  WorkItemCompletionService,
 } from './internal/work-item.types.js';
 
 /**
