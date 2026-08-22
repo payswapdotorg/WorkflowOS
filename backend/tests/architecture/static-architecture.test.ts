@@ -2525,4 +2525,17 @@ describe('WORK-020 invariants — /audit module boundaries', () => {
     // Must check pull_request_association_id (new).
     expect(src).toMatch(/NEW\.pull_request_association_id/);
   });
+
+  it('REGRESSION (PR #19 issue 4): index.ts wires workflow + audit routes into production buildServer', () => {
+    // The production entry point (index.ts) must pass the audited
+    // workflowEngine + auditService into buildServer so production
+    // workflow transitions emit audit events and the audit API is served.
+    const indexFile = join(SRC_ROOT, 'index.ts');
+    const src = readFileSync(indexFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Must pass workflowEngine into the workflow route deps.
+    expect(codeOnly).toMatch(/workflowEngine:\s*app\.deps\.workflowEngine/);
+    // Must pass auditService into the audit route deps.
+    expect(codeOnly).toMatch(/auditQuery:\s*app\.deps\.auditService/);
+  });
 });
