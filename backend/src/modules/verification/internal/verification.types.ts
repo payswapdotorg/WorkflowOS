@@ -105,7 +105,21 @@ export interface CreateEvidenceInput {
   projectId: string;
   verificationRunId: string;
   evidenceType: string;
-  authority?: EvidenceAuthority;
+  /**
+   * Provider that produced the evidence ('github', 'agent', 'llm', 'manual').
+   *
+   * NOTE: `authority` is intentionally NOT in this input type. Authority is
+   * determined SERVER-SIDE by the VerificationService based on the trusted
+   * source path — never accepted from the client. This prevents the
+   * verification-authority bypass (PR #14 architect review): an ordinary
+   * project writer cannot manufacture authoritative PASS evidence by
+   * self-declaring `authority: 'authoritative'`.
+   *
+   * The ONLY trusted path that produces `authoritative` evidence is
+   * {@link VerificationService.attachCiEvidence} (CI results ingested through
+   * the /github boundary). The public/manual {@link VerificationService.attachEvidence}
+   * path always produces `claim` evidence.
+   */
   provider: string;
   externalRef?: string | null;
   headSha?: string | null;
@@ -121,7 +135,15 @@ export interface CreateEvidenceInput {
 }
 
 export interface EvidenceRepository {
-  create(input: CreateEvidenceInput): Promise<Evidence>;
+  /**
+   * Create an Evidence row. The `authority` parameter is SERVER-SIDE only —
+   * it is NOT part of {@link CreateEvidenceInput} and cannot be supplied by
+   * API clients. The {@link VerificationService} sets it based on the trusted
+   * source path:
+   *   - `attachEvidence` (public/manual path) → `authority: 'claim'`
+   *   - `attachCiEvidence` (trusted /github CI path) → `authority: 'authoritative'`
+   */
+  create(input: CreateEvidenceInput, authority: EvidenceAuthority): Promise<Evidence>;
   findById(id: string): Promise<Evidence | null>;
   listForVerificationRun(verificationRunId: string): Promise<Evidence[]>;
 }

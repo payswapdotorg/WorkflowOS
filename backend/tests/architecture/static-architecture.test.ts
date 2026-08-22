@@ -1806,4 +1806,78 @@ describe('WORK-015 invariants — /verification + /github CI ingestion', () => {
     expect(ghIndex).toMatch(/CiEvidenceIngestionRepository/);
     expect(ghIndex).toMatch(/CiEvidenceIngestionService/);
   });
+
+  // --- REGRESSION (PR #14 architect review): verification-authority bypass ---
+
+  it('REGRESSION (PR #14): CreateEvidenceInput does NOT have an authority field', () => {
+    // The public CreateEvidenceInput type must NOT include `authority` —
+    // authority is determined SERVER-SIDE based on the trusted source path,
+    // never accepted from the client. This is the structural fix for the
+    // verification-authority bypass: an ordinary project writer cannot
+    // manufacture authoritative PASS evidence by self-declaring
+    // `authority: 'authoritative'`.
+    const typesFile = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+    expect(existsSync(typesFile), `${relative(BACKEND_ROOT, typesFile)} must exist`).toBe(true);
+    const src = readFileSync(typesFile, 'utf8');
+    // Strip comments so only executable code is checked.
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Find the CreateEvidenceInput interface body (everything between the
+    // opening { and the matching closing }).
+    const match = codeOnly.match(/export\s+interface\s+CreateEvidenceInput\s*\{([\s\S]*?)^\}/m);
+    expect(match, 'CreateEvidenceInput interface not found').not.toBeNull();
+    const interfaceBody = match![1]!;
+    expect(
+      interfaceBody,
+      'CreateEvidenceInput must NOT have an `authority` field — it is server-side only',
+    ).not.toMatch(/^\s*authority\b/m);
+  });
+
+  it('REGRESSION (PR #14): EvidenceRepository.create requires authority as a server-side parameter', () => {
+    // The repository create() method must take `authority` as a separate
+    // required parameter — NOT from CreateEvidenceInput. This enforces that
+    // the service (not the client) sets the authority based on the trusted
+    // source path.
+    const typesFile = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+    const src = readFileSync(typesFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The create() signature must include `authority: EvidenceAuthority` as a
+    // separate parameter (not inside CreateEvidenceInput).
+    expect(codeOnly).toMatch(/create\s*\(\s*input:\s*CreateEvidenceInput\s*,\s*authority:\s*EvidenceAuthority\s*\)/);
+  });
+
+  it('REGRESSION (PR #14): attachEvidence always passes claim authority to the repository', () => {
+    // The public/manual attachEvidence() method must ALWAYS pass 'claim' to
+    // evidenceRepo.create() — it must NOT read authority from the input.
+    const serviceFile = join(MODULES_DIR, 'verification', 'internal', 'verification-service.ts');
+    expect(existsSync(serviceFile)).toBe(true);
+    const src = readFileSync(serviceFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The attachEvidence method must call evidenceRepo.create(input, 'claim').
+    expect(codeOnly).toMatch(/async\s+attachEvidence[\s\S]*?evidenceRepo\.create\s*\(\s*input,\s*['"]claim['"]\s*\)/);
+    // The attachCiEvidence method must call evidenceRepo.create(..., 'authoritative').
+    expect(codeOnly).toMatch(/async\s+attachCiEvidence[\s\S]*?evidenceRepo\.create\s*\([\s\S]*?,\s*['"]authoritative['"]\s*\)/);
+  });
+
+  it('REGRESSION (PR #14): the verification evidence route does NOT pass authority to the service', () => {
+    // The POST /verification-runs/:runId/evidence route must NOT pass
+    // `authority` from the client body to the service. The field is not
+    // accepted at the API boundary.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'verification.route.ts');
+    expect(existsSync(routeFile)).toBe(true);
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Find the attachEvidence call in the route and verify it does NOT include
+    // `authority:`. The attachEvidence call looks like:
+    //   deps.verificationService.attachEvidence({
+    //     projectId: ..., verificationRunId: ..., evidenceType: ..., provider: ...,
+    //     ...
+    //   })
+    const match = codeOnly.match(/verificationService\.attachEvidence\s*\(\{([\s\S]*?)\}\s*\)/);
+    expect(match, 'attachEvidence call in route not found').not.toBeNull();
+    const callBody = match![1]!;
+    expect(
+      callBody,
+      'the route must NOT pass authority to attachEvidence — it is server-side only',
+    ).not.toMatch(/\bauthority\b/);
+  });
 });

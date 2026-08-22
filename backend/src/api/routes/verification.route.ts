@@ -126,7 +126,11 @@ export async function verificationRoutes(
       });
       const body = req.body as {
         evidenceType?: string;
-        authority?: 'authoritative' | 'claim';
+        // NOTE: `authority` is intentionally NOT accepted from the client.
+        // The public/manual evidence path always produces `claim` evidence.
+        // Authoritative evidence can only come through the trusted CI
+        // ingestion path (POST /verification-runs/:runId/ci-evidence).
+        // See PR #14 architect review.
         provider?: string;
         externalRef?: string;
         headSha?: string;
@@ -146,7 +150,6 @@ export async function verificationRoutes(
         projectId: resolved.projectId,
         verificationRunId: runId,
         evidenceType: body.evidenceType,
-        authority: body.authority,
         provider: body.provider,
         externalRef: body.externalRef,
         headSha: body.headSha,

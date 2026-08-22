@@ -109,7 +109,13 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
 export class PgEvidenceRepository implements EvidenceRepository {
   constructor(private readonly db: DatabaseClient) {}
 
-  async create(input: CreateEvidenceInput): Promise<Evidence> {
+  async create(input: CreateEvidenceInput, authority: EvidenceAuthority): Promise<Evidence> {
+    // `authority` is a SERVER-SIDE parameter — it is NOT part of
+    // CreateEvidenceInput and cannot be supplied by API clients. The
+    // VerificationService sets it based on the trusted source path:
+    //   - attachEvidence (public/manual) → 'claim'
+    //   - attachCiEvidence (trusted /github CI) → 'authoritative'
+    // This prevents the verification-authority bypass (PR #14 architect review).
     const result = await this.db.query<EvidenceRow>(
       `INSERT INTO wfos_evidence
          (project_id, verification_run_id, evidence_type, authority, provider,
@@ -125,7 +131,7 @@ export class PgEvidenceRepository implements EvidenceRepository {
         input.projectId,
         input.verificationRunId,
         input.evidenceType,
-        input.authority ?? 'authoritative',
+        authority, // SERVER-SIDE — never from client
         input.provider,
         input.externalRef ?? null,
         input.headSha ?? null,

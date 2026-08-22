@@ -138,7 +138,24 @@ export class DefaultVerificationService implements VerificationService {
   }
 
   async attachEvidence(input: CreateEvidenceInput): Promise<Evidence> {
-    return this.evidenceRepo.create(input);
+    // AUTHORITY BOUNDARY (PR #14 architect review):
+    //
+    // The public/manual evidence path ALWAYS produces `authority: 'claim'`.
+    // An API client cannot self-declare `authority: 'authoritative'` — that
+    // would let an ordinary project writer manufacture authoritative PASS
+    // evidence, map it to a criterion as 'proves', and obtain an
+    // authoritative PASS without an objective/provider-backed source.
+    //
+    // The ONLY trusted path that produces `authoritative` evidence is
+    // {@link attachCiEvidence} (CI results ingested through the /github
+    // boundary). Manual/agent/LLM evidence remains `claim` unless the
+    // architecture explicitly authorizes promotion (no such path exists
+    // in WORK-015).
+    //
+    // `CreateEvidenceInput` intentionally does NOT have an `authority` field
+    // — the client cannot supply it. The authority is set HERE, server-side,
+    // based on the calling path.
+    return this.evidenceRepo.create(input, 'claim');
   }
 
   async attachCiEvidence(input: {
@@ -169,11 +186,14 @@ export class DefaultVerificationService implements VerificationService {
     // preserves the raw conclusion; /verification interprets it.
     const result = translateGithubConclusion(ci.conclusion, ci.status);
 
+    // AUTHORITY BOUNDARY: CI results ingested through the /github boundary
+    // are `authoritative` — they come from the customer's actual CI system,
+    // not from an agent's self-report. This is the ONLY trusted path that
+    // produces `authoritative` evidence in WORK-015.
     return this.evidenceRepo.create({
       projectId: run.projectId,
       verificationRunId: run.id,
       evidenceType: 'ci',
-      authority: 'authoritative', // CI results ingested via /github are authoritative.
       provider: ci.provider,
       externalRef: ci.runUrl,
       headSha: ci.headSha,
@@ -191,7 +211,7 @@ export class DefaultVerificationService implements VerificationService {
         artifactReferences: ci.artifactReferences,
         providerMetadata: ci.providerMetadata,
       },
-    });
+    }, 'authoritative');
   }
 
   async mapEvidenceToCriterion(input: CreateMapInput): Promise<CriterionEvidenceMapping> {
@@ -537,27 +557,28 @@ export function translateGithubConclusion(conclusion: string | null, status: str
 /**
  * Returns the authority classification for a given evidence provider/type.
  *
- * Used by the API layer when attaching manual or agent evidence to a run:
- *   - CI results ingested via /github → 'authoritative'.
- *   - Agent-reported test results → 'claim' (VERIFY-EVAL-AC-03).
- *   - LLM/Architect output → 'claim' (architecture §15 line 481).
- *   - Manual evidence by an authorized reviewer → 'authoritative'.
+ * Used by the service to classify evidence server-side. The boundary is:
+ *   - CI results ingested via /github (attachCiEvidence path) → 'authoritative'.
+ *   - Everything else (manual, agent-claim, llm-claim, etc.) → 'claim'.
  *
- * Exposed as a function (not a constant) so callers explicitly classify their
- * evidence — the boundary between 'authoritative' and 'claim' is a
- * first-class decision, not an implicit default.
+ * PR #14 architect review: manual evidence is `claim` unless the architecture
+ * explicitly authorizes promotion (no such path exists in WORK-015). This
+ * prevents an ordinary project writer from manufacturing authoritative PASS
+ * evidence by self-declaring `authority: 'authoritative'`.
+ *
+ * Exposed as a function so the authority boundary is a first-class decision
+ * documented in code, not an implicit default.
  */
 export function classifyEvidenceAuthority(
   provider: string,
   evidenceType: string,
 ): EvidenceAuthority {
   // CI results are authoritative (they come from the customer's actual CI
-  // system, not from an agent's self-report).
+  // system via /github, not from an agent's self-report). This is the ONLY
+  // path that produces authoritative evidence in WORK-015.
   if (evidenceType === 'ci' && provider === 'github') return 'authoritative';
-  // Manual evidence recorded by an authorized reviewer is authoritative.
-  if (evidenceType === 'manual') return 'authoritative';
-  // Everything else (agent-claim, llm-claim, etc.) is a claim — never enough
-  // for PASS alone.
+  // Everything else (manual, agent-claim, llm-claim, etc.) is a claim —
+  // never enough for PASS alone.
   return 'claim';
 }
 

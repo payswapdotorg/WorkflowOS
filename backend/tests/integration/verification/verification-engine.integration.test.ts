@@ -11,6 +11,7 @@ import { PgGitHubInstallationRepository } from '../../../src/modules/github/inte
 import { DefaultWorkflowEngine } from '../../../src/modules/workflows/internal/workflow-engine.js';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
+import type { Evidence } from '@modules/verification/index.js';
 
 /**
  * WORK-015 — CI ingestion and verification engine (VERIFY-001..003, GITHUB-006).
@@ -210,6 +211,43 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
     });
   }
 
+  // Helper: attach authoritative CI evidence with a specific result to a run.
+  // This routes through the TRUSTED /github CI ingestion path (not the
+  // public/manual attachEvidence path) — the only way to produce
+  // `authority: 'authoritative'` evidence (PR #14 architect review).
+  //
+  // Maps the desired EvidenceResult to the appropriate GitHub conclusion:
+  //   pass    → 'success'
+  //   fail    → 'failure'
+  //   blocked → 'cancelled'
+  //   unknown → 'neutral'
+  let ciRunCounter = 500000;
+  async function attachAuthoritativeCi(
+    runId: string,
+    desiredResult: 'pass' | 'fail' | 'blocked' | 'unknown',
+  ): Promise<Evidence> {
+    ciRunCounter++;
+    const conclusionMap: Record<typeof desiredResult, string> = {
+      pass: 'success',
+      fail: 'failure',
+      blocked: 'cancelled',
+      unknown: 'neutral',
+    };
+    const ci = await ciIngestionService.ingestFromWebhookPayload({
+      webhookEventId: `wh-ci-${ciRunCounter}`,
+      eventType: 'workflow_run',
+      payload: buildWorkflowRunPayload({
+        runId: ciRunCounter,
+        conclusion: conclusionMap[desiredResult],
+      }),
+    });
+    if (!ci) throw new Error(`attachAuthoritativeCi: CI ingestion returned null for result ${desiredResult}`);
+    return verificationService.attachCiEvidence({
+      verificationRunId: runId,
+      ciEvidenceId: ci.id,
+    });
+  }
+
   // --- GitHub CI ingestion ---
 
   describe('GitHub CI ingestion (GITHUB-006, GH6-AC-01)', () => {
@@ -342,13 +380,15 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const evidence = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'manual', authority: 'authoritative', provider: 'manual',
+        evidenceType: 'manual', provider: 'manual',
         externalRef: 'manual-check-1', result: 'pass',
         contentSummary: 'Reviewer verified the auth flow',
       });
       expect(evidence.id).toBeTruthy();
       expect(evidence.verificationRunId).toBe(run.id);
-      expect(evidence.authority).toBe('authoritative');
+      // PR #14 architect review: manual evidence via the public path is always
+      // `claim` — authority is determined server-side, not client-supplied.
+      expect(evidence.authority).toBe('claim');
       expect(evidence.result).toBe('pass');
       expect(evidence.provider).toBe('manual');
     });
@@ -388,7 +428,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       expect(stored.contentLength).toBe(100_000);
       const evidence = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'test', authority: 'authoritative', provider: 'github',
+        evidenceType: 'test', provider: 'github',
         result: 'pass', contentSummary: 'Large test report (body in ObjectStore)',
         storageKey: stored.key, storageProvider: stored.provider,
         artifactDigest: stored.digestSha256, artifactSizeBytes: stored.contentLength,
@@ -411,11 +451,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-map-001',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github',
-        result: 'pass', contentSummary: 'CI passed',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       const mapping = await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -433,11 +469,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-map-002',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github',
-        result: 'pass',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       await expect(
         verificationService.mapEvidenceToCriterion({
           projectId: projectA.id, verificationRunId: run.id,
@@ -452,11 +484,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-map-003',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github',
-        result: 'pass',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       await expect(
         verificationService.mapEvidenceToCriterion({
           projectId: projectA.id, verificationRunId: run.id,
@@ -471,11 +499,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-map-004',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github',
-        result: 'pass',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       const m1 = await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id,
@@ -497,10 +521,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-eval-001',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -519,10 +540,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-eval-002',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'fail',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'fail');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -552,10 +570,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-eval-004',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'blocked',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'blocked');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'blocks',
@@ -574,7 +589,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const claimEvidence = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'agent-claim', authority: 'claim', provider: 'agent',
+        evidenceType: 'agent-claim', provider: 'agent',
         result: 'pass', contentSummary: 'Agent claims the tests pass',
       });
       await verificationService.mapEvidenceToCriterion({
@@ -594,10 +609,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-eval-006',
       });
-      const evidence = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -619,18 +631,12 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-001',
       });
-      const ev1 = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev1 = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev1.id, criterionId: criterionA1.id, relevance: 'proves',
       });
-      const ev2 = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev2 = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev2.id, criterionId: criterionA2.id, relevance: 'proves',
@@ -647,18 +653,12 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-002',
       });
-      const ev1 = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev1 = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev1.id, criterionId: criterionA1.id, relevance: 'proves',
       });
-      const ev2 = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'fail',
-      });
+      const ev2 = await attachAuthoritativeCi(run.id, 'fail');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev2.id, criterionId: criterionA2.id, relevance: 'proves',
@@ -674,10 +674,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-req-003',
       });
-      const ev = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'blocked',
-      });
+      const ev = await attachAuthoritativeCi(run.id, 'blocked');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev.id, criterionId: criterionA1.id, relevance: 'blocks',
@@ -695,7 +692,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const claim1 = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'agent-claim', authority: 'claim', provider: 'agent', result: 'pass',
+        evidenceType: 'agent-claim', provider: 'agent', result: 'pass',
       });
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
@@ -703,7 +700,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const claim2 = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'agent-claim', authority: 'claim', provider: 'agent', result: 'pass',
+        evidenceType: 'agent-claim', provider: 'agent', result: 'pass',
       });
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
@@ -726,7 +723,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const llmClaim = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'llm-claim', authority: 'claim', provider: 'llm', result: 'pass',
+        evidenceType: 'llm-claim', provider: 'llm', result: 'pass',
         contentSummary: 'Architect LLM claims the criterion is met',
       });
       await verificationService.mapEvidenceToCriterion({
@@ -761,10 +758,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-auth-003',
       });
-      const ev = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -788,10 +782,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-wf-001',
       });
-      const ev = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
       await verificationService.mapEvidenceToCriterion({
         projectId: projectA.id, verificationRunId: run.id,
         evidenceId: ev.id, criterionId: criterionA1.id, relevance: 'proves',
@@ -835,10 +826,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-tenant-003',
       });
-      const ev = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
       const res = await server.inject({
         method: 'POST', url: `/verification-runs/${run.id}/evidence-mappings`,
         headers: { 'x-api-key': 'raw-key-verify-b' },
@@ -866,10 +854,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
         projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
         source: 'github-actions', executionId: 'verify-tenant-005',
       });
-      const ev = await verificationService.attachEvidence({
-        projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'ci', authority: 'authoritative', provider: 'github', result: 'pass',
-      });
+      const ev = await attachAuthoritativeCi(run.id, 'pass');
       await expect(
         verificationService.mapEvidenceToCriterion({
           projectId: projectA.id, verificationRunId: run.id,
@@ -894,7 +879,7 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       });
       const evidence = await verificationService.attachEvidence({
         projectId: projectA.id, verificationRunId: run.id,
-        evidenceType: 'test', authority: 'authoritative', provider: 'github',
+        evidenceType: 'test', provider: 'github',
         result: 'pass', contentSummary: 'Large test report',
         storageKey: stored.key, storageProvider: stored.provider,
         artifactDigest: stored.digestSha256, artifactSizeBytes: stored.contentLength,
@@ -924,11 +909,110 @@ describe('WORK-015 — CI ingestion and verification engine', () => {
       expect(translateGithubConclusion('success', 'queued')).toBe('unknown');
     });
 
-    it('classifyEvidenceAuthority: CI via github → authoritative; agent/llm → claim', () => {
+    it('classifyEvidenceAuthority: CI via github → authoritative; manual/agent/llm → claim', () => {
+      // PR #14 architect review: only CI via /github is authoritative.
+      // Manual evidence is now `claim` (not authoritative) — the public
+      // attachEvidence path always produces claim evidence.
       expect(classifyEvidenceAuthority('github', 'ci')).toBe('authoritative');
-      expect(classifyEvidenceAuthority('manual', 'manual')).toBe('authoritative');
+      expect(classifyEvidenceAuthority('manual', 'manual')).toBe('claim');
       expect(classifyEvidenceAuthority('agent', 'agent-claim')).toBe('claim');
       expect(classifyEvidenceAuthority('llm', 'llm-claim')).toBe('claim');
+    });
+  });
+
+  // --- Authority bypass regression (PR #14 architect review) ---
+
+  describe('REGRESSION (PR #14): verification-authority bypass', () => {
+    it('a project writer cannot self-declare authoritative evidence via the API', async () => {
+      const wi = await createWorkItemA('VERIFY-BYPASS-001');
+      const run = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-bypass-001',
+      });
+      // Attempt to manufacture authoritative PASS evidence by sending
+      // `authority: 'authoritative'` in the request body.
+      const res = await server.inject({
+        method: 'POST', url: `/verification-runs/${run.id}/evidence`,
+        headers: { 'x-api-key': 'raw-key-verify-a' },
+        payload: {
+          evidenceType: 'manual',
+          provider: 'manual',
+          authority: 'authoritative', // ← self-declared — must be IGNORED
+          result: 'pass',
+          contentSummary: 'I claim this passes',
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      const evidence = res.json() as Evidence;
+      // The evidence MUST be `claim`, NOT `authoritative` — the client-supplied
+      // `authority` field was ignored by the server.
+      expect(evidence.authority).toBe('claim');
+      expect(evidence.result).toBe('pass'); // result is still pass (claim pass)
+      expect(evidence.evidenceType).toBe('manual');
+    });
+
+    it('self-declared authoritative evidence + mapping + evaluate does NOT produce criterion PASS', async () => {
+      const wi = await createWorkItemA('VERIFY-BYPASS-002');
+      const run = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-bypass-002',
+      });
+      // Step 1: manufacture "authoritative pass" evidence via the API.
+      const evRes = await server.inject({
+        method: 'POST', url: `/verification-runs/${run.id}/evidence`,
+        headers: { 'x-api-key': 'raw-key-verify-a' },
+        payload: {
+          evidenceType: 'manual',
+          provider: 'manual',
+          authority: 'authoritative', // ← self-declared — must be IGNORED
+          result: 'pass',
+        },
+      });
+      expect(evRes.statusCode).toBe(201);
+      const evidence = evRes.json() as Evidence;
+      expect(evidence.authority).toBe('claim'); // NOT authoritative — bypass blocked
+
+      // Step 2: map the evidence to a criterion with relevance 'proves'.
+      const mapRes = await server.inject({
+        method: 'POST', url: `/verification-runs/${run.id}/evidence-mappings`,
+        headers: { 'x-api-key': 'raw-key-verify-a' },
+        payload: {
+          evidenceId: evidence.id,
+          criterionId: criterionA1.id,
+          relevance: 'proves',
+        },
+      });
+      expect(mapRes.statusCode).toBe(201);
+
+      // Step 3: evaluate the criterion — it MUST be PENDING, not PASS.
+      const evalResult = await verificationService.evaluateCriterion({
+        verificationRunId: run.id, criterionId: criterionA1.id,
+      });
+      expect(evalResult.derivedStatus).toBe('pending');
+      expect(evalResult.derivedStatus).not.toBe('pass');
+      expect(evalResult.authoritativeEvidencePresent).toBe(false);
+    });
+
+    it('only the trusted CI ingestion path produces authoritative evidence', async () => {
+      const wi = await createWorkItemA('VERIFY-BYPASS-003');
+      const run = await verificationService.createRun({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'github-actions', executionId: 'verify-bypass-003',
+      });
+      // Route through the trusted CI ingestion path.
+      const evidence = await attachAuthoritativeCi(run.id, 'pass');
+      expect(evidence.authority).toBe('authoritative');
+      expect(evidence.result).toBe('pass');
+      // Map + evaluate → PASS (authoritative evidence present).
+      await verificationService.mapEvidenceToCriterion({
+        projectId: projectA.id, verificationRunId: run.id,
+        evidenceId: evidence.id, criterionId: criterionA1.id, relevance: 'proves',
+      });
+      const evalResult = await verificationService.evaluateCriterion({
+        verificationRunId: run.id, criterionId: criterionA1.id,
+      });
+      expect(evalResult.derivedStatus).toBe('pass');
+      expect(evalResult.authoritativeEvidencePresent).toBe(true);
     });
   });
 });
