@@ -21,6 +21,10 @@ export interface AppConfig {
   databaseUrl?: string;
   objectStorageDir?: string;
   logLevel: string;
+  /** PRODUCTION READINESS: env var name holding the GitHub webhook secret. */
+  githubWebhookSecretRef?: string;
+  /** PRODUCTION READINESS: CORS origin (the Vercel frontend URL). */
+  corsOrigin?: string;
 }
 
 const DEFAULT_PORT = 3001;
@@ -54,5 +58,7 @@ export function loadConfig(): AppConfig {
     databaseUrl,
     objectStorageDir: process.env.OBJECT_STORAGE_DIR,
     logLevel: process.env.LOG_LEVEL ?? 'info',
+    githubWebhookSecretRef: process.env.WORKFLOWOS_GITHUB_WEBHOOK_SECRET_REF ?? 'WORKFLOWOS_GITHUB_WEBHOOK_SECRET',
+    corsOrigin: process.env.CORS_ORIGIN,
   };
 }

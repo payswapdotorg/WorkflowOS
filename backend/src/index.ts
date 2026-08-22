@@ -27,6 +27,8 @@ async function main(): Promise<void> {
     server = await buildServer({
       queue: app.deps.queue,
       logger: app.deps.logger,
+      // PRODUCTION READINESS: CORS origin (the Vercel frontend URL).
+      ...(config.corsOrigin ? { corsOrigin: config.corsOrigin } : {}),
       // WORK-023: wire health/readiness deps (PostgreSQL, Redis, ObjectStore)
       // so /health/ready can verify connectivity to authoritative dependencies.
       ...(app.deps.infrastructure
@@ -142,6 +144,8 @@ async function main(): Promise<void> {
               architectureVersionRepository: app.deps.architectureVersionRepository,
               workItemRepository: app.deps.workItemRepository,
               workflowEngine: app.deps.workflowEngine,
+              // WORK-017/018: orchestrator (convergence loop). Present when Redis is available.
+              ...(app.deps.orchestrator ? { orchestrator: app.deps.orchestrator } : {}),
             },
           }
         : {}),
@@ -176,6 +180,138 @@ async function main(): Promise<void> {
               architectureVersionRepository: app.deps.architectureVersionRepository,
               workItemRepository: app.deps.workItemRepository,
               notificationService: app.deps.notificationService,
+            },
+          }
+        : {}),
+      // --- PRODUCTION READINESS: wire the remaining route groups ---
+      // These were previously only wired in the test/E2E composition.
+      // Production must wire them so the deployed API has the full route set.
+      // WORK-017/018: workflow orchestrator is added to the workflow route deps
+      // when present (constructed in app.ts when Redis is available).
+      // The `workflow` route group is already wired above — here we just ensure
+      // the orchestrator is passed through when it exists.
+      // (The workflow route deps are constructed inline above; the orchestrator
+      //  is added via a spread when present.)
+      // WORK-012: agent gateway + agent run routes.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.agentGateway &&
+      app.deps.agentRunRepository &&
+      app.deps.queue
+        ? {
+            agents: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              agentGateway: app.deps.agentGateway,
+              agentRunRepository: app.deps.agentRunRepository,
+              queue: app.deps.queue,
+            },
+          }
+        : {}),
+      // WORK-015: verification routes.
+      ...(app.deps.authorizationService &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.requirementRepository &&
+      app.deps.acceptanceCriterionRepository &&
+      app.deps.verificationService &&
+      app.deps.ciEvidenceIngestionService
+        ? {
+            verification: {
+              authorizationService: app.deps.authorizationService,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              requirementRepository: app.deps.requirementRepository,
+              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
+              verificationService: app.deps.verificationService,
+              ciEvidenceIngestionService: app.deps.ciEvidenceIngestionService,
+            },
+          }
+        : {}),
+      // WORK-016: review routes.
+      ...(app.deps.authorizationService &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.reviewService
+        ? {
+            reviews: {
+              authorizationService: app.deps.authorizationService,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              reviewService: app.deps.reviewService,
+            },
+          }
+        : {}),
+      // WORK-013: LLM gateway routes.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.llmGateway &&
+      app.deps.llmExecutionRecordRepository
+        ? {
+            llm: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              llmGateway: app.deps.llmGateway,
+              executionRecordRepository: app.deps.llmExecutionRecordRepository,
+            },
+          }
+        : {}),
+      // WORK-014: architect service routes.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.workOrderRepository &&
+      app.deps.requirementRepository &&
+      app.deps.acceptanceCriterionRepository &&
+      app.deps.llmGateway &&
+      app.deps.architectService
+        ? {
+            architect: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              workOrderRepository: app.deps.workOrderRepository,
+              requirementRepository: app.deps.requirementRepository,
+              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
+              llmGateway: app.deps.llmGateway,
+              architectService: app.deps.architectService,
+              db: app.deps.infrastructure?.database as never,
+            },
+          }
+        : {}),
+      // WORK-008/009: GitHub webhook routes (signature-validated, not auth-gated).
+      ...(app.deps.githubAdapter &&
+      app.deps.webhookEventRepository &&
+      app.deps.secretStore
+        ? {
+            githubWebhook: {
+              queue: app.deps.queue,
+              logger: app.deps.logger,
+              secretStore: app.deps.secretStore,
+              webhookSecretRef: config.githubWebhookSecretRef ?? 'WORKFLOWOS_GITHUB_WEBHOOK_SECRET',
+              githubAdapter: app.deps.githubAdapter,
+              webhookEventRepository: app.deps.webhookEventRepository,
+              ...(app.deps.webhookProcessingService ? { webhookProcessingService: app.deps.webhookProcessingService } : {}),
             },
           }
         : {}),

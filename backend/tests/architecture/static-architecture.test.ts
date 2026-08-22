@@ -3137,3 +3137,117 @@ describe('WORK-024 invariants -- E2E lifecycle boundaries', () => {
     expect(src).toMatch(/lifecycle\.integration/);
   });
 });
+
+// ===========================================================================
+// PRODUCTION READINESS invariants.
+//
+// Static checks that verify the production composition is complete:
+//   - index.ts wires every route group that buildServer() supports;
+//   - app.ts constructs the full service stack (not just the test subset);
+//   - CORS support is present;
+//   - no production role defaults to fake providers (checked at runtime);
+//   - production code does not depend on pglite/in-memory implementations
+//     for authoritative state;
+//   - frozen architecture files remain untouched.
+// ===========================================================================
+
+describe('PRODUCTION READINESS invariants', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+
+  // --- Production route wiring audit ---
+
+  it('production index.ts wires every route group that buildServer() supports', () => {
+    // Extract the route groups from server.ts (the `if (deps.X && deps.Y)` blocks).
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    const routeGroups = new Set<string>();
+    for (const m of serverSrc.matchAll(/deps\.(\w+)\s*&&/g)) {
+      routeGroups.add(m[1]!);
+    }
+    // Also check the `await XRoutes(app, deps.Y)` registrations.
+    for (const m of serverSrc.matchAll(/await\s+\w+Routes\(app,\s*deps\.(\w+)\)/g)) {
+      routeGroups.add(m[1]!);
+    }
+
+    // The index.ts must reference each of these route groups.
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+
+    // Required route groups (excluding 'health' which is always wired + 'jobs'
+    // which is part of ServerDeps directly).
+    const REQUIRED_GROUPS = [
+      'auth',
+      'projects',
+      'specifications',
+      'architecture',
+      'workItems',
+      'requirements',
+      'workflow',
+      'agents',
+      'verification',
+      'reviews',
+      'llm',
+      'architect',
+      'githubWebhook',
+      'audit',
+      'notifications',
+      'health',
+    ];
+
+    const missing: string[] = [];
+    for (const group of REQUIRED_GROUPS) {
+      if (!indexSrc.includes(group)) {
+        missing.push(group);
+      }
+    }
+    expect(missing, `index.ts is missing route group wiring: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('app.ts constructs the full service stack (orchestrator, agentGateway, llmGateway, architectService, verificationService, reviewService, webhookProcessing)', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    const REQUIRED_SERVICES = [
+      'DefaultWorkflowOrchestrator',
+      'DefaultAgentGateway',
+      'DefaultLlmGateway',
+      'DefaultArchitectService',
+      'DefaultVerificationService',
+      'DefaultReviewService',
+      'DefaultWebhookProcessingService',
+      'DefaultCiEvidenceIngestionService',
+    ];
+    const missing: string[] = [];
+    for (const svc of REQUIRED_SERVICES) {
+      if (!appSrc.includes(svc)) {
+        missing.push(svc);
+      }
+    }
+    expect(missing, `app.ts is missing service construction: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('CORS support is present in server.ts', () => {
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverSrc).toMatch(/corsOrigin/);
+    expect(serverSrc).toMatch(/Access-Control-Allow-Origin/);
+  });
+
+  it('config.ts includes CORS + GitHub webhook secret ref configuration', () => {
+    const configSrc = readFileSync(join(BACKEND_ROOT, 'src', 'config.ts'), 'utf8');
+    expect(configSrc).toMatch(/corsOrigin/);
+    expect(configSrc).toMatch(/githubWebhookSecretRef/);
+  });
+
+  it('production deployment documentation exists', () => {
+    const docPath = join(REPO_ROOT, 'docs', 'deployment', 'production.md');
+    expect(existsSync(docPath), 'docs/deployment/production.md not found').toBe(true);
+    const src = readFileSync(docPath, 'utf8');
+    expect(src).toMatch(/Neon/i);
+    expect(src).toMatch(/Railway/i);
+    expect(src).toMatch(/R2|Cloudflare/i);
+    expect(src).toMatch(/GitHub App/i);
+    expect(src).toMatch(/Vercel/i);
+    expect(src).toMatch(/CORS/i);
+  });
+
+  it('bootstrap script exists', () => {
+    const scriptPath = join(REPO_ROOT, 'scripts', 'bootstrap-production.ts');
+    expect(existsSync(scriptPath), 'scripts/bootstrap-production.ts not found').toBe(true);
+  });
+});

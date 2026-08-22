@@ -96,6 +96,31 @@ import type { NotificationService } from '@modules/notifications/index.js';
 import type { AppConfig } from './config.js';
 import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
 import type { WorkflowEngine } from '@modules/workflows/index.js';
+import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from './modules/workflows/internal/workflow-orchestrator.js';
+import type { WorkflowOrchestrator } from '@modules/workflows/index.js';
+import { DefaultAgentGateway } from './modules/agents/internal/agent-gateway.js';
+import type { AgentGateway } from '@modules/agents/index.js';
+import { PgAgentRunRepository } from './modules/agents/internal/pg-agent-repository.js';
+import type { AgentRunRepository } from '@modules/agents/index.js';
+import { DefaultLlmGateway } from './modules/llm/internal/llm-gateway.js';
+import type { LlmGateway, LlmExecutionRecordRepository } from '@modules/llm/index.js';
+import { PgLlmExecutionRecordRepository } from './modules/llm/internal/pg-llm-repository.js';
+import { DefaultArchitectService } from './modules/llm/internal/architect-service.js';
+import type { ArchitectService } from '@modules/llm/index.js';
+import { DefaultVerificationService } from './modules/verification/internal/verification-service.js';
+import type { VerificationService } from '@modules/verification/index.js';
+import { DefaultReviewService } from './modules/reviews/internal/review-service.js';
+import type { ReviewService } from '@modules/reviews/index.js';
+import { DefaultGitHubAdapter, PgGitHubInstallationRepository, PgWebhookEventRepository } from './modules/github/internal/pg-github-repository.js';
+import { PgCiEvidenceIngestionRepository } from './modules/github/internal/pg-ci-evidence-repository.js';
+import { DefaultCiEvidenceIngestionService } from './modules/github/internal/ci-evidence-ingestion-service.js';
+import type { CiEvidenceIngestionService } from '@modules/github/index.js';
+import { DefaultWebhookProcessingService, createWebhookJobHandler } from './modules/github/internal/webhook-processing-service.js';
+import type { WebhookProcessingService } from '@modules/github/index.js';
+import type { GitHubAdapter, GitHubInstallationRepository } from '@modules/github/index.js';
+import type { WebhookEventRepository } from '@modules/github/index.js';
+import { generateExecutionId } from '@platform/ids.js';
+import { DefaultWorkItemCompletionService } from './modules/work-items/internal/pg-work-item-repository.js';
 
 /**
  * Application composition root.
@@ -170,6 +195,34 @@ export interface AppDeps {
   notificationService?: NotificationService;
   /** WORK-009/020: workflow engine (wired with audit emitter). */
   workflowEngine?: WorkflowEngine;
+  /** WORK-017/018: workflow orchestrator (convergence loop). Present when DB + Redis. */
+  orchestrator?: WorkflowOrchestrator;
+  /** WORK-012: agent gateway. Present when DB + Redis configured. */
+  agentGateway?: AgentGateway;
+  /** WORK-012: agent run repository. Present when DB configured. */
+  agentRunRepository?: AgentRunRepository;
+  /** WORK-013: LLM gateway. Present when DB configured. */
+  llmGateway?: LlmGateway;
+  /** WORK-013: LLM execution record repository. Present when DB configured. */
+  llmExecutionRecordRepository?: LlmExecutionRecordRepository;
+  /** WORK-014: architect service. Present when DB configured. */
+  architectService?: ArchitectService;
+  /** WORK-015: verification service. Present when DB configured. */
+  verificationService?: VerificationService;
+  /** WORK-016: review service. Present when DB configured. */
+  reviewService?: ReviewService;
+  /** WORK-015: CI evidence ingestion service. Present when DB configured. */
+  ciEvidenceIngestionService?: CiEvidenceIngestionService;
+  /** WORK-008/009: GitHub webhook processing service. Present when DB configured. */
+  webhookProcessingService?: WebhookProcessingService;
+  /** WORK-008: GitHub webhook event repository. Present when DB configured. */
+  webhookEventRepository?: WebhookEventRepository;
+  /** WORK-008: GitHub adapter (signature verification, provider calls). */
+  githubAdapter?: GitHubAdapter;
+  /** WORK-008: GitHub installation repository. Present when DB configured. */
+  githubInstallationRepository?: GitHubInstallationRepository;
+  /** WORK-002/008: secret store (for API keys + webhook secrets). */
+  secretStore?: SecretStore;
 }
 
 export interface BuildAppOptions {
@@ -311,8 +364,24 @@ export async function buildApp(
   let auditService: AuditService | undefined;
   let notificationService: NotificationService | undefined;
   let workflowEngine: WorkflowEngine | undefined;
+  let orchestrator: WorkflowOrchestrator | undefined;
+  let agentGateway: AgentGateway | undefined;
+  let agentRunRepository: AgentRunRepository | undefined;
+  let llmGateway: LlmGateway | undefined;
+  let llmExecutionRecordRepository: LlmExecutionRecordRepository | undefined;
+  let architectService: ArchitectService | undefined;
+  let verificationService: VerificationService | undefined;
+  let reviewService: ReviewService | undefined;
+  let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
+  let webhookProcessingService: WebhookProcessingService | undefined;
+  let webhookEventRepository: WebhookEventRepository | undefined;
+  let githubInstallationRepository: GitHubInstallationRepository | undefined;
+  const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
+  // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
+  // route (signature validation). Hoist it out of the database block so the
+  // webhook route can be wired even if other DB-dependent services aren't.
+  const secretStore: SecretStore = new EnvSecretStore();
   if (database) {
-    const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
     const membershipRepo = new PgMembershipRepository(database);
     const rolePermissionRepo = new PgRolePermissionRepository(database);
@@ -354,6 +423,55 @@ export async function buildApp(
     // notification.send worker handler so production can deliver
     // notifications asynchronously through the existing WorkerHost.
     notificationService = new DefaultNotificationService(database, logger, queue, []);
+
+    // --- PRODUCTION READINESS: wire the full service stack ---
+    // These services were previously only constructed in the test/E2E
+    // composition. Production must wire them so every route group works.
+    // WORK-012: agent gateway + run repository.
+    agentRunRepository = new PgAgentRunRepository(database);
+    agentGateway = new DefaultAgentGateway(database, logger, [], 3);
+    // WORK-013/014: LLM gateway + architect service.
+    llmExecutionRecordRepository = new PgLlmExecutionRecordRepository(database);
+    llmGateway = new DefaultLlmGateway(database, logger, [], 3);
+    architectService = new DefaultArchitectService(database, llmGateway, workOrderRepository, logger);
+    // WORK-008/015: GitHub CI evidence ingestion + installation repo.
+    githubInstallationRepository = new PgGitHubInstallationRepository(database);
+    const ciIngestionRepo = new PgCiEvidenceIngestionRepository(database);
+    ciEvidenceIngestionService = new DefaultCiEvidenceIngestionService(ciIngestionRepo, githubInstallationRepository, logger);
+    // WORK-015: verification service.
+    verificationService = new DefaultVerificationService(
+      database, requirementRepository, acceptanceCriterionRepository,
+      architectureVersionRepository, workItemRepository,
+      workItemRequirementRepository, workItemCriterionRepository,
+      ciIngestionRepo, objectStore, logger,
+    );
+    // WORK-016: review service.
+    reviewService = new DefaultReviewService(database, workItemRepository, logger);
+    // WORK-008/009: webhook event repository + processing service.
+    const pgWebhookEventRepo = new PgWebhookEventRepository(database);
+    webhookEventRepository = pgWebhookEventRepo;
+    webhookProcessingService = new DefaultWebhookProcessingService(
+      pgWebhookEventRepo,
+      githubInstallationRepository as PgGitHubInstallationRepository,
+      pullRequestAssociationRepository as PgPullRequestAssociationRepository,
+      repositoryAssociationRepository as PgProjectRepositoryAssociationRepository,
+      logger,
+      database,
+    );
+    // WORK-017/018: workflow orchestrator (convergence loop). Requires
+    // Redis for the queue — constructed only when redisClient is available.
+    if (redisClient) {
+      orchestrator = new DefaultWorkflowOrchestrator(
+        database, logger, queue, workflowEngine,
+        workItemRepository, workOrderRepository, depService,
+        // WORK-007: work item completion service.
+        new DefaultWorkItemCompletionService(workItemRepository as PgWorkItemRepository),
+        pullRequestAssociationRepository, agentGateway, agentRunRepository,
+        architectService, verificationService, reviewService, githubAdapter,
+        architectureVersionRepository, architectureRepository,
+        projectRepository, generateExecutionId,
+      );
+    }
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -371,6 +489,14 @@ export async function buildApp(
   ];
   if (notificationService) {
     handlerList.push(createNotificationJobHandler(notificationService, logger));
+  }
+  // WORK-017: convergence job handler — drives the workflow convergence loop.
+  if (orchestrator) {
+    handlerList.push(createConvergenceJobHandler(orchestrator, logger));
+  }
+  // WORK-008: GitHub webhook job handler — processes webhook events async.
+  if (webhookProcessingService) {
+    handlerList.push(createWebhookJobHandler(webhookProcessingService, logger));
   }
   const handlers = buildHandlerRegistry(handlerList);
   const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
@@ -409,6 +535,20 @@ export async function buildApp(
       auditService,
       notificationService,
       workflowEngine,
+      orchestrator,
+      agentGateway,
+      agentRunRepository,
+      llmGateway,
+      llmExecutionRecordRepository,
+      architectService,
+      verificationService,
+      reviewService,
+      ciEvidenceIngestionService,
+      webhookProcessingService,
+      webhookEventRepository,
+      githubAdapter,
+      githubInstallationRepository,
+      secretStore,
     },
     start: async () => {
       if (options.startWorker !== false) {

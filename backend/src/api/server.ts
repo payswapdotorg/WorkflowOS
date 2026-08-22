@@ -32,6 +32,11 @@ export interface ServerDeps extends JobsRouteDeps {
   /** Health/readiness route deps (WORK-023). Optional — when not provided,
    *  /health/ready returns 200 with no checks. */
   health?: HealthRouteDeps;
+  /** PRODUCTION READINESS: CORS origin (the Vercel frontend URL). When set,
+   *  the server adds CORS headers + handles OPTIONS preflight. Must be a
+   *  full origin (e.g. https://app.example.com). Do not use '*' for
+   *  authenticated production APIs. */
+  corsOrigin?: string;
   /** When provided, the auth plugin + protected routes are registered. */
   auth?: AuthPluginDeps;
   /** When auth is enabled, the protected /projects route uses this. */
@@ -70,6 +75,26 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     genReqId: () => crypto.randomUUID(),
   });
   await executionContextPlugin(app);
+
+  // PRODUCTION READINESS: CORS support. When corsOrigin is set, add the
+  // Access-Control-Allow-Origin header + handle OPTIONS preflight. This
+  // allows the Vercel frontend to make authenticated API requests.
+  if (deps.corsOrigin) {
+    app.addHook('onRequest', async (req, reply) => {
+      const origin = req.headers.origin;
+      if (origin && origin === deps.corsOrigin) {
+        reply.header('Access-Control-Allow-Origin', deps.corsOrigin);
+        reply.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+        reply.header('Access-Control-Allow-Headers', 'Content-Type, x-api-key, x-github-delivery, x-github-event, x-hub-signature-256');
+        reply.header('Access-Control-Allow-Credentials', 'true');
+      }
+      // Handle preflight.
+      if (req.method === 'OPTIONS') {
+        return reply.code(204).send();
+      }
+    });
+  }
+
   if (deps.auth) {
     await authPlugin(app, deps.auth);
   }
