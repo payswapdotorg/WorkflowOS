@@ -351,7 +351,10 @@ function mapEvidence(row: EvidenceRow): Evidence {
     storageKey: row.storage_key,
     storageProvider: row.storage_provider,
     artifactDigest: row.artifact_digest,
-    artifactSizeBytes: row.artifact_size_bytes,
+    // PostgreSQL returns BIGINT as a string by default (to avoid JS number
+    // precision issues). Parse to number — artifact sizes fit comfortably in
+    // a JS number (up to 2^53 - 1 bytes ≈ 9 PB).
+    artifactSizeBytes: row.artifact_size_bytes != null ? Number(row.artifact_size_bytes) : null,
     artifactContentType: row.artifact_content_type,
     metadata: (row.metadata as Record<string, unknown>) ?? {},
     createdAt: row.created_at,
