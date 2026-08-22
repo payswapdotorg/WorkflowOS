@@ -2373,3 +2373,107 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
     expect(codeOnly).not.toMatch(/completed:\s*true\s*\}\s*as\s*never/);
   });
 });
+
+/**
+ * WORK-020 invariants — /audit module boundaries.
+ */
+describe('WORK-020 invariants — /audit module boundaries', () => {
+  it('/audit does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'audit') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not import provider SDKs', () => {
+    const PROVIDER_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports provider SDK "${specifier}"`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} mutates wfos_workflow_executions — /workflows owns canonical state`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'audit'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares competing infrastructure`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no other module imports /audit/internal', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const targetModule = moduleOf(file);
+      if (!targetModule || targetModule === 'audit') continue;
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const mod = moduleOf(resolved);
+        if (mod === 'audit' && isInsideInternal(resolved)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ${relative(BACKEND_ROOT, resolved)}`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/audit barrel exposes only audit-domain contracts', () => {
+    const aIndex = readFileSync(join(MODULES_DIR, 'audit', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'AuditEvent', 'WriteAuditEventInput', 'AuditEventWriter',
+      'AuditEventRepository', 'AuditEventQuery', 'AuditService',
+      'WorkflowAuditEmitter',
+      'auditModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of aIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of aIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/audit exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+});

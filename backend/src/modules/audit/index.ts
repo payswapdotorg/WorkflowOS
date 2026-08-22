@@ -2,26 +2,39 @@
  * audit module — public interface.
  *
  * Canonical name: /audit
- * Responsibility (spec/architecture.md): Append-oriented audit trail for privileged/domain actions.
+ * Responsibility (spec/architecture.md §31): Append-oriented audit trail for
+ * privileged/domain actions.
  *
  * This file is the ONLY surface other modules may import. Files under
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-020: implements the authoritative /audit domain (AUDIT-001).
+ * Owns AuditEvent persistence, audit event schema, event normalization,
+ * append-only audit history, and audit query/read contracts.
+ *
+ * The audit system is forensic/governance infrastructure, not the source of
+ * truth for underlying domain state. Audit ingestion must NEVER mutate domain
+ * state (frozen architecture §31: "domain state → domain operation → audit
+ * event" — NOT the reverse).
  */
 import type { ModuleContract } from '@platform/module-contract.js';
 
+export type {
+  AuditEvent,
+  WriteAuditEventInput,
+  AuditEventWriter,
+  AuditEventRepository,
+  AuditEventQuery,
+  AuditService,
+  WorkflowAuditEmitter,
+} from './internal/audit.types.js';
+
 /**
  * Public capabilities exposed by the /audit module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
  */
 export interface AuditModuleApi {
-  // future: provider-independent methods consumed by other modules
+  // future: additional audit-domain methods consumed by other modules
 }
 
 /**
