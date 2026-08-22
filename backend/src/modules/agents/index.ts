@@ -4,31 +4,19 @@
  * Canonical name: /agents
  * Responsibility (spec/architecture.md): Agent Gateway and Agent Runs.
  *
- * This file is the ONLY surface other modules may import. Files under
- * `internal/` are private to this module; cross-module imports of
- * `internal/` are forbidden and enforced statically (PLAT-AC-02).
- *
- * Domain logic for this module is out of scope for WORK-001 and will be added
- * by later work items. The contract marker is established here so the module
- * boundary exists mechanically from day one (PLAT-AC-01).
+ * WORK-012: implements the provider-independent Agent Gateway (AGENT-001,
+ * AGENT-002). Provider-specific code stays inside internal/. Credentials via
+ * SecretStore. Agent output is claim/evidence input only — it must NOT
+ * directly mutate workflow state.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
+export type {
+  AgentStatus, AgentErrorType, AgentRequest, AgentExecutionResult,
+  AgentTestReport, AgentBlockerReport, AgentError, AgentGateway, AgentRun,
+  AgentRunRepository,
+} from './internal/agent.types.js';
 
-/**
- * Public capabilities exposed by the /agents module to other modules.
- *
- * Empty for WORK-001 (foundation). Future work items declare methods here and
- * implement them under `internal/`.
- */
-export interface AgentsModuleApi {
-  // future: provider-independent methods consumed by other modules
-}
+export interface AgentsModuleApi {}
 
-/**
- * Frozen module contract for /agents.
- */
-export const agentsModule: ModuleContract & AgentsModuleApi = {
-  name: '/agents',
-};
-
+export const agentsModule: ModuleContract & AgentsModuleApi = { name: '/agents' };
 export default agentsModule;
