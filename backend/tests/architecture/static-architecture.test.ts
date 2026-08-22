@@ -986,3 +986,135 @@ describe('WORK-004 invariants — project + specification boundaries', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * WORK-005 invariants — architecture module boundaries.
+ *
+ * Ensures /architecture owns Architecture/Version/ADR/ChangeRequest domain
+ * authority, does not import other modules' internal/, does not couple to
+ * GitHub, and does not create its own infrastructure.
+ */
+describe('WORK-005 invariants — architecture module boundaries', () => {
+  it('/architecture does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'architecture'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'architecture') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/architecture does not import GitHub provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'architecture'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/architecture does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'architecture'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/architecture does not own workflow state', () => {
+    // /architecture must not declare workflow state-machine types
+    // (DRAFT/READY/ASSIGNED/IMPLEMENTING/etc. are /workflows territory).
+    const WORKFLOW_STATES = /\b(READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|MERGED|VERIFIED|IMPLEMENTATION_BLOCKED)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'architecture'))) {
+      const src = readFileSync(file, 'utf8');
+      // Only flag workflow states in type/value declarations, not in comments.
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} references workflow states — /architecture must not own workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/architecture barrel exposes only architecture-domain contracts', () => {
+    const archIndex = readFileSync(join(MODULES_DIR, 'architecture', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'Architecture',
+      'CreateArchitectureInput',
+      'ArchitectureVersion',
+      'ArchitectureVersionState',
+      'CreateArchitectureVersionInput',
+      'ArchitectureVersionRepository',
+      'ArchitectureRepository',
+      'ArchitectureDecisionRecord',
+      'CreateAdrInput',
+      'ArchitectureDecisionRepository',
+      'ArchitectureChangeRequest',
+      'ChangeRequestStatus',
+      'CreateChangeRequestInput',
+      'ArchitectureChangeRequestRepository',
+      'ArchitectureService',
+      'architectureModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of archIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of archIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(
+      unexpected,
+      `/architecture exports unexpected names: ${unexpected.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('replacement-version creation is only possible through the ArchitectureService path', () => {
+    // The ArchitectureService.approveChangeAndCreateReplacement is the ONLY
+    // sanctioned path to create a replacement version from a Change Request.
+    // The approve route must call it; the route must NOT call
+    // architectureVersionRepository.transitionState directly (that would
+    // bypass the service's atomic supersession logic).
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'architecture.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    // The approve route must call architectureService.approveChangeAndCreateReplacement.
+    expect(src).toMatch(/architectureService\.approveChangeAndCreateReplacement/);
+    // The approve route must NOT call transitionState directly (bypasses the service).
+    // The freeze route calls architectureService.freezeVersion (not transitionState).
+    const approveSection = src.match(/app\.post\('\/change-requests\/:crId\/approve'[\s\S]*?\}\);/);
+    expect(approveSection, 'expected approve route to exist').not.toBeNull();
+    expect(approveSection![0]).not.toMatch(/architectureVersionRepository\.transitionState/);
+  });
+});
