@@ -2476,4 +2476,53 @@ describe('WORK-020 invariants — /audit module boundaries', () => {
     const unexpected = exported.filter((n) => !allowed.has(n));
     expect(unexpected, `/audit exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
   });
+
+  // --- REGRESSION (PR #19): 3 blocking fixes ---
+
+  it('REGRESSION (PR #19): app.ts wires DefaultAuditService + DefaultWorkflowEngine with audit emitter', () => {
+    // Issue 1: production workflow transitions must emit audit events.
+    // Verify app.ts imports + constructs both services.
+    const appFile = join(SRC_ROOT, 'app.ts');
+    const src = readFileSync(appFile, 'utf8');
+    expect(src).toMatch(/import.*DefaultAuditService.*from.*audit\/internal\/audit-service/);
+    expect(src).toMatch(/import.*DefaultWorkflowEngine.*from.*workflows\/internal\/workflow-engine/);
+    expect(src).toMatch(/new DefaultAuditService\s*\(/);
+    expect(src).toMatch(/new DefaultWorkflowEngine\s*\(/);
+    // The workflow engine must be constructed with the audit service as the emitter.
+    expect(src).toMatch(/auditService.*WorkflowAuditEmitter|auditService,\s*\/\/ WorkflowAuditEmitter/);
+  });
+
+  it('REGRESSION (PR #19): audit route resolves project BEFORE querying work-item audit', () => {
+    // Issue 2: the work-item audit endpoint must resolve the project from
+    // the work item chain and authorize BEFORE returning any results.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'audit.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The route must NOT return 200 [] without authorization.
+    expect(codeOnly).not.toMatch(/events\.length\s*===\s*0.*\n.*return reply\.code\(200\)\.send\(\[\]\)/s);
+    // The route MUST resolve the project from the work item chain.
+    expect(codeOnly).toMatch(/resolveProjectForWorkItem/);
+    expect(codeOnly).toMatch(/requireProjectAuthorization/);
+  });
+
+  it('REGRESSION (PR #19): audit integrity trigger checks all resource references', () => {
+    // Issue 3: the integrity trigger must check ALL persisted references,
+    // not just work_item_id.
+    const migrationFile = join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0015_audit.sql');
+    const src = readFileSync(migrationFile, 'utf8');
+    // Must check work_item_id (already existed).
+    expect(src).toMatch(/NEW\.work_item_id/);
+    // Must check work_order_id (new).
+    expect(src).toMatch(/NEW\.work_order_id/);
+    // Must check architecture_version_id (new).
+    expect(src).toMatch(/NEW\.architecture_version_id/);
+    // Must check review_id (new).
+    expect(src).toMatch(/NEW\.review_id/);
+    // Must check verification_run_id (new).
+    expect(src).toMatch(/NEW\.verification_run_id/);
+    // Must check agent_run_id (new).
+    expect(src).toMatch(/NEW\.agent_run_id/);
+    // Must check pull_request_association_id (new).
+    expect(src).toMatch(/NEW\.pull_request_association_id/);
+  });
 });

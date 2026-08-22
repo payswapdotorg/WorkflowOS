@@ -94,7 +94,7 @@ export interface AuditEventQuery {
  * The AuditService combines the writer + query contracts. It is the public
  * surface that other modules receive via dependency injection.
  */
-export interface AuditService extends AuditEventWriter, AuditEventQuery {}
+export interface AuditService extends AuditEventWriter, AuditEventQuery, WorkflowAuditEmitter {}
 
 // --- Workflow audit emission callback ---
 //

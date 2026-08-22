@@ -88,7 +88,12 @@ import {
   PgPullRequestAssociationRepository,
   PgWorkOrderRepository,
 } from './modules/work-items/internal/pg-work-item-repository.js';
+import { DefaultWorkItemDependencyService } from './modules/work-items/internal/work-item-dependency-service.js';
+import { DefaultAuditService } from './modules/audit/internal/audit-service.js';
+import type { AuditService } from '@modules/audit/index.js';
 import type { AppConfig } from './config.js';
+import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
+import type { WorkflowEngine } from '@modules/workflows/index.js';
 
 /**
  * Application composition root.
@@ -157,6 +162,10 @@ export interface AppDeps {
   pullRequestAssociationRepository?: PullRequestAssociationRepository;
   /** WORK-007: work order repository. */
   workOrderRepository?: WorkOrderRepository;
+  /** WORK-020: audit service (workflow audit emission + query). */
+  auditService?: AuditService;
+  /** WORK-009/020: workflow engine (wired with audit emitter). */
+  workflowEngine?: WorkflowEngine;
 }
 
 export interface BuildAppOptions {
@@ -291,6 +300,8 @@ export async function buildApp(
   let workItemDependencyRepository: WorkItemDependencyRepository | undefined;
   let pullRequestAssociationRepository: PullRequestAssociationRepository | undefined;
   let workOrderRepository: WorkOrderRepository | undefined;
+  let auditService: AuditService | undefined;
+  let workflowEngine: WorkflowEngine | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
@@ -317,6 +328,19 @@ export async function buildApp(
     workItemDependencyRepository = new PgWorkItemDependencyRepository(database);
     pullRequestAssociationRepository = new PgPullRequestAssociationRepository(database);
     workOrderRepository = new PgWorkOrderRepository(database);
+    // WORK-020: wire the audit service — production workflow transitions
+    // emit audit events through this service. Without this wiring, the
+    // DefaultWorkflowEngine in index.ts would have no audit emitter.
+    auditService = new DefaultAuditService(database, logger);
+    // WORK-020: wire the workflow engine with the audit emitter so
+    // production workflow transitions emit audit events. Without this,
+    // transitions can execute without audit (issue 1 from PR #19 review).
+    const depService = new DefaultWorkItemDependencyService(database);
+    workflowEngine = new DefaultWorkflowEngine(
+      database, logger,
+      (wiId: string) => depService.canBeginImplementation(wiId),
+      auditService, // WorkflowAuditEmitter — workflow transitions emit audit events
+    );
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -358,6 +382,8 @@ export async function buildApp(
       workItemDependencyRepository,
       pullRequestAssociationRepository,
       workOrderRepository,
+      auditService,
+      workflowEngine,
     },
     start: async () => {
       if (options.startWorker !== false) {

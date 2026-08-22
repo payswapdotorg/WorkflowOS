@@ -87,15 +87,24 @@ CREATE TRIGGER wfos_audit_events_no_delete
 -- ---------------------------------------------------------------------------
 -- Resource integrity trigger.
 --
--- Ensures that if a work_item_id is provided, it belongs to the same project
--- as the audit event's project_id. This prevents cross-tenant resource
--- references in audit events.
+-- WORK-020 correction (PR #19 issue 3): ensures that ALL persisted resource
+-- references (work_item, work_order, architecture_version, review,
+-- verification_run, agent_run, pull_request_association) belong to the same
+-- project as the audit event's project_id. This prevents cross-tenant
+-- resource references in audit events.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION wfos_check_audit_event_integrity()
 RETURNS TRIGGER AS $$
 DECLARE
   wi_project_id UUID;
+  wo_project_id UUID;
+  av_project_id UUID;
+  rev_project_id UUID;
+  vr_project_id UUID;
+  ar_project_id UUID;
+  pra_project_id UUID;
 BEGIN
+  -- Work Item: resolve via work_item → architecture_version → architecture → project
   IF NEW.work_item_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
     SELECT a.project_id INTO wi_project_id
       FROM wfos_work_items wi
@@ -108,6 +117,83 @@ BEGIN
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
+
+  -- Work Order: resolve via work_order.project_id (denormalized)
+  IF NEW.work_order_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT project_id INTO wo_project_id
+      FROM wfos_work_orders WHERE id = NEW.work_order_id;
+    IF wo_project_id IS NOT NULL AND wo_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: work order % belongs to project %, not project %',
+        NEW.work_order_id, wo_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- ArchitectureVersion: resolve via architecture_version → architecture → project
+  IF NEW.architecture_version_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT a.project_id INTO av_project_id
+      FROM wfos_architecture_versions av
+      JOIN wfos_architectures a ON a.id = av.architecture_id
+      WHERE av.id = NEW.architecture_version_id;
+    IF av_project_id IS NOT NULL AND av_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: architecture version % belongs to project %, not project %',
+        NEW.architecture_version_id, av_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- Review: resolve via review.project_id
+  IF NEW.review_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT project_id INTO rev_project_id
+      FROM wfos_reviews WHERE id = NEW.review_id;
+    IF rev_project_id IS NOT NULL AND rev_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: review % belongs to project %, not project %',
+        NEW.review_id, rev_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- VerificationRun: resolve via verification_run.project_id
+  IF NEW.verification_run_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT project_id INTO vr_project_id
+      FROM wfos_verification_runs WHERE id = NEW.verification_run_id;
+    IF vr_project_id IS NOT NULL AND vr_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: verification run % belongs to project %, not project %',
+        NEW.verification_run_id, vr_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- AgentRun: resolve via agent_run.work_item_id → work_item → ... → project
+  IF NEW.agent_run_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT a.project_id INTO ar_project_id
+      FROM wfos_agent_runs ar
+      JOIN wfos_work_items wi ON wi.id = ar.work_item_id
+      JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+      JOIN wfos_architectures a ON a.id = av.architecture_id
+      WHERE ar.id = NEW.agent_run_id;
+    IF ar_project_id IS NOT NULL AND ar_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: agent run % belongs to project %, not project %',
+        NEW.agent_run_id, ar_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- PullRequestAssociation: resolve via pull_request_association.work_item_id → ... → project
+  IF NEW.pull_request_association_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT a.project_id INTO pra_project_id
+      FROM wfos_pull_request_associations pra
+      JOIN wfos_work_items wi ON wi.id = pra.work_item_id
+      JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+      JOIN wfos_architectures a ON a.id = av.architecture_id
+      WHERE pra.id = NEW.pull_request_association_id;
+    IF pra_project_id IS NOT NULL AND pra_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'audit event integrity: pull request association % belongs to project %, not project %',
+        NEW.pull_request_association_id, pra_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
