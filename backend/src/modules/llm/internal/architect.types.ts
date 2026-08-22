@@ -59,6 +59,12 @@ export interface ArchitectExecutionRequest {
   readonly projectId: string;
   readonly architectureVersionId: string;
   readonly workItemId?: string;
+  /**
+   * Optional VerificationRun ID. When provided (WORK-018), the Architect
+   * Service loads the persisted verification run + its evidence and includes
+   * them in the assembled context (WF-VER-AC-02).
+   */
+  readonly verificationRunId?: string;
   readonly task: string;
   readonly executionId: string;
   readonly provider: string;

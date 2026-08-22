@@ -52,7 +52,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
   private readonly signalRepo: PgConvergenceSignalRepository;
 
   constructor(
-    db: DatabaseClient,
+    private readonly db: DatabaseClient,
     private readonly logger: Logger,
     private readonly queue: Queue,
     private readonly workflowEngine: WorkflowEngine,
@@ -70,7 +70,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     projectRepository: ProjectRepository,
     private readonly genExecutionId: typeof generateExecutionId,
   ) {
-    this.signalRepo = new PgConvergenceSignalRepository(db);
+    this.signalRepo = new PgConvergenceSignalRepository(this.db);
     // projectRepository is accepted for future use (project-level convergence
     // queries). It is intentionally wired now so downstream work items don't
     // need to re-plumb the dependency.
@@ -722,35 +722,60 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       });
     }
 
-    // Create a VerificationRun via the existing /verification contract.
-    const verificationRun = await this.verificationService.createRun({
-      projectId,
-      workItemId: input.workItemId,
-      architectureVersionId: wi.architectureVersionId,
-      source: 'orchestrator',
-      sourceRef: input.executionId,
-      executionId: this.genExecutionId(),
-    });
+    // Idempotency (PR #17 architect review — issue 2): when already in
+    // VERIFYING, reuse the existing INCOMPLETE VerificationRun rather than
+    // creating a new one. This prevents duplicate verification runs for one
+    // logical verification cycle. A repeated beginVerification call returns
+    // the existing run ID.
+    //
+    // Only reuse runs that are still 'pending' or 'running' (not yet completed
+    // or failed). A completed/failed run belongs to a previous verification
+    // cycle — a new cycle (after correction) should create a new run.
+    const existingRunResult = await this.db.query<{ id: string; status: string }>(
+      `SELECT id, status FROM wfos_verification_runs
+       WHERE work_item_id = $1 AND status IN ('pending', 'running')
+       ORDER BY created_at DESC LIMIT 1`,
+      [input.workItemId],
+    );
+    let verificationRunId: string;
+    if (existingRunResult.rows.length > 0) {
+      // Reuse the existing run — this is the idempotent path.
+      verificationRunId = existingRunResult.rows[0]!.id;
+      this.logger.info('convergence.begin_verification.reused', {
+        workItemId: input.workItemId,
+        verificationRunId,
+      });
+    } else {
+      // Create a new VerificationRun via the existing /verification contract.
+      const verificationRun = await this.verificationService.createRun({
+        projectId,
+        workItemId: input.workItemId,
+        architectureVersionId: wi.architectureVersionId,
+        source: 'orchestrator',
+        sourceRef: input.executionId,
+        executionId: this.genExecutionId(),
+      });
+      verificationRunId = verificationRun.id;
+      this.logger.info('convergence.begin_verification.created', {
+        workItemId: input.workItemId,
+        verificationRunId,
+      });
+    }
 
     // Submit the signal as a record (idempotent — no async processing needed
-    // since the transition + run creation already happened above).
+    // since the transition + run creation/reuse already happened above).
     const signal = await this.submitSignalInternal({
       workItemId: input.workItemId,
       signalType: 'begin_verification',
       sourceEventId: input.sourceEventId,
       executionId: input.executionId,
-      payload: { verificationRunId: verificationRun.id },
+      payload: { verificationRunId },
     });
 
     // Mark it as already processed (the work was done synchronously above).
     await this.signalRepo.markProcessed(signal.id, 'verifying', null);
 
-    this.logger.info('convergence.begin_verification.created', {
-      workItemId: input.workItemId,
-      verificationRunId: verificationRun.id,
-    });
-
-    return { signal, verificationRunId: verificationRun.id };
+    return { signal, verificationRunId };
   }
 
   private async handleBeginVerification(signal: ConvergenceSignal): Promise<WorkflowState | null> {
@@ -856,15 +881,35 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     const workOrder = workOrders.find((wo) => wo.state === 'generated' || wo.state === 'draft') ?? workOrders[0] ?? null;
 
     // Invoke the ArchitectService via /llm.
+    // WORK-018 (WF-VER-AC-02): pass the latest completed VerificationRun ID
+    // so the Architect Service can load the persisted verification evidence
+    // context. The architect execution receives the actual verification state,
+    // not an empty array.
     const provider = input.provider ?? 'fake';
     const model = input.model ?? 'test-model';
     const task = input.task ?? 'Review the implementation against the architecture and requirements';
     const archExecutionId = this.genExecutionId();
 
+    // Find the latest completed VerificationRun for this work item.
+    // The orchestrator does NOT evaluate evidence — it just finds the run ID
+    // so the Architect Service can load the evidence from /verification's
+    // persisted records.
+    let verificationRunId: string | undefined;
+    // Query the latest verification run for this work item (any status —
+    // the architect should see even incomplete runs for context).
+    const vrResult = await this.db.query<{ id: string }>(
+      `SELECT id FROM wfos_verification_runs WHERE work_item_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [input.workItemId],
+    );
+    if (vrResult.rows.length > 0) {
+      verificationRunId = vrResult.rows[0]!.id;
+    }
+
     const archResult = await this.architectService.execute({
       projectId,
       architectureVersionId: wi.architectureVersionId,
       workItemId: wi.id,
+      verificationRunId,
       task,
       executionId: archExecutionId,
       provider,
