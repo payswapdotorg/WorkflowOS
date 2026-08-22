@@ -91,6 +91,8 @@ import {
 import { DefaultWorkItemDependencyService } from './modules/work-items/internal/work-item-dependency-service.js';
 import { DefaultAuditService } from './modules/audit/internal/audit-service.js';
 import type { AuditService } from '@modules/audit/index.js';
+import { DefaultNotificationService, createNotificationJobHandler } from './modules/notifications/internal/notification-service.js';
+import type { NotificationService } from '@modules/notifications/index.js';
 import type { AppConfig } from './config.js';
 import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
 import type { WorkflowEngine } from '@modules/workflows/index.js';
@@ -164,6 +166,8 @@ export interface AppDeps {
   workOrderRepository?: WorkOrderRepository;
   /** WORK-020: audit service (workflow audit emission + query). */
   auditService?: AuditService;
+  /** WORK-021: notification service. */
+  notificationService?: NotificationService;
   /** WORK-009/020: workflow engine (wired with audit emitter). */
   workflowEngine?: WorkflowEngine;
 }
@@ -219,10 +223,8 @@ export async function buildApp(
     });
   }
 
-  const handlers = buildHandlerRegistry([
-    createEchoJobHandler(logger, { onEcho: options.onEcho }),
-  ]);
-  const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
+  // Handler registry is built AFTER database wiring (below) so that
+  // database-dependent handlers (notification.send, etc.) can be registered.
 
   // --- WORK-003: optional infrastructure wiring (PostgreSQL + object storage).
   // When DATABASE_URL is set, a real PostgreSQL client is constructed and
@@ -301,6 +303,7 @@ export async function buildApp(
   let pullRequestAssociationRepository: PullRequestAssociationRepository | undefined;
   let workOrderRepository: WorkOrderRepository | undefined;
   let auditService: AuditService | undefined;
+  let notificationService: NotificationService | undefined;
   let workflowEngine: WorkflowEngine | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
@@ -341,6 +344,10 @@ export async function buildApp(
       (wiId: string) => depService.canBeginImplementation(wiId),
       auditService, // WorkflowAuditEmitter — workflow transitions emit audit events
     );
+    // WORK-021: wire the notification service + register the
+    // notification.send worker handler so production can deliver
+    // notifications asynchronously through the existing WorkerHost.
+    notificationService = new DefaultNotificationService(database, logger, queue, []);
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -350,6 +357,17 @@ export async function buildApp(
     );
     apiKeyProvisioner = new ApiKeyCredentialProvisioner(database);
   }
+
+  // Build handler registry AFTER database wiring so database-dependent
+  // handlers can be registered.
+  const handlerList: import('@platform/index.js').JobHandler[] = [
+    createEchoJobHandler(logger, { onEcho: options.onEcho }),
+  ];
+  if (notificationService) {
+    handlerList.push(createNotificationJobHandler(notificationService, logger));
+  }
+  const handlers = buildHandlerRegistry(handlerList);
+  const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
 
   const handle: AppHandle = {
     deps: {
@@ -383,6 +401,7 @@ export async function buildApp(
       pullRequestAssociationRepository,
       workOrderRepository,
       auditService,
+      notificationService,
       workflowEngine,
     },
     start: async () => {

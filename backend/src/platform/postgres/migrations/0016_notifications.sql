@@ -80,3 +80,62 @@ DROP TRIGGER IF EXISTS wfos_notification_requests_set_updated_at ON wfos_notific
 CREATE TRIGGER wfos_notification_requests_set_updated_at
   BEFORE UPDATE ON wfos_notification_requests
   FOR EACH ROW EXECUTE FUNCTION wfos_notifications_set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- Resource integrity trigger (PR #20 issue 3).
+--
+-- Ensures that persisted resource references (work_item_id, review_id,
+-- verification_run_id) belong to the same project as the notification's
+-- project_id. Prevents cross-tenant resource references.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION wfos_check_notification_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+  wi_project_id UUID;
+  rev_project_id UUID;
+  vr_project_id UUID;
+BEGIN
+  -- Work Item: resolve via work_item -> architecture_version -> architecture -> project
+  IF NEW.work_item_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT a.project_id INTO wi_project_id
+      FROM wfos_work_items wi
+      JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+      JOIN wfos_architectures a ON a.id = av.architecture_id
+      WHERE wi.id = NEW.work_item_id;
+    IF wi_project_id IS NOT NULL AND wi_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'notification integrity: work item % belongs to project %, not project %',
+        NEW.work_item_id, wi_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- Review: resolve via review.project_id
+  IF NEW.review_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT project_id INTO rev_project_id
+      FROM wfos_reviews WHERE id = NEW.review_id;
+    IF rev_project_id IS NOT NULL AND rev_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'notification integrity: review % belongs to project %, not project %',
+        NEW.review_id, rev_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- VerificationRun: resolve via verification_run.project_id
+  IF NEW.verification_run_id IS NOT NULL AND NEW.project_id IS NOT NULL THEN
+    SELECT project_id INTO vr_project_id
+      FROM wfos_verification_runs WHERE id = NEW.verification_run_id;
+    IF vr_project_id IS NOT NULL AND vr_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'notification integrity: verification run % belongs to project %, not project %',
+        NEW.verification_run_id, vr_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS wfos_notification_requests_integrity_check ON wfos_notification_requests;
+CREATE TRIGGER wfos_notification_requests_integrity_check
+  BEFORE INSERT ON wfos_notification_requests
+  FOR EACH ROW EXECUTE FUNCTION wfos_check_notification_integrity();

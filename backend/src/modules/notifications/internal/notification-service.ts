@@ -104,13 +104,13 @@ export class DefaultNotificationService implements NotificationService {
       return;
     }
 
-    // Find a provider adapter. If no adapters are configured (e.g. in tests
-    // without a fake), mark as delivered with provider='local' (no-op).
+    // Find a provider adapter. If no adapters are configured, mark as failed
+    // — a missing provider is NOT a successful delivery.
     const provider = this.providers.get('local') ?? this.providers.values().next().value;
     if (!provider) {
-      // No provider configured — mark as delivered (no-op).
-      await this.repo.updateStatus(notificationId, 'delivered', 'local', { note: 'no provider configured' });
-      this.logger.info('notification.process.no_provider', { notificationId });
+      // No provider configured — mark as FAILED (not delivered).
+      await this.repo.updateStatus(notificationId, 'failed', null, null, 'no notification provider configured');
+      this.logger.warn('notification.process.no_provider', { notificationId });
       return;
     }
 

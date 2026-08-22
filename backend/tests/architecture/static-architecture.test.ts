@@ -2626,4 +2626,42 @@ describe('WORK-021 invariants -- /notifications module boundaries', () => {
     const unexpected = exported.filter((n) => !allowed.has(n));
     expect(unexpected, `/notifications exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
   });
+
+  // --- REGRESSION (PR #20): 3 blocking fixes ---
+
+  it('REGRESSION (PR #20): app.ts wires DefaultNotificationService + notification.send handler', () => {
+    const appFile = join(SRC_ROOT, 'app.ts');
+    const src = readFileSync(appFile, 'utf8');
+    expect(src).toMatch(/import.*DefaultNotificationService.*from.*notification-service/);
+    expect(src).toMatch(/import.*createNotificationJobHandler.*from.*notification-service/);
+    expect(src).toMatch(/new DefaultNotificationService\s*\(/);
+    expect(src).toMatch(/createNotificationJobHandler\s*\(/);
+  });
+
+  it('REGRESSION (PR #20): missing provider marks notification as FAILED (not delivered)', () => {
+    const serviceFile = join(MODULES_DIR, 'notifications', 'internal', 'notification-service.ts');
+    const src = readFileSync(serviceFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The no-provider path must use 'failed', NOT 'delivered'.
+    const noProviderMatch = codeOnly.match(/!provider[\s\S]*?return/);
+    expect(noProviderMatch).not.toBeNull();
+    expect(noProviderMatch![0]).toMatch(/'failed'/);
+    expect(noProviderMatch![0]).not.toMatch(/'delivered'/);
+  });
+
+  it('REGRESSION (PR #20): notification integrity trigger checks resource references', () => {
+    const migrationFile = join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0016_notifications.sql');
+    const src = readFileSync(migrationFile, 'utf8');
+    expect(src).toMatch(/NEW\.work_item_id/);
+    expect(src).toMatch(/NEW\.review_id/);
+    expect(src).toMatch(/NEW\.verification_run_id/);
+    expect(src).toMatch(/wfos_check_notification_integrity/);
+  });
+
+  it('REGRESSION (PR #20): index.ts wires notification routes into production buildServer', () => {
+    const indexFile = join(SRC_ROOT, 'index.ts');
+    const src = readFileSync(indexFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(codeOnly).toMatch(/notificationService:\s*app\.deps\.notificationService/);
+  });
 });
