@@ -131,11 +131,72 @@ export interface ConvergenceSignalRepository {
  */
 export interface WorkflowOrchestrator {
   /**
-   * Submit a convergence signal. Idempotent — duplicate signals with the same
-   * (work_item_id, signal_type, source_event_id) are no-ops. Enqueues a
-   * convergence job for async processing.
+   * Submit an `initiate` signal — the ONLY client-facing convergence operation.
+   * Starts the convergence loop for a work item (DRAFT → READY → ASSIGNED →
+   * IMPLEMENTING → PR_OPEN). This is NOT a trusted-outcome signal — it only
+   * starts the loop; all downstream transitions require trusted domain signals.
+   *
+   * Idempotent — duplicate signals with the same
+   * (work_item_id, signal_type, source_event_id) are no-ops.
    */
-  submitSignal(input: SubmitSignalInput): Promise<ConvergenceSignal>;
+  initiateConvergence(input: {
+    workItemId: string;
+    sourceEventId: string;
+    executionId: string;
+    payload?: Record<string, unknown>;
+  }): Promise<ConvergenceSignal>;
+
+  /**
+   * INTERNAL — submit a trusted `agent_run_completed` signal.
+   *
+   * Validates the AgentRun exists, belongs to the work item, and loads its
+   * authoritative status/commitRef/pullRequestRef from the persisted record.
+   * A client cannot forge this — the signal payload is populated from the
+   * AgentRun record, not from client input.
+   */
+  submitAgentRunCompleted(input: {
+    workItemId: string;
+    agentRunId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal>;
+
+  /**
+   * INTERNAL — submit a trusted `verification_completed` signal.
+   *
+   * Validates the VerificationRun exists, belongs to the work item, is
+   * completed, and loads the authoritative criteria-pass/fail result from
+   * the persisted run summary. A client cannot forge this.
+   */
+  submitVerificationCompleted(input: {
+    workItemId: string;
+    verificationRunId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal>;
+
+  /**
+   * INTERNAL — submit a trusted `review_finalized` signal.
+   *
+   * Validates the Review exists, belongs to the work item, is finalized, and
+   * loads the authoritative outcome from the persisted ReviewResult. A client
+   * cannot forge this.
+   */
+  submitReviewFinalized(input: {
+    workItemId: string;
+    reviewId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal>;
+
+  /**
+   * INTERNAL — submit a trusted `pull_request_merged` signal.
+   *
+   * Validates the PR association exists, belongs to the work item, and its
+   * status is 'merged'. A client cannot forge this.
+   */
+  submitPullRequestMerged(input: {
+    workItemId: string;
+    prAssociationId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal>;
 
   /**
    * Process a convergence signal. Loads the signal + current workflow state,

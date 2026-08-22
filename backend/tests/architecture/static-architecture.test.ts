@@ -2265,4 +2265,22 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
     expect(wfIndex).toMatch(/ConvergenceSignal/);
     expect(wfIndex).toMatch(/WorkflowOrchestrator/);
   });
+
+  it('REGRESSION (PR #16): no public signal endpoint accepts arbitrary signalType', () => {
+    // The public generic signal endpoint (POST /signals) was REMOVED because
+    // it allowed a project writer to forge trusted internal outcomes. The only
+    // client-facing convergence operation is POST /converge (initiate). Trusted
+    // signals (agent_run_completed, verification_completed, review_finalized,
+    // pull_request_merged) are submitted internally by the orchestrator, which
+    // validates each source against the persisted authoritative domain record.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    expect(existsSync(routeFile)).toBe(true);
+    const src = readFileSync(routeFile, 'utf8');
+    // The route must NOT register a POST /signals endpoint.
+    expect(src).not.toMatch(/app\.post\([^)]*\/signals['"]/);
+    // The route must NOT reference SignalType (arbitrary signal type acceptance).
+    expect(src).not.toMatch(/\bSignalType\b/);
+    // The route MUST use initiateConvergence (the only public entry point).
+    expect(src).toMatch(/initiateConvergence/);
+  });
 });

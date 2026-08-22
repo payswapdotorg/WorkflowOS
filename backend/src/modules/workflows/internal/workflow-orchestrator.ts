@@ -61,29 +61,190 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     private readonly workItemDependencyService: WorkItemDependencyService,
     private readonly pullRequestAssociationRepository: PullRequestAssociationRepository,
     private readonly agentGateway: AgentGateway,
-    agentRunRepository: AgentRunRepository,
+    private readonly agentRunRepository: AgentRunRepository,
     private readonly architectService: ArchitectService,
-    verificationService: VerificationService,
-    reviewService: ReviewService,
+    private readonly verificationService: VerificationService,
+    private readonly reviewService: ReviewService,
     private readonly architectureVersionRepository: ArchitectureVersionRepository,
     private readonly architectureRepository: ArchitectureRepository,
     projectRepository: ProjectRepository,
     private readonly genExecutionId: typeof generateExecutionId,
   ) {
     this.signalRepo = new PgConvergenceSignalRepository(db);
-    // verificationService + reviewService + agentRunRepository +
-    // projectRepository are accepted for future use (the orchestrator may
-    // create verification runs / reviews automatically in future convergence
-    // steps). They are intentionally wired now so downstream work items don't
-    // need to re-plumb the dependencies. Currently the orchestrator reads
-    // results from signal payloads rather than calling these services directly.
-    void verificationService;
-    void reviewService;
-    void agentRunRepository;
+    // projectRepository is accepted for future use (project-level convergence
+    // queries). It is intentionally wired now so downstream work items don't
+    // need to re-plumb the dependency.
     void projectRepository;
   }
 
-  async submitSignal(input: SubmitSignalInput): Promise<ConvergenceSignal> {
+  // --- Client-facing convergence operation (the ONLY public entry point) ---
+
+  async initiateConvergence(input: {
+    workItemId: string;
+    sourceEventId: string;
+    executionId: string;
+    payload?: Record<string, unknown>;
+  }): Promise<ConvergenceSignal> {
+    // The `initiate` signal is the ONLY client-facing convergence operation.
+    // It starts the loop (DRAFT → READY → ASSIGNED → IMPLEMENTING → PR_OPEN)
+    // but does NOT forge any trusted domain outcome. All downstream transitions
+    // (verification pass, review approve, PR merge) require trusted internal
+    // signals that validate against persisted authoritative domain records.
+    return this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'initiate',
+      sourceEventId: input.sourceEventId,
+      executionId: input.executionId,
+      payload: input.payload ?? {},
+    });
+  }
+
+  // --- Trusted internal submission paths (NOT exposed via the public API) ---
+  //
+  // Each method validates the source domain record against persisted state
+  // before creating a signal. The signal payload is populated from the
+  // AUTHORITATIVE record, not from client input. This prevents the
+  // workflow-authority bypass (PR #16 architect review): a project writer
+  // cannot forge an agent_run_completed, verification_completed,
+  // review_finalized, or pull_request_merged signal through the API.
+
+  async submitAgentRunCompleted(input: {
+    workItemId: string;
+    agentRunId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal> {
+    // Validate the AgentRun exists + belongs to the work item.
+    const run = await this.agentRunRepository.findById(input.agentRunId);
+    if (!run) {
+      throw new Error(`convergence: agent run ${input.agentRunId} not found`);
+    }
+    if (run.workItemId !== input.workItemId) {
+      throw new Error(
+        `convergence: agent run ${input.agentRunId} belongs to work item ${run.workItemId}, not ${input.workItemId}`,
+      );
+    }
+    // Populate the signal payload from the AUTHORITATIVE AgentRun record.
+    return this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'agent_run_completed',
+      sourceEventId: input.agentRunId, // use the agent run ID as the stable source event id
+      executionId: input.executionId,
+      payload: {
+        agentRunId: run.id,
+        status: run.status,
+        commitRef: run.commitRef,
+        pullRequestRef: run.pullRequestRef,
+      },
+    });
+  }
+
+  async submitVerificationCompleted(input: {
+    workItemId: string;
+    verificationRunId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal> {
+    // Validate the VerificationRun exists + belongs to the work item.
+    const run = await this.verificationService.findRun(input.verificationRunId);
+    if (!run) {
+      throw new Error(`convergence: verification run ${input.verificationRunId} not found`);
+    }
+    if (run.workItemId !== input.workItemId) {
+      throw new Error(
+        `convergence: verification run ${input.verificationRunId} belongs to work item ${run.workItemId}, not ${input.workItemId}`,
+      );
+    }
+    if (run.status !== 'completed') {
+      throw new Error(
+        `convergence: verification run ${input.verificationRunId} is not completed (status: ${run.status})`,
+      );
+    }
+    // Determine allCriteriaPass from the persisted run summary (populated by
+    // persistEvaluations). The orchestrator does NOT evaluate evidence itself
+    // — it reads the authoritative result from the persisted record.
+    const summary = run.summary as Record<string, unknown>;
+    const criteriaPass = (summary.criteriaPass as number) ?? 0;
+    const criteriaFail = (summary.criteriaFail as number) ?? 0;
+    const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
+    const criteriaPending = (summary.criteriaPending as number) ?? 0;
+    const allCriteriaPass = criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
+
+    return this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'verification_completed',
+      sourceEventId: input.verificationRunId,
+      executionId: input.executionId,
+      payload: {
+        verificationRunId: run.id,
+        allCriteriaPass,
+      },
+    });
+  }
+
+  async submitReviewFinalized(input: {
+    workItemId: string;
+    reviewId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal> {
+    // Validate the Review exists + is finalized + belongs to the work item.
+    // Load the AUTHORITATIVE review result (outcome) from /reviews.
+    const reviewResult = await this.reviewService.getReviewResult(input.reviewId);
+    if (!reviewResult) {
+      throw new Error(
+        `convergence: review ${input.reviewId} not found or not finalized`,
+      );
+    }
+    if (reviewResult.workItemId !== input.workItemId) {
+      throw new Error(
+        `convergence: review ${input.reviewId} belongs to work item ${reviewResult.workItemId}, not ${input.workItemId}`,
+      );
+    }
+    // Populate the signal payload from the AUTHORITATIVE ReviewResult.
+    return this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'review_finalized',
+      sourceEventId: input.reviewId,
+      executionId: input.executionId,
+      payload: {
+        reviewId: reviewResult.reviewId,
+        outcome: reviewResult.outcome,
+      },
+    });
+  }
+
+  async submitPullRequestMerged(input: {
+    workItemId: string;
+    prAssociationId: string;
+    executionId: string;
+  }): Promise<ConvergenceSignal> {
+    // Validate the PR association exists + belongs to the work item + is merged.
+    const pra = await this.pullRequestAssociationRepository.findById(input.prAssociationId);
+    if (!pra) {
+      throw new Error(`convergence: PR association ${input.prAssociationId} not found`);
+    }
+    if (pra.workItemId !== input.workItemId) {
+      throw new Error(
+        `convergence: PR association ${input.prAssociationId} belongs to work item ${pra.workItemId}, not ${input.workItemId}`,
+      );
+    }
+    if (pra.status !== 'merged') {
+      throw new Error(
+        `convergence: PR association ${input.prAssociationId} is not merged (status: ${pra.status})`,
+      );
+    }
+    return this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'pull_request_merged',
+      sourceEventId: input.prAssociationId,
+      executionId: input.executionId,
+      payload: {
+        prAssociationId: pra.id,
+      },
+    });
+  }
+
+  // --- Internal signal submission (shared by all trusted paths) ---
+
+  private async submitSignalInternal(input: SubmitSignalInput): Promise<ConvergenceSignal> {
     // Resolve the project from the work item (tenant isolation — don't trust
     // client-supplied project IDs).
     const wi = await this.workItemRepository.findById(input.workItemId);

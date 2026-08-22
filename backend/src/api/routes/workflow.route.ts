@@ -3,7 +3,7 @@ import type { AuthorizationService } from '@modules/auth/index.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
 import type { ArchitectureRepository, ArchitectureVersionRepository } from '@modules/architecture/index.js';
 import type { WorkItemRepository } from '@modules/work-items/index.js';
-import type { WorkflowEngine, WorkflowState, TransitionRequest, WorkflowOrchestrator, SignalType } from '@modules/workflows/index.js';
+import type { WorkflowEngine, WorkflowState, TransitionRequest, WorkflowOrchestrator } from '@modules/workflows/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 import {
   requireProjectAuthorization,
@@ -124,6 +124,17 @@ export async function workflowRoutes(
   // --- WORK-017: Convergence routes ---
 
   // POST /work-items/:workItemId/workflow/converge — initiate the convergence loop.
+  //
+  // This is the ONLY client-facing convergence operation. It starts the loop
+  // (DRAFT → READY → ASSIGNED → IMPLEMENTING → PR_OPEN) but does NOT forge
+  // any trusted domain outcome. All downstream transitions (verification pass,
+  // review approve, PR merge) require trusted INTERNAL signals that validate
+  // against persisted authoritative domain records — NOT client-submitted signals.
+  //
+  // The public generic signal endpoint (POST /signals) was REMOVED in the
+  // PR #16 correction: it allowed a project writer to forge trusted outcomes
+  // (e.g. review_finalized with outcome:APPROVE) and advance canonical workflow
+  // state without the underlying event occurring.
   app.post('/work-items/:workItemId/workflow/converge', async (req, reply) => {
     return runAuthed(req, async () => {
       const { workItemId } = req.params as { workItemId: string };
@@ -146,46 +157,11 @@ export async function workflowRoutes(
         task?: string;
       };
       const executionId = generateExecutionId();
-      const signal = await deps.orchestrator.submitSignal({
+      const signal = await deps.orchestrator.initiateConvergence({
         workItemId,
-        signalType: 'initiate',
         sourceEventId: executionId,
         executionId,
         payload: body,
-      });
-      return reply.code(202).send({ signalId: signal.id, accepted: true });
-    });
-  });
-
-  // POST /work-items/:workItemId/workflow/signals — submit a domain signal.
-  app.post('/work-items/:workItemId/workflow/signals', async (req, reply) => {
-    return runAuthed(req, async () => {
-      const { workItemId } = req.params as { workItemId: string };
-      const projectId = await resolveProjectForWorkItem(deps, workItemId);
-      if (!projectId) {
-        return reply.code(404).send({ error: 'work-item-not-found' });
-      }
-      await requireProjectAuthorization(req, reply, deps, {
-        permission: 'project.write', projectId,
-      });
-      if (!deps.orchestrator) {
-        return reply.code(501).send({ error: 'orchestrator-not-configured' });
-      }
-      const body = req.body as {
-        signalType?: SignalType;
-        sourceEventId?: string;
-        payload?: Record<string, unknown>;
-      };
-      if (!body?.signalType || !body?.sourceEventId) {
-        return reply.code(400).send({ error: 'signalType and sourceEventId required' });
-      }
-      const executionId = generateExecutionId();
-      const signal = await deps.orchestrator.submitSignal({
-        workItemId,
-        signalType: body.signalType,
-        sourceEventId: body.sourceEventId,
-        executionId,
-        payload: body.payload ?? {},
       });
       return reply.code(202).send({ signalId: signal.id, accepted: true });
     });

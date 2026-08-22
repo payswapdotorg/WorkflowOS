@@ -55,6 +55,13 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
   let versionA: { id: string };
   let versionB: { id: string };
   let reqA: { id: string };
+  let criterionA1Id: string;
+  // Services needed by the trusted signal submission helpers.
+  let verificationService: DefaultVerificationService;
+  let reviewService: DefaultReviewService;
+  let agentRunRepo: PgAgentRunRepository;
+  let agentGateway: DefaultAgentGateway;
+  let ciIngestionService: DefaultCiEvidenceIngestionService;
 
   beforeAll(async () => {
     stack = await buildAuthStack({
@@ -90,7 +97,7 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
     });
     await stack.acceptanceCriterionRepository.create({
       requirementId: reqA.id, criterionId: 'AC-CONV-1', description: 'Valid auth resolves identity',
-    });
+    }).then((c) => { criterionA1Id = c.id; });
 
     // GitHub installation for project A (for CI evidence ingestion).
     const installationRepo = new PgGitHubInstallationRepository(stack.db.client);
@@ -105,17 +112,17 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
 
     const llmGateway = new DefaultLlmGateway(stack.db.client, logger, [fakeLlm], 3);
     const architectService = new DefaultArchitectService(stack.db.client, llmGateway, stack.workOrderRepository, logger);
-    const agentGateway = new DefaultAgentGateway(stack.db.client, logger, [fakeAgent], 3);
-    const agentRunRepo = new PgAgentRunRepository(stack.db.client);
+    agentGateway = new DefaultAgentGateway(stack.db.client, logger, [fakeAgent], 3);
+    agentRunRepo = new PgAgentRunRepository(stack.db.client);
     const ciIngestionRepo = new PgCiEvidenceIngestionRepository(stack.db.client);
-    void new DefaultCiEvidenceIngestionService(ciIngestionRepo, installationRepo, logger);
-    const verificationService = new DefaultVerificationService(
+    ciIngestionService = new DefaultCiEvidenceIngestionService(ciIngestionRepo, installationRepo, logger);
+    verificationService = new DefaultVerificationService(
       stack.db.client, stack.requirementRepository, stack.acceptanceCriterionRepository,
       stack.architectureVersionRepository, stack.workItemRepository,
       stack.workItemRequirementRepository, stack.workItemCriterionRepository,
       ciIngestionRepo, stack.objectStore, logger,
     );
-    const reviewService = new DefaultReviewService(stack.db.client, stack.workItemRepository, logger);
+    reviewService = new DefaultReviewService(stack.db.client, stack.workItemRepository, logger);
 
     const depService = new DefaultWorkItemDependencyService(stack.db.client);
     workflowEngine = new DefaultWorkflowEngine(
@@ -212,23 +219,190 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
   }
 
   // Helper: submit + wait for a signal to be processed.
-  async function submitAndWait(signal: {
-    workItemId: string;
-    signalType: 'initiate' | 'agent_run_completed' | 'pull_request_merged' | 'verification_completed' | 'review_finalized';
-    sourceEventId: string;
-    payload: Record<string, unknown>;
-  }): Promise<ConvergenceSignal> {
-    const submitted = await orchestrator.submitSignal({
-      ...signal,
-      executionId: generateExecutionId(),
+  // Helper: initiate convergence + wait for processing.
+  async function initiateAndWait(workItemId: string, payload: Record<string, unknown> = {}, sourceEventId?: string): Promise<ConvergenceSignal> {
+    const execId = generateExecutionId();
+    const submitted = await orchestrator.initiateConvergence({
+      workItemId, sourceEventId: sourceEventId ?? execId, executionId: execId, payload,
     });
-    // Wait for the worker to process the signal.
+    await waitForSignal(submitted.id, workItemId);
+    return submitted;
+  }
+
+  // Helper: submit a trusted verification_completed signal + wait.
+  async function submitVerificationAndWait(workItemId: string, verificationRunId: string): Promise<ConvergenceSignal> {
+    const submitted = await orchestrator.submitVerificationCompleted({
+      workItemId, verificationRunId, executionId: generateExecutionId(),
+    });
+    await waitForSignal(submitted.id, workItemId);
+    return submitted;
+  }
+
+  // Helper: submit a trusted review_finalized signal + wait.
+  async function submitReviewAndWait(workItemId: string, reviewId: string): Promise<ConvergenceSignal> {
+    const submitted = await orchestrator.submitReviewFinalized({
+      workItemId, reviewId, executionId: generateExecutionId(),
+    });
+    await waitForSignal(submitted.id, workItemId);
+    return submitted;
+  }
+
+  // Helper: submit a trusted agent_run_completed signal + wait.
+  async function submitAgentRunAndWait(workItemId: string, agentRunId: string): Promise<ConvergenceSignal> {
+    const submitted = await orchestrator.submitAgentRunCompleted({
+      workItemId, agentRunId, executionId: generateExecutionId(),
+    });
+    await waitForSignal(submitted.id, workItemId);
+    return submitted;
+  }
+
+  // Helper: submit a trusted pull_request_merged signal + wait.
+  async function submitPrMergeAndWait(workItemId: string, prAssociationId: string): Promise<ConvergenceSignal> {
+    const submitted = await orchestrator.submitPullRequestMerged({
+      workItemId, prAssociationId, executionId: generateExecutionId(),
+    });
+    await waitForSignal(submitted.id, workItemId);
+    return submitted;
+  }
+
+  async function waitForSignal(signalId: string, workItemId: string): Promise<void> {
     await waitFor(async () => {
-      const s = await orchestrator.getConvergenceStatus(signal.workItemId);
-      const found = s.signals.find((sig) => sig.id === submitted.id);
+      const s = await orchestrator.getConvergenceStatus(workItemId);
+      const found = s.signals.find((sig) => sig.id === signalId);
       return found?.processingState === 'processed' || found?.processingState === 'failed';
     }, { timeout: 3000 });
-    return submitted;
+  }
+
+  // Helper: create a real verification run + persist passing evaluations.
+  // Associates the work item with the criterion so the evaluation has scope.
+  async function createPassingVerificationRun(workItemId: string): Promise<string> {
+    const wi = await stack.workItemRepository.findById(workItemId);
+    if (!wi) throw new Error('work item not found');
+    // Associate the work item with the requirement + criterion (needed for
+    // evaluateForRun scoping — WORK-015 PR #14 correction).
+    await stack.workItemRequirementRepository.associate(workItemId, reqA.id);
+    await stack.workItemCriterionRepository.associate(workItemId, criterionA1Id);
+    const run = await verificationService.createRun({
+      projectId: projectA.id, workItemId, architectureVersionId: wi.architectureVersionId,
+      source: 'test', executionId: generateExecutionId(),
+    });
+    // Attach authoritative CI evidence that passes + map it to the criterion.
+    const ciPayload = JSON.stringify({
+      action: 'completed',
+      workflow_run: {
+        id: Math.floor(Math.random() * 1000000), name: 'CI', head_branch: 'feature',
+        head_sha: 'sha-test', status: 'completed', conclusion: 'success',
+        html_url: 'https://github.com/actions/runs/1',
+        run_started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:05:00Z',
+      },
+      workflow: { name: 'CI' },
+      repository: { id: 123, full_name: 'conv-org-a/repo-a' },
+      installation: { id: 999 },
+    });
+    const ci = await ciIngestionService.ingestFromWebhookPayload({
+      webhookEventId: 'wh-test-' + run.id, eventType: 'workflow_run', payload: ciPayload,
+    });
+    const evidence = await verificationService.attachCiEvidence({
+      verificationRunId: run.id, ciEvidenceId: ci!.id,
+    });
+    await verificationService.mapEvidenceToCriterion({
+      projectId: projectA.id, verificationRunId: run.id,
+      evidenceId: evidence.id, criterionId: criterionA1Id, relevance: 'proves',
+    });
+    await verificationService.persistEvaluations(run.id);
+    return run.id;
+  }
+
+  // Helper: create a real verification run + persist failing evaluations.
+  async function createFailingVerificationRun(workItemId: string): Promise<string> {
+    const wi = await stack.workItemRepository.findById(workItemId);
+    if (!wi) throw new Error('work item not found');
+    await stack.workItemRequirementRepository.associate(workItemId, reqA.id);
+    await stack.workItemCriterionRepository.associate(workItemId, criterionA1Id);
+    const run = await verificationService.createRun({
+      projectId: projectA.id, workItemId, architectureVersionId: wi.architectureVersionId,
+      source: 'test', executionId: generateExecutionId(),
+    });
+    // Attach FAILING CI evidence + map it to the criterion.
+    const ciPayload = JSON.stringify({
+      action: 'completed',
+      workflow_run: {
+        id: Math.floor(Math.random() * 1000000), name: 'CI', head_branch: 'feature',
+        head_sha: 'sha-test', status: 'completed', conclusion: 'failure',
+        html_url: 'https://github.com/actions/runs/2',
+        run_started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:05:00Z',
+      },
+      workflow: { name: 'CI' },
+      repository: { id: 123, full_name: 'conv-org-a/repo-a' },
+      installation: { id: 999 },
+    });
+    const ci = await ciIngestionService.ingestFromWebhookPayload({
+      webhookEventId: 'wh-test-fail-' + run.id, eventType: 'workflow_run', payload: ciPayload,
+    });
+    const evidence = await verificationService.attachCiEvidence({
+      verificationRunId: run.id, ciEvidenceId: ci!.id,
+    });
+    await verificationService.mapEvidenceToCriterion({
+      projectId: projectA.id, verificationRunId: run.id,
+      evidenceId: evidence.id, criterionId: criterionA1Id, relevance: 'proves',
+    });
+    await verificationService.persistEvaluations(run.id);
+    return run.id;
+  }
+
+  // Helper: create a real review + finalize it with the given outcome.
+  async function createAndFinalizeReview(workItemId: string, outcome: 'APPROVE' | 'REQUEST_CHANGES' | 'ARCHITECTURE_CHANGE_REQUIRED' | 'IMPLEMENTATION_BLOCKED'): Promise<string> {
+    const wi = await stack.workItemRepository.findById(workItemId);
+    if (!wi) throw new Error('work item not found');
+    const review = await reviewService.createReview({
+      projectId: projectA.id, workItemId, architectureVersionId: wi.architectureVersionId,
+      source: 'architect-llm', executionId: generateExecutionId(),
+    });
+    await reviewService.finalizeReview(review.id, { outcome });
+    return review.id;
+  }
+
+  // Helper: create a real agent run (success) via the gateway.
+  async function createSuccessAgentRun(workItemId: string): Promise<string> {
+    const execId = generateExecutionId();
+    const wo = await stack.workOrderRepository.create({
+      workItemId, projectId: projectA.id, architectureVersionId: versionA.id,
+    });
+    fakeAgent.setOutput('Agent completed');
+    await agentGateway.execute({
+      provider: 'fake', configuration: {}, workItemId,
+      workOrderId: wo.id, architectureVersionId: versionA.id,
+      executionId: execId, input: 'implement',
+    });
+    const run = await agentRunRepo.findByExecutionId(execId);
+    if (!run) throw new Error('agent run not found');
+    return run.id;
+  }
+
+  // Helper: create a real agent run (failed) — the gateway records the failure.
+  async function createFailedAgentRun(workItemId: string): Promise<string> {
+    const execId = generateExecutionId();
+    const wo = await stack.workOrderRepository.create({
+      workItemId, projectId: projectA.id, architectureVersionId: versionA.id,
+    });
+    // Reset the fake agent FIRST so callCount is 0, then set the failure.
+    // (The FakeAgentAdapter's callCount is cumulative — without reset, the
+    // failure check `callCount <= failCount` would be false.)
+    fakeAgent.reset();
+    fakeAgent.setFailure('execution_failed', 'Agent crashed', false);
+    try {
+      await agentGateway.execute({
+        provider: 'fake', configuration: {}, workItemId,
+        workOrderId: wo.id, architectureVersionId: versionA.id,
+        executionId: execId, input: 'implement',
+      });
+    } catch {
+      // Expected — the agent failed.
+    }
+    fakeAgent.reset();
+    const run = await agentRunRepo.findByExecutionId(execId);
+    if (!run) throw new Error('agent run not found');
+    return run.id;
   }
 
   async function getState(workItemId: string): Promise<WorkflowState> {
@@ -258,12 +432,7 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       fakeAgent.setOutput('Implementation complete');
 
       // 1. Initiate → DRAFT → READY → ASSIGNED → IMPLEMENTING → PR_OPEN
-      await submitAndWait({
-        workItemId: wi.id,
-        signalType: 'initiate',
-        sourceEventId: 'happy-initiate',
-        payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' },
-      });
+      await initiateAndWait(wi.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'happy-initiate');
 
       const stateAfterInit = await getState(wi.id);
       expect(stateAfterInit).toBe('pr_open');
@@ -277,32 +446,26 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       });
 
       // 3. Verification completed (all criteria pass) → ARCHITECT_REVIEW
-      await submitAndWait({
-        workItemId: wi.id,
-        signalType: 'verification_completed',
-        sourceEventId: 'happy-verify',
-        payload: { allCriteriaPass: true, verificationRunId: 'vr-001' },
-      });
+      const vrId = await createPassingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vrId);
 
       expect(await getState(wi.id)).toBe('architect_review');
 
       // 4. Review finalized (APPROVE) → APPROVED
-      await submitAndWait({
-        workItemId: wi.id,
-        signalType: 'review_finalized',
-        sourceEventId: 'happy-review',
-        payload: { outcome: 'APPROVE', reviewId: 'rev-001' },
-      });
+      const revApprove = await createAndFinalizeReview(wi.id, 'APPROVE'); await submitReviewAndWait(wi.id, revApprove);
 
       expect(await getState(wi.id)).toBe('approved');
 
       // 5. PR merged → MERGED → VERIFIED
-      await submitAndWait({
-        workItemId: wi.id,
-        signalType: 'pull_request_merged',
-        sourceEventId: 'happy-merge',
-        payload: { prAssociationId: 'pra-001' },
+      // Create a real PR association with 'merged' status, then submit the trusted signal.
+      const pra = await stack.pullRequestAssociationRepository.create({
+        workItemId: wi.id, externalPrId: 'github:owner/repo#merge-1',
       });
+      // Manually update the PR status to 'merged' (in production this comes from GitHub).
+      await stack.db.client.query(
+        'UPDATE wfos_pull_request_associations SET status = $1 WHERE id = $2',
+        ['merged', pra.id],
+      );
+      await submitPrMergeAndWait(wi.id, pra.id);
 
       expect(await getState(wi.id)).toBe('verified');
 
@@ -341,14 +504,14 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       fakeAgent.setOutput('Implementation complete');
 
       // Drive to ARCHITECT_REVIEW.
-      await submitAndWait({ workItemId: wi.id, signalType: 'initiate', sourceEventId: 'corr-init', payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' } });
+      await initiateAndWait(wi.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'corr-init');
       await workflowEngine.transition({ workItemId: wi.id, toState: 'verifying', actor: 'test', executionId: generateExecutionId() });
-      await submitAndWait({ workItemId: wi.id, signalType: 'verification_completed', sourceEventId: 'corr-verify', payload: { allCriteriaPass: true } });
+      const vr_corr_verify = await createPassingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vr_corr_verify);
 
       expect(await getState(wi.id)).toBe('architect_review');
 
       // Review 1: REQUEST_CHANGES → CHANGES_REQUESTED
-      await submitAndWait({ workItemId: wi.id, signalType: 'review_finalized', sourceEventId: 'corr-review-1', payload: { outcome: 'REQUEST_CHANGES' } });
+      const rev_corr_review_1 = await createAndFinalizeReview(wi.id, 'REQUEST_CHANGES'); await submitReviewAndWait(wi.id, rev_corr_review_1);
       expect(await getState(wi.id)).toBe('changes_requested');
 
       // Correction: CHANGES_REQUESTED → IMPLEMENTING
@@ -357,10 +520,10 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       await workflowEngine.transition({ workItemId: wi.id, toState: 'verifying', actor: 'test', executionId: generateExecutionId() });
 
       // Review 2: APPROVE → APPROVED
-      await submitAndWait({ workItemId: wi.id, signalType: 'verification_completed', sourceEventId: 'corr-verify-2', payload: { allCriteriaPass: true } });
+      const vr_corr_verify_2 = await createPassingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vr_corr_verify_2);
       expect(await getState(wi.id)).toBe('architect_review');
 
-      await submitAndWait({ workItemId: wi.id, signalType: 'review_finalized', sourceEventId: 'corr-review-2', payload: { outcome: 'APPROVE' } });
+      const rev_corr_review_2 = await createAndFinalizeReview(wi.id, 'APPROVE'); await submitReviewAndWait(wi.id, rev_corr_review_2);
       expect(await getState(wi.id)).toBe('approved');
 
       // Verify both reviews' history is preserved (prior transitions remain).
@@ -385,11 +548,11 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       }));
       fakeAgent.setOutput('Implementation complete');
 
-      await submitAndWait({ workItemId: wi.id, signalType: 'initiate', sourceEventId: 'fail-init', payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' } });
+      await initiateAndWait(wi.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'fail-init');
       await workflowEngine.transition({ workItemId: wi.id, toState: 'verifying', actor: 'test', executionId: generateExecutionId() });
 
       // Verification failed → VERIFICATION_FAILED
-      await submitAndWait({ workItemId: wi.id, signalType: 'verification_completed', sourceEventId: 'fail-verify', payload: { allCriteriaPass: false } });
+      const vrf_fail_verify = await createFailingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vrf_fail_verify);
       expect(await getState(wi.id)).toBe('verification_failed');
 
       // Recovery: VERIFICATION_FAILED → IMPLEMENTING
@@ -410,10 +573,7 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       await workflowEngine.transition({ workItemId: wi.id, toState: 'implementing', actor: 'test', executionId: generateExecutionId() });
 
       // Agent failed → IMPLEMENTATION_BLOCKED (via agent_run_completed signal).
-      await submitAndWait({
-        workItemId: wi.id, signalType: 'agent_run_completed',
-        sourceEventId: 'blk-agent-fail', payload: { status: 'failed' },
-      });
+      const failedRunId = await createFailedAgentRun(wi.id); await submitAgentRunAndWait(wi.id, failedRunId);
       expect(await getState(wi.id)).toBe('implementation_blocked');
 
       // Recovery: IMPLEMENTATION_BLOCKED → IMPLEMENTING
@@ -435,13 +595,13 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       }));
       fakeAgent.setOutput('Implementation complete');
 
-      await submitAndWait({ workItemId: wi.id, signalType: 'initiate', sourceEventId: 'arch-init', payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' } });
+      await initiateAndWait(wi.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'arch-init');
       await workflowEngine.transition({ workItemId: wi.id, toState: 'verifying', actor: 'test', executionId: generateExecutionId() });
-      await submitAndWait({ workItemId: wi.id, signalType: 'verification_completed', sourceEventId: 'arch-verify', payload: { allCriteriaPass: true } });
+      const vr_arch_verify = await createPassingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vr_arch_verify);
       expect(await getState(wi.id)).toBe('architect_review');
 
       // Review: ARCHITECTURE_CHANGE_REQUIRED
-      await submitAndWait({ workItemId: wi.id, signalType: 'review_finalized', sourceEventId: 'arch-review', payload: { outcome: 'ARCHITECTURE_CHANGE_REQUIRED' } });
+      const rev_arch_review = await createAndFinalizeReview(wi.id, 'ARCHITECTURE_CHANGE_REQUIRED'); await submitReviewAndWait(wi.id, rev_arch_review);
       expect(await getState(wi.id)).toBe('architecture_change_required');
 
       // Transition to terminal ARCHITECTURE_CHANGE_REQUEST
@@ -472,14 +632,14 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       fakeAgent.setOutput('Implementation complete');
 
       // Initiate wiB — should stay in READY because wiA is not completed.
-      await submitAndWait({ workItemId: wiB.id, signalType: 'initiate', sourceEventId: 'dep-init-blocked', payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' } });
+      await initiateAndWait(wiB.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'dep-init-blocked');
       expect(await getState(wiB.id)).toBe('ready');
 
       // Complete wiA.
       await stack.workItemCompletionService.markCompleted(wiA.id, true);
 
       // Re-initiate wiB — should now proceed past READY.
-      await submitAndWait({ workItemId: wiB.id, signalType: 'initiate', sourceEventId: 'dep-init-ready', payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' } });
+      await initiateAndWait(wiB.id, { provider: 'fake', model: 'test-model', agentProvider: 'fake' }, 'dep-init-ready');
       const stateAfter = await getState(wiB.id);
       expect(['assigned', 'implementing', 'pr_open']).toContain(stateAfter);
     });
@@ -491,12 +651,12 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
     it('same signal submitted twice → one transition, no duplicate downstream', async () => {
       const wi = await createWorkItemA('CONV-DUP-001');
       // Submit the same initiate signal twice with the same sourceEventId.
-      const s1 = await orchestrator.submitSignal({
-        workItemId: wi.id, signalType: 'initiate', sourceEventId: 'dup-001',
+      const s1 = await orchestrator.initiateConvergence({
+        workItemId: wi.id, sourceEventId: 'dup-001',
         executionId: generateExecutionId(), payload: {},
       });
-      const s2 = await orchestrator.submitSignal({
-        workItemId: wi.id, signalType: 'initiate', sourceEventId: 'dup-001',
+      const s2 = await orchestrator.initiateConvergence({
+        workItemId: wi.id, sourceEventId: 'dup-001',
         executionId: generateExecutionId(), payload: {},
       });
       // Same signal row (idempotent).
@@ -523,10 +683,7 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       // Create the workflow execution first (DRAFT).
       await workflowEngine.getOrCreate(wi.id);
       // Submit verification_completed while the work item is still in DRAFT.
-      await submitAndWait({
-        workItemId: wi.id, signalType: 'verification_completed',
-        sourceEventId: 'ooo-verify', payload: { allCriteriaPass: true },
-      });
+      const vrId = await createPassingVerificationRun(wi.id); await submitVerificationAndWait(wi.id, vrId);
       // State should remain DRAFT (the signal is ignored — not in VERIFYING).
       expect(await getState(wi.id)).toBe('draft');
     });
@@ -538,12 +695,12 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
     it('two simultaneous converge signals → no contradictory transitions', async () => {
       const wi = await createWorkItemA('CONV-CONC-001');
       // Submit two different initiate signals simultaneously (different sourceEventIds).
-      const p1 = orchestrator.submitSignal({
-        workItemId: wi.id, signalType: 'initiate', sourceEventId: 'conc-001',
+      const p1 = orchestrator.initiateConvergence({
+        workItemId: wi.id, sourceEventId: 'conc-001',
         executionId: generateExecutionId(), payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' },
       });
-      const p2 = orchestrator.submitSignal({
-        workItemId: wi.id, signalType: 'initiate', sourceEventId: 'conc-002',
+      const p2 = orchestrator.initiateConvergence({
+        workItemId: wi.id, sourceEventId: 'conc-002',
         executionId: generateExecutionId(), payload: { provider: 'fake', model: 'test-model', agentProvider: 'fake' },
       });
       await Promise.all([p1, p2]);
@@ -568,8 +725,8 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       const wi = await createWorkItemA('CONV-RECOV-001');
       // Submit a signal but stop the worker before it processes.
       await worker.stop();
-      const signal = await orchestrator.submitSignal({
-        workItemId: wi.id, signalType: 'initiate', sourceEventId: 'recov-001',
+      const signal = await orchestrator.initiateConvergence({
+        workItemId: wi.id, sourceEventId: 'recov-001',
         executionId: generateExecutionId(), payload: {},
       });
       // The signal is persisted in PostgreSQL but not yet processed.
@@ -612,14 +769,17 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       expect(res.statusCode).toBe(403);
     });
 
-    it('cross-tenant signal denied (403)', async () => {
+    it('REGRESSION (PR #16): the public /signals endpoint is REMOVED (404)', async () => {
+      // The public generic signal endpoint was REMOVED because it allowed a
+      // project writer to forge trusted outcomes (review_finalized with
+      // outcome:APPROVE, etc.). A request to the old endpoint returns 404.
       const wi = await createWorkItemA('CONV-TEN-002');
       const res = await server.inject({
         method: 'POST', url: `/work-items/${wi.id}/workflow/signals`,
         headers: { 'x-api-key': 'raw-key-conv-b' },
         payload: { signalType: 'verification_completed', sourceEventId: 'ten-sig' },
       });
-      expect(res.statusCode).toBe(403);
+      expect(res.statusCode).toBe(404);
     });
 
     it('cross-tenant convergence status denied (403)', async () => {
@@ -648,10 +808,7 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       await workflowEngine.transition({ workItemId: wi.id, toState: 'implementing', actor: 'test', executionId: generateExecutionId() });
 
       // Submit agent_run_completed → orchestrator transitions to PR_OPEN.
-      await submitAndWait({
-        workItemId: wi.id, signalType: 'agent_run_completed',
-        sourceEventId: 'auth-agent', payload: { status: 'success', commitRef: 'sha1', pullRequestRef: 'github:owner/repo#1' },
-      });
+      const successRunId = await createSuccessAgentRun(wi.id); await submitAgentRunAndWait(wi.id, successRunId);
       expect(await getState(wi.id)).toBe('pr_open');
     });
 
@@ -667,11 +824,130 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       await workflowEngine.transition({ workItemId: wi.id, toState: 'architect_review', actor: 'test', executionId: generateExecutionId() });
 
       // Submit review_finalized → orchestrator transitions to APPROVED.
-      await submitAndWait({
-        workItemId: wi.id, signalType: 'review_finalized',
-        sourceEventId: 'auth-review', payload: { outcome: 'APPROVE' },
-      });
+      const revApprove = await createAndFinalizeReview(wi.id, 'APPROVE'); await submitReviewAndWait(wi.id, revApprove);
       expect(await getState(wi.id)).toBe('approved');
+    });
+  });
+
+  // --- REGRESSION (PR #16): forged outcome rejection ---
+
+  describe('REGRESSION (PR #16): trusted signal validation', () => {
+    it('submitReviewFinalized rejects a non-existent review', async () => {
+      const wi = await createWorkItemA('CONV-FORGE-001');
+      await workflowEngine.getOrCreate(wi.id);
+      await expect(
+        orchestrator.submitReviewFinalized({
+          workItemId: wi.id,
+          reviewId: '00000000-0000-0000-0000-000000000000',
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/not found or not finalized/);
+    });
+
+    it('submitReviewFinalized rejects a review belonging to ANOTHER work item', async () => {
+      const wiA = await createWorkItemA('CONV-FORGE-002A');
+      const wiB = await createWorkItemA('CONV-FORGE-002B');
+      const reviewB = await createAndFinalizeReview(wiB.id, 'APPROVE');
+      // Attempt to submit wiB's review for wiA — rejected.
+      await expect(
+        orchestrator.submitReviewFinalized({
+          workItemId: wiA.id, reviewId: reviewB,
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/belongs to work item/);
+    });
+
+    it('submitVerificationCompleted rejects a non-existent run', async () => {
+      const wi = await createWorkItemA('CONV-FORGE-003');
+      await workflowEngine.getOrCreate(wi.id);
+      await expect(
+        orchestrator.submitVerificationCompleted({
+          workItemId: wi.id,
+          verificationRunId: '00000000-0000-0000-0000-000000000000',
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it('submitVerificationCompleted rejects a run belonging to ANOTHER work item', async () => {
+      const wiA = await createWorkItemA('CONV-FORGE-004A');
+      const wiB = await createWorkItemA('CONV-FORGE-004B');
+      const vrB = await createPassingVerificationRun(wiB.id);
+      // Attempt to submit wiB's verification run for wiA — rejected.
+      await expect(
+        orchestrator.submitVerificationCompleted({
+          workItemId: wiA.id, verificationRunId: vrB,
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/belongs to work item/);
+    });
+
+    it('submitAgentRunCompleted rejects a non-existent run', async () => {
+      const wi = await createWorkItemA('CONV-FORGE-005');
+      await expect(
+        orchestrator.submitAgentRunCompleted({
+          workItemId: wi.id,
+          agentRunId: '00000000-0000-0000-0000-000000000000',
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it('submitAgentRunCompleted rejects a run belonging to ANOTHER work item', async () => {
+      const wiA = await createWorkItemA('CONV-FORGE-006A');
+      const wiB = await createWorkItemA('CONV-FORGE-006B');
+      const runB = await createSuccessAgentRun(wiB.id);
+      // Attempt to submit wiB's agent run for wiA — rejected.
+      await expect(
+        orchestrator.submitAgentRunCompleted({
+          workItemId: wiA.id, agentRunId: runB,
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/belongs to work item/);
+    });
+
+    it('submitPullRequestMerged rejects a non-existent PR association', async () => {
+      const wi = await createWorkItemA('CONV-FORGE-007');
+      await expect(
+        orchestrator.submitPullRequestMerged({
+          workItemId: wi.id,
+          prAssociationId: '00000000-0000-0000-0000-000000000000',
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it('submitPullRequestMerged rejects a PR that is NOT merged', async () => {
+      const wi = await createWorkItemA('CONV-FORGE-008');
+      const pra = await stack.pullRequestAssociationRepository.create({
+        workItemId: wi.id, externalPrId: 'github:owner/repo#not-merged',
+      });
+      // PR status is 'active' (not 'merged') — rejected.
+      await expect(
+        orchestrator.submitPullRequestMerged({
+          workItemId: wi.id, prAssociationId: pra.id,
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/not merged/);
+    });
+
+    it('submitPullRequestMerged rejects a PR belonging to ANOTHER work item', async () => {
+      const wiA = await createWorkItemA('CONV-FORGE-009A');
+      const wiB = await createWorkItemA('CONV-FORGE-009B');
+      const praB = await stack.pullRequestAssociationRepository.create({
+        workItemId: wiB.id, externalPrId: 'github:owner/repo#other-wi',
+      });
+      await stack.db.client.query(
+        'UPDATE wfos_pull_request_associations SET status = $1 WHERE id = $2',
+        ['merged', praB.id],
+      );
+      // Attempt to submit wiB's PR for wiA — rejected.
+      await expect(
+        orchestrator.submitPullRequestMerged({
+          workItemId: wiA.id, prAssociationId: praB.id,
+          executionId: generateExecutionId(),
+        }),
+      ).rejects.toThrow(/belongs to work item/);
     });
   });
 
