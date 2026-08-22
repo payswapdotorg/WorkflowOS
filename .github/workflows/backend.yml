@@ -76,8 +76,18 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Install dependencies
+      - name: Install backend dependencies
         run: bun install --frozen-lockfile
+
+      # WORK-022: the backend typecheck + rendered-UI integration tests now
+      # import the actual frontend React pages (ProjectPage, WorkItemPage)
+      # from ../frontend/src. For tsc to resolve `react`, `react-dom`, and
+      # `react-router-dom` from those frontend files, the frontend dependency
+      # tree must be installed. This does NOT run the frontend's own
+      # typecheck/lint/build/test — those run in frontend.yml.
+      - name: Install frontend dependencies (for backend typecheck of rendered-UI tests)
+        run: bun install --frozen-lockfile
+        working-directory: frontend
 
       - name: Run tests (unit + integration + static architecture checks)
         run: bun run test

@@ -361,4 +361,30 @@ export interface VerificationService {
     criteria: CriterionEvaluation[];
     requirements: RequirementDerivation[];
   }>;
+
+  /**
+   * List every VerificationRun for a Work Item (newest first).
+   *
+   * WORK-022 (UI2-AC-01): this is the AUTHORITATIVE read path that the web
+   * application consumes to render VerificationRun state. It exists so the
+   * frontend never has to substitute workflow-convergence metadata for
+   * actual verification data (PR #21 issue 3). Pure read — no mutation.
+   */
+  listRunsForWorkItem(workItemId: string): Promise<VerificationRun[]>;
+
+  /**
+   * List every Evidence record attached to a VerificationRun.
+   *
+   * WORK-022 (UI2-AC-01): authoritative read path for evidence rendering.
+   * Pure read — no mutation, no evaluation.
+   */
+  listEvidenceForRun(verificationRunId: string): Promise<Evidence[]>;
+
+  /**
+   * List every Evidence→Criterion mapping for a VerificationRun.
+   *
+   * WORK-022 (UI2-AC-01): authoritative read path for mapping rendering.
+   * Pure read — no mutation, no evaluation.
+   */
+  listMappingsForRun(verificationRunId: string): Promise<CriterionEvidenceMapping[]>;
 }
