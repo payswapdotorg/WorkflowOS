@@ -218,8 +218,8 @@ describe('WORK-007 — work items, dependencies, PR associations, work orders', 
     const a = await createWorkItemA('WI-ELIG-OK', 'Elig allowed');
     const b = await createWorkItemA('WI-ELIG-DEP-OK', 'Elig dep (completed)');
     await stack.workItemDependencyRepository.add(a.id, b.id);
-    // Mark b as completed via the internal markCompleted method (not the API).
-    await stack.workItemRepository.markCompleted(b.id, true);
+    // Mark b as completed via the internal completion service (not the API).
+    await stack.workItemCompletionService.markCompleted(b.id, true);
     const { DefaultWorkItemDependencyService } = await import('../../../src/modules/work-items/internal/work-item-dependency-service.js');
     const service = new DefaultWorkItemDependencyService(stack.db.client);
     const canBeginAfter = await service.canBeginImplementation(a.id);
@@ -388,8 +388,8 @@ describe('WORK-007 — work items, dependencies, PR associations, work orders', 
     const fetched = await stack.workItemRepository.findById(wi.id);
     expect(fetched!.completed).toBe(false);
     expect(fetched!.title).toBe('updated title');
-    // Only markCompleted() can change the flag.
-    const marked = await stack.workItemRepository.markCompleted(wi.id, true);
+    // Only the internal WorkItemCompletionService can change the flag.
+    const marked = await stack.workItemCompletionService.markCompleted(wi.id, true);
     expect(marked!.completed).toBe(true);
   });
 });

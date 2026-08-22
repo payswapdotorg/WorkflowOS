@@ -2,6 +2,7 @@ import type { DatabaseClient } from '@platform/index.js';
 import type {
   WorkItem,
   WorkItemRepository,
+  WorkItemCompletionService,
   CreateWorkItemInput,
   UpdateWorkItemInput,
   WorkItemRequirementAssociation,
@@ -112,6 +113,21 @@ export class PgWorkItemRepository implements WorkItemRepository {
     );
     if (result.rows.length === 0) return null;
     return mapWi(result.rows[0]!);
+  }
+}
+
+/**
+ * INTERNAL completion service (architect review PR #8). Implements
+ * {@link WorkItemCompletionService} — NOT part of the public /work-items
+ * barrel. Only the composition root / test harness / future /workflows
+ * integration constructs this. Other domain modules cannot reach it through
+ * the public `WorkItemRepository` interface.
+ */
+export class DefaultWorkItemCompletionService implements WorkItemCompletionService {
+  constructor(private readonly repo: PgWorkItemRepository) {}
+
+  async markCompleted(id: string, completed: boolean): Promise<WorkItem | null> {
+    return this.repo.markCompleted(id, completed);
   }
 }
 

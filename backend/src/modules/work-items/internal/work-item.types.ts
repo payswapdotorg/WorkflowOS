@@ -53,8 +53,25 @@ export interface UpdateWorkItemInput {
   metadata?: Record<string, unknown>;
   // NOTE: `completed` is deliberately NOT in this type. The completion signal
   // is a workflow/verification-derived fact that ordinary project-write users
-  // must not set through the normal Work Item update API. Use
-  // WorkItemRepository.markCompleted() for internal/test/future-workflow use.
+  // must not set through the normal Work Item update API. The completion
+  // mutation is available only via WorkItemCompletionService (internal).
+}
+
+/**
+ * INTERNAL completion service — not part of the /work-items public barrel.
+ * Exposes the `markCompleted` mutation so tests and future /workflows +
+ * /verification integration can set the completion signal. Other domain
+ * modules CANNOT import this through the public interface; it stays under
+ * internal/ and is wired only by the composition root / test harness.
+ */
+export interface WorkItemCompletionService {
+  /**
+   * Set the completion flag (DEP-AC-02). This is an INTERNAL capability — it
+   * must NOT be exposed through the ordinary Work Item update API or the
+   * public WorkItemRepository interface. Future /workflows + /verification
+   * will call this to signal completion.
+   */
+  markCompleted(id: string, completed: boolean): Promise<WorkItem | null>;
 }
 
 export interface WorkItemRepository {
@@ -62,12 +79,6 @@ export interface WorkItemRepository {
   findById(id: string): Promise<WorkItem | null>;
   findByArchitectureVersion(architectureVersionId: string): Promise<WorkItem[]>;
   update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null>;
-  /**
-   * Set the completion flag (DEP-AC-02). This is an INTERNAL method — it must
-   * NOT be exposed through the ordinary Work Item update API. Future
-   * /workflows + /verification will call this to signal completion.
-   */
-  markCompleted(id: string, completed: boolean): Promise<WorkItem | null>;
 }
 
 // --- Work Item ↔ Requirement associations ---
