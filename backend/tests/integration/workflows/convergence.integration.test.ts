@@ -467,6 +467,15 @@ describe('WORK-017 — Workflow convergence / automated execution loop', () => {
       );
       await submitPrMergeAndWait(wi.id, pra.id);
 
+      // WORK-019: MERGED → VERIFIED is now a separate step (advanceToVerified).
+      expect(await getState(wi.id)).toBe('merged');
+
+      // Advance to VERIFIED.
+      const advanceExecId = generateExecutionId();
+      await orchestrator.advanceToVerified({
+        workItemId: wi.id, executionId: advanceExecId, sourceEventId: advanceExecId,
+      });
+
       expect(await getState(wi.id)).toBe('verified');
 
       // Verify the workflow history is append-only and complete.

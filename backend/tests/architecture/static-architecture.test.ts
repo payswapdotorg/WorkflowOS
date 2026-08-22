@@ -2315,4 +2315,27 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
       expect(beginReviewMatch[0]).not.toMatch(/outcome/);
     }
   });
+
+  // --- WORK-019: Merge gating + advancement checks ---
+
+  it('REGRESSION (WORK-019): workflow route exposes merge + advancement endpoints', () => {
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    expect(src).toMatch(/request-merge/);
+    expect(src).toMatch(/merge-readiness/);
+    expect(src).toMatch(/advance-to-verified/);
+    expect(src).toMatch(/next-work-item/);
+  });
+
+  it('REGRESSION (WORK-019): no public endpoint can directly set MERGED or VERIFIED', () => {
+    // No API endpoint may directly set workflow state to 'merged' or 'verified'.
+    // The transitions go through WorkflowEngine.transition() via the orchestrator.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The route must NOT directly call workflowEngine.transition with 'merged' or 'verified'.
+    // Only the orchestrator methods (requestMerge, advanceToVerified) may invoke transitions.
+    expect(codeOnly).not.toMatch(/toState:\s*['"]merged['"]/);
+    expect(codeOnly).not.toMatch(/toState:\s*['"]verified['"]/);
+  });
 });

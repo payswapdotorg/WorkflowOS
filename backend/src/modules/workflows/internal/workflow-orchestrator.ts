@@ -15,6 +15,7 @@ import type {
   WorkflowOrchestrator,
   ConvergenceSignal,
   SubmitSignalInput,
+  MergeGateResult,
 } from './convergence.types.js';
 import type { WorkflowEngine, WorkflowState, TransitionResult } from './workflow.types.js';
 import { PgConvergenceSignalRepository } from './pg-convergence-repository.js';
@@ -358,6 +359,10 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         return this.handleBeginVerification(signal);
       case 'begin_architect_review':
         return this.handleBeginArchitectReview(signal);
+      case 'request_merge':
+        return this.handleRequestMerge(signal);
+      case 'advance_to_verified':
+        return this.handleAdvanceToVerified(signal);
       default:
         throw new Error(`convergence: unknown signal type "${signal.signalType}"`);
     }
@@ -539,28 +544,24 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
 
   // --- pull_request_merged: PR was merged ---
   //
-  // APPROVED → MERGED → VERIFIED
+  // WORK-019: APPROVED → MERGED only. Does NOT auto-advance to VERIFIED.
+  // The MERGED → VERIFIED transition is handled by the separate
+  // advance_to_verified signal/handler, which checks the frozen post-merge
+  // conditions before transitioning.
 
   private async handlePullRequestMerged(signal: ConvergenceSignal): Promise<WorkflowState | null> {
     const exec = await this.workflowEngine.getState(signal.workItemId);
     if (!exec) return null;
 
-    let currentState = exec.currentState;
-
-    // APPROVED → MERGED
-    if (currentState === 'approved') {
+    // WORK-019: only transition APPROVED → MERGED.
+    // The PR association status is already validated as 'merged' by
+    // submitPullRequestMerged (the trusted entry point).
+    if (exec.currentState === 'approved') {
       const result = await this.transition(signal, 'merged');
-      if (!result.success) return currentState;
-      currentState = 'merged';
+      return result.success ? 'merged' : exec.currentState;
     }
 
-    // MERGED → VERIFIED
-    if (currentState === 'merged') {
-      const result = await this.transition(signal, 'verified');
-      if (result.success) currentState = 'verified';
-    }
-
-    return currentState;
+    return exec.currentState;
   }
 
   // --- verification_completed: verification run finished ---
@@ -1087,6 +1088,270 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     // Return the current state after processing.
     const updatedExec = await this.workflowEngine.getState(signal.workItemId);
     return updatedExec?.currentState ?? null;
+  }
+
+  // --- WORK-019: Merge gating and workflow advancement ---
+
+  /**
+   * Check merge gates for a Work Item (WF-MERGE-AC-01).
+   *
+   * Gates checked:
+   * 1. Work Item is in 'approved' state
+   * 2. An approved (finalized with APPROVE) Architect Review exists
+   * 3. An active PR association exists for the work item
+   * 4. Verification prerequisites are satisfied (a completed verification run
+   *    with all criteria passing exists for the work item)
+   * 5. Dependencies are satisfied (WorkItemDependencyService.canBeginImplementation)
+   */
+  async inspectMergeReadiness(workItemId: string): Promise<MergeGateResult> {
+    const exec = await this.workflowEngine.getState(workItemId);
+    const reasons: string[] = [];
+
+    // Gate 1: must be in 'approved' state.
+    const inApprovedState = exec?.currentState === 'approved';
+    if (!inApprovedState) {
+      reasons.push(`work item is in '${exec?.currentState ?? 'none'}' state, not 'approved'`);
+    }
+
+    // Gate 2: approved Architect Review exists.
+    const reviews = await this.reviewService.listReviewsForWorkItem(workItemId);
+    const approvedReview = reviews.find(
+      (r) => r.status === 'completed' && r.outcome === 'APPROVE',
+    );
+    const hasApprovedReview = !!approvedReview;
+    if (!hasApprovedReview) {
+      reasons.push('no approved (APPROVE) Architect Review found');
+    }
+
+    // Gate 3: active PR association exists.
+    const pra = await this.pullRequestAssociationRepository.findActiveForWorkItem(workItemId);
+    const hasActivePrAssociation = !!pra;
+    if (!hasActivePrAssociation) {
+      reasons.push('no active PR association found');
+    }
+
+    // Gate 4: verification prerequisites satisfied.
+    // Check the latest completed verification run's summary for allCriteriaPass.
+    const vrResult = await this.db.query<{ id: string; status: string; summary: Record<string, unknown> }>(
+      `SELECT id, status, summary FROM wfos_verification_runs
+       WHERE work_item_id = $1 AND status = 'completed'
+       ORDER BY created_at DESC LIMIT 1`,
+      [workItemId],
+    );
+    let verificationSatisfied = false;
+    if (vrResult.rows.length > 0) {
+      const summary = vrResult.rows[0]!.summary as Record<string, unknown>;
+      const criteriaPass = (summary.criteriaPass as number) ?? 0;
+      const criteriaFail = (summary.criteriaFail as number) ?? 0;
+      const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
+      const criteriaPending = (summary.criteriaPending as number) ?? 0;
+      verificationSatisfied = criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
+    }
+    if (!verificationSatisfied) {
+      reasons.push('verification prerequisites not satisfied (no completed run with all criteria passing)');
+    }
+
+    // Gate 5: dependencies satisfied.
+    const canBegin = await this.workItemDependencyService.canBeginImplementation(workItemId);
+    const dependenciesSatisfied = canBegin;
+    if (!dependenciesSatisfied) {
+      reasons.push('dependencies not satisfied');
+    }
+
+    const ready = inApprovedState && hasApprovedReview && hasActivePrAssociation && verificationSatisfied && dependenciesSatisfied;
+
+    return {
+      ready,
+      currentState: exec?.currentState ?? null,
+      hasApprovedReview,
+      hasActivePrAssociation,
+      prAssociationMatchesWorkItem: hasActivePrAssociation, // the PR association was found via findActiveForWorkItem
+      verificationSatisfied,
+      dependenciesSatisfied,
+      approvedReviewId: approvedReview?.id ?? null,
+      activePrAssociationId: pra?.id ?? null,
+      reasons,
+    };
+  }
+
+  async requestMerge(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{
+    signal: ConvergenceSignal;
+    mergeReady: boolean;
+    gates: MergeGateResult;
+  }> {
+    // Check merge gates.
+    const gates = await this.inspectMergeReadiness(input.workItemId);
+
+    // Submit the signal (idempotent — records the merge request attempt).
+    const signal = await this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'request_merge',
+      sourceEventId: input.sourceEventId,
+      executionId: input.executionId,
+      payload: {
+        mergeReady: gates.ready,
+        gates,
+      },
+    });
+
+    // Mark as processed — the actual merge happens via the GitHub webhook
+    // path (PR association status → 'merged' → submitPullRequestMerged →
+    // handlePullRequestMerged → APPROVED → MERGED).
+    await this.signalRepo.markProcessed(signal.id, gates.currentState, gates.ready ? null : 'merge gates not satisfied');
+
+    this.logger.info('convergence.request_merge', {
+      workItemId: input.workItemId,
+      mergeReady: gates.ready,
+      reasons: gates.reasons,
+    });
+
+    return { signal, mergeReady: gates.ready, gates };
+  }
+
+  private async handleRequestMerge(signal: ConvergenceSignal): Promise<WorkflowState | null> {
+    // The merge request is handled synchronously by requestMerge() above.
+    // This handler is a no-op — the actual APPROVED → MERGED transition
+    // happens via the pull_request_merged signal (triggered by the GitHub
+    // webhook when the PR is actually merged).
+    const exec = await this.workflowEngine.getState(signal.workItemId);
+    return exec?.currentState ?? null;
+  }
+
+  async advanceToVerified(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{ signal: ConvergenceSignal; verified: boolean; reason?: string }> {
+    const exec = await this.workflowEngine.getState(input.workItemId);
+
+    // Only advance if in MERGED state.
+    if (!exec || exec.currentState !== 'merged') {
+      const signal = await this.submitSignalInternal({
+        workItemId: input.workItemId,
+        signalType: 'advance_to_verified',
+        sourceEventId: input.sourceEventId,
+        executionId: input.executionId,
+        payload: {},
+      });
+      await this.signalRepo.markProcessed(signal.id, exec?.currentState ?? null, `not in 'merged' state (current: ${exec?.currentState ?? 'none'})`);
+      return { signal, verified: false, reason: `not in 'merged' state` };
+    }
+
+    // The frozen spec (§13: APPROVED → MERGED → VERIFIED) does NOT require
+    // post-merge verification if verification was already satisfied before
+    // merge. The verification prerequisites were already checked by the merge
+    // gates (inspectMergeReadiness). So MERGED → VERIFIED is a direct
+    // transition if the pre-merge verification was satisfied.
+    //
+    // However, we still check: was there a completed verification run with
+    // all criteria passing? This is the same check as the merge gate, but
+    // re-verified here for safety.
+    const vrResult = await this.db.query<{ id: string; status: string; summary: Record<string, unknown> }>(
+      `SELECT id, status, summary FROM wfos_verification_runs
+       WHERE work_item_id = $1 AND status = 'completed'
+       ORDER BY created_at DESC LIMIT 1`,
+      [input.workItemId],
+    );
+    let verificationSatisfied = false;
+    if (vrResult.rows.length > 0) {
+      const summary = vrResult.rows[0]!.summary as Record<string, unknown>;
+      const criteriaPass = (summary.criteriaPass as number) ?? 0;
+      const criteriaFail = (summary.criteriaFail as number) ?? 0;
+      const criteriaBlocked = (summary.criteriaBlocked as number) ?? 0;
+      const criteriaPending = (summary.criteriaPending as number) ?? 0;
+      verificationSatisfied = criteriaPass > 0 && criteriaFail === 0 && criteriaBlocked === 0 && criteriaPending === 0;
+    }
+
+    if (!verificationSatisfied) {
+      const signal = await this.submitSignalInternal({
+        workItemId: input.workItemId,
+        signalType: 'advance_to_verified',
+        sourceEventId: input.sourceEventId,
+        executionId: input.executionId,
+        payload: {},
+      });
+      await this.signalRepo.markProcessed(signal.id, 'merged', 'post-merge verification not satisfied');
+      return { signal, verified: false, reason: 'post-merge verification not satisfied' };
+    }
+
+    // Submit + process the signal (transitions MERGED → VERIFIED).
+    const signal = await this.submitSignalInternal({
+      workItemId: input.workItemId,
+      signalType: 'advance_to_verified',
+      sourceEventId: input.sourceEventId,
+      executionId: input.executionId,
+      payload: { verificationSatisfied },
+    });
+
+    // Transition MERGED → VERIFIED via WorkflowEngine.
+    await this.workflowEngine.transition({
+      workItemId: input.workItemId,
+      toState: 'verified',
+      transitionType: 'convergence:advance_to_verified',
+      actor: 'workflow-orchestrator',
+      executionId: input.executionId,
+      idempotencyKey: `${input.workItemId}:advance_to_verified:${input.sourceEventId}:verified`,
+      metadata: { signalId: signal.id },
+    });
+
+    // Mark the Work Item as completed (via the /work-items contract).
+    // We use the WorkItemRepository.update method to set completed=true.
+    await this.workItemRepository.update(input.workItemId, { completed: true } as never);
+
+    await this.signalRepo.markProcessed(signal.id, 'verified', null);
+
+    this.logger.info('convergence.advance_to_verified', {
+      workItemId: input.workItemId,
+      verified: true,
+    });
+
+    return { signal, verified: true };
+  }
+
+  private async handleAdvanceToVerified(signal: ConvergenceSignal): Promise<WorkflowState | null> {
+    // Already handled synchronously by advanceToVerified() above.
+    const exec = await this.workflowEngine.getState(signal.workItemId);
+    return exec?.currentState ?? null;
+  }
+
+  async selectNextWorkItem(projectId: string): Promise<string | null> {
+    // Find work items for this project that are:
+    // - not completed
+    // - in 'ready' state (dependencies satisfied)
+    // - belong to the correct project/tenant
+    //
+    // Use the existing WorkItemDependencyService to check eligibility.
+    // Deterministic ordering: by work_item_id (lexicographic) — the frozen
+    // spec does not define an explicit ordering, so we use a stable default.
+
+    // Query work items for this project (via architecture_version → architecture → project).
+    const result = await this.db.query<{ id: string; work_item_id: string }>(
+      `SELECT wi.id, wi.work_item_id
+       FROM wfos_work_items wi
+       JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+       JOIN wfos_architectures a ON a.id = av.architecture_id
+       WHERE a.project_id = $1 AND wi.completed = false
+       ORDER BY wi.work_item_id`,
+      [projectId],
+    );
+
+    // Check each work item's dependency eligibility.
+    for (const row of result.rows) {
+      const canBegin = await this.workItemDependencyService.canBeginImplementation(row.id);
+      if (canBegin) {
+        // Check the workflow state — only select items in 'ready' state.
+        const exec = await this.workflowEngine.getState(row.id);
+        if (exec?.currentState === 'ready') {
+          return row.id; // first eligible, deterministic
+        }
+      }
+    }
+
+    return null; // no eligible work item
   }
 }
 
