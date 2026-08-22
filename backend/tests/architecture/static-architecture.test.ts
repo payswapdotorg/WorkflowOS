@@ -1553,3 +1553,331 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
     expect(unexpected, `/llm exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
   });
 });
+
+/**
+ * WORK-015 invariants — /verification + /github CI ingestion boundaries.
+ *
+ * Ensures:
+ * - /verification owns VerificationRun, Evidence, mapping, and evaluation authority;
+ * - /verification does not import GitHub SDK/provider implementations;
+ * - /github does not evaluate Acceptance Criteria (GH6-AC-02);
+ * - /agents cannot directly mutate criterion status;
+ * - /llm cannot directly mutate criterion status;
+ * - /workflows does not directly evaluate Evidence;
+ * - /requirements remains the owner of AcceptanceCriterion persistence;
+ * - /verification uses existing PostgreSQL/ObjectStore/authorization infrastructure;
+ * - no duplicate evidence/artifact store is introduced;
+ * - no module defines a competing criterion-status authority;
+ * - workflow state remains exclusively owned by /workflows.
+ */
+describe('WORK-015 invariants — /verification + /github CI ingestion', () => {
+  it('/verification does not import GitHub SDK/provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is /github; /verification consumes provider-independent CI evidence only`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification does not import from /github internal/', () => {
+    // /verification may consume /github's PUBLIC barrel (@modules/github/index.js)
+    // but must NOT reach into /github/internal/ — that would couple /verification
+    // to GitHub provider implementation details.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (targetModule === 'github' && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside github/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/github does not evaluate Acceptance Criteria (GH6-AC-02)', () => {
+    // /github OWNS CI ingestion + translation. It must NOT:
+    // - call AcceptanceCriterionRepository.update (criterion status mutation);
+    // - call RequirementRepository.update (requirement status mutation);
+    // - declare criterion evaluation logic (deriveCriterionStatus, evaluateCriterion).
+    const violations: string[] = [];
+    const EVAL_PATTERNS = [
+      /\bAcceptanceCriterionRepository\b/,
+      /\bRequirementRepository\b/,
+      /\bderiveCriterionStatus\b/,
+      /\bevaluateCriterion\b/,
+      /\bevaluateForRun\b/,
+      /\bpersistEvaluations\b/,
+      /\bderivateRequirementStatus\b/,
+    ];
+    for (const file of walkTs(join(MODULES_DIR, 'github'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const pattern of EVAL_PATTERNS) {
+        if (pattern.test(codeOnly)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} references ${pattern.source} — /github must not evaluate acceptance criteria (GH6-AC-02)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/agents cannot directly mutate criterion status', () => {
+    // /agents must NOT call AcceptanceCriterionRepository.update — that's
+    // /verification's authority (via the /requirements contract).
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'agents'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (/\bAcceptanceCriterionRepository\b/.test(codeOnly) && /\.update\s*\(/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} references AcceptanceCriterionRepository.update — agent output must not directly mutate criterion status`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm cannot directly mutate criterion status', () => {
+    // /llm must NOT call AcceptanceCriterionRepository.update — that's
+    // /verification's authority (via the /requirements contract).
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (/\bAcceptanceCriterionRepository\b/.test(codeOnly) && /\.update\s*\(/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} references AcceptanceCriterionRepository.update — LLM/Architect output must not directly mutate criterion status`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/workflows does not directly evaluate Evidence', () => {
+    // /workflows owns the canonical state machine. It must NOT:
+    // - import Evidence/EvidenceRepository/VerificationService evaluation methods;
+    // - declare criterion evaluation logic.
+    const violations: string[] = [];
+    const EVAL_PATTERNS = [
+      /\bderiveCriterionStatus\b/,
+      /\bevaluateCriterion\b/,
+      /\bevaluateForRun\b/,
+      /\bpersistEvaluations\b/,
+    ];
+    for (const file of walkTs(join(MODULES_DIR, 'workflows'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const pattern of EVAL_PATTERNS) {
+        if (pattern.test(codeOnly)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} references ${pattern.source} — /workflows must not evaluate evidence; /verification owns evaluation`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification does not own canonical workflow state', () => {
+    const WORKFLOW_STATES = /\b(READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|MERGED|VERIFIED|IMPLEMENTATION_BLOCKED)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} references workflow states — /workflows remains the sole workflow-state authority`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification does not define a competing criterion-status enum', () => {
+    // The criterion status enum (PENDING/PASS/FAIL/BLOCKED) is owned by
+    // /requirements (REQ-002, AC-AC-03). /verification may IMPORT the type
+    // but must not DECLARE a competing CriterionStatus type.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // A competing enum is implied by `export type CriterionStatus = ...`
+      // (NOT `import type { CriterionStatus }`).
+      if (/export\s+type\s+CriterionStatus\b/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a CriterionStatus type — /requirements is the sole owner`,
+        );
+      }
+      if (/export\s+type\s+RequirementStatus\b/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a RequirementStatus type — /requirements is the sole owner`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification does not create a duplicate evidence/artifact store', () => {
+    // /verification must use the existing ObjectStore abstraction (DATA-003),
+    // not declare its own artifact storage implementation.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'verification'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      const declaresStore = /\bclass\s+\w+\s+(implements|extends)\s*(ObjectStore|EvidenceStore|ArtifactStore)\b/.test(codeOnly)
+        || /\bCREATE\s+TABLE\s+\w*(evidence|artifact)_?store/i.test(codeOnly);
+      if (declaresStore) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing evidence/artifact store — reuse @platform ObjectStore (DATA-003)`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/verification barrel exposes only verification-domain contracts', () => {
+    const vIndex = readFileSync(join(MODULES_DIR, 'verification', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      // CriterionStatus + RequirementStatus are RE-EXPORTED from /requirements
+      // (they're owned by /requirements, /verification just re-exports for consumer convenience).
+      'CriterionStatus', 'RequirementStatus',
+      // Verification domain types (WORK-015)
+      'VerificationRunStatus',
+      'EvidenceAuthority', 'EvidenceResult',
+      'Evidence', 'CreateEvidenceInput', 'EvidenceRepository',
+      'VerificationRun', 'CreateVerificationRunInput', 'UpdateVerificationRunInput',
+      'VerificationRunRepository',
+      'MappingRelevance', 'MappingStatus',
+      'CriterionEvidenceMapping', 'CreateMapInput', 'CriterionEvidenceMappingRepository',
+      'CriterionEvaluation', 'RequirementDerivation',
+      'VerificationService',
+      // Module contract const
+      'verificationModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of vIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of vIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/verification exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+
+  it('/github barrel exposes CI evidence contracts alongside existing ones', () => {
+    // GH6-AC-01: GitHub Actions results are ingested as CI evidence.
+    // The /github barrel must export the CI evidence types so /verification
+    // can consume them through the provider-independent contract.
+    const ghIndex = readFileSync(join(MODULES_DIR, 'github', 'index.ts'), 'utf8');
+    expect(ghIndex).toMatch(/CiArtifactReference/);
+    expect(ghIndex).toMatch(/CiRunEvidence/);
+    expect(ghIndex).toMatch(/CiEvidenceIngestionRepository/);
+    expect(ghIndex).toMatch(/CiEvidenceIngestionService/);
+  });
+
+  // --- REGRESSION (PR #14 architect review): verification-authority bypass ---
+
+  it('REGRESSION (PR #14): CreateEvidenceInput does NOT have an authority field', () => {
+    // The public CreateEvidenceInput type must NOT include `authority` —
+    // authority is determined SERVER-SIDE based on the trusted source path,
+    // never accepted from the client. This is the structural fix for the
+    // verification-authority bypass: an ordinary project writer cannot
+    // manufacture authoritative PASS evidence by self-declaring
+    // `authority: 'authoritative'`.
+    const typesFile = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+    expect(existsSync(typesFile), `${relative(BACKEND_ROOT, typesFile)} must exist`).toBe(true);
+    const src = readFileSync(typesFile, 'utf8');
+    // Strip comments so only executable code is checked.
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Find the CreateEvidenceInput interface body (everything between the
+    // opening { and the matching closing }).
+    const match = codeOnly.match(/export\s+interface\s+CreateEvidenceInput\s*\{([\s\S]*?)^\}/m);
+    expect(match, 'CreateEvidenceInput interface not found').not.toBeNull();
+    const interfaceBody = match![1]!;
+    expect(
+      interfaceBody,
+      'CreateEvidenceInput must NOT have an `authority` field — it is server-side only',
+    ).not.toMatch(/^\s*authority\b/m);
+  });
+
+  it('REGRESSION (PR #14): EvidenceRepository.create requires authority as a server-side parameter', () => {
+    // The repository create() method must take `authority` as a separate
+    // required parameter — NOT from CreateEvidenceInput. This enforces that
+    // the service (not the client) sets the authority based on the trusted
+    // source path.
+    const typesFile = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+    const src = readFileSync(typesFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The create() signature must include `authority: EvidenceAuthority` as a
+    // separate parameter (not inside CreateEvidenceInput).
+    expect(codeOnly).toMatch(/create\s*\(\s*input:\s*CreateEvidenceInput\s*,\s*authority:\s*EvidenceAuthority\s*\)/);
+  });
+
+  it('REGRESSION (PR #14): attachEvidence always passes claim authority to the repository', () => {
+    // The public/manual attachEvidence() method must ALWAYS pass 'claim' to
+    // evidenceRepo.create() — it must NOT read authority from the input.
+    const serviceFile = join(MODULES_DIR, 'verification', 'internal', 'verification-service.ts');
+    expect(existsSync(serviceFile)).toBe(true);
+    const src = readFileSync(serviceFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The attachEvidence method must call evidenceRepo.create(input, 'claim').
+    expect(codeOnly).toMatch(/async\s+attachEvidence[\s\S]*?evidenceRepo\.create\s*\(\s*input,\s*['"]claim['"]\s*\)/);
+    // The attachCiEvidence method must call evidenceRepo.create(..., 'authoritative').
+    expect(codeOnly).toMatch(/async\s+attachCiEvidence[\s\S]*?evidenceRepo\.create\s*\([\s\S]*?,\s*['"]authoritative['"]\s*\)/);
+  });
+
+  it('REGRESSION (PR #14): the verification evidence route does NOT pass authority to the service', () => {
+    // The POST /verification-runs/:runId/evidence route must NOT pass
+    // `authority` from the client body to the service. The field is not
+    // accepted at the API boundary.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'verification.route.ts');
+    expect(existsSync(routeFile)).toBe(true);
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Find the attachEvidence call in the route and verify it does NOT include
+    // `authority:`. The attachEvidence call looks like:
+    //   deps.verificationService.attachEvidence({
+    //     projectId: ..., verificationRunId: ..., evidenceType: ..., provider: ...,
+    //     ...
+    //   })
+    const match = codeOnly.match(/verificationService\.attachEvidence\s*\(\{([\s\S]*?)\}\s*\)/);
+    expect(match, 'attachEvidence call in route not found').not.toBeNull();
+    const callBody = match![1]!;
+    expect(
+      callBody,
+      'the route must NOT pass authority to attachEvidence — it is server-side only',
+    ).not.toMatch(/\bauthority\b/);
+  });
+});
