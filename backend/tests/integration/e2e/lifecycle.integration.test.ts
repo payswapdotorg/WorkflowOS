@@ -12,12 +12,20 @@ import { DefaultLlmGateway, FakeLlmAdapter } from '../../../src/modules/llm/inte
 import { DefaultArchitectService } from '../../../src/modules/llm/internal/architect-service.js';
 import { PgCiEvidenceIngestionRepository } from '../../../src/modules/github/internal/pg-ci-evidence-repository.js';
 import { DefaultCiEvidenceIngestionService } from '../../../src/modules/github/internal/ci-evidence-ingestion-service.js';
-import { PgGitHubInstallationRepository, DefaultGitHubAdapter } from '../../../src/modules/github/internal/pg-github-repository.js';
+import { PgGitHubInstallationRepository, PgWebhookEventRepository, DefaultGitHubAdapter } from '../../../src/modules/github/internal/pg-github-repository.js';
+import { DefaultWebhookProcessingService, createWebhookJobHandler } from '../../../src/modules/github/internal/webhook-processing-service.js';
 import { DefaultVerificationService } from '../../../src/modules/verification/internal/verification-service.js';
 import { DefaultReviewService } from '../../../src/modules/reviews/internal/review-service.js';
 import { DefaultAuditService } from '../../../src/modules/audit/internal/audit-service.js';
+import { createHmac } from 'node:crypto';
+import { waitFor } from '../../helpers/test-app.js';
 import type { FastifyInstance } from 'fastify';
 import type { WorkflowState } from '@modules/workflows/index.js';
+
+/** HMAC-sign a webhook payload with the given secret (matches GitHub's signature format). */
+function hmacSign(payload: string, secret: string): string {
+  return 'sha256=' + createHmac('sha256', secret).update(payload).digest('hex');
+}
 
 /**
  * WORK-024 — End-to-end WorkflowOS development lifecycle.
@@ -118,6 +126,10 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
   const KEY_A = 'raw-key-e2e-a';
   const KEY_B = 'raw-key-e2e-b';
 
+  // GitHub webhook secret (for the /github webhook boundary — PR merge).
+  const WEBHOOK_SECRET = 'e2e-webhook-secret';
+  const WEBHOOK_SECRET_REF = 'WFOS_TEST_E2E_WEBHOOK_SECRET';
+
   // API key header for User A.
   const HDR_A = { 'x-api-key': KEY_A };
   const HDR_B = { 'x-api-key': KEY_B };
@@ -127,6 +139,7 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
     stack = await buildAuthStack({
       WFOS_TEST_KEY_E2E_A: KEY_A,
       WFOS_TEST_KEY_E2E_B: KEY_B,
+      [WEBHOOK_SECRET_REF]: WEBHOOK_SECRET,
     });
     orgA = await stack.organizationRepository.create({ name: 'E2E Org A' });
     orgB = await stack.organizationRepository.create({ name: 'E2E Org B' });
@@ -178,7 +191,20 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
       stack.architectureVersionRepository, stack.architectureRepository,
       stack.projectRepository, generateExecutionId,
     );
-    const handlers = buildHandlerRegistry([createConvergenceJobHandler(orchestrator, logger)]);
+    // Wire the GitHub webhook processing service (for the PR merge boundary).
+    const webhookEventRepo = new PgWebhookEventRepository(stack.db.client);
+    const webhookProcessingService = new DefaultWebhookProcessingService(
+      webhookEventRepo,
+      installationRepo,
+      stack.pullRequestAssociationRepository,
+      stack.repositoryAssociationRepository,
+      logger,
+      stack.db.client,
+    );
+    const handlers = buildHandlerRegistry([
+      createConvergenceJobHandler(orchestrator, logger),
+      createWebhookJobHandler(webhookProcessingService, logger),
+    ]);
     worker = new WorkerHost(queue, handlers, logger, { pollIntervalMs: 5 });
 
     server = await buildServer({
@@ -262,6 +288,15 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         workItemRepository: stack.workItemRepository,
         auditQuery: auditService,
+      },
+      githubWebhook: {
+        queue,
+        logger: stack.db.logger,
+        secretStore: stack.secretStore,
+        webhookSecretRef: WEBHOOK_SECRET_REF,
+        githubAdapter: new DefaultGitHubAdapter(),
+        webhookEventRepository: webhookEventRepo,
+        webhookProcessingService,
       },
     });
     await server.ready();
@@ -574,10 +609,47 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
       const stateAfterMergeReq = await api('GET', `/work-items/${workItemA.id}/workflow`);
       expect((stateAfterMergeReq.body as { currentState: string }).currentState).toBe('approved');
 
-      // Mark the PR as merged (simulates authoritative GitHub webhook).
-      const prMergeRes = await api('POST', `/work-items/${workItemA.id}/pr-associations/${prAssocA.id}/merge`);
-      expect(prMergeRes.statusCode).toBe(200);
-      expect((prMergeRes.body as { status: string }).status).toBe('merged');
+      // Drive the PR merge through the AUTHORITATIVE /github webhook boundary
+      // (not a direct API call). GitHub sends a `pull_request` webhook with
+      // `merged: true` — the webhook handler validates the HMAC signature,
+      // persists the receipt, enqueues a `github.webhook` job, and the worker
+      // processes it via WebhookProcessingService.syncPullRequest, which
+      // updates the PR association status to 'merged'. A normal project user
+      // CANNOT forge this — the webhook requires a valid signature.
+      const prMergePayload = JSON.stringify({
+        action: 'closed',
+        pull_request: {
+          number: 1,
+          title: 'E2E PR',
+          state: 'closed',
+          merged: true,
+          head: { ref: 'feat/e2e', sha: 'sha-e2e-1' },
+          base: { ref: 'main' },
+        },
+        repository: { id: 200001, full_name: 'e2e-org-a/repo-a' },
+        installation: { id: 'e2e-install-1' },
+      });
+      const prMergeSignature = hmacSign(prMergePayload, WEBHOOK_SECRET);
+      const webhookRes = await server.inject({
+        method: 'POST',
+        url: '/webhooks/github',
+        headers: {
+          'x-github-delivery': 'e2e-pr-merge-' + Date.now(),
+          'x-github-event': 'pull_request',
+          'x-hub-signature-256': prMergeSignature,
+          'content-type': 'application/json',
+        },
+        payload: prMergePayload,
+      });
+      expect(webhookRes.statusCode).toBe(202);
+
+      // Wait for the worker to process the webhook (syncPullRequest updates
+      // the PR association status to 'merged').
+      await waitFor(async () => {
+        const prs = await api('GET', `/work-items/${workItemA.id}/pr-associations`);
+        const body = prs.body as { prAssociations: { status: string }[] };
+        return body.prAssociations.some((p) => p.status === 'merged');
+      }, { timeoutMs: 10000 });
 
       // Submit the pull_request_merged signal (HTTP — WORK-024 additive seam).
       const prMergedRes = await api('POST', `/work-items/${workItemA.id}/workflow/submit-pr-merged`, {
@@ -714,6 +786,41 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
       const criterionEval = criteria.find((c) => c.derivedStatus === 'pass');
       // Claim-only evidence must NOT produce PASS.
       expect(criterionEval).toBeUndefined();
+    });
+
+    it('normal project user cannot forge a merged PR (no API endpoint exists)', async () => {
+      // PR #23 review correction: the previous POST /work-items/:id/pr-associations/:prId/merge
+      // endpoint was removed because it let a project writer bypass GitHub's
+      // authoritative merge state. The ONLY way to mark a PR as merged is
+      // through the /github webhook boundary (which requires a valid HMAC
+      // signature from GitHub).
+
+      // Verify the endpoint no longer exists — a POST returns 404.
+      const res = await api('POST', `/work-items/${workItemA.id}/pr-associations/${prAssocA.id}/merge`);
+      expect(res.statusCode).toBe(404);
+
+      // Verify a webhook with an INVALID signature is rejected (401).
+      const badPayload = JSON.stringify({
+        action: 'closed',
+        pull_request: { number: 1, title: 'Forged', state: 'closed', merged: true },
+        repository: { id: 200001, full_name: 'e2e-org-a/repo-a' },
+        installation: { id: 'e2e-install-1' },
+      });
+      const badRes = await server.inject({
+        method: 'POST',
+        url: '/webhooks/github',
+        headers: {
+          'x-github-delivery': 'e2e-forge-' + Date.now(),
+          'x-github-event': 'pull_request',
+          'x-hub-signature-256': 'sha256=invalid-signature',
+          'content-type': 'application/json',
+        },
+        payload: badPayload,
+      });
+      expect(badRes.statusCode).toBe(401);
+
+      // A project writer CANNOT mark a PR as merged through any API endpoint.
+      // The merge state is owned by the /github provider boundary.
     });
   });
 

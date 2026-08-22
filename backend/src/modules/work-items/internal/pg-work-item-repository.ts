@@ -356,19 +356,6 @@ export class PgPullRequestAssociationRepository implements PullRequestAssociatio
     );
   }
 
-  async markMerged(id: string): Promise<PullRequestAssociation | null> {
-    const result = await this.db.query<PrRow>(
-      `UPDATE wfos_pull_request_associations
-       SET status = 'merged'
-       WHERE id = $1 AND status = 'active'
-       RETURNING id, work_item_id, external_pr_id, provider, repository_ref,
-                 branch, base_branch, head_commit, status, created_at, superseded_at`,
-      [id],
-    );
-    if (result.rows.length === 0) return null;
-    return mapPr(result.rows[0]!);
-  }
-
   async findActiveForWorkItem(workItemId: string): Promise<PullRequestAssociation | null> {
     const result = await this.db.query<PrRow>(
       `SELECT id, work_item_id, external_pr_id, provider, repository_ref,

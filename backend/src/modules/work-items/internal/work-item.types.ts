@@ -164,16 +164,6 @@ export interface PullRequestAssociationRepository {
   listForWorkItem(workItemId: string): Promise<PullRequestAssociation[]>;
   /** Supersede the currently-active PR for a work item (sets it to 'superseded'). */
   supersedeActive(workItemId: string): Promise<void>;
-  /**
-   * Mark a PR association as merged (WORK-024).
-   *
-   * In production, this status transition is driven by the authoritative
-   * GitHub webhook (`pull_request` event with `merged: true`). This method
-   * is the repository-level mutation; the HTTP route
-   * `POST /work-items/:id/pr-associations/:prId/merge` exposes it through
-   * the API so the E2E lifecycle can drive it without direct SQL.
-   */
-  markMerged(id: string): Promise<PullRequestAssociation | null>;
   /** Get the active PR for a work item (or null). */
   findActiveForWorkItem(workItemId: string): Promise<PullRequestAssociation | null>;
 }
