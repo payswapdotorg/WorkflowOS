@@ -7,6 +7,7 @@ import { projectsRoutes, type ProjectsRouteDeps } from './routes/projects.route.
 import { specificationsRoutes, type SpecificationsRouteDeps } from './routes/specifications.route.js';
 import { architectureRoutes, type ArchitectureRouteDeps } from './routes/architecture.route.js';
 import { requirementsRoutes, type RequirementsRouteDeps } from './routes/requirements.route.js';
+import { workItemsRoutes, type WorkItemsRouteDeps } from './routes/work-items.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -29,6 +30,8 @@ export interface ServerDeps extends JobsRouteDeps {
   architecture?: ArchitectureRouteDeps;
   /** When auth is enabled, the protected /requirements route uses this. */
   requirements?: RequirementsRouteDeps;
+  /** When auth is enabled, the protected /work-items route uses this. */
+  workItems?: WorkItemsRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -50,6 +53,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.architecture) {
     await architectureRoutes(app, deps.architecture);
+  }
+  if (deps.auth && deps.workItems) {
+    await workItemsRoutes(app, deps.workItems);
   }
   if (deps.auth && deps.requirements) {
     await requirementsRoutes(app, deps.requirements);

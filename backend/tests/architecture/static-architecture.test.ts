@@ -1248,3 +1248,119 @@ describe('WORK-006 invariants — requirements module boundaries', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * WORK-007 invariants — work-items module boundaries.
+ *
+ * Ensures /work-items owns Work Item + Work Order authority, does not own
+ * workflow state or verification semantics, does not couple to GitHub, and
+ * does not create its own infrastructure.
+ */
+describe('WORK-007 invariants — work-items module boundaries', () => {
+  it('/work-items does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'work-items'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'work-items') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/work-items does not import GitHub provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'work-items'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/work-items does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'work-items'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/work-items does not own workflow state', () => {
+    const WORKFLOW_STATES = /\b(READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|MERGED|VERIFIED|IMPLEMENTATION_BLOCKED)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'work-items'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} references workflow states — /work-items must not own workflow state`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('WO-AC-02: Work Order state is not declared in /workflows, /llm, or /agents', () => {
+    // WorkOrderState (draft/generated/consumed) is owned by /work-items.
+    // No other module may declare a competing WorkOrderState type.
+    const violations: string[] = [];
+    for (const mod of ['workflows', 'llm', 'agents']) {
+      const modDir = join(MODULES_DIR, mod);
+      if (!existsSync(modDir)) continue;
+      for (const file of walkTs(modDir)) {
+        const src = readFileSync(file, 'utf8');
+        const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+        if (/\bWorkOrderState\b/.test(codeOnly)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} declares WorkOrderState — owned by /work-items only`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/work-items barrel exposes only work-items-domain contracts', () => {
+    const wiIndex = readFileSync(join(MODULES_DIR, 'work-items', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'WorkItem', 'CreateWorkItemInput', 'UpdateWorkItemInput', 'WorkItemRepository',
+      'WorkItemRequirementAssociation', 'WorkItemRequirementRepository',
+      'WorkItemCriterionAssociation', 'WorkItemCriterionRepository',
+      'WorkItemDependency', 'WorkItemDependencyRepository',
+      'PullRequestAssociation', 'CreatePrAssociationInput', 'PrAssociationStatus',
+      'PullRequestAssociationRepository',
+      'WorkOrder', 'CreateWorkOrderInput', 'WorkOrderState', 'WorkOrderRepository',
+      'WorkItemDependencyService',
+      'workItemsModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of wiIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of wiIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/work-items exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+});
