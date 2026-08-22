@@ -4,13 +4,19 @@
  * The frontend is a CONSUMER — it never owns authoritative state.
  * All data comes from backend API responses.
  *
+ * WORK-023: all API calls are prefixed with `/api` so the nginx reverse proxy
+ * (production) and the Vite dev proxy (development) can distinguish API
+ * requests from SPA client-side routes. Both proxies strip the `/api` prefix
+ * before forwarding to the backend (whose routes are at the root:
+ * /projects/:id, /health, etc.).
+ *
  * UI2-AC-01 (PR #21 correction): the verification surface fetches ACTUAL
  * VerificationRun + Evidence records from /verification, NOT workflow-convergence
  * metadata. The previous implementation substituted the convergence status
  * endpoint for verification data, which did not satisfy UI2-AC-01.
  */
 
-const API_BASE = '';
+const API_BASE = '/api';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {

@@ -1,0 +1,82 @@
+# Deployment validation CI for WorkflowOS (WORK-023).
+#
+# Builds the Docker images, starts the full docker-compose topology (web,
+# api, worker, postgres, redis, object-storage volume), and runs the
+# deployment validation script against the live deployment.
+#
+# Verifies:
+#   DEPLOY-AC-01 — all six topology components present + connected
+#   DEPLOY-AC-02 — startup without a customer repository
+#   DEPLOY-AC-03 — no microservices (single backend codebase)
+#
+# This workflow does NOT deploy to any cloud provider. It validates the
+# frozen topology is reproducible in CI without production credentials.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: build + deploy + validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # --- Static architecture checks (always run, no Docker needed) ---
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: bun install --frozen-lockfile
+
+      - name: Install frontend dependencies (for backend typecheck of rendered-UI tests)
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Run static architecture checks (includes WORK-023 invariants)
+        working-directory: backend
+        run: bun run vitest run tests/architecture/static-architecture.test.ts -t "WORK-023"
+
+      - name: Run backend typecheck
+        working-directory: backend
+        run: bun run typecheck
+
+      - name: Run backend lint
+        working-directory: backend
+        run: bun run lint
+
+      # --- Docker deployment validation ---
+
+      - name: Build and start the topology
+        run: docker compose up --build -d --wait
+
+      - name: Show container status
+        run: docker compose ps
+
+      - name: Run deployment validation
+        env:
+          API_URL: http://localhost:3001
+          WEB_URL: http://localhost:8080
+        run: ./scripts/validate-deployment.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

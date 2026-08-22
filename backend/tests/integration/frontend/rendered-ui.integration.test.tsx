@@ -90,7 +90,12 @@ function renderPage(pageKey: 'project' | 'work-item', params: Record<string, str
 function stubFetchToServer(server: FastifyInstance, apiKey: string) {
   const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    const path = rawUrl.replace(/^https?:\/\/[^/]+/, '');
+    let path = rawUrl.replace(/^https?:\/\/[^/]+/, '');
+    // WORK-023: the frontend now prefixes API calls with /api (so nginx and
+    // the vite dev proxy can distinguish them from SPA routes). Strip the
+    // prefix here to match what the proxies do before forwarding to the
+    // backend (whose routes are at the root: /projects/:id, etc.).
+    path = path.replace(/^\/api/, '');
     const method = (init?.method ?? 'GET').toUpperCase();
     const headers: Record<string, string> = {
       'x-api-key': apiKey,

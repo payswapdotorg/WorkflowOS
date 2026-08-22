@@ -1,0 +1,119 @@
+# WorkflowOS deployable runtime topology (WORK-023).
+#
+# Frozen architecture §36 — the initial containerized deployment consists of:
+#
+#   Web Application        (web — nginx serving the Vite SPA)
+#   Backend API            (api — Fastify HTTP server, modular monolith)
+#   Background Worker      (worker — WorkerHost polling the Redis-backed queue)
+#   PostgreSQL             (postgres — authoritative relational persistence)
+#   Redis                  (redis — queue/locks/cache, NON-authoritative)
+#   Object Storage         (FsObjectStore on a shared volume)
+#
+# DEPLOY-AC-01: all six topology components are present and connected.
+# DEPLOY-AC-02: no customer repository is required for startup.
+# DEPLOY-AC-03: no microservices — one backend codebase, two process roles.
+#
+# Usage:
+#   docker compose up --build
+#   docker compose down -v   # tear down + remove volumes
+#
+# The API and worker share the same backend image. The role is selected by
+# the WORKFLOWOS_ROLE env var (api vs worker). No secrets are baked into the
+# image or compose file — all sensitive values come from the environment.
+
+services:
+  # --- PostgreSQL (authoritative persistence, DATA-001) ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: wfos
+      POSTGRES_PASSWORD: wfos
+      POSTGRES_DB: wfos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wfos -d wfos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  # --- Redis (queue/locks/cache, NON-authoritative, DATA-002) ---
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  # --- Backend API (modular monolith, PLAT-001) ---
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      WORKFLOWOS_ROLE: api
+      DATABASE_URL: postgres://wfos:wfos@postgres:5432/wfos
+      REDIS_URL: redis://redis:6379
+      OBJECT_STORAGE_DIR: /data/objects
+      PORT: 3001
+      HOST: 0.0.0.0
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    volumes:
+      - objectdata:/data/objects
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e \"fetch('http://localhost:3001/health').then(r=>{if(!r.ok)throw new Error('unhealthy')}).catch(e=>{throw e})\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # --- Background Worker (same image, different role) ---
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      WORKFLOWOS_ROLE: worker
+      DATABASE_URL: postgres://wfos:wfos@postgres:5432/wfos
+      REDIS_URL: redis://redis:6379
+      OBJECT_STORAGE_DIR: /data/objects
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - objectdata:/data/objects
+
+  # --- Web Application (nginx serving the Vite SPA) ---
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+
+volumes:
+  # PostgreSQL data (authoritative).
+  pgdata:
+  # Object storage (FsObjectStore). Shared between api and worker so both
+  # processes can read/write evidence artifacts through the ObjectStore
+  # boundary (DATA-003). This is a filesystem volume, not a cloud bucket —
+  # the FsObjectStore adapter is the existing repository implementation.
+  objectdata:

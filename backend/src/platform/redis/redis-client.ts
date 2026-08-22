@@ -1,5 +1,10 @@
 import IORedis, { type Redis, type RedisOptions } from 'ioredis';
 
+// Re-export the Redis type so other layers can type Redis clients without
+// importing ioredis directly (WORK-023: the provider-package boundary check
+// forbids importing ioredis outside src/platform/**).
+export type { Redis };
+
 /**
  * Redis connection factory for WorkflowOS.
  *
