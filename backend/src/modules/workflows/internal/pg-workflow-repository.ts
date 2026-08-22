@@ -104,12 +104,13 @@ export class PgWorkflowTransitionRepository implements WorkflowTransitionReposit
     return result.rows.map(mapTrans);
   }
 
-  async findByIdempotencyKey(key: string): Promise<WorkflowTransition | null> {
+  async findByIdempotencyKey(workItemId: string, key: string): Promise<WorkflowTransition | null> {
     const result = await this.db.query<TransRow>(
       `SELECT id, workflow_execution_id, work_item_id, from_state, to_state,
               transition_type, actor, execution_id, idempotency_key, metadata, created_at
-       FROM wfos_workflow_transitions WHERE idempotency_key = $1 LIMIT 1`,
-      [key],
+       FROM wfos_workflow_transitions
+       WHERE work_item_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      [workItemId, key],
     );
     if (result.rows.length === 0) return null;
     return mapTrans(result.rows[0]!);

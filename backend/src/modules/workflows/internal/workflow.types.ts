@@ -130,7 +130,7 @@ export interface WorkflowTransitionRepository {
     metadata?: Record<string, unknown>;
   }): Promise<WorkflowTransition>;
   listForWorkItem(workItemId: string): Promise<WorkflowTransition[]>;
-  findByIdempotencyKey(key: string): Promise<WorkflowTransition | null>;
+  findByIdempotencyKey(workItemId: string, key: string): Promise<WorkflowTransition | null>;
 }
 
 /**

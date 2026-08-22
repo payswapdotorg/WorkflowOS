@@ -230,6 +230,34 @@ describe('WORK-009 — workflow state machine', () => {
     expect(history.filter((t) => t.idempotencyKey === key)).toHaveLength(1);
   });
 
+  it('idempotency: same key on a different work item is NOT a no-op (scoped per work item)', async () => {
+    const wiA = await createWorkItemA('WF-015-A');
+    const wiB = await createWorkItemA('WF-015-B');
+    const key = 'shared-idemp-key';
+    // Work Item A uses the key to transition DRAFT → READY.
+    const rA = await engine.transition({ workItemId: wiA.id, toState: 'ready', idempotencyKey: key, actor: 'test' });
+    expect(rA.success).toBe(true);
+    expect(rA.toState).toBe('ready');
+    // Work Item B uses the SAME key — it must NOT resolve to A's transition.
+    const rB = await engine.transition({ workItemId: wiB.id, toState: 'ready', idempotencyKey: key, actor: 'test' });
+    expect(rB.success).toBe(true);
+    expect(rB.reason).not.toBe('idempotent-noop');
+    expect(rB.toState).toBe('ready');
+    // Both work items are in 'ready'.
+    const execA = await engine.getState(wiA.id);
+    const execB = await engine.getState(wiB.id);
+    expect(execA!.currentState).toBe('ready');
+    expect(execB!.currentState).toBe('ready');
+    // Each has its own transition history record with the key.
+    const histA = await engine.getHistory(wiA.id);
+    const histB = await engine.getHistory(wiB.id);
+    expect(histA.filter((t) => t.idempotencyKey === key)).toHaveLength(1);
+    expect(histB.filter((t) => t.idempotencyKey === key)).toHaveLength(1);
+    // The transition records are for different work items.
+    expect(histA[0]!.workItemId).toBe(wiA.id);
+    expect(histB[0]!.workItemId).toBe(wiB.id);
+  });
+
   it('transition history is append-only and reconstructable', async () => {
     const wi = await createWorkItemA('WF-016');
     await fullHappyPath(wi.id);

@@ -57,7 +57,7 @@ export class DefaultWorkflowEngine implements WorkflowEngine {
       // Idempotency: if an idempotency key was provided and a transition
       // with that key already exists, return it as a no-op success.
       if (request.idempotencyKey) {
-        const existing = await transRepo.findByIdempotencyKey(request.idempotencyKey);
+        const existing = await transRepo.findByIdempotencyKey(request.workItemId, request.idempotencyKey);
         if (existing) {
           const exec = await execRepo.findByWorkItem(request.workItemId);
           return {
