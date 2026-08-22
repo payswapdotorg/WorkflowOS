@@ -2837,43 +2837,53 @@ describe('WORK-023 invariants -- Deployable runtime', () => {
   });
 
   // --- SEC-001: no secrets in deployment files ---
+  //
+  // PR #22 review found that docker-compose.yml hard-coded the PostgreSQL
+  // credential (`POSTGRES_PASSWORD: wfos`) and embedded it in DATABASE_URL
+  // (`postgres://wfos:wfos@...`). The previous version of this check did NOT
+  // catch it because (a) the YAML values were unquoted (the regex required
+  // quotes), and (b) there was an explicit carve-out that allowed the
+  // DATABASE_URL password to match POSTGRES_PASSWORD. Both gaps are now
+  // closed: the check forbids ANY literal credential in a deployment file
+  // and requires `${VAR}` substitution instead.
 
-  it('no deployment file hard-codes secrets', () => {
-    const SECRET_PATTERNS = /\b(password\s*[:=]\s*['"][^'"]+['"])\b|\b(token\s*[:=]\s*['"][^'"]+['"])\b|\b(api_key\s*[:=]\s*['"][^'"]+['"])\b|\b(secret\s*[:=]\s*['"][^'"]+['"])\b|\b(POSTGRES_PASSWORD\s*[:=]\s*['"][^'"]+['"])\b/i;
+  it('no deployment file hard-codes secrets (literal passwords / DATABASE_URL with embedded credential)', () => {
     const violations: string[] = [];
     for (const file of DEPLOY_FILES) {
       if (!existsSync(file)) continue;
       const src = readFileSync(file, 'utf8');
-      // Skip comments (YAML #, Dockerfile #, nginx #).
+      // Strip comments (YAML #, Dockerfile #, nginx #, HTML <!-- -->).
       const codeOnly = src.replace(/^\s*#.*/gm, '').replace(/<!--[\s\S]*?-->/g, '');
-      if (SECRET_PATTERNS.test(codeOnly)) {
-        violations.push(`${relative(REPO_ROOT, file)} hard-codes a secret`);
+
+      // 1. No literal POSTGRES_PASSWORD value. The value MUST be ${VAR}.
+      //    Matches `POSTGRES_PASSWORD: <value>` or `POSTGRES_PASSWORD=<value>`
+      //    where <value> is NOT a ${...} substitution.
+      const pgPassMatches = codeOnly.matchAll(/POSTGRES_PASSWORD\s*[:=]\s*(\S+)/gi);
+      for (const m of pgPassMatches) {
+        const val = m[1]!.replace(/^['"]|['"]$/g, '');
+        if (!val.startsWith('${')) {
+          violations.push(`${relative(REPO_ROOT, file)} hard-codes POSTGRES_PASSWORD="${val}" — use \${VAR} substitution`);
+        }
       }
-    }
-    // The docker-compose.yml sets POSTGRES_USER/PASSWORD/DB as env vars on
-    // the postgres container — those are initial dev credentials, not
-    // application secrets. The check above is intentionally strict; if the
-    // compose file needs dev credentials, they should come from .env
-    // (which is gitignored). We exclude the standard postgres init env.
-    const composeFile = join(REPO_ROOT, 'docker-compose.yml');
-    if (existsSync(composeFile)) {
-      const src = readFileSync(composeFile, 'utf8');
-      // POSTGRES_USER/PASSWORD/DB are acceptable as dev-only container init
-      // (they configure the postgres container, not the application).
-      // Application secrets (DATABASE_URL with real creds, REDIS_URL with
-      // passwords, API keys) must NOT appear.
-      const APP_SECRET = /DATABASE_URL\s*:\s*postgres:\/\/[^:]+:[^@]+@/i;
-      if (APP_SECRET.test(src)) {
-        // The compose file does set DATABASE_URL with the dev postgres creds.
-        // This is acceptable for local/dev deployment (the credentials are
-        // the postgres container init creds, not application secrets).
-        // We verify it uses the same dev creds as POSTGRES_PASSWORD.
-        const pgPass = src.match(/POSTGRES_PASSWORD:\s*(\S+)/);
-        const dbUrlPass = src.match(/postgres:\/\/[^:]+:([^@]+)@/);
-        if (pgPass && dbUrlPass && pgPass[1] === dbUrlPass[1]) {
-          // OK — the DATABASE_URL password matches POSTGRES_PASSWORD (dev only).
-        } else {
-          violations.push(`${relative(REPO_ROOT, composeFile)} has a DATABASE_URL with a non-matching password`);
+
+      // 2. No literal DATABASE_URL with an embedded credential. The URL
+      //    password MUST be ${VAR}, not a literal string.
+      const dbUrlMatches = codeOnly.matchAll(/DATABASE_URL\s*[:=]\s*postgres:\/\/[^:]+:([^@]+)@/gi);
+      for (const m of dbUrlMatches) {
+        const pass = m[1]!.replace(/^['"]|['"]$/g, '');
+        if (!pass.startsWith('${')) {
+          violations.push(`${relative(REPO_ROOT, file)} embeds a literal password in DATABASE_URL — use \${VAR} substitution`);
+        }
+      }
+
+      // 3. No other literal secret-like assignments (password, token,
+      //    api_key, secret) with a non-${VAR} value.
+      const SECRET_KEYS = /\b(password|token|api_key|secret_key|private_key)\s*[:=]\s*(\S+)/gi;
+      const secretMatches = codeOnly.matchAll(SECRET_KEYS);
+      for (const m of secretMatches) {
+        const val = m[2]!.replace(/^['"]|['"]$/g, '');
+        if (!val.startsWith('${') && val.length > 0) {
+          violations.push(`${relative(REPO_ROOT, file)} hard-codes ${m[1]}="${val}" — use \${VAR} substitution`);
         }
       }
     }

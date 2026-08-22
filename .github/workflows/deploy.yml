@@ -60,8 +60,19 @@ jobs:
         run: bun run lint
 
       # --- Docker deployment validation ---
+      #
+      # The docker-compose.yml uses ${VAR} substitution for all credentials
+      # (no secrets are baked into the file). CI supplies the test values
+      # explicitly here. In production, supply these via a real secret
+      # manager / .env file (gitignored).
 
       - name: Build and start the topology
+        env:
+          POSTGRES_USER: wfos
+          POSTGRES_PASSWORD: wfos-ci-test
+          POSTGRES_DB: wfos
+          DATABASE_URL: postgres://wfos:wfos-ci-test@postgres:5432/wfos
+          REDIS_URL: redis://redis:6379
         run: docker compose up --build -d --wait
 
       - name: Show container status

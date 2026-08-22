@@ -14,25 +14,36 @@
 # DEPLOY-AC-03: no microservices — one backend codebase, two process roles.
 #
 # Usage:
+#   # Set required environment variables (or create a .env file — see .env.example):
+#   export POSTGRES_USER=wfos
+#   export POSTGRES_PASSWORD=<your-secret>
+#   export POSTGRES_DB=wfos
+#   export DATABASE_URL=postgres://wfos:<your-secret>@postgres:5432/wfos
+#   export REDIS_URL=redis://redis:6379
 #   docker compose up --build
 #   docker compose down -v   # tear down + remove volumes
 #
+# SECURITY: no credentials are baked into this file. All sensitive values
+# come from the environment (SEC-001). The static architecture check
+# (tests/architecture/static-architecture.test.ts) enforces this — any
+# literal password or literal DATABASE_URL with an embedded credential will
+# fail CI.
+#
 # The API and worker share the same backend image. The role is selected by
-# the WORKFLOWOS_ROLE env var (api vs worker). No secrets are baked into the
-# image or compose file — all sensitive values come from the environment.
+# the WORKFLOWOS_ROLE env var (api vs worker).
 
 services:
   # --- PostgreSQL (authoritative persistence, DATA-001) ---
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: wfos
-      POSTGRES_PASSWORD: wfos
-      POSTGRES_DB: wfos
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wfos -d wfos"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -57,8 +68,8 @@ services:
       dockerfile: Dockerfile
     environment:
       WORKFLOWOS_ROLE: api
-      DATABASE_URL: postgres://wfos:wfos@postgres:5432/wfos
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       OBJECT_STORAGE_DIR: /data/objects
       PORT: 3001
       HOST: 0.0.0.0
@@ -86,8 +97,8 @@ services:
       dockerfile: Dockerfile
     environment:
       WORKFLOWOS_ROLE: worker
-      DATABASE_URL: postgres://wfos:wfos@postgres:5432/wfos
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       OBJECT_STORAGE_DIR: /data/objects
       LOG_LEVEL: info
     depends_on:
