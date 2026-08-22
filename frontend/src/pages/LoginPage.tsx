@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { ApiError } from '../api/client';
 
 export default function LoginPage() {
   const { setApiKey } = useAuth();

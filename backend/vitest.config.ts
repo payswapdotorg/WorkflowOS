@@ -1,8 +1,31 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
 
+/**
+ * WORK-022 backend vitest config.
+ *
+ * Added React plugin + `.tsx` include so rendered-UI tests can mount real
+ * React pages against a real Fastify server (PR #21 issue 2 correction).
+ *
+ * The default environment stays `node` (so existing tests don't change AND so
+ * `import.meta.url` keeps working for backend modules that locate files on
+ * disk). Rendered-UI `.tsx` tests set up DOM globals manually by importing
+ * `./rendered-ui-dom-setup.ts` at the top of the test file instead of using
+ * `@vitest-environment jsdom` (which would transform `import.meta.url` for
+ * every backend module the test imports and break the migration runner +
+ * object store).
+ */
 export default defineConfig({
+  plugins: [react()],
   resolve: {
+    // WORK-022 rendered-UI tests: force a SINGLE React + react-router-dom
+    // instance. The backend has its own devDep copies of React (for
+    // @testing-library/react) and the frontend has its own copies. Without
+    // dedupe, two module instances coexist, react-router's context is null,
+    // and `useParams`/`useRef` throw. `dedupe` tells vite to resolve every
+    // import of these packages to a single physical copy.
+    dedupe: ['react', 'react-dom', 'react-router', 'react-router-dom', 'scheduler'],
     alias: {
       '@platform': fileURLToPath(new URL('./src/platform', import.meta.url)),
       '@api': fileURLToPath(new URL('./src/api', import.meta.url)),
@@ -15,6 +38,7 @@ export default defineConfig({
     include: [
       'tests/unit/**/*.test.ts',
       'tests/integration/**/*.test.ts',
+      'tests/integration/**/*.test.tsx',
       'tests/architecture/**/*.test.ts',
     ],
     testTimeout: 15000,

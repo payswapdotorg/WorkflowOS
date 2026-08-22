@@ -1,6 +1,8 @@
 import { useParams } from 'react-router-dom';
 import { useState, useEffect } from 'react';
-import { audit, type AuditEvent, ApiError } from '../api/client';
+import {
+  audit, type AuditEvent, ApiError,
+} from '../api/client';
 
 export default function AuditPage() {
   const { projectId } = useParams<{ projectId: string }>();

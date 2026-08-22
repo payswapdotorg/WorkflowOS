@@ -1,8 +1,13 @@
 /**
- * API client for the WorkflowOS backend.
+ * API client for the WorkflowOS backend (WORK-022).
  *
- * The frontend is a consumer — it never owns authoritative state.
+ * The frontend is a CONSUMER — it never owns authoritative state.
  * All data comes from backend API responses.
+ *
+ * UI2-AC-01 (PR #21 correction): the verification surface fetches ACTUAL
+ * VerificationRun + Evidence records from /verification, NOT workflow-convergence
+ * metadata. The previous implementation substituted the convergence status
+ * endpoint for verification data, which did not satisfy UI2-AC-01.
  */
 
 const API_BASE = '';
@@ -102,10 +107,19 @@ export interface ArchitectureVersion {
   contentInline: string | null;
 }
 
+// Backend wraps list responses in objects (`{ architectures: [...] }`,
+// `{ versions: [...] }`, `{ requirements: [...] }`, `{ criteria: [...] }`).
+// The frontend unwraps them here so page components receive plain arrays.
 export const architecture = {
-  listForProject: (projectId: string) => apiGet<Architecture[]>(`/projects/${projectId}/architectures`),
+  listForProject: async (projectId: string): Promise<Architecture[]> => {
+    const body = await apiGet<{ architectures: Architecture[] }>(`/projects/${projectId}/architectures`);
+    return body.architectures ?? [];
+  },
   get: (id: string) => apiGet<Architecture>(`/architectures/${id}`),
-  listVersions: (architectureId: string) => apiGet<ArchitectureVersion[]>(`/architectures/${architectureId}/versions`),
+  listVersions: async (architectureId: string): Promise<ArchitectureVersion[]> => {
+    const body = await apiGet<{ versions: ArchitectureVersion[] }>(`/architectures/${architectureId}/versions`);
+    return body.versions ?? [];
+  },
 };
 
 // --- Requirements ---
@@ -126,8 +140,14 @@ export interface AcceptanceCriterion {
 }
 
 export const requirements = {
-  listForVersion: (versionId: string) => apiGet<Requirement[]>(`/architecture-versions/${versionId}/requirements`),
-  listCriteria: (requirementId: string) => apiGet<AcceptanceCriterion[]>(`/requirements/${requirementId}/criteria`),
+  listForVersion: async (versionId: string): Promise<Requirement[]> => {
+    const body = await apiGet<{ requirements: Requirement[] }>(`/architecture-versions/${versionId}/requirements`);
+    return body.requirements ?? [];
+  },
+  listCriteria: async (requirementId: string): Promise<AcceptanceCriterion[]> => {
+    const body = await apiGet<{ criteria: AcceptanceCriterion[] }>(`/requirements/${requirementId}/criteria`);
+    return body.criteria ?? [];
+  },
 };
 
 // --- Work Items ---
@@ -156,10 +176,20 @@ export interface PrAssociation {
   status: string;
 }
 
+// The backend wraps list responses in objects (`{ workOrders: [...] }`,
+// `{ prAssociations: [...] }`, `{ agentRuns: [...] }`). The frontend unwraps
+// them here so page components receive plain arrays — but the authority is
+// still the backend response, not client-side derivation.
 export const workItems = {
   get: (id: string) => apiGet<WorkItem>(`/work-items/${id}`),
-  listWorkOrders: (workItemId: string) => apiGet<WorkOrder[]>(`/work-items/${workItemId}/work-orders`),
-  listPrAssociations: (workItemId: string) => apiGet<PrAssociation[]>(`/work-items/${workItemId}/pr-associations`),
+  listWorkOrders: async (workItemId: string): Promise<WorkOrder[]> => {
+    const body = await apiGet<{ workOrders: WorkOrder[] }>(`/work-items/${workItemId}/work-orders`);
+    return body.workOrders ?? [];
+  },
+  listPrAssociations: async (workItemId: string): Promise<PrAssociation[]> => {
+    const body = await apiGet<{ prAssociations: PrAssociation[] }>(`/work-items/${workItemId}/pr-associations`);
+    return body.prAssociations ?? [];
+  },
 };
 
 // --- Workflow ---
@@ -168,6 +198,7 @@ export interface WorkflowExecution {
   id: string;
   workItemId: string;
   currentState: string;
+  version: number;
 }
 
 export interface WorkflowTransition {
@@ -205,11 +236,13 @@ export const workflow = {
   getMergeReadiness: (workItemId: string) => apiGet<MergeGateResult>(`/work-items/${workItemId}/workflow/merge-readiness`),
   advanceToVerified: (workItemId: string) =>
     apiPost<{ signalId: string; accepted: boolean; verified: boolean; reason?: string }>(`/work-items/${workItemId}/workflow/advance-to-verified`, {}),
-  getConvergence: (workItemId: string) => apiGet<{ workflowState: string | null; signals: unknown[] }>(`/work-items/${workItemId}/workflow/convergence`),
   getNextWorkItem: (projectId: string) => apiGet<{ nextWorkItemId: string | null }>(`/projects/${projectId}/workflow/next-work-item`),
 };
 
 // --- Agent Runs ---
+//
+// Backend wraps the list response as `{ agentRuns: [...] }`. The frontend
+// unwraps it here.
 
 export interface AgentRun {
   id: string;
@@ -219,10 +252,16 @@ export interface AgentRun {
   status: string;
   commitRef: string | null;
   pullRequestRef: string | null;
+  branch: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 export const agentRuns = {
-  listForWorkItem: (workItemId: string) => apiGet<AgentRun[]>(`/work-items/${workItemId}/agent-runs`),
+  listForWorkItem: async (workItemId: string): Promise<AgentRun[]> => {
+    const body = await apiGet<{ agentRuns: AgentRun[] }>(`/work-items/${workItemId}/agent-runs`);
+    return body.agentRuns ?? [];
+  },
 };
 
 // --- Reviews ---
@@ -247,24 +286,100 @@ export interface ReviewFinding {
 }
 
 export const reviews = {
+  // Backend returns the array directly for /work-items/:id/reviews.
   listForWorkItem: (workItemId: string) => apiGet<Review[]>(`/work-items/${workItemId}/reviews`),
   get: (reviewId: string) => apiGet<Review>(`/reviews/${reviewId}`),
   listFindings: (reviewId: string) => apiGet<ReviewFinding[]>(`/reviews/${reviewId}/findings`),
 };
 
-// --- Verification ---
+// --- Verification (UI2-AC-01 correction) ---
+//
+// The verification surface renders ACTUAL VerificationRun + Evidence records
+// persisted by the /verification module. It does NOT substitute workflow
+// convergence metadata for verification data (PR #21 issue 3).
+//
+// Backend endpoints (added in this PR):
+//   GET /work-items/:workItemId/verification-runs           → VerificationRun[]
+//   GET /verification-runs/:runId                           → VerificationRun
+//   GET /verification-runs/:runId/evidence                  → Evidence[]
+//   GET /verification-runs/:runId/evidence-mappings         → CriterionEvidenceMapping[]
+//   GET /verification-runs/:runId/evaluation                 → evaluation result (read-only)
 
 export interface VerificationRun {
   id: string;
+  projectId: string;
   workItemId: string;
-  status: string;
+  workOrderId: string | null;
+  architectureVersionId: string;
   source: string;
+  sourceRef: string | null;
+  status: string;
+  executionId: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  summary: Record<string, unknown> | null;
+  errorMetadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VerificationEvidence {
+  id: string;
+  projectId: string;
+  verificationRunId: string;
+  evidenceType: string;
+  authority: string;
+  provider: string;
+  externalRef: string | null;
+  headSha: string | null;
+  result: string;
+  contentSummary: string | null;
+  storageKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CriterionEvidenceMapping {
+  id: string;
+  verificationRunId: string;
+  evidenceId: string;
+  criterionId: string;
+  relevance: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface CriterionEvaluation {
+  criterionId: string;
+  requirementId: string;
+  derivedStatus: string;
+  evidenceRefs: string[];
+  rationale: string;
+}
+
+export interface RequirementDerivation {
+  requirementId: string;
+  derivedStatus: string;
+  rationale: string;
+}
+
+export interface VerificationEvaluation {
+  run: VerificationRun;
+  criteria: CriterionEvaluation[];
+  requirements: RequirementDerivation[];
 }
 
 export const verification = {
-  // The backend doesn't have a list endpoint for verification runs per work item,
-  // but we can use the convergence status to find the latest run.
-  getConvergence: (workItemId: string) => workflow.getConvergence(workItemId),
+  listRunsForWorkItem: (workItemId: string) =>
+    apiGet<VerificationRun[]>(`/work-items/${workItemId}/verification-runs`),
+  getRun: (runId: string) =>
+    apiGet<VerificationRun>(`/verification-runs/${runId}`),
+  listEvidence: (runId: string) =>
+    apiGet<VerificationEvidence[]>(`/verification-runs/${runId}/evidence`),
+  listMappings: (runId: string) =>
+    apiGet<CriterionEvidenceMapping[]>(`/verification-runs/${runId}/evidence-mappings`),
+  getEvaluation: (runId: string) =>
+    apiGet<VerificationEvaluation>(`/verification-runs/${runId}/evaluation`),
 };
 
 // --- Audit ---

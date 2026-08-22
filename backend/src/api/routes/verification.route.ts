@@ -263,6 +263,87 @@ export async function verificationRoutes(
     });
   });
 
+  // --- WORK-022 (UI2-AC-01) read paths for the web application ---
+  //
+  // These GET endpoints expose ACTUAL VerificationRun + Evidence + mapping
+  // records so the frontend can render authoritative verification state.
+  // They exist specifically so the frontend never substitutes workflow-
+  // convergence metadata for actual verification data (PR #21 issue 3).
+  //
+  // Authorization resolves through the same traceability chain as every
+  // other verification route: VerificationRun → Work Item →
+  // ArchitectureVersion → Architecture → Project. Tenant isolation is
+  // preserved by requireProjectAuthorization.
+
+  // GET /work-items/:workItemId/verification-runs — list runs for a work item.
+  app.get('/work-items/:workItemId/verification-runs', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId,
+      });
+      const runs = await deps.verificationService.listRunsForWorkItem(workItemId);
+      return reply.code(200).send(runs);
+    });
+  });
+
+  // GET /verification-runs/:runId — fetch a single run.
+  app.get('/verification-runs/:runId', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { runId } = req.params as { runId: string };
+      const resolved = await resolveProjectForVerificationRun(deps, runId);
+      if (!resolved) {
+        return reply.code(404).send({ error: 'verification-run-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId: resolved.projectId,
+      });
+      const run = await deps.verificationService.findRun(runId);
+      if (!run) return reply.code(404).send({ error: 'verification-run-not-found' });
+      return reply.code(200).send(run);
+    });
+  });
+
+  // GET /verification-runs/:runId/evidence — list evidence attached to a run.
+  app.get('/verification-runs/:runId/evidence', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { runId } = req.params as { runId: string };
+      const resolved = await resolveProjectForVerificationRun(deps, runId);
+      if (!resolved) {
+        return reply.code(404).send({ error: 'verification-run-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId: resolved.projectId,
+      });
+      const evidence = await deps.verificationService.listEvidenceForRun(runId);
+      return reply.code(200).send(evidence);
+    });
+  });
+
+  // GET /verification-runs/:runId/evidence-mappings — list evidence→criterion mappings.
+  app.get('/verification-runs/:runId/evidence-mappings', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { runId } = req.params as { runId: string };
+      const resolved = await resolveProjectForVerificationRun(deps, runId);
+      if (!resolved) {
+        return reply.code(404).send({ error: 'verification-run-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId: resolved.projectId,
+      });
+      const mappings = await deps.verificationService.listMappingsForRun(runId);
+      return reply.code(200).send(mappings);
+    });
+  });
+
   // --- CI evidence ingestion endpoint (manual trigger for testing) ---
 
   app.post('/projects/:projectId/ci-evidence', async (req, reply) => {

@@ -143,6 +143,23 @@ export class DefaultVerificationService implements VerificationService {
     return this.runRepo.findById(id);
   }
 
+  // WORK-022 (UI2-AC-01): authoritative read paths used by the web
+  // application to render VerificationRun + Evidence state. Pure reads — no
+  // mutation, no evaluation. These exist so the frontend never substitutes
+  // workflow-convergence metadata for actual verification data (PR #21
+  // issue 3).
+  async listRunsForWorkItem(workItemId: string): Promise<VerificationRun[]> {
+    return this.runRepo.listForWorkItem(workItemId);
+  }
+
+  async listEvidenceForRun(verificationRunId: string): Promise<Evidence[]> {
+    return this.evidenceRepo.listForVerificationRun(verificationRunId);
+  }
+
+  async listMappingsForRun(verificationRunId: string): Promise<CriterionEvidenceMapping[]> {
+    return this.mappingRepo.listForVerificationRun(verificationRunId);
+  }
+
   async attachEvidence(input: CreateEvidenceInput): Promise<Evidence> {
     // AUTHORITY BOUNDARY (PR #14 architect review):
     //

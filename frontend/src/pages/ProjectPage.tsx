@@ -22,11 +22,13 @@ export default function ProjectPage() {
     ]).then(async ([proj, archs]) => {
       setProject(proj);
       setArchitectures(archs);
-      if (archs.length > 0) {
-        const vs = await architecture.listVersions(archs[0].id);
+      const firstArch = archs[0];
+      if (firstArch) {
+        const vs = await architecture.listVersions(firstArch.id);
         setVersions(vs);
-        if (vs.length > 0) {
-          const rs = await requirements.listForVersion(vs[0].id);
+        const firstVersion = vs[0];
+        if (firstVersion) {
+          const rs = await requirements.listForVersion(firstVersion.id);
           setReqs(rs);
           const critMap: Record<string, AcceptanceCriterion[]> = {};
           for (const r of rs) {
@@ -57,7 +59,7 @@ export default function ProjectPage() {
           <strong>{arch.name}</strong> (ID: {arch.id})
           {versions.filter(v => v.architectureId === arch.id).map(v => (
             <div key={v.id} style={{ marginLeft: 20 }}>
-              Version: {v.id.slice(0, 8)}... -- State: <strong>{v.state}</strong>
+              Version: {v.id.slice(0, 8)}... — State: <strong>{v.state}</strong>
             </div>
           ))}
         </div>

@@ -16,7 +16,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
       <footer style={{ padding: '10px 20px', borderTop: '1px solid #ddd', marginTop: 'auto', fontSize: 12, color: '#999' }}>
-        WorkflowOS -- Backend retains all authoritative state.
+        WorkflowOS — Backend retains all authoritative state.
       </footer>
     </div>
   );
