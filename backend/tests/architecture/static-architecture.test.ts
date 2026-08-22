@@ -2991,3 +2991,149 @@ describe('WORK-023 invariants -- Deployable runtime', () => {
     expect(src).toMatch(/validate-deployment/);
   });
 });
+
+// ===========================================================================
+// WORK-024 — End-to-end lifecycle invariants.
+//
+// Static checks that verify the E2E suite does not bypass architectural
+// boundaries:
+//   - E2E tests do not import domain internal/ implementations to mutate
+//     state (only for composition/wiring at the test boundary);
+//   - E2E tests do not directly mutate workflow persistence (all state changes
+//     go through HTTP API calls);
+//   - no test-only shortcut bypasses AuthorizationService;
+//   - no second workflow engine / verification engine / review system is
+//     introduced;
+//   - E2E CI workflow exists.
+// ===========================================================================
+
+describe('WORK-024 invariants -- E2E lifecycle boundaries', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const E2E_DIR = join(BACKEND_ROOT, 'tests', 'integration', 'e2e');
+
+  it('E2E test directory exists with lifecycle test', () => {
+    expect(existsSync(E2E_DIR), 'E2E test directory not found').toBe(true);
+    const lifecycleTest = join(E2E_DIR, 'lifecycle.integration.test.ts');
+    expect(existsSync(lifecycleTest), 'lifecycle.integration.test.ts not found').toBe(true);
+  });
+
+  it('E2E tests drive lifecycle through HTTP API calls (server.inject), not direct service mutation', () => {
+    if (!existsSync(E2E_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(E2E_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // E2E tests MUST use server.inject for lifecycle mutations.
+      // They may import services for WIRING (composition boundary), but must
+      // NOT call mutating methods directly to simulate completed domain actions.
+      // The key mutating methods that must NOT be called directly in the
+      // lifecycle assertions:
+      const MUTATING_CALLS = [
+        /\bworkflowEngine\.transition\s*\(/,
+        /\bverificationService\.createRun\s*\(/,
+        /\bverificationService\.attachEvidence\s*\(/,
+        /\bverificationService\.attachCiEvidence\s*\(/,
+        /\bverificationService\.mapEvidenceToCriterion\s*\(/,
+        /\bverificationService\.persistEvaluations\s*\(/,
+        /\breviewService\.createReview\s*\(/,
+        /\breviewService\.finalizeReview\s*\(/,
+        /\breviewService\.addFinding\s*\(/,
+        /\borchestrator\.submitVerificationCompleted\s*\(/,
+        /\borchestrator\.submitReviewFinalized\s*\(/,
+        /\borchestrator\.submitPullRequestMerged\s*\(/,
+        /\borchestrator\.beginVerification\s*\(/,
+        /\borchestrator\.beginArchitectReview\s*\(/,
+      ];
+      for (const pattern of MUTATING_CALLS) {
+        if (pattern.test(codeOnly)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} calls a mutating service method directly (${pattern}) — use HTTP API (server.inject) instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('E2E tests do not directly mutate workflow persistence (no raw SQL on wfos_workflow_)', () => {
+    if (!existsSync(E2E_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(E2E_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // No direct SQL mutations on workflow tables.
+      if (/UPDATE\s+wfos_workflow_|INSERT\s+INTO\s+wfos_workflow_|DELETE\s+FROM\s+wfos_workflow_/i.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} directly mutates wfos_workflow_ tables`);
+      }
+      // No direct SQL mutations on verification/review tables.
+      if (/UPDATE\s+wfos_verification_|UPDATE\s+wfos_reviews_|UPDATE\s+wfos_evidence_/i.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} directly mutates verification/review/evidence tables`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('E2E tests do not bypass AuthorizationService (no direct DB seeding of protected resources in lifecycle assertions)', () => {
+    if (!existsSync(E2E_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(E2E_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      // Strip comments.
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // The E2E test may create orgs/users/api-keys/Project B at the
+      // composition boundary (in beforeAll) but must NOT seed
+      // projects/work-items directly via repositories within `it(...)` blocks
+      // (lifecycle assertions). We check only the content of `it(...)` blocks.
+      // To isolate `it()` blocks, we split on `\nit(` or `\n  it(` at the
+      // start of a line, and take everything until the next `it(`, `describe(`,
+      // `beforeAll(`, `afterAll(`, or end of file.
+      const itRegex = /\bit\s*\(\s*['"`]/g;
+      let match: RegExpExecArray | null;
+      while ((match = itRegex.exec(codeOnly)) !== null) {
+        const start = match.index;
+        // Find the end of this `it()` block: the next `it(`, `describe(`,
+        // `beforeAll(`, `afterAll(`, or `});` at the same indentation level.
+        // Simple heuristic: take the next 5000 chars or until the next `it(`.
+        const rest = codeOnly.slice(start);
+        const nextIt = rest.search(/\n\s*it\s*\(/);
+        const nextDescribe = rest.search(/\n\s*describe\s*\(/);
+        const nextBeforeAll = rest.search(/\n\s*beforeAll\s*\(/);
+        const nextAfterAll = rest.search(/\n\s*afterAll\s*\(/);
+        const ends = [nextIt, nextDescribe, nextBeforeAll, nextAfterAll].filter((n) => n > 0);
+        const end = ends.length > 0 ? Math.min(...ends) : rest.length;
+        const blockContent = rest.slice(0, end);
+        if (/stack\.projectRepository\.create\s*\(/.test(blockContent)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} seeds a project via repository in a test block — use POST /organizations/:orgId/projects instead`);
+        }
+        if (/stack\.workItemRepository\.create\s*\(/.test(blockContent)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} seeds a work item via repository in a test block — use POST /architecture-versions/:versionId/work-items instead`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('no second workflow engine / verification engine / review system is introduced', () => {
+    // The E2E tests must reuse the existing DefaultWorkflowEngine,
+    // DefaultVerificationService, DefaultReviewService — not introduce new ones.
+    if (!existsSync(E2E_DIR)) return;
+    for (const file of walkTs(E2E_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      // Must import the existing services (not custom ones).
+      expect(src).toMatch(/DefaultWorkflowOrchestrator/);
+      expect(src).toMatch(/DefaultVerificationService/);
+      expect(src).toMatch(/DefaultReviewService/);
+      // Must NOT define new engines/services.
+      expect(src).not.toMatch(/class\s+\w*WorkflowEngine\w*\s+implements/);
+      expect(src).not.toMatch(/class\s+\w*VerificationService\w*\s+implements/);
+      expect(src).not.toMatch(/class\s+\w*ReviewService\w*\s+implements/);
+    }
+  });
+
+  it('E2E CI workflow exists', () => {
+    const e2eYml = join(REPO_ROOT, '.github', 'workflows', 'e2e.yml');
+    expect(existsSync(e2eYml), 'e2e.yml workflow not found').toBe(true);
+    const src = readFileSync(e2eYml, 'utf8');
+    expect(src).toMatch(/lifecycle\.integration/);
+  });
+});

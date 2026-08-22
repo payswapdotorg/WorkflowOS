@@ -194,6 +194,55 @@ export async function workflowRoutes(
     });
   });
 
+  // POST /work-items/:workItemId/workflow/complete-verification — submit the
+  // verification_completed signal (WORK-024 additive API seam).
+  //
+  // This route exposes the existing orchestrator.submitVerificationCompleted
+  // method through HTTP so the E2E lifecycle can be driven entirely through
+  // API calls. It does NOT change any authority: it validates the
+  // VerificationRun is completed (status='completed', set by persistEvaluations)
+  // and reads the authoritative result from the persisted summary — it never
+  // accepts a client-supplied pass/fail outcome.
+  //
+  // The caller is expected to have already:
+  //   1. POST /work-items/:id/workflow/begin-verification (creates the run)
+  //   2. POST /projects/:projectId/ci-evidence (ingests CI evidence)
+  //   3. POST /verification-runs/:runId/ci-evidence (attaches to the run)
+  //   4. POST /verification-runs/:runId/evidence-mappings (maps to criteria)
+  //   5. POST /verification-runs/:runId/evaluate (persists evaluations + sets run to 'completed')
+  //   6. POST /work-items/:id/workflow/complete-verification (this route — submits the signal)
+  //
+  // The signal is processed asynchronously by the WorkerHost, which transitions
+  // VERIFYING → ARCHITECT_REVIEW (if all criteria pass) or VERIFYING → VERIFICATION_FAILED.
+  app.post('/work-items/:workItemId/workflow/complete-verification', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const body = req.body as { verificationRunId?: string };
+      if (!body?.verificationRunId) {
+        return reply.code(400).send({ error: 'verificationRunId required' });
+      }
+      const executionId = generateExecutionId();
+      const signal = await deps.orchestrator.submitVerificationCompleted({
+        workItemId,
+        verificationRunId: body.verificationRunId,
+        executionId,
+      });
+      return reply.code(202).send({
+        signalId: signal.id, accepted: true,
+      });
+    });
+  });
+
   // POST /work-items/:workItemId/workflow/begin-architect-review — begin architect review (WORK-018).
   // Invokes ArchitectService + creates + finalizes Review + drives workflow transition.
   // Does NOT accept review outcomes — the verdict comes from the authoritative ArchitectExecutionResult.
@@ -267,6 +316,46 @@ export async function workflowRoutes(
       return reply.code(202).send({
         signalId: result.signal.id, accepted: true,
         mergeReady: result.mergeReady, gates: result.gates,
+      });
+    });
+  });
+
+  // POST /work-items/:workItemId/workflow/submit-pr-merged — submit the
+  // pull_request_merged signal (WORK-024 additive API seam).
+  //
+  // This route exposes the existing orchestrator.submitPullRequestMerged
+  // method through HTTP. In production, this signal is triggered by the
+  // authoritative GitHub webhook. The E2E lifecycle uses this route (after
+  // marking the PR as merged via POST /work-items/:id/pr-associations/:prId/merge)
+  // to drive the APPROVED → MERGED transition.
+  //
+  // It does NOT change any authority — the orchestrator validates the PR
+  // association is persisted with status='merged' before submitting the signal.
+  app.post('/work-items/:workItemId/workflow/submit-pr-merged', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      if (!deps.orchestrator) {
+        return reply.code(501).send({ error: 'orchestrator-not-configured' });
+      }
+      const body = req.body as { prAssociationId?: string };
+      if (!body?.prAssociationId) {
+        return reply.code(400).send({ error: 'prAssociationId required' });
+      }
+      const executionId = generateExecutionId();
+      const signal = await deps.orchestrator.submitPullRequestMerged({
+        workItemId,
+        prAssociationId: body.prAssociationId,
+        executionId,
+      });
+      return reply.code(202).send({
+        signalId: signal.id, accepted: true,
       });
     });
   });
