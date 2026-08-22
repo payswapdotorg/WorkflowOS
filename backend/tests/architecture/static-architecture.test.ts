@@ -1881,3 +1881,237 @@ describe('WORK-015 invariants — /verification + /github CI ingestion', () => {
     ).not.toMatch(/\bauthority\b/);
   });
 });
+
+/**
+ * WORK-016 invariants — /reviews (Architect Reviews) module boundaries.
+ *
+ * Ensures /reviews owns Architect Review + Review Finding persistence and
+ * semantics, and does NOT:
+ * - import /workflows/internal (boundary — /workflows owns canonical state);
+ * - import GitHub SDK/provider implementations;
+ * - define criterion/verification semantics;
+ * - mutate workflow persistence directly (no INSERT/UPDATE/DELETE on
+ *   wfos_workflow_executions);
+ * - define canonical workflow states;
+ * - create duplicate Work Order or Architect Execution persistence;
+ * - import /verification/internal or /llm/internal (consume public contracts only).
+ *
+ * The frozen architecture (architecture.md §6, §19, §20; architecture-lock.md
+ * §61) requires:
+ *
+ *   /llm executes architect reasoning → /reviews persists the verdict + findings
+ *   → /workflows consumes the public ArchitectReviewResult to drive state
+ *     transitions.
+ */
+describe('WORK-016 invariants — /reviews (Architect Reviews) module boundaries', () => {
+  it('/reviews does not import from /workflows/internal', () => {
+    // /reviews exposes a public ArchitectReviewResult that /workflows consumes,
+    // but /reviews must NOT reach into /workflows/internal — that would couple
+    // reviews to workflow implementation details and risk workflow-state mutation.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (targetModule === 'workflows' && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside workflows/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not import from /verification/internal', () => {
+    // /reviews may consume /verification's PUBLIC barrel
+    // (@modules/verification/index.js) but must NOT reach into
+    // /verification/internal/ — that would couple reviews to verification
+    // implementation details.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (targetModule === 'verification' && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside verification/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not import from /llm/internal', () => {
+    // /reviews may reference the architect execution via the /llm PUBLIC barrel
+    // (@modules/llm/index.js) but must NOT reach into /llm/internal/.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (targetModule === 'llm' && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside llm/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not import GitHub SDK/provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is /github; /reviews references provider-independent contracts only`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION: /reviews does not mutate workflow persistence directly', () => {
+    // /reviews MUST NOT write directly to wfos_workflow_executions — that would
+    // bypass the Workflow Engine (boundary — /workflows owns canonical state).
+    // /reviews exposes a public ArchitectReviewResult that /workflows consumes.
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_workflow_executions — ` +
+            `canonical workflow state is owned by /workflows; expose a public ReviewResult instead`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not own canonical workflow state', () => {
+    // The canonical workflow state machine is owned by /workflows. /reviews
+    // must not declare those states. NOTE: ARCHITECTURE_CHANGE_REQUIRED and
+    // IMPLEMENTATION_BLOCKED are BOTH verdicts (frozen architecture §19) AND
+    // workflow states (§13) — they are valid in /reviews as VERDICT values.
+    // The pure workflow states that /reviews must NOT reference are:
+    //   DRAFT, READY, ASSIGNED, IMPLEMENTING, PR_OPEN, VERIFYING,
+    //   ARCHITECT_REVIEW, CHANGES_REQUESTED, APPROVED, MERGED, VERIFIED,
+    //   ARCHITECTURE_CHANGE_REQUEST
+    const PURE_WORKFLOW_STATES = /\b(DRAFT|READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|CHANGES_REQUESTED|APPROVED|MERGED|VERIFIED|ARCHITECTURE_CHANGE_REQUEST)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (PURE_WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} references pure workflow states — /workflows remains the sole workflow-state authority`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not define criterion/verification semantics', () => {
+    // /reviews must NOT:
+    // - call AcceptanceCriterionRepository.update (criterion status mutation);
+    // - call RequirementRepository.update (requirement status mutation);
+    // - declare criterion evaluation logic (deriveCriterionStatus, evaluateCriterion).
+    // /verification owns verification semantics.
+    const violations: string[] = [];
+    const EVAL_PATTERNS = [
+      /\bAcceptanceCriterionRepository\b/,
+      /\bRequirementRepository\b/,
+      /\bderiveCriterionStatus\b/,
+      /\bevaluateCriterion\b/,
+      /\bevaluateForRun\b/,
+      /\bpersistEvaluations\b/,
+    ];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const pattern of EVAL_PATTERNS) {
+        if (pattern.test(codeOnly)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} references ${pattern.source} — /reviews must not evaluate evidence or modify criterion status (that's /verification)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews does not create duplicate Work Order or Architect Execution persistence', () => {
+    // /reviews must NOT create its own Work Order or Architect Execution
+    // persistence — those are owned by /work-items and /llm respectively.
+    // /reviews references them via FK + text columns.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'reviews'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // A competing persistence model is implied by a CREATE TABLE statement
+      // for a work_order or architect_execution table, or by a class/interface
+      // explicitly named *WorkOrder*Repository / *ArchitectExecution*Repository.
+      const declaresTable = /\bCREATE\s+TABLE\s+\w*(work_?order|architect_?execution)\w*/i.test(codeOnly);
+      const declaresRepo = /\bclass\s+\w*(WorkOrder|ArchitectExecution)\w*\s+(implements|extends)\s*\w*Repository/i.test(codeOnly)
+        || /\binterface\s+\w*(WorkOrder|ArchitectExecution)\w*Repository\b/i.test(codeOnly);
+      if (declaresTable || declaresRepo) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing Work Order / Architect Execution persistence model — those are owned by /work-items and /llm`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/reviews barrel exposes only review-domain contracts', () => {
+    const rIndex = readFileSync(join(MODULES_DIR, 'reviews', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      // Review domain types (WORK-016)
+      'ReviewVerdict', 'ReviewStatus', 'ReviewSource',
+      'FindingSeverity', 'FindingDisposition',
+      'Review', 'CreateReviewInput', 'FinalizeReviewInput', 'ReviewRepository',
+      'ReviewFinding', 'CreateFindingInput', 'ReviewFindingRepository',
+      'ArchitectReviewResult', 'ReviewService',
+      // Module contract const
+      'reviewsModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of rIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of rIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/reviews exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+});
