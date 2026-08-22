@@ -10,6 +10,7 @@ import type {
   ArchitectRequirementSummary,
   ArchitectCriterionSummary,
   ArchitectRepositoryEvidence,
+  ArchitectVerificationEvidence,
 } from './architect.types.js';
 
 /**
@@ -217,6 +218,33 @@ export class DefaultArchitectService implements ArchitectService {
       outOfScope = wiResult.rows[0]?.out_of_scope ?? null;
     }
 
+    // WORK-018 (WF-VER-AC-02): load persisted VerificationRun + evidence when
+    // a verificationRunId is provided. The architect execution receives the
+    // actual verification state/evidence context, not an empty array.
+    let verificationEvidence: ArchitectVerificationEvidence[] = [];
+    if (request.verificationRunId) {
+      // Load the verification run.
+      const runResult = await this.db.query<{ id: string; status: string; summary: Record<string, unknown> }>(
+        `SELECT id, status, summary FROM wfos_verification_runs WHERE id = $1`,
+        [request.verificationRunId],
+      );
+      if (runResult.rows.length > 0) {
+        const run = runResult.rows[0]!;
+        // Load the evidence records for this run.
+        const evResult = await this.db.query<{ id: string; evidence_type: string; result: string; external_ref: string | null }>(
+          `SELECT id, evidence_type, result, external_ref
+           FROM wfos_evidence WHERE verification_run_id = $1
+           ORDER BY created_at`,
+          [request.verificationRunId],
+        );
+        verificationEvidence = evResult.rows.map((ev) => ({
+          type: ev.evidence_type,
+          ref: ev.external_ref ?? ev.id,
+          status: `${ev.result} (run: ${run.status})`,
+        }));
+      }
+    }
+
     return {
       projectId: request.projectId,
       architectureVersionId: request.architectureVersionId,
@@ -225,7 +253,7 @@ export class DefaultArchitectService implements ArchitectService {
       acceptanceCriteria: criteria,
       architectureConstraints: archConstraints,
       repositoryEvidence: repoEvidence,
-      verificationEvidence: [], // WORK-015 will provide verification evidence.
+      verificationEvidence,
       outOfScope,
     };
   }

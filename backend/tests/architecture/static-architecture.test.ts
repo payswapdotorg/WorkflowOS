@@ -2283,4 +2283,36 @@ describe('WORK-017 invariants — /workflows convergence boundaries', () => {
     // The route MUST use initiateConvergence (the only public entry point).
     expect(src).toMatch(/initiateConvergence/);
   });
+
+  // --- WORK-018: Verification/Review orchestration checks ---
+
+  it('REGRESSION (WORK-018): workflow route exposes begin-verification and begin-architect-review', () => {
+    // WORK-018 adds two new API endpoints that initiate verification and
+    // architect review. These endpoints do NOT accept verification/review
+    // outcomes — they only initiate the process.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    expect(src).toMatch(/begin-verification/);
+    expect(src).toMatch(/begin-architect-review/);
+    expect(src).toMatch(/beginVerification/);
+    expect(src).toMatch(/beginArchitectReview/);
+  });
+
+  it('REGRESSION (WORK-018): no public endpoint accepts verification/review outcomes', () => {
+    // The begin-verification and begin-architect-review endpoints must NOT
+    // accept outcome/payload fields that could forge results.
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'workflow.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Find the begin-verification handler body — must NOT accept allCriteriaPass.
+    const beginVerifyMatch = codeOnly.match(/begin-verification[\s\S]*?begin-architect-review/);
+    if (beginVerifyMatch) {
+      expect(beginVerifyMatch[0]).not.toMatch(/allCriteriaPass/);
+    }
+    // Find the begin-architect-review handler body — must NOT accept outcome.
+    const beginReviewMatch = codeOnly.match(/begin-architect-review[\s\S]*?convergence/);
+    if (beginReviewMatch) {
+      expect(beginReviewMatch[0]).not.toMatch(/outcome/);
+    }
+  });
 });

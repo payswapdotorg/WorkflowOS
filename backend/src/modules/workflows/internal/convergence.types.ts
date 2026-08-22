@@ -36,11 +36,14 @@ import type { WorkflowState, WorkflowEngine } from './workflow.types.js';
 // minimal set required by the convergence loop (frozen architecture §14, §27).
 
 export type SignalType =
-  | 'initiate'              // Start the convergence loop for a work item
-  | 'agent_run_completed'   // Agent run finished (success or failure)
-  | 'pull_request_merged'   // GitHub PR was merged
+  | 'initiate'               // Start the convergence loop for a work item
+  | 'agent_run_completed'    // Agent run finished (success or failure)
+  | 'pull_request_merged'    // GitHub PR was merged
   | 'verification_completed' // Verification run finished
-  | 'review_finalized';     // Architect review was finalized
+  | 'review_finalized'       // Architect review was finalized
+  // WORK-018: verification/review orchestration signals
+  | 'begin_verification'    // PR_OPEN → VERIFYING + create VerificationRun
+  | 'begin_architect_review'; // ARCHITECT_REVIEW → invoke ArchitectService + create + finalize Review
 
 export type SignalProcessingState = 'pending' | 'processed' | 'failed';
 
@@ -197,6 +200,45 @@ export interface WorkflowOrchestrator {
     prAssociationId: string;
     executionId: string;
   }): Promise<ConvergenceSignal>;
+
+  // --- WORK-018: Verification/Review orchestration ---
+
+  /**
+   * Begin verification for a Work Item: transitions PR_OPEN → VERIFYING and
+   * creates a VerificationRun using the existing `/verification` contract.
+   *
+   * The orchestrator does NOT evaluate evidence — it only creates the run.
+   * The verification result comes later via `submitVerificationCompleted`
+   * (which loads the authoritative persisted result).
+   *
+   * Returns the verification run ID so the caller can attach evidence.
+   */
+  beginVerification(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+  }): Promise<{ signal: ConvergenceSignal; verificationRunId: string }>;
+
+  /**
+   * Begin architect review for a Work Item: invokes the existing ArchitectService
+   * (via /llm), creates a Review (via /reviews), finalizes it with the
+   * architect's verdict, and submits a `review_finalized` signal that drives
+   * the correct canonical workflow transition.
+   *
+   * The verdict is loaded from the AUTHORITATIVE ArchitectExecutionResult +
+   * persisted Review — NOT from client input. A client cannot forge the outcome.
+   *
+   * The architect execution + review creation use the Work Item's existing
+   * Work Order / ArchitectureVersion traceability.
+   */
+  beginArchitectReview(input: {
+    workItemId: string;
+    executionId: string;
+    sourceEventId: string;
+    provider?: string;
+    model?: string;
+    task?: string;
+  }): Promise<{ signal: ConvergenceSignal; reviewId: string }>;
 
   /**
    * Process a convergence signal. Loads the signal + current workflow state,
