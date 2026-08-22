@@ -51,8 +51,10 @@ export interface UpdateWorkItemInput {
   assignee?: string;
   executionMetadata?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
-  /** Mark the work item as completed (DEP-AC-02). */
-  completed?: boolean;
+  // NOTE: `completed` is deliberately NOT in this type. The completion signal
+  // is a workflow/verification-derived fact that ordinary project-write users
+  // must not set through the normal Work Item update API. Use
+  // WorkItemRepository.markCompleted() for internal/test/future-workflow use.
 }
 
 export interface WorkItemRepository {
@@ -60,6 +62,12 @@ export interface WorkItemRepository {
   findById(id: string): Promise<WorkItem | null>;
   findByArchitectureVersion(architectureVersionId: string): Promise<WorkItem[]>;
   update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null>;
+  /**
+   * Set the completion flag (DEP-AC-02). This is an INTERNAL method — it must
+   * NOT be exposed through the ordinary Work Item update API. Future
+   * /workflows + /verification will call this to signal completion.
+   */
+  markCompleted(id: string, completed: boolean): Promise<WorkItem | null>;
 }
 
 // --- Work Item ↔ Requirement associations ---

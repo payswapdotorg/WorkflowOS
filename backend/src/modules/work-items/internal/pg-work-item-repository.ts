@@ -88,7 +88,8 @@ export class PgWorkItemRepository implements WorkItemRepository {
     if (input.assignee !== undefined) { sets.push(`assignee = $${pIdx++}`); params.push(input.assignee); }
     if (input.executionMetadata !== undefined) { sets.push(`execution_metadata = $${pIdx++}`); params.push(JSON.stringify(input.executionMetadata)); }
     if (input.metadata !== undefined) { sets.push(`metadata = $${pIdx++}`); params.push(JSON.stringify(input.metadata)); }
-    if (input.completed !== undefined) { sets.push(`completed = $${pIdx++}`); params.push(input.completed); }
+    // NOTE: `completed` is deliberately NOT settable through update(). Use
+    // markCompleted() for the internal completion signal (architect review PR #8).
     if (sets.length === 0) return this.findById(id);
     const result = await this.db.query<WiRow>(
       `UPDATE wfos_work_items SET ${sets.join(', ')} WHERE id = $1
@@ -96,6 +97,18 @@ export class PgWorkItemRepository implements WorkItemRepository {
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
                  completed, metadata, created_at, updated_at`,
       params,
+    );
+    if (result.rows.length === 0) return null;
+    return mapWi(result.rows[0]!);
+  }
+
+  async markCompleted(id: string, completed: boolean): Promise<WorkItem | null> {
+    const result = await this.db.query<WiRow>(
+      `UPDATE wfos_work_items SET completed = $1 WHERE id = $2
+       RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
+                 out_of_scope, architecture_constraints, assignee, execution_metadata,
+                 completed, metadata, created_at, updated_at`,
+      [completed, id],
     );
     if (result.rows.length === 0) return null;
     return mapWi(result.rows[0]!);
