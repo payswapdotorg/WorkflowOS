@@ -16,6 +16,7 @@ import { architectRoutes, type ArchitectRouteDeps } from './routes/architect.rou
 import { verificationRoutes, type VerificationRouteDeps } from './routes/verification.route.js';
 import { reviewRoutes, type ReviewRouteDeps } from './routes/review.route.js';
 import { auditRoutes, type AuditRouteDeps } from './routes/audit.route.js';
+import { notificationRoutes, type NotificationRouteDeps } from './routes/notification.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -56,6 +57,8 @@ export interface ServerDeps extends JobsRouteDeps {
   reviews?: ReviewRouteDeps;
   /** Audit routes (backend-authorized, read-only). */
   audit?: AuditRouteDeps;
+  /** Notification routes (backend-authorized, read-only). */
+  notifications?: NotificationRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -107,6 +110,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.audit) {
     await auditRoutes(app, deps.audit);
+  }
+  if (deps.auth && deps.notifications) {
+    await notificationRoutes(app, deps.notifications);
   }
   return app;
 }

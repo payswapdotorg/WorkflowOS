@@ -2539,3 +2539,91 @@ describe('WORK-020 invariants — /audit module boundaries', () => {
     expect(codeOnly).toMatch(/auditQuery:\s*app\.deps\.auditService/);
   });
 });
+
+/**
+ * WORK-021 invariants -- /notifications module boundaries.
+ */
+describe('WORK-021 invariants -- /notifications module boundaries', () => {
+  it('/notifications does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'notifications'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'notifications') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/notifications does not import provider SDKs', () => {
+    const PROVIDER_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'notifications'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports provider SDK "${specifier}"`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/notifications does not mutate workflow persistence directly', () => {
+    const violations: string[] = [];
+    const DIRECT_MUTATION = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+wfos_workflow_executions\b/i;
+    for (const file of walkTs(join(MODULES_DIR, 'notifications'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (DIRECT_MUTATION.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} mutates wfos_workflow_executions`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/notifications does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'notifications'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares competing infrastructure`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/notifications barrel exposes only notification-domain contracts', () => {
+    const nIndex = readFileSync(join(MODULES_DIR, 'notifications', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'NotificationRequest', 'NotificationStatus', 'CreateNotificationInput',
+      'NotificationService', 'NotificationProviderAdapter',
+      'NotificationDeliveryInput', 'NotificationDeliveryResult',
+      'NotificationRepository',
+      'notificationsModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of nIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of nIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/notifications exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+});
