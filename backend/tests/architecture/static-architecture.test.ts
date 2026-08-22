@@ -2665,3 +2665,92 @@ describe('WORK-021 invariants -- /notifications module boundaries', () => {
     expect(codeOnly).toMatch(/notificationService:\s*app\.deps\.notificationService/);
   });
 });
+
+/**
+ * WORK-022 invariants -- Frontend web application boundaries.
+ *
+ * Ensures the frontend:
+ * - does not define canonical workflow states or transition graphs;
+ * - does not implement authorization policy;
+ * - does not import backend internal modules;
+ * - does not import provider SDKs;
+ * - does not write workflow persistence;
+ * - does not evaluate verification evidence;
+ * - consumes backend APIs only.
+ */
+describe('WORK-022 invariants -- Frontend web application boundaries', () => {
+  const FRONTEND_DIR = join(BACKEND_ROOT, '..', 'frontend');
+
+  it('frontend does not define canonical workflow transition maps', () => {
+    if (!existsSync(FRONTEND_DIR)) return;
+    const violations: string[] = [];
+    const TRANSITION_MAP = /\bLEGAL_TRANSITIONS\b|\bworkflowGraph\b|\btransitionMap\b|\blegalTransitions\b/;
+    for (const file of walkTs(join(FRONTEND_DIR, 'src'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (TRANSITION_MAP.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} defines a canonical workflow transition map`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('frontend does not implement authorization policy', () => {
+    if (!existsSync(FRONTEND_DIR)) return;
+    const violations: string[] = [];
+    const AUTH_PATTERNS = /\bauthorize\s*\(|\bauthorizationService\b|\bcheckPermission\b|\bisAuthorized\b/;
+    for (const file of walkTs(join(FRONTEND_DIR, 'src'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // Exclude API client type references (they reference types, not logic)
+      if (AUTH_PATTERNS.test(codeOnly) && !file.includes('api/client')) {
+        violations.push(`${relative(BACKEND_ROOT, file)} implements authorization policy`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('frontend does not import backend internal modules', () => {
+    if (!existsSync(FRONTEND_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(join(FRONTEND_DIR, 'src'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        if (specifier.includes('/internal/') || specifier.includes('@modules/') || specifier.includes('@platform/')) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports backend internal "${specifier}"`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('frontend does not import provider SDKs', () => {
+    if (!existsSync(FRONTEND_DIR)) return;
+    const PROVIDER_PACKAGES = new Set(['pg', 'ioredis', '@octokit/rest', '@octokit/graphql', '@octokit/webhooks', '@electric-sql/pglite']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(FRONTEND_DIR, 'src'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (PROVIDER_PACKAGES.has(pkg)) {
+          violations.push(`${relative(BACKEND_ROOT, file)} imports provider SDK "${specifier}"`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('frontend does not evaluate verification evidence', () => {
+    if (!existsSync(FRONTEND_DIR)) return;
+    const violations: string[] = [];
+    const EVAL_PATTERNS = /\bderiveCriterionStatus\b|\bevaluateCriterion\b|\bevaluateForRun\b|\bpersistEvaluations\b/;
+    for (const file of walkTs(join(FRONTEND_DIR, 'src'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (EVAL_PATTERNS.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} evaluates verification evidence`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+});
