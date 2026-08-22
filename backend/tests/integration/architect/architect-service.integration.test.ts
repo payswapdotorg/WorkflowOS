@@ -59,7 +59,12 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
 
     fakeLlm = new FakeLlmAdapter();
     const llmGateway = new DefaultLlmGateway(stack.db.client, stack.db.logger, [fakeLlm], 3);
-    architectService = new DefaultArchitectService(stack.db.client, llmGateway, stack.db.logger);
+    architectService = new DefaultArchitectService(
+      stack.db.client,
+      llmGateway,
+      stack.workOrderRepository,
+      stack.db.logger,
+    );
 
     server = await buildServer({
       queue: stack.db.client as never,

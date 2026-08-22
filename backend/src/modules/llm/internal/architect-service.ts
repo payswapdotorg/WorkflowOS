@@ -1,6 +1,7 @@
 import type { DatabaseClient } from '@platform/index.js';
 import type { Logger } from '@platform/logger.js';
 import type { LlmGateway } from './llm.types.js';
+import type { WorkOrderRepository } from '@modules/work-items/index.js';
 import type {
   ArchitectService,
   ArchitectExecutionRequest,
@@ -18,7 +19,21 @@ import type {
  * reasoning through the existing LlmGateway, normalizes the result, and
  * generates a Work Order via the existing /work-items Work Order contract.
  *
+ * MODULE OWNERSHIP (WORK-014 §3, §11, §17, §23 + architect review PR #13):
+ *
+ * The Architect Service lives in /llm. It may READ authoritative project state
+ * (projects, architecture versions, requirements, criteria, work items,
+ * repository associations) for context assembly. The only mutation it performs
+ * against the Work Order persistence authority is routed through the existing
+ * {@link WorkOrderRepository} contract owned by /work-items:
+ *
+ *   /llm (Architect Service)
+ *       → WorkOrderRepository.create() + WorkOrderRepository.updateState()
+ *       → /work-items persistence (wfos_work_orders)
+ *
  * The Architect Service does NOT:
+ * - write to `wfos_work_orders` directly (that bypasses /work-items authority
+ *   and is enforced by static architecture checks + a regression test);
  * - persist Architect Review records (that's /reviews);
  * - mutate workflow state (that's /workflows);
  * - determine criterion PASS/FAIL (that's /verification);
@@ -28,6 +43,7 @@ export class DefaultArchitectService implements ArchitectService {
   constructor(
     private readonly db: DatabaseClient,
     private readonly llmGateway: LlmGateway,
+    private readonly workOrderRepository: WorkOrderRepository,
     private readonly logger: Logger,
   ) {}
 
@@ -71,38 +87,72 @@ export class DefaultArchitectService implements ArchitectService {
       throw new Error('work item ID required for Work Order generation');
     }
 
-    // Generate a Work Order using the existing /work-items contract.
-    // The Work Order references the exact ArchitectureVersion, requirements,
-    // criteria, and constraints from the architect context.
-    const woResult = await this.db.query<{ id: string }>(
-      `INSERT INTO wfos_work_orders
-         (work_item_id, project_id, architecture_version_id, requirement_ids,
-          criterion_ids, architecture_constraints, implementation_context,
-          scope, out_of_scope, verification_requirements, state, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'generated', $11)
-       RETURNING id`,
-      [
-        request.workItemId,
-        request.projectId,
-        request.architectureVersionId,
-        JSON.stringify(result.workOrderCandidate.requirementIds),
-        JSON.stringify(result.workOrderCandidate.criterionIds),
-        result.workOrderCandidate.architectureConstraints,
-        JSON.stringify({
-          ...result.workOrderCandidate.implementationContext,
-          architectExecutionId: request.executionId,
-          architectProvider: request.provider,
-          architectModel: request.model,
-        }),
-        result.workOrderCandidate.scope,
-        result.workOrderCandidate.outOfScope,
-        JSON.stringify(result.workOrderCandidate.verificationRequirements),
-        JSON.stringify({ architectExecutionId: request.executionId }),
-      ],
+    const candidate = result.workOrderCandidate;
+
+    // MUTATION BOUNDARY (architect review PR #13):
+    //
+    // The Architect Service lives in /llm. /work-items owns the Work Order
+    // persistence authority (WORK-014 §3, §11, §17, §23). The Architect Service
+    // must NOT write to `wfos_work_orders` directly through DatabaseClient —
+    // doing so would make /llm a second Work Order persistence authority and
+    // bypass the /work-items WorkOrderRepository contract.
+    //
+    // The generated Work Order is therefore created via the existing
+    // WorkOrderRepository contract:
+    //
+    //   /llm → WorkOrderRepository.create() → /work-items persistence
+    //
+    // The repository creates the row in the 'draft' state. Architect-generated
+    // Work Orders are surfaced as 'generated' (per the frozen spec §18 +
+    // WORK_ORDER_GENERATED audit event). That transition is also routed through
+    // the repository contract, so /work-items retains exclusive ownership of
+    // Work Order state transitions:
+    //
+    //   /llm → WorkOrderRepository.updateState(id, 'generated') → /work-items
+    //
+    // The Architect Service preserves traceability to the originating execution
+    // by recording the architect execution ID / provider / model in the Work
+    // Order's `implementationContext` (a field owned by the /work-items Work
+    // Order contract, so no contract extension is required).
+    const created = await this.workOrderRepository.create({
+      workItemId: request.workItemId,
+      projectId: request.projectId,
+      architectureVersionId: request.architectureVersionId,
+      requirementIds: candidate.requirementIds,
+      criterionIds: candidate.criterionIds,
+      architectureConstraints: candidate.architectureConstraints,
+      implementationContext: {
+        ...candidate.implementationContext,
+        architectExecutionId: request.executionId,
+        architectProvider: request.provider,
+        architectModel: request.model,
+      },
+      scope: candidate.scope,
+      outOfScope: candidate.outOfScope,
+      verificationRequirements: candidate.verificationRequirements,
+    });
+
+    const generated = await this.workOrderRepository.updateState(
+      created.id,
+      'generated',
     );
+    if (!generated) {
+      // Should be unreachable given create() just succeeded; we never return a
+      // dangling id to the caller.
+      throw new Error(
+        `work order ${created.id} disappeared during generation transition`,
+      );
+    }
+
+    this.logger.info('architect.work_order.generated', {
+      workOrderId: generated.id,
+      workItemId: request.workItemId,
+      architectExecutionId: request.executionId,
+      architectureVersionId: request.architectureVersionId,
+    });
 
     return {
-      workOrderId: woResult.rows[0]!.id,
+      workOrderId: generated.id,
       architectExecutionId: request.executionId,
     };
   }

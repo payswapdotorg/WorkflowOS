@@ -1364,3 +1364,192 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
     expect(unexpected, `/work-items exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
   });
 });
+
+/**
+ * WORK-014 invariants — /llm (Architect Service) module boundaries.
+ *
+ * Ensures /llm owns the Architect Service + LLM Gateway, may consume the
+ * public contracts of other modules (provider-independent), and does NOT:
+ *
+ * - write directly to `wfos_work_orders` (the regression fixed in PR #13:
+ *   the Architect Service must route Work Order mutations through the
+ *   existing /work-items `WorkOrderRepository` contract, not raw SQL via
+ *   `DatabaseClient`);
+ * - import other modules' `internal/`;
+ * - import GitHub SDK / provider code;
+ * - declare a competing WorkOrderState type (already enforced by WO-AC-02);
+ * - declare a second Work Order persistence model;
+ * - mutate canonical workflow state;
+ * - define verification semantics.
+ *
+ * The frozen architecture (spec/architecture.md §17, §18, §42 + WORK-014
+ * prompt §3, §11, §17, §23) requires:
+ *
+ *   /llm (Architect Service)
+ *       → WorkOrderRepository contract (owned by /work-items)
+ *       → /work-items persistence (wfos_work_orders)
+ */
+describe('WORK-014 invariants — /llm (Architect Service) module boundaries', () => {
+  it('REGRESSION (PR #13): /llm does not write directly to wfos_work_orders', () => {
+    // The Architect Service must not bypass the /work-items WorkOrderRepository
+    // contract by issuing raw `INSERT INTO wfos_work_orders` / `UPDATE
+    // wfos_work_orders` SQL through DatabaseClient. Doing so would make /llm a
+    // second Work Order persistence authority and is the exact violation the
+    // architect review caught on PR #13.
+    //
+    // This check scans every .ts file under src/modules/llm/ for raw SQL
+    // mutations of wfos_work_orders. The /work-items PgWorkOrderRepository is
+    // the ONLY sanctioned author of wfos_work_orders rows.
+    const violations: string[] = [];
+    const llmDir = join(MODULES_DIR, 'llm');
+    if (existsSync(llmDir)) {
+      for (const file of walkTs(llmDir)) {
+        const src = readFileSync(file, 'utf8');
+        // Strip comments so a TODO/NOTE mentioning the table doesn't trip the
+        // check — only executable code matters.
+        const codeOnly = src
+          .replace(/\/\/.*$/gm, '')
+          .replace(/\/\*[\s\S]*?\*\//g, '');
+        // Any INSERT/UPDATE/DELETE/UPSERT/MERGE against wfos_work_orders
+        // authored inside /llm is a boundary violation.
+        const directMutation = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_work_orders\b/i;
+        if (directMutation.test(codeOnly)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} issues a direct SQL mutation against wfos_work_orders — ` +
+              `Work Order persistence is owned by /work-items; route through WorkOrderRepository instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('REGRESSION (PR #13): /llm routes Work Order mutation through WorkOrderRepository', () => {
+    // Positive counterpart of the previous check: the Architect Service must
+    // depend on the /work-items WorkOrderRepository contract and call its
+    // create()/updateState() methods. If someone deletes the dependency or
+    // stops calling the repository, this check fails.
+    const architectFile = join(MODULES_DIR, 'llm', 'internal', 'architect-service.ts');
+    expect(existsSync(architectFile), `${relative(BACKEND_ROOT, architectFile)} must exist`).toBe(true);
+    const src = readFileSync(architectFile, 'utf8');
+    expect(src).toMatch(/import[^;]*WorkOrderRepository[^;]*from\s*['"]@modules\/work-items\/index\.js['"]/);
+    expect(src).toMatch(/this\.workOrderRepository\.create\s*\(/);
+    expect(src).toMatch(/this\.workOrderRepository\.updateState\s*\(/);
+  });
+
+  it('/llm does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'llm') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm does not import GitHub provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008; /llm consumes provider-independent /github contracts only`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm does not own canonical workflow state', () => {
+    // The canonical workflow state machine (READY/ASSIGNED/IMPLEMENTING/...)
+    // is owned by /workflows. /llm must not declare those states.
+    const WORKFLOW_STATES = /\b(READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|MERGED|VERIFIED|IMPLEMENTATION_BLOCKED)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(`${relative(BACKEND_ROOT, file)} references workflow states — /workflows remains the sole workflow-state authority`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm does not define a second Work Order persistence model', () => {
+    // /llm may consume the /work-items WorkOrderRepository + WorkOrder types.
+    // It must not define its own "WorkOrderRecord" / "PersistedWorkOrder" /
+    // "LlmWorkOrder" table-mapped persistence model — that would duplicate
+    // /work-items authority.
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'llm'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // A persistence model is implied by a CREATE TABLE statement or by a
+      // class/interface explicitly named *WorkOrder*Repository / *WorkOrder*Store.
+      const declaresTable = /\bCREATE\s+TABLE\s+\w*work_?order/i.test(codeOnly);
+      const declaresRepo = /\bclass\s+\w*(WorkOrder|WorkOrderStore)\w*\s+(implements|extends)\s*\w*Repository/i.test(codeOnly)
+        || /\binterface\s+\w*(WorkOrder|WorkOrderStore)\w*Repository\b/i.test(codeOnly);
+      if (declaresTable || declaresRepo) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a Work Order persistence model — /work-items is the sole Work Order persistence authority`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/llm barrel exposes only llm-domain contracts', () => {
+    const llmIndex = readFileSync(join(MODULES_DIR, 'llm', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      // LLM Gateway (WORK-013)
+      'LlmMessage', 'LlmRequest', 'LlmResponse', 'LlmUsage',
+      'LlmError', 'LlmErrorType', 'LlmGateway',
+      'LlmExecutionRecord', 'LlmExecutionStatus', 'LlmExecutionRecordRepository',
+      // Architect Service (WORK-014)
+      'ArchitectContext', 'ArchitectRequirementSummary', 'ArchitectCriterionSummary',
+      'ArchitectRepositoryEvidence', 'ArchitectVerificationEvidence',
+      'ArchitectExecutionRequest', 'ArchitectExecutionResult',
+      'WorkOrderCandidate', 'ArchitectService',
+      // Module contract const
+      'llmModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of llmIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of llmIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/llm exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+});
