@@ -694,6 +694,167 @@ describe('WORK-016 — Architect Reviews and Review Findings', () => {
     });
   });
 
+  // --- Persistence-level integrity regression (PR #15 REQUEST_CHANGES) ---
+
+  describe('REGRESSION (PR #15): cross-entity integrity triggers', () => {
+    it('gap 1: Review → Work Order belonging to ANOTHER Work Item is rejected', async () => {
+      // Work Item A + its Work Order; Work Item B (same project, same version).
+      const wiA = await createWorkItemA('REVIEW-INT-001A');
+      const wiB = await createWorkItemA('REVIEW-INT-001B');
+      // Work Order belongs to wiB.
+      const woB = await stack.workOrderRepository.create({
+        workItemId: wiB.id, projectId: projectA.id, architectureVersionId: versionA.id,
+      });
+      // Attempt to create a review for wiA but referencing wiB's Work Order.
+      await expect(
+        reviewService.createReview({
+          projectId: projectA.id,
+          workItemId: wiA.id,
+          workOrderId: woB.id, // belongs to wiB, not wiA
+          architectureVersionId: versionA.id,
+          source: 'architect-llm',
+          executionId: 'review-int-001',
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('gap 1: Review → Work Order belonging to the SAME Work Item is accepted', async () => {
+      const wi = await createWorkItemA('REVIEW-INT-002');
+      const wo = await stack.workOrderRepository.create({
+        workItemId: wi.id, projectId: projectA.id, architectureVersionId: versionA.id,
+      });
+      const review = await reviewService.createReview({
+        projectId: projectA.id,
+        workItemId: wi.id,
+        workOrderId: wo.id, // same work item — accepted
+        architectureVersionId: versionA.id,
+        source: 'architect-llm',
+        executionId: 'review-int-002',
+      });
+      expect(review.workOrderId).toBe(wo.id);
+    });
+
+    it('gap 2: Review → PR association belonging to ANOTHER Work Item is rejected', async () => {
+      const wiA = await createWorkItemA('REVIEW-INT-003A');
+      const wiB = await createWorkItemA('REVIEW-INT-003B');
+      // PR association belongs to wiB.
+      const praB = await stack.pullRequestAssociationRepository.create({
+        workItemId: wiB.id, externalPrId: 'github:owner/repo#999',
+      });
+      // Attempt to create a review for wiA but referencing wiB's PR.
+      await expect(
+        reviewService.createReview({
+          projectId: projectA.id,
+          workItemId: wiA.id,
+          pullRequestAssociationId: praB.id, // belongs to wiB, not wiA
+          architectureVersionId: versionA.id,
+          source: 'architect-llm',
+          executionId: 'review-int-003',
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('gap 2: Review → PR association belonging to the SAME Work Item is accepted', async () => {
+      const wi = await createWorkItemA('REVIEW-INT-004');
+      const pra = await stack.pullRequestAssociationRepository.create({
+        workItemId: wi.id, externalPrId: 'github:owner/repo#998',
+      });
+      const review = await reviewService.createReview({
+        projectId: projectA.id,
+        workItemId: wi.id,
+        pullRequestAssociationId: pra.id, // same work item — accepted
+        architectureVersionId: versionA.id,
+        source: 'architect-llm',
+        executionId: 'review-int-004',
+      });
+      expect(review.pullRequestAssociationId).toBe(pra.id);
+    });
+
+    it('gap 3: Finding → Requirement belonging to ANOTHER tenant is rejected', async () => {
+      // reqB belongs to project B (tenant B).
+      const wi = await createWorkItemA('REVIEW-INT-005');
+      const review = await reviewService.createReview({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'architect-llm', executionId: 'review-int-005',
+      });
+      // Attempt to add a finding referencing reqB (project B's requirement).
+      await expect(
+        reviewService.addFinding({
+          projectId: projectA.id, reviewId: review.id,
+          title: 'Cross-tenant requirement', description: 'Bad',
+          requirementId: reqB.id, // project B requirement
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('gap 3: Finding → Requirement belonging to the SAME tenant is accepted', async () => {
+      const wi = await createWorkItemA('REVIEW-INT-006');
+      const review = await reviewService.createReview({
+        projectId: projectA.id, workItemId: wi.id, architectureVersionId: versionA.id,
+        source: 'architect-llm', executionId: 'review-int-006',
+      });
+      const finding = await reviewService.addFinding({
+        projectId: projectA.id, reviewId: review.id,
+        title: 'Same-tenant requirement', description: 'OK',
+        requirementId: reqA.id, // project A requirement — same tenant
+      });
+      expect(finding.requirementId).toBe(reqA.id);
+    });
+
+    it('gap 4: Finding → causedByFindingId belonging to ANOTHER tenant is rejected', async () => {
+      // Create a finding in project B (tenant B).
+      const wiB = await createWorkItemB('REVIEW-INT-007B');
+      const reviewB = await reviewService.createReview({
+        projectId: projectB.id, workItemId: wiB.id, architectureVersionId: versionB.id,
+        source: 'architect-llm', executionId: 'review-int-007b',
+      });
+      const findingB = await reviewService.addFinding({
+        projectId: projectB.id, reviewId: reviewB.id,
+        title: 'Finding in project B', description: 'Tenant B finding',
+      });
+
+      // Attempt to create a finding in project A that links back to project B's finding.
+      const wiA = await createWorkItemA('REVIEW-INT-007A');
+      const reviewA = await reviewService.createReview({
+        projectId: projectA.id, workItemId: wiA.id, architectureVersionId: versionA.id,
+        source: 'architect-llm', executionId: 'review-int-007a',
+      });
+      await expect(
+        reviewService.addFinding({
+          projectId: projectA.id, reviewId: reviewA.id,
+          title: 'Cross-tenant correction link', description: 'Bad',
+          causedByFindingId: findingB.id, // project B finding — cross-tenant
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('gap 4: Finding → causedByFindingId belonging to the SAME tenant is accepted', async () => {
+      // Create finding #1 in project A.
+      const wi1 = await createWorkItemA('REVIEW-INT-008A');
+      const review1 = await reviewService.createReview({
+        projectId: projectA.id, workItemId: wi1.id, architectureVersionId: versionA.id,
+        source: 'architect-llm', executionId: 'review-int-008a',
+      });
+      const finding1 = await reviewService.addFinding({
+        projectId: projectA.id, reviewId: review1.id,
+        title: 'Original finding', description: 'Project A finding',
+      });
+
+      // Create finding #2 in project A that links back to finding #1 (same tenant).
+      const wi2 = await createWorkItemA('REVIEW-INT-008B');
+      const review2 = await reviewService.createReview({
+        projectId: projectA.id, workItemId: wi2.id, architectureVersionId: versionA.id,
+        source: 'architect-llm', executionId: 'review-int-008b',
+      });
+      const finding2 = await reviewService.addFinding({
+        projectId: projectA.id, reviewId: review2.id,
+        title: 'Correction finding', description: 'Links back to finding #1',
+        causedByFindingId: finding1.id, // same tenant — accepted
+      });
+      expect(finding2.causedByFindingId).toBe(finding1.id);
+    });
+  });
+
   // --- API ---
 
   describe('API', () => {

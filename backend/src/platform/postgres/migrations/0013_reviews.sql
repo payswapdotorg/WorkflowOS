@@ -100,11 +100,21 @@ CREATE INDEX wfos_reviews_work_item_idx ON wfos_reviews (work_item_id);
 CREATE INDEX wfos_reviews_execution_idx ON wfos_reviews (execution_id);
 
 -- ---------------------------------------------------------------------------
--- Review → Work Item integrity trigger.
+-- Review → Work Item / Work Order / PR association integrity trigger.
 --
--- Ensures the review's architecture_version_id matches the Work Item's
--- architecture_version_id, and project_id matches the architecture version →
--- architecture → project chain. PERSISTENCE-LEVEL enforcement (analogous to
+-- Ensures:
+-- 1. The review's architecture_version_id matches the Work Item's
+--    architecture_version_id.
+-- 2. project_id matches the architecture version → architecture → project chain.
+-- 3. When work_order_id is set, the Work Order belongs to the same Work Item
+--    (PR #15 architect review — gap 1: a caller could otherwise attach another
+--    Work Item's Work Order to a review).
+-- 4. When pull_request_association_id is set, the PR association belongs to
+--    the same Work Item (PR #15 architect review — gap 2: a caller could
+--    otherwise attach another Work Item's PR to a review, creating misleading
+--    cross-work-item traceability).
+--
+-- PERSISTENCE-LEVEL enforcement (analogous to
 -- wfos_check_work_order_integrity from WORK-007 and
 -- wfos_check_verification_run_integrity from WORK-015).
 -- ---------------------------------------------------------------------------
@@ -113,6 +123,8 @@ RETURNS TRIGGER AS $$
 DECLARE
   wi_version UUID;
   wi_project_id UUID;
+  wo_work_item_id UUID;
+  pra_work_item_id UUID;
 BEGIN
   SELECT architecture_version_id INTO wi_version
     FROM wfos_work_items WHERE id = NEW.work_item_id;
@@ -136,6 +148,36 @@ BEGIN
     RAISE EXCEPTION 'review integrity: project_id % does not match work item %''s project %',
       NEW.project_id, NEW.work_item_id, wi_project_id
       USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Gap 1: Work Order must belong to the same Work Item.
+  IF NEW.work_order_id IS NOT NULL THEN
+    SELECT work_item_id INTO wo_work_item_id
+      FROM wfos_work_orders WHERE id = NEW.work_order_id;
+    IF wo_work_item_id IS NULL THEN
+      RAISE EXCEPTION 'review integrity: work order % not found', NEW.work_order_id
+        USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    IF wo_work_item_id <> NEW.work_item_id THEN
+      RAISE EXCEPTION 'review integrity: work order % belongs to work item %, not work item %',
+        NEW.work_order_id, wo_work_item_id, NEW.work_item_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- Gap 2: PR association must belong to the same Work Item.
+  IF NEW.pull_request_association_id IS NOT NULL THEN
+    SELECT work_item_id INTO pra_work_item_id
+      FROM wfos_pull_request_associations WHERE id = NEW.pull_request_association_id;
+    IF pra_work_item_id IS NULL THEN
+      RAISE EXCEPTION 'review integrity: pull request association % not found', NEW.pull_request_association_id
+        USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    IF pra_work_item_id <> NEW.work_item_id THEN
+      RAISE EXCEPTION 'review integrity: pull request association % belongs to work item %, not work item %',
+        NEW.pull_request_association_id, pra_work_item_id, NEW.work_item_id
+        USING ERRCODE = 'check_violation';
+    END IF;
   END IF;
 
   RETURN NEW;
@@ -227,6 +269,8 @@ RETURNS TRIGGER AS $$
 DECLARE
   rev_project_id UUID;
   crit_project_id UUID;
+  req_project_id UUID;
+  caused_by_project_id UUID;
 BEGIN
   SELECT project_id INTO rev_project_id
     FROM wfos_reviews WHERE id = NEW.review_id;
@@ -256,6 +300,45 @@ BEGIN
     IF crit_project_id <> NEW.project_id THEN
       RAISE EXCEPTION 'review finding integrity: cross-tenant criterion rejected (criterion project % vs finding project %)',
         crit_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- Gap 3 (PR #15 architect review): if a requirement is referenced, it must
+  -- belong to the same project as the finding. Resolves through:
+  --   requirement → architecture_version → architecture → project
+  -- A cross-tenant requirement reference is rejected at the DB level.
+  IF NEW.requirement_id IS NOT NULL THEN
+    SELECT a.project_id INTO req_project_id
+      FROM wfos_requirements r
+      JOIN wfos_architecture_versions v ON v.id = r.architecture_version_id
+      JOIN wfos_architectures a ON a.id = v.architecture_id
+      WHERE r.id = NEW.requirement_id;
+    IF req_project_id IS NULL THEN
+      RAISE EXCEPTION 'review finding integrity: requirement % not found', NEW.requirement_id
+        USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    IF req_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'review finding integrity: cross-tenant requirement rejected (requirement project % vs finding project %)',
+        req_project_id, NEW.project_id
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- Gap 4 (PR #15 architect review): if caused_by_finding_id is set, the
+  -- causing finding must belong to the same project as the new finding. This
+  -- prevents cross-tenant correction-cycle links. The finding's project_id
+  -- is stored directly on the finding row.
+  IF NEW.caused_by_finding_id IS NOT NULL THEN
+    SELECT project_id INTO caused_by_project_id
+      FROM wfos_review_findings WHERE id = NEW.caused_by_finding_id;
+    IF caused_by_project_id IS NULL THEN
+      RAISE EXCEPTION 'review finding integrity: caused_by_finding % not found', NEW.caused_by_finding_id
+        USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    IF caused_by_project_id <> NEW.project_id THEN
+      RAISE EXCEPTION 'review finding integrity: cross-tenant caused_by_finding rejected (causing finding project % vs finding project %)',
+        caused_by_project_id, NEW.project_id
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
