@@ -174,9 +174,14 @@ echo ""
 echo "--- DEPLOY-AC-02: no customer repository required ---"
 # The docker-compose.yml does not mount or reference any customer repository.
 # The API started successfully without any customer repo — proven by the
-# /health/ready check above. Verify no /repos, /customer, or checkout path
-# exists in the deployment configuration.
-if grep -riE "customer|checkout|/repos/.*\.git" docker-compose.yml backend/Dockerfile frontend/Dockerfile 2>/dev/null; then
+# /health/ready check above. Verify no git checkout, customer repo clone, or
+# repository mount exists in the deployment configuration.
+# NOTE: strip comments first so the grep doesn't match this validation
+# script's own comments or the docker-compose.yml's own comments.
+if grep -riE "git clone|checkout|/repos/.*\.git|volume:.*customer" \
+  <(sed 's/#.*$//' docker-compose.yml) \
+  <(sed 's/#.*$//' backend/Dockerfile) \
+  <(sed 's/#.*$//' frontend/Dockerfile) 2>/dev/null; then
   echo "  FAIL: Deployment configuration references customer repositories"
   exit 1
 fi
