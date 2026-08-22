@@ -67,11 +67,13 @@ export class PgWebhookEventRepository implements WebhookEventRepository {
   }
 
   async markProcessing(id: string): Promise<WebhookEvent | null> {
-    // Atomic transition: only mark as processing if currently 'received'.
+    // Atomic transition: mark as processing if currently 'received' or 'failed'.
+    // 'failed' is allowed so that retries can re-process a failed event
+    // (architect review PR #9 — processing must be retry-safe).
     const result = await this.db.query<EventRow>(
       `UPDATE wfos_github_webhook_events
        SET processing_state = 'processing', updated_at = NOW()
-       WHERE id = $1 AND processing_state = 'received'
+       WHERE id = $1 AND processing_state IN ('received', 'failed')
        RETURNING id, delivery_id, event_type, repository_full_name,
                  repository_id, signature_valid, payload, processing_state,
                  error_message, retry_count, processed_at, received_at,

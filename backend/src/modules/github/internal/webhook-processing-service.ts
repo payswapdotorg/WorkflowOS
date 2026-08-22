@@ -1,9 +1,9 @@
+import type { DatabaseClient } from '@platform/index.js';
 import type {
   WebhookProcessingService,
 } from './github.types.js';
 import type { Logger } from '@platform/logger.js';
-import type { JobRecord } from '@platform/index.js';
-import type { JobHandler } from '@platform/index.js';
+import type { JobRecord, JobHandler } from '@platform/index.js';
 import { PgWebhookEventRepository, PgGitHubInstallationRepository } from './pg-github-repository.js';
 import type { ProjectRepositoryAssociationRepository } from '@modules/projects/index.js';
 import type { PullRequestAssociationRepository } from '@modules/work-items/index.js';
@@ -29,6 +29,7 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
     private readonly prAssociationRepo: PullRequestAssociationRepository,
     private readonly projectRepoAssociationRepo: ProjectRepositoryAssociationRepository,
     private readonly logger: Logger,
+    private readonly db: DatabaseClient,
   ) {
     this.eventRepo = eventRepo;
     this.installationRepo = installationRepo;
@@ -48,11 +49,12 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
       return;
     }
 
-    // Atomically transition to processing.
+    // Atomically transition to processing (allows 'received' and 'failed'
+    // states — retry-safe per architect review PR #9).
     const processing = await this.eventRepo.markProcessing(event.id);
     if (!processing) {
       // Another worker is processing or the state is unexpected.
-      this.logger.info('webhook.skipped_not_received', { deliveryId: event.deliveryId, state: event.processingState });
+      this.logger.info('webhook.skipped', { deliveryId: event.deliveryId, state: event.processingState });
       return;
     }
 
@@ -132,26 +134,45 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
       merged?: boolean;
     },
   ): Promise<void> {
-    // Resolve the project repository association for this repo.
-    // The external PR ID is provider-independent: 'github:owner/repo#PR'.
     const externalPrId = `github:${repoFullName}#${pr.number}`;
-    // Find work items that have a PR association with this externalPrId.
-    // For WORK-008 we don't have a lookup by externalPrId in the repository;
-    // the webhook processing updates PR associations through the existing
-    // repository. Since we don't have the work_item_id from the webhook
-    // payload alone (GitHub webhook payloads don't include WorkflowOS
-    // work_item_id), we log the sync event. Actual PR association updates
-    // will be triggered by the workflow engine in WORK-009+.
-    this.logger.info('webhook.pr_sync', {
+
+    // GitHub PR state → WorkflowOS PR association status mapping:
+    //   state='open'              → 'active'
+    //   state='closed', merged=false → 'closed'
+    //   state='closed', merged=true  → 'merged'
+    const newStatus = pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'active';
+
+    // Find existing PR associations for this external_pr_id and update their
+    // status. This is the minimal PR lifecycle sync: when GitHub says a PR
+    // was closed/merged, we update the existing association records.
+    const result = await this.db.query<{ id: string; work_item_id: string; status: string }>(
+      `SELECT id, work_item_id, status
+       FROM wfos_pull_request_associations
+       WHERE external_pr_id = $1`,
+      [externalPrId],
+    );
+
+    for (const row of result.rows) {
+      if (row.status !== newStatus) {
+        await this.db.query(
+          `UPDATE wfos_pull_request_associations
+           SET status = $1,
+               superseded_at = CASE WHEN $1 != 'active' THEN NOW() ELSE superseded_at END
+           WHERE id = $2 AND status != $1`,
+          [newStatus, row.id],
+        );
+      }
+    }
+
+    this.logger.info('webhook.pr_synced', {
       projectId,
       externalPrId,
       prNumber: pr.number,
       prState: pr.state,
       prMerged: pr.merged,
+      newStatus,
+      updatedAssociations: result.rows.length,
     });
-    // Note: the actual PR association update happens when a Work Item is
-    // associated with this PR. The webhook event is durably persisted and
-    // the workflow engine (WORK-009+) will consume it.
     void this.prAssociationRepo;
   }
 
@@ -160,16 +181,18 @@ export class DefaultWebhookProcessingService implements WebhookProcessingService
     repo: { id: number; full_name: string; default_branch?: string },
   ): Promise<void> {
     // Synchronize repository metadata to the existing project repository
-    // association model (WORK-004).
-    const [owner, name] = repo.full_name.split('/');
-    if (!owner || !name) return;
-
-    // Find existing repository associations for this project.
-    // The association uses provider='github' + external_id=repo.full_name.
-    // For WORK-008 we use the project repository association repository to
-    // upsert the association.
-    void this.projectRepoAssociationRepo;
-    this.logger.info('webhook.repo_sync', {
+    // association model (WORK-004). Upsert the association.
+    await this.projectRepoAssociationRepo.associate({
+      projectId,
+      provider: 'github',
+      externalId: repo.full_name,
+      canonicalRef: `https://github.com/${repo.full_name}`,
+      metadata: {
+        repoId: repo.id,
+        defaultBranch: repo.default_branch ?? null,
+      },
+    });
+    this.logger.info('webhook.repo_synced', {
       projectId,
       repoFullName: repo.full_name,
       repoId: repo.id,
