@@ -29,7 +29,7 @@ export interface AgentRequest {
   readonly provider: string;
   readonly configuration: Record<string, unknown>;
   readonly workItemId: string;
-  readonly workOrderId?: string;
+  readonly workOrderId: string;
   readonly architectureVersionId?: string;
   readonly executionId: string;
   readonly repositoryRef?: string;

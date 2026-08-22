@@ -9,7 +9,7 @@ CREATE TABLE wfos_agent_runs (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   execution_id    TEXT NOT NULL UNIQUE,
   work_item_id    UUID NOT NULL REFERENCES wfos_work_items(id) ON DELETE CASCADE,
-  work_order_id   UUID REFERENCES wfos_work_orders(id) ON DELETE SET NULL,
+  work_order_id   UUID NOT NULL REFERENCES wfos_work_orders(id) ON DELETE CASCADE,
   architecture_version_id UUID REFERENCES wfos_architecture_versions(id) ON DELETE SET NULL,
   -- Provider + configuration (provider-independent).
   provider        TEXT NOT NULL,
@@ -65,3 +65,34 @@ CREATE INDEX wfos_agent_runs_work_item_idx ON wfos_agent_runs (work_item_id);
 CREATE INDEX wfos_agent_runs_execution_id_idx ON wfos_agent_runs (execution_id);
 CREATE INDEX wfos_agent_runs_status_idx ON wfos_agent_runs (status);
 CREATE INDEX wfos_agent_runs_provider_idx ON wfos_agent_runs (provider);
+
+-- ---------------------------------------------------------------------------
+-- Work Order integrity trigger (architect review PR #12).
+-- Ensures the work_order_id belongs to the same work_item_id. A work order
+-- from a different work item / project is rejected at the persistence level.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION wfos_check_agent_run_work_order_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+  wo_work_item_id UUID;
+BEGIN
+  SELECT work_item_id INTO wo_work_item_id
+    FROM wfos_work_orders WHERE id = NEW.work_order_id;
+  IF wo_work_item_id IS NULL THEN
+    RAISE EXCEPTION 'agent run integrity: work order % not found', NEW.work_order_id
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  IF wo_work_item_id <> NEW.work_item_id THEN
+    RAISE EXCEPTION 'agent run integrity: work order % belongs to work item %, not %',
+      NEW.work_order_id, wo_work_item_id, NEW.work_item_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS wfos_agent_runs_work_order_integrity_check
+  ON wfos_agent_runs;
+CREATE TRIGGER wfos_agent_runs_work_order_integrity_check
+  BEFORE INSERT OR UPDATE ON wfos_agent_runs
+  FOR EACH ROW EXECUTE FUNCTION wfos_check_agent_run_work_order_integrity();

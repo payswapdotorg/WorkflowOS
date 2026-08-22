@@ -40,7 +40,9 @@ export async function agentRoutes(app: FastifyInstance, deps: AgentRouteDeps): P
         provider?: string; configuration?: Record<string, unknown>;
         workOrderId?: string; repositoryRef?: string; branch?: string; input?: string;
       };
-      if (!body?.provider || !body?.input) return reply.code(400).send({ error: 'provider and input required' });
+      if (!body?.provider || !body?.input || !body?.workOrderId) {
+        return reply.code(400).send({ error: 'provider, input, and workOrderId required' });
+      }
       const executionId = generateExecutionId();
       // Enqueue async execution (does NOT block the request).
       // The gateway's execute() method creates the Agent Run record.

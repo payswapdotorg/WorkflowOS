@@ -15,7 +15,7 @@ export class PgAgentRunRepository implements AgentRunRepository {
   async create(input: {
     executionId: string;
     workItemId: string;
-    workOrderId?: string;
+    workOrderId: string;
     architectureVersionId?: string;
     provider: string;
     configuration?: Record<string, unknown>;
@@ -36,7 +36,7 @@ export class PgAgentRunRepository implements AgentRunRepository {
                  error_type, error_message, retry_count, max_retries,
                  started_at, completed_at, created_at, updated_at`,
       [
-        input.executionId, input.workItemId, input.workOrderId ?? null,
+        input.executionId, input.workItemId, input.workOrderId,
         input.architectureVersionId ?? null, input.provider,
         JSON.stringify(input.configuration ?? {}),
         input.repositoryRef ?? null, input.branch ?? null,

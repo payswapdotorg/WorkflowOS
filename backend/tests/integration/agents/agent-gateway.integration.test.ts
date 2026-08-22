@@ -123,15 +123,28 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
   async function createWorkItemB(id: string) {
     return stack.workItemRepository.create({ architectureVersionId: versionB.id, workItemId: id, title: id });
   }
+  async function createWorkOrderFor(wi: { id: string }) {
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wi.id, projectId: projectA.id, architectureVersionId: versionA.id,
+    });
+    return wo;
+  }
+  async function createWorkOrderForB(wi: { id: string }) {
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wi.id, projectId: projectB.id, architectureVersionId: versionB.id,
+    });
+    return wo;
+  }
 
   // --- Gateway contract ---
 
   it('gateway executes and returns a normalized result', async () => {
     const wi = await createWorkItemA('AG-001');
+    const wo = await createWorkOrderFor(wi);
     fakeAdapter.setOutput('Agent completed successfully');
     const result = await gateway.execute({
       provider: 'fake', configuration: { model: 'test' },
-      workItemId: wi.id, executionId: 'agent-exec-001', input: 'Implement feature X',
+      workItemId: wi.id, workOrderId: wo.id, executionId: 'agent-exec-001', input: 'Implement feature X',
     });
     expect(result.status).toBe('success');
     expect(result.output).toBe('Agent completed successfully');
@@ -145,7 +158,7 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
   it('unsupported provider fails with normalized error', async () => {
     const wi = await createWorkItemA('AG-002');
     await expect(
-      gateway.execute({ provider: 'unknown', configuration: {}, workItemId: wi.id, executionId: 'agent-exec-002', input: 'test' }),
+      gateway.execute({ provider: 'unknown', configuration: {}, workItemId: wi.id, workOrderId: 'unused', executionId: 'agent-exec-002', input: 'test' }),
     ).rejects.toMatchObject({ type: 'invalid_request', retryable: false });
   });
 
@@ -153,10 +166,11 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
 
   it('Agent Run persists with all required fields', async () => {
     const wi = await createWorkItemA('AG-003');
+    const wo = await createWorkOrderFor(wi);
     fakeAdapter.setOutput('Persist test output');
     await gateway.execute({
       provider: 'fake', configuration: { key: 'value' },
-      workItemId: wi.id, executionId: 'agent-exec-003', input: 'test persist',
+      workItemId: wi.id, workOrderId: wo.id, executionId: 'agent-exec-003', input: 'test persist',
       repositoryRef: 'owner/repo', branch: 'feature-branch',
     });
     const run = await runRepo.findByExecutionId('agent-exec-003');
@@ -176,11 +190,12 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
 
   it('retryable failure retries and eventually succeeds', async () => {
     const wi = await createWorkItemA('AG-004');
+    const wo = await createWorkOrderFor(wi);
     fakeAdapter.setOutput('Retry success');
     fakeAdapter.setFailure('rate_limit', 'Rate limited', true, 1);
     const result = await gateway.execute({
       provider: 'fake', configuration: {},
-      workItemId: wi.id, executionId: 'agent-exec-004', input: 'retry me',
+      workItemId: wi.id, workOrderId: wo.id, executionId: 'agent-exec-004', input: 'retry me',
     });
     expect(result.status).toBe('success');
     expect(fakeAdapter.getCallCount()).toBeGreaterThanOrEqual(2);
@@ -190,11 +205,12 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
 
   it('non-retryable failure does NOT retry', async () => {
     const wi = await createWorkItemA('AG-005');
+    const wo = await createWorkOrderFor(wi);
     fakeAdapter.setOutput('Should not reach');
     fakeAdapter.setFailure('authentication', 'Bad key', false, 99);
     const callsBefore = fakeAdapter.getCallCount();
     await expect(
-      gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, executionId: 'agent-exec-005', input: 'no retry' }),
+      gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, workOrderId: wo.id, executionId: 'agent-exec-005', input: 'no retry' }),
     ).rejects.toMatchObject({ type: 'authentication', retryable: false });
     expect(fakeAdapter.getCallCount() - callsBefore).toBe(1);
     const run = await runRepo.findByExecutionId('agent-exec-005');
@@ -209,10 +225,11 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
     fakeAdapter.reset();
     fakeAdapter.setOutput('Async output');
     const wi = await createWorkItemA('AG-006');
+    const wo = await createWorkOrderFor(wi);
     const res = await server.inject({
       method: 'POST', url: `/work-items/${wi.id}/agent-runs`,
       headers: { 'x-api-key': 'raw-key-agent-a' },
-      payload: { provider: 'fake', input: 'async test' },
+      payload: { provider: 'fake', input: 'async test', workOrderId: wo.id },
     });
     expect(res.statusCode).toBe(202);
     const body = res.json() as { accepted: boolean; executionId: string };
@@ -229,7 +246,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
 
   it('API: GET agent-runs list', async () => {
     const wi = await createWorkItemA('AG-007');
-    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, executionId: 'agent-exec-007', input: 'list test' });
+    const wo7 = await createWorkOrderFor(wi);
+    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, workOrderId: wo7.id, executionId: 'agent-exec-007', input: 'list test' });
     const res = await server.inject({
       method: 'GET', url: `/work-items/${wi.id}/agent-runs`,
       headers: { 'x-api-key': 'raw-key-agent-a' },
@@ -243,7 +261,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
   it('no raw credentials in Agent Run records', async () => {
     const wi = await createWorkItemA('AG-008');
     fakeAdapter.setOutput('Secret test');
-    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, executionId: 'agent-exec-008', input: 'secret check' });
+    const wo8 = await createWorkOrderFor(wi);
+    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, workOrderId: wo8.id, executionId: 'agent-exec-008', input: 'secret check' });
     const run = await runRepo.findByExecutionId('agent-exec-008');
     expect(JSON.stringify(run)).not.toContain('WFOS_TEST_KEY');
     expect(JSON.stringify(run)).not.toContain('raw-key-agent');
@@ -253,7 +272,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
 
   it('User A cannot read User B Agent Runs', async () => {
     const wiB = await createWorkItemB('AG-009-B');
-    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wiB.id, executionId: 'agent-exec-009', input: 'tenant test' });
+    const wo9 = await createWorkOrderForB(wiB);
+    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wiB.id, workOrderId: wo9.id, executionId: 'agent-exec-009', input: 'tenant test' });
     const res = await server.inject({
       method: 'GET', url: `/work-items/${wiB.id}/agent-runs`,
       headers: { 'x-api-key': 'raw-key-agent-a' },
@@ -281,7 +301,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
     await wfEngine.transition({ workItemId: wi.id, toState: 'ready', actor: 'test' });
     // Execute an agent run.
     fakeAdapter.setOutput('Workflow authority test');
-    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, executionId: 'agent-exec-011', input: 'test' });
+    const wo11 = await createWorkOrderFor(wi);
+    await gateway.execute({ provider: 'fake', configuration: {}, workItemId: wi.id, workOrderId: wo11.id, executionId: 'agent-exec-011', input: 'test' });
     // The workflow state must still be 'ready' — agent execution does NOT
     // trigger a workflow transition.
     const exec = await wfEngine.getState(wi.id);
@@ -295,5 +316,61 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
     expect(barrel.agentsModule).toBeDefined();
     expect((barrel as Record<string, unknown>).FakeAgentAdapter).toBeUndefined();
     expect((barrel as Record<string, unknown>).DefaultAgentGateway).toBeUndefined();
+  });
+
+  // --- Work Order traceability (architect review PR #12) ---
+
+  it('Agent Run without a Work Order is rejected (DB NOT NULL constraint)', async () => {
+    const wi = await createWorkItemA('AG-012');
+    fakeAdapter.reset();
+    fakeAdapter.setOutput('Should not reach');
+    // Direct DB insert without work_order_id — rejected by NOT NULL constraint.
+    await expect(
+      stack.db.client.query(
+        `INSERT INTO wfos_agent_runs (execution_id, work_item_id, provider, status)
+         VALUES ('exec-no-wo', $1, 'fake', 'pending')`,
+        [wi.id],
+      ),
+    ).rejects.toThrow(/not-null|constraint|integrity/i);
+  });
+
+  it('Agent Run with a Work Order from a different Work Item is rejected (DB trigger)', async () => {
+    const wiA = await createWorkItemA('AG-013-A');
+    const wiB = await createWorkItemB('AG-013-B');
+    const woB = await createWorkOrderForB(wiB); // belongs to wiB
+    // Attempt to create an Agent Run for wiA but with woB's id.
+    await expect(
+      stack.db.client.query(
+        `INSERT INTO wfos_agent_runs (execution_id, work_item_id, work_order_id, provider, status)
+         VALUES ('exec-cross-wo', $1, $2, 'fake', 'pending')`,
+        [wiA.id, woB.id],
+      ),
+    ).rejects.toThrow(/agent run integrity.*work order.*belongs to/i);
+  });
+
+  it('Agent Run with a valid Work Item + Work Order succeeds', async () => {
+    const wi = await createWorkItemA('AG-014');
+    const wo = await createWorkOrderFor(wi);
+    fakeAdapter.reset();
+    fakeAdapter.setOutput('Valid WO test');
+    const result = await gateway.execute({
+      provider: 'fake', configuration: {},
+      workItemId: wi.id, workOrderId: wo.id,
+      executionId: 'agent-exec-014', input: 'valid wo',
+    });
+    expect(result.status).toBe('success');
+    const run = await runRepo.findByExecutionId('agent-exec-014');
+    expect(run!.workOrderId).toBe(wo.id);
+    expect(run!.workItemId).toBe(wi.id);
+  });
+
+  it('API: Agent Run without workOrderId is rejected (400)', async () => {
+    const wi = await createWorkItemA('AG-015');
+    const res = await server.inject({
+      method: 'POST', url: `/work-items/${wi.id}/agent-runs`,
+      headers: { 'x-api-key': 'raw-key-agent-a' },
+      payload: { provider: 'fake', input: 'missing wo' },
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

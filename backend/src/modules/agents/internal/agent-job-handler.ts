@@ -12,7 +12,7 @@ export function createAgentJobHandler(
     async handle(job: JobRecord): Promise<void> {
       const payload = job.payload as {
         provider: string; configuration: Record<string, unknown>;
-        workItemId: string; workOrderId?: string; architectureVersionId?: string;
+        workItemId: string; workOrderId: string; architectureVersionId?: string;
         executionId: string; repositoryRef?: string; branch?: string; input: string;
       };
       if (!payload?.executionId) {
