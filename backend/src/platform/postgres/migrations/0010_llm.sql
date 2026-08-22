@@ -1,4 +1,4 @@
--- WORK-010 schema: LLM Gateway — execution/usage records (LLM-001..005).
+-- WORK-013 schema: LLM Gateway — execution/usage records (LLM-001..005).
 --
 -- /llm owns the LLM Gateway: provider selection, model selection, request/response
 -- normalization, retries, usage recording, error handling. Provider-specific

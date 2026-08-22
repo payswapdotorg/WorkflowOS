@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
 import type { LlmResponse } from '@modules/llm/index.js';
 
-describe('WORK-010 — LLM Gateway', () => {
+describe('WORK-013 — LLM Gateway', () => {
   let stack: TestAuthStack;
   let server: FastifyInstance;
   let gateway: DefaultLlmGateway;

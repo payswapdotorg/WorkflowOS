@@ -9,7 +9,7 @@
  * `internal/` are private to this module; cross-module imports of
  * `internal/` are forbidden and enforced statically (PLAT-AC-02).
  *
- * WORK-010: implements the provider-independent LLM Gateway (LLM-001..005).
+ * WORK-013: implements the provider-independent LLM Gateway (LLM-001..005).
  * Provider-specific SDK code stays inside internal/. Credentials via
  * SecretStore (SEC-001). The gateway owns: provider/model selection, retry
  * policy, usage recording, error normalization.
