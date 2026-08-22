@@ -35,7 +35,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
-                 metadata, created_at, updated_at`,
+                 completed, metadata, created_at, updated_at`,
       [
         input.architectureVersionId,
         input.workItemId,
@@ -56,7 +56,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
     const result = await this.db.query<WiRow>(
       `SELECT id, architecture_version_id, work_item_id, title, objective, scope,
               out_of_scope, architecture_constraints, assignee, execution_metadata,
-              metadata, created_at, updated_at
+              completed, metadata, created_at, updated_at
        FROM wfos_work_items WHERE id = $1`,
       [id],
     );
@@ -68,7 +68,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
     const result = await this.db.query<WiRow>(
       `SELECT id, architecture_version_id, work_item_id, title, objective, scope,
               out_of_scope, architecture_constraints, assignee, execution_metadata,
-              metadata, created_at, updated_at
+              completed, metadata, created_at, updated_at
        FROM wfos_work_items WHERE architecture_version_id = $1
        ORDER BY work_item_id`,
       [architectureVersionId],
@@ -88,12 +88,13 @@ export class PgWorkItemRepository implements WorkItemRepository {
     if (input.assignee !== undefined) { sets.push(`assignee = $${pIdx++}`); params.push(input.assignee); }
     if (input.executionMetadata !== undefined) { sets.push(`execution_metadata = $${pIdx++}`); params.push(JSON.stringify(input.executionMetadata)); }
     if (input.metadata !== undefined) { sets.push(`metadata = $${pIdx++}`); params.push(JSON.stringify(input.metadata)); }
+    if (input.completed !== undefined) { sets.push(`completed = $${pIdx++}`); params.push(input.completed); }
     if (sets.length === 0) return this.findById(id);
     const result = await this.db.query<WiRow>(
       `UPDATE wfos_work_items SET ${sets.join(', ')} WHERE id = $1
        RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
-                 metadata, created_at, updated_at`,
+                 completed, metadata, created_at, updated_at`,
       params,
     );
     if (result.rows.length === 0) return null;
@@ -424,6 +425,7 @@ interface WiRow {
   architecture_constraints: string | null;
   assignee: string | null;
   execution_metadata: Record<string, unknown>;
+  completed: boolean;
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
@@ -489,6 +491,7 @@ function mapWi(row: WiRow): WorkItem {
     architectureConstraints: row.architecture_constraints,
     assignee: row.assignee,
     executionMetadata: row.execution_metadata ?? {},
+    completed: row.completed,
     metadata: row.metadata ?? {},
     createdAt: row.created_at,
     updatedAt: row.updated_at,

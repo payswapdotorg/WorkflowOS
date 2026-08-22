@@ -22,6 +22,8 @@ export interface WorkItem {
   readonly architectureConstraints: string | null;
   readonly assignee: string | null;
   readonly executionMetadata: Record<string, unknown>;
+  /** Completion flag: when true, dependent work items become eligible (DEP-AC-02). */
+  readonly completed: boolean;
   readonly metadata: Record<string, unknown>;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -49,6 +51,8 @@ export interface UpdateWorkItemInput {
   assignee?: string;
   executionMetadata?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /** Mark the work item as completed (DEP-AC-02). */
+  completed?: boolean;
 }
 
 export interface WorkItemRepository {

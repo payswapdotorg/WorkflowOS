@@ -200,14 +200,40 @@ describe('WORK-007 — work items, dependencies, PR associations, work orders', 
   });
 
   // --- DEP-AC-02: eligibility ---
-  it('DEP-AC-02: dependency eligibility is deterministic (canBeginImplementation)', async () => {
-    const a = await createWorkItemA('WI-ELIG-A', 'Elig A');
-    const b = await createWorkItemA('WI-ELIG-B', 'Elig B');
+
+  it('DEP-AC-02: an incomplete dependency blocks eligibility (canBeginImplementation returns false)', async () => {
+    const a = await createWorkItemA('WI-ELIG-BLOCK', 'Elig blocked');
+    const b = await createWorkItemA('WI-ELIG-DEP-BLOCK', 'Elig dep (incomplete)');
     await stack.workItemDependencyRepository.add(a.id, b.id);
+    // b is not completed yet → a cannot begin implementation.
+    const { DefaultWorkItemDependencyService } = await import('../../../src/modules/work-items/internal/work-item-dependency-service.js');
+    const service = new DefaultWorkItemDependencyService(stack.db.client);
+    const canBeginBefore = await service.canBeginImplementation(a.id);
+    expect(canBeginBefore).toBe(false);
+    const unsatisfied = await service.getUnsatisfiedDependencies(a.id);
+    expect(unsatisfied).toEqual([b.id]);
+  });
+
+  it('DEP-AC-02: a completed dependency allows eligibility (canBeginImplementation returns true)', async () => {
+    const a = await createWorkItemA('WI-ELIG-OK', 'Elig allowed');
+    const b = await createWorkItemA('WI-ELIG-DEP-OK', 'Elig dep (completed)');
+    await stack.workItemDependencyRepository.add(a.id, b.id);
+    // Mark b as completed.
+    await stack.workItemRepository.update(b.id, { completed: true });
+    const { DefaultWorkItemDependencyService } = await import('../../../src/modules/work-items/internal/work-item-dependency-service.js');
+    const service = new DefaultWorkItemDependencyService(stack.db.client);
+    const canBeginAfter = await service.canBeginImplementation(a.id);
+    expect(canBeginAfter).toBe(true);
+    const unsatisfied = await service.getUnsatisfiedDependencies(a.id);
+    expect(unsatisfied).toEqual([]);
+  });
+
+  it('DEP-AC-02: a work item with no dependencies is eligible', async () => {
+    const a = await createWorkItemA('WI-ELIG-NODEP', 'No deps');
     const { DefaultWorkItemDependencyService } = await import('../../../src/modules/work-items/internal/work-item-dependency-service.js');
     const service = new DefaultWorkItemDependencyService(stack.db.client);
     const canBegin = await service.canBeginImplementation(a.id);
-    expect(typeof canBegin).toBe('boolean');
+    expect(canBegin).toBe(true);
   });
 
   // --- WO-AC-01 ---
@@ -246,6 +272,30 @@ describe('WORK-007 — work items, dependencies, PR associations, work orders', 
     await expect(
       stack.db.client.query(`UPDATE wfos_work_orders SET state = 'invalid' WHERE id = $1`, [wo.id]),
     ).rejects.toThrow(/check.*constraint|violat/i);
+  });
+
+  it('WO-AC-01: a work order with a mismatched project_id is rejected (DB integrity trigger)', async () => {
+    // Work item A belongs to versionA → architecture A → project A.
+    // Attempt a work order pointing at project B (cross-project mismatch).
+    const wiA = await createWorkItemA('WI-WO-CROSS-PROJ', 'Cross proj WO');
+    await expect(
+      stack.workOrderRepository.create({
+        workItemId: wiA.id,
+        projectId: projectB.id,  // wrong project
+        architectureVersionId: versionA.id,
+      }),
+    ).rejects.toThrow(/work order integrity.*project/i);
+  });
+
+  it('WO-AC-01: a work order with a mismatched architecture_version_id is rejected (DB integrity trigger)', async () => {
+    const wiA = await createWorkItemA('WI-WO-CROSS-VER', 'Cross ver WO');
+    await expect(
+      stack.workOrderRepository.create({
+        workItemId: wiA.id,
+        projectId: projectA.id,
+        architectureVersionId: versionB.id,  // wrong version
+      }),
+    ).rejects.toThrow(/work order integrity.*architecture_version/i);
   });
 
   // --- Tenant isolation ---

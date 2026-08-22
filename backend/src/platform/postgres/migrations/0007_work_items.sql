@@ -28,6 +28,11 @@ CREATE TABLE wfos_work_items (
   -- Assignment / execution metadata (persisted for later /agents / /llm).
   assignee                TEXT,
   execution_metadata       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- Completion flag: when true, dependent work items become eligible for
+  -- implementation (DEP-AC-02). This is a minimal persisted signal that the
+  -- dependency service checks; it does NOT implement the workflow state
+  -- machine — /workflows will later derive this from verification/review state.
+  completed               BOOLEAN NOT NULL DEFAULT false,
   metadata                JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -253,3 +258,56 @@ ALTER TABLE wfos_work_orders
   CHECK (state IN ('draft', 'generated', 'consumed'));
 
 CREATE INDEX wfos_work_orders_wi_idx ON wfos_work_orders (work_item_id);
+
+-- ---------------------------------------------------------------------------
+-- Work Order traceability/tenant-integrity trigger (architect review PR #8).
+--
+-- Ensures the work_order's architecture_version_id matches the work_item's
+-- architecture_version_id, and the project_id matches the architecture
+-- version's architecture's project. A work order whose project_id or
+-- architecture_version_id describes a different project than the work item
+-- is rejected by PostgreSQL at the persistence level — NOT just app logic.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION wfos_check_work_order_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+  wi_version UUID;
+  wi_arch_id UUID;
+  wi_project_id UUID;
+BEGIN
+  -- Resolve the work item's architecture version.
+  SELECT architecture_version_id INTO wi_version
+    FROM wfos_work_items WHERE id = NEW.work_item_id;
+  IF wi_version IS NULL THEN
+    RAISE EXCEPTION 'work order integrity: work item % not found', NEW.work_item_id
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+
+  -- The work order's architecture_version_id must match the work item's.
+  IF NEW.architecture_version_id <> wi_version THEN
+    RAISE EXCEPTION 'work order integrity: architecture_version_id % does not match work item %''s version %',
+      NEW.architecture_version_id, NEW.work_item_id, wi_version
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Resolve the project from the architecture version → architecture chain.
+  SELECT a.project_id INTO wi_project_id
+    FROM wfos_architecture_versions v
+    JOIN wfos_architectures a ON a.id = v.architecture_id
+    WHERE v.id = wi_version;
+
+  -- The work order's project_id must match the work item's project.
+  IF NEW.project_id <> wi_project_id THEN
+    RAISE EXCEPTION 'work order integrity: project_id % does not match work item %''s project %',
+      NEW.project_id, NEW.work_item_id, wi_project_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS wfos_work_orders_integrity_check ON wfos_work_orders;
+CREATE TRIGGER wfos_work_orders_integrity_check
+  BEFORE INSERT OR UPDATE ON wfos_work_orders
+  FOR EACH ROW EXECUTE FUNCTION wfos_check_work_order_integrity();

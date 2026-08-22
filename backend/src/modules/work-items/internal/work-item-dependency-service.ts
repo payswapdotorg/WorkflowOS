@@ -12,17 +12,17 @@ import { PgWorkItemDependencyRepository } from './pg-work-item-repository.js';
  * This does NOT implement the workflow state machine — it exposes the
  * dependency-eligibility contract only.
  *
- * For WORK-007, "satisfied" is minimal: a dependency is satisfied if the
- * dependency work item exists and has been marked as having no unsatisfied
- * dependencies of its own. The actual completion status (verified, reviewed,
- * merged) will be derived by /workflows + /verification in later work items.
- * Until those exist, we treat all dependencies as "satisfied" — the contract
- * is in place for later enhancement.
+ * Satisfaction model: a dependency is "satisfied" when the dependency work
+ * item's `completed` column is `true`. This is a minimal persisted signal;
+ * /workflows + /verification will later derive `completed` from verification
+ * + review state, but for WORK-007 the signal is explicit and queryable.
  */
 export class DefaultWorkItemDependencyService implements WorkItemDependencyService {
   private readonly depRepo: PgWorkItemDependencyRepository;
+  private readonly db: DatabaseClient;
 
   constructor(db: DatabaseClient) {
+    this.db = db;
     this.depRepo = new PgWorkItemDependencyRepository(db);
   }
 
@@ -32,14 +32,17 @@ export class DefaultWorkItemDependencyService implements WorkItemDependencyServi
   }
 
   async getUnsatisfiedDependencies(workItemId: string): Promise<string[]> {
-    // For WORK-007, all dependencies are considered "satisfied" — the contract
-    // is in place. Later work items (/workflows, /verification) will define
-    // what "satisfied" means (e.g. dependency work item must be VERIFIED).
-    // This returns the direct dependencies; if any don't exist, they're
-    // "unsatisfied" (but the FK constraint prevents non-existent deps).
     const deps = await this.depRepo.listForWorkItem(workItemId);
-    // For now, all persisted dependencies are considered satisfiable.
-    // The contract is here for later enhancement.
-    return deps.map((d) => d.dependsOnId).filter(() => false);
+    if (deps.length === 0) return [];
+    // Check each direct dependency's `completed` flag.
+    const depIds = deps.map((d) => d.dependsOnId);
+    const result = await this.db.query<{ id: string; completed: boolean }>(
+      `SELECT id, completed FROM wfos_work_items WHERE id = ANY($1::uuid[])`,
+      [depIds],
+    );
+    // Return the ids of dependencies that are NOT completed.
+    return result.rows
+      .filter((r) => !r.completed)
+      .map((r) => r.id);
   }
 }
