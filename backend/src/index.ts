@@ -75,6 +75,25 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      ...(app.deps.authorizationService &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.requirementRepository &&
+      app.deps.requirementDependencyRepository &&
+      app.deps.acceptanceCriterionRepository &&
+      app.deps.evidenceReferenceRepository
+        ? {
+            requirements: {
+              authorizationService: app.deps.authorizationService,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              requirementRepository: app.deps.requirementRepository,
+              requirementDependencyRepository: app.deps.requirementDependencyRepository,
+              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
+              evidenceReferenceRepository: app.deps.evidenceReferenceRepository,
+            },
+          }
+        : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     app.deps.logger.info('app.api.listening', {

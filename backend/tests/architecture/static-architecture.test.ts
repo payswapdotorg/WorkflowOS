@@ -1118,3 +1118,133 @@ describe('WORK-005 invariants — architecture module boundaries', () => {
     expect(approveSection![0]).not.toMatch(/architectureVersionRepository\.transitionState/);
   });
 });
+
+/**
+ * WORK-006 invariants — requirements module boundaries.
+ *
+ * Ensures /requirements owns Requirement + AcceptanceCriterion authority,
+ * does not own verification semantics or workflow state, does not couple to
+ * GitHub, and does not create its own infrastructure.
+ */
+describe('WORK-006 invariants — requirements module boundaries', () => {
+  it('/requirements does not import from other modules internal/', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'requirements'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'requirements') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/requirements does not import GitHub provider packages', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'requirements'))) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub provider package "${specifier}" — GitHub integration is WORK-008`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/requirements does not declare competing infrastructure', () => {
+    const forbidden = /\bclass\s+\w+\s+(implements|extends)\s+(DatabaseClient|ObjectStore|Queue|WorkerHost)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'requirements'))) {
+      const src = readFileSync(file, 'utf8');
+      if (forbidden.test(src)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a competing infrastructure implementation — reuse @platform/*`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/requirements does not own verification semantics', () => {
+    // /requirements must not implement evidence evaluation or verification
+    // engine logic — that belongs to /verification (WORK-015). It may store
+    // evidence REFERENCES but must not evaluate them.
+    const VERIFICATION_LOGIC = /\b(evaluateEvidence|deriveStatus|verifyCriterion|runVerification)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'requirements'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (VERIFICATION_LOGIC.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} implements verification semantics — /requirements must not own verification logic`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/requirements does not own workflow state', () => {
+    const WORKFLOW_STATES = /\b(READY|ASSIGNED|IMPLEMENTING|PR_OPEN|VERIFYING|ARCHITECT_REVIEW|MERGED|VERIFIED|IMPLEMENTATION_BLOCKED)\b/;
+    const violations: string[] = [];
+    for (const file of walkTs(join(MODULES_DIR, 'requirements'))) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      if (WORKFLOW_STATES.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} references workflow states — /requirements must not own workflow state`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('/requirements barrel exposes only requirements-domain contracts', () => {
+    const reqIndex = readFileSync(join(MODULES_DIR, 'requirements', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      'Requirement',
+      'RequirementStatus',
+      'CreateRequirementInput',
+      'UpdateRequirementInput',
+      'RequirementRepository',
+      'RequirementDependency',
+      'RequirementDependencyRepository',
+      'AcceptanceCriterion',
+      'CriterionStatus',
+      'CreateCriterionInput',
+      'UpdateCriterionInput',
+      'AcceptanceCriterionRepository',
+      'EvidenceReference',
+      'AddEvidenceReferenceInput',
+      'EvidenceReferenceRepository',
+      'requirementsModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of reqIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of reqIndex.matchAll(/export\s+(?:const|class|function)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(
+      unexpected,
+      `/requirements exports unexpected names: ${unexpected.join(', ')}`,
+    ).toEqual([]);
+  });
+});
