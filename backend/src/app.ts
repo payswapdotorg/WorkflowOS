@@ -72,6 +72,22 @@ import {
   PgAcceptanceCriterionRepository,
   PgEvidenceReferenceRepository,
 } from './modules/requirements/internal/pg-requirement-repository.js';
+import type {
+  WorkItemRepository,
+  WorkItemRequirementRepository,
+  WorkItemCriterionRepository,
+  WorkItemDependencyRepository,
+  PullRequestAssociationRepository,
+  WorkOrderRepository,
+} from '@modules/work-items/index.js';
+import {
+  PgWorkItemRepository,
+  PgWorkItemRequirementRepository,
+  PgWorkItemCriterionRepository,
+  PgWorkItemDependencyRepository,
+  PgPullRequestAssociationRepository,
+  PgWorkOrderRepository,
+} from './modules/work-items/internal/pg-work-item-repository.js';
 import type { AppConfig } from './config.js';
 
 /**
@@ -129,6 +145,18 @@ export interface AppDeps {
   acceptanceCriterionRepository?: AcceptanceCriterionRepository;
   /** WORK-006: evidence reference repository. */
   evidenceReferenceRepository?: EvidenceReferenceRepository;
+  /** WORK-007: work item repository. */
+  workItemRepository?: WorkItemRepository;
+  /** WORK-007: work item requirement association repository. */
+  workItemRequirementRepository?: WorkItemRequirementRepository;
+  /** WORK-007: work item criterion association repository. */
+  workItemCriterionRepository?: WorkItemCriterionRepository;
+  /** WORK-007: work item dependency repository. */
+  workItemDependencyRepository?: WorkItemDependencyRepository;
+  /** WORK-007: PR association repository. */
+  pullRequestAssociationRepository?: PullRequestAssociationRepository;
+  /** WORK-007: work order repository. */
+  workOrderRepository?: WorkOrderRepository;
 }
 
 export interface BuildAppOptions {
@@ -257,6 +285,12 @@ export async function buildApp(
   let requirementDependencyRepository: RequirementDependencyRepository | undefined;
   let acceptanceCriterionRepository: AcceptanceCriterionRepository | undefined;
   let evidenceReferenceRepository: EvidenceReferenceRepository | undefined;
+  let workItemRepository: WorkItemRepository | undefined;
+  let workItemRequirementRepository: WorkItemRequirementRepository | undefined;
+  let workItemCriterionRepository: WorkItemCriterionRepository | undefined;
+  let workItemDependencyRepository: WorkItemDependencyRepository | undefined;
+  let pullRequestAssociationRepository: PullRequestAssociationRepository | undefined;
+  let workOrderRepository: WorkOrderRepository | undefined;
   if (database) {
     const secretStore: SecretStore = new EnvSecretStore();
     userRepository = new PgUserRepository(database);
@@ -277,6 +311,12 @@ export async function buildApp(
     requirementDependencyRepository = new PgRequirementDependencyRepository(database);
     acceptanceCriterionRepository = new PgAcceptanceCriterionRepository(database);
     evidenceReferenceRepository = new PgEvidenceReferenceRepository(database);
+    workItemRepository = new PgWorkItemRepository(database);
+    workItemRequirementRepository = new PgWorkItemRequirementRepository(database);
+    workItemCriterionRepository = new PgWorkItemCriterionRepository(database);
+    workItemDependencyRepository = new PgWorkItemDependencyRepository(database);
+    pullRequestAssociationRepository = new PgPullRequestAssociationRepository(database);
+    workOrderRepository = new PgWorkOrderRepository(database);
     authProvider = new ApiKeyAuthProvider(database, secretStore);
     authorizationService = new DefaultAuthorizationService(
       membershipRepo,
@@ -312,6 +352,12 @@ export async function buildApp(
       requirementDependencyRepository,
       acceptanceCriterionRepository,
       evidenceReferenceRepository,
+      workItemRepository,
+      workItemRequirementRepository,
+      workItemCriterionRepository,
+      workItemDependencyRepository,
+      pullRequestAssociationRepository,
+      workOrderRepository,
     },
     start: async () => {
       if (options.startWorker !== false) {

@@ -94,6 +94,29 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      ...(app.deps.authorizationService &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.workItemRequirementRepository &&
+      app.deps.workItemCriterionRepository &&
+      app.deps.workItemDependencyRepository &&
+      app.deps.pullRequestAssociationRepository &&
+      app.deps.workOrderRepository
+        ? {
+            workItems: {
+              authorizationService: app.deps.authorizationService,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              workItemRequirementRepository: app.deps.workItemRequirementRepository,
+              workItemCriterionRepository: app.deps.workItemCriterionRepository,
+              workItemDependencyRepository: app.deps.workItemDependencyRepository,
+              pullRequestAssociationRepository: app.deps.pullRequestAssociationRepository,
+              workOrderRepository: app.deps.workOrderRepository,
+            },
+          }
+        : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     app.deps.logger.info('app.api.listening', {

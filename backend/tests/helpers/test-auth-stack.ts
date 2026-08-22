@@ -17,6 +17,15 @@ import {
   PgAcceptanceCriterionRepository,
   PgEvidenceReferenceRepository,
 } from '../../src/modules/requirements/internal/pg-requirement-repository.js';
+import {
+  PgWorkItemRepository,
+  PgWorkItemRequirementRepository,
+  PgWorkItemCriterionRepository,
+  PgWorkItemDependencyRepository,
+  PgPullRequestAssociationRepository,
+  PgWorkOrderRepository,
+  DefaultWorkItemCompletionService,
+} from '../../src/modules/work-items/internal/pg-work-item-repository.js';
 import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth-provider.js';
 import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore, InMemoryObjectStore } from '@platform/index.js';
@@ -47,6 +56,14 @@ export interface TestAuthStack {
   requirementDependencyRepository: PgRequirementDependencyRepository;
   acceptanceCriterionRepository: PgAcceptanceCriterionRepository;
   evidenceReferenceRepository: PgEvidenceReferenceRepository;
+  workItemRepository: PgWorkItemRepository;
+  workItemRequirementRepository: PgWorkItemRequirementRepository;
+  workItemCriterionRepository: PgWorkItemCriterionRepository;
+  workItemDependencyRepository: PgWorkItemDependencyRepository;
+  pullRequestAssociationRepository: PgPullRequestAssociationRepository;
+  workOrderRepository: PgWorkOrderRepository;
+  /** INTERNAL completion service — not in the /work-items public barrel. */
+  workItemCompletionService: DefaultWorkItemCompletionService;
   authProvider: ApiKeyAuthProvider;
   authorizationService: DefaultAuthorizationService;
   apiKeyProvisioner: ApiKeyCredentialProvisioner;
@@ -87,6 +104,13 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const requirementDependencyRepository = new PgRequirementDependencyRepository(db.client);
   const acceptanceCriterionRepository = new PgAcceptanceCriterionRepository(db.client);
   const evidenceReferenceRepository = new PgEvidenceReferenceRepository(db.client);
+  const workItemRepository = new PgWorkItemRepository(db.client);
+  const workItemRequirementRepository = new PgWorkItemRequirementRepository(db.client);
+  const workItemCriterionRepository = new PgWorkItemCriterionRepository(db.client);
+  const workItemDependencyRepository = new PgWorkItemDependencyRepository(db.client);
+  const pullRequestAssociationRepository = new PgPullRequestAssociationRepository(db.client);
+  const workOrderRepository = new PgWorkOrderRepository(db.client);
+  const workItemCompletionService = new DefaultWorkItemCompletionService(workItemRepository);
   const authProvider = new ApiKeyAuthProvider(db.client, secretStore);
   const authorizationService = new DefaultAuthorizationService(
     membershipRepository,
@@ -123,6 +147,13 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     requirementDependencyRepository,
     acceptanceCriterionRepository,
     evidenceReferenceRepository,
+    workItemRepository,
+    workItemRequirementRepository,
+    workItemCriterionRepository,
+    workItemDependencyRepository,
+    pullRequestAssociationRepository,
+    workOrderRepository,
+    workItemCompletionService,
     authProvider,
     authorizationService,
     apiKeyProvisioner,
