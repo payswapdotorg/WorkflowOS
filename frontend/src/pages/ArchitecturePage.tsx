@@ -1,7 +1,7 @@
 import { LoadingState } from '@/components/domain/loading-state';
 import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { StatusBadge } from '@/components/domain/status-badge';
 import { architecture, type Architecture, type ArchitectureVersion } from '@/api/client';
-import { Snowflake, Plus, FileText, Lock } from 'lucide-react';
+import { Snowflake, Plus, FileText, Lock, ArrowRight } from 'lucide-react';
 
 function getApiKey(): string {
   return localStorage.getItem('wfos_api_key') || '';
@@ -17,6 +17,7 @@ function getApiKey(): string {
 
 export default function ArchitecturePage() {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const [archs, setArchs] = useState<Architecture[]>([]);
   const [versions, setVersions] = useState<Record<string, ArchitectureVersion[]>>({});
   const [loading, setLoading] = useState(true);
@@ -109,6 +110,19 @@ export default function ArchitecturePage() {
                         </div>
                       ) : (
                         <p className="text-sm text-muted-foreground">No content</p>
+                      )}
+
+                      {/* Continue to Requirements CTA — only when frozen */}
+                      {v.state === 'frozen' && (
+                        <div className="mt-3 flex justify-end">
+                          <Button
+                            size="sm"
+                            onClick={() => navigate(`/projects/${projectId}/requirements`)}
+                          >
+                            Continue to Requirements
+                            <ArrowRight className="ml-1 h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       )}
                     </div>
                   ))}
