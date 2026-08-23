@@ -812,6 +812,8 @@ export interface ParsedArchitecture {
     title: string;
     objective?: string;
     scope?: string;
+    requirementIds?: string[];
+    criterionIds?: string[];
     dependencies?: string[];
   }>;
   summary?: string;
@@ -822,6 +824,16 @@ export interface ArchitectProvider {
   provider: string;
   model: string;
   status: 'ready' | 'not-configured';
+}
+
+export interface ArchitectRevisionData {
+  id: string;
+  sessionId: string;
+  revisionNumber: number;
+  userPrompt: string;
+  architectResponse: string;
+  parsedPlan: ParsedArchitecture | null;
+  createdAt: string;
 }
 
 export interface ArchitectSession {
@@ -866,7 +878,10 @@ export const architect = {
     apiGet<{ providers: ArchitectProvider[] }>(`/projects/${projectId}/architect/providers`),
 
   getSession: (projectId: string) =>
-    apiGet<{ session: ArchitectSession | null }>(`/projects/${projectId}/architect/session`),
+    apiGet<{ session: ArchitectSession | null; revisions: ArchitectRevisionData[] }>(`/projects/${projectId}/architect/session`),
+
+  getRevisions: (projectId: string) =>
+    apiGet<{ revisions: ArchitectRevisionData[] }>(`/projects/${projectId}/architect/revisions`),
 
   saveSession: (projectId: string, body: {
     messages?: Array<{ role: string; content: string }>;
