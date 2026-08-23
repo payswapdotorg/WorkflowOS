@@ -47,7 +47,8 @@ the user's own provider session — with WorkflowOS retaining every authority
 
 ### ChatGPT (WORK-030)
 
-The real ChatGPT adapter drives `https://chatgpt.com` — you must be **signed
+The real ChatGPT adapter drives the **Codex coding environment at
+`https://chatgpt.com/codex`** — not conversational Chat. You must be **signed
 in to ChatGPT in the same browser** (the adapter uses your existing session;
 it never asks for or stores ChatGPT credentials or API keys). Flow: the
 Companion opens the chatgpt.com root (a fresh composer — never an existing

@@ -1266,12 +1266,24 @@ export type ExecutionStatus =
   | 'created' | 'queued' | 'running' | 'handoff_ready' | 'submitted'
   | 'completed' | 'failed' | 'cancelled' | 'expired';
 
+/** WORK-030 (PR #33 review): provider surface capabilities. */
+export type ProviderSurfaceKind = 'conversational-chat' | 'coding-agent';
+export type SurfaceReadiness = 'ready' | 'unverified' | 'not-available';
+
+export interface ProviderSurfaceCapabilities {
+  conversationalChat: SurfaceReadiness;
+  codingAgent: SurfaceReadiness;
+  implementationSurface: ProviderSurfaceKind;
+}
+
 export interface ExecutionProviderInfo {
   name: string;
   provider: string;
   model: string;
   nativeApi: 'ready' | 'not-configured';
   externalUi: 'available' | 'not-supported';
+  /** Surface capabilities (conversational Chat vs the coding agent). */
+  capabilities?: ProviderSurfaceCapabilities;
 }
 
 export interface StartExecutionResponse {

@@ -31,12 +31,13 @@ WorkflowOS
   multi-signal completion; blocked/failure classification). See
   `src/providers/zai/README.md` for the observed UI contract + selector
   strategy + fixture E2E.
-- ✅ **REAL ChatGPT adapter (WORK-030)** — drives `https://chatgpt.com`
-  (ProseMirror contenteditable composer; execCommand injection with
-  normalized read-back; stop-button streaming marker; data-testid send
-  control). See `src/providers/chatgpt/README.md` (includes the
-  confidence-graded observed contract — live inspection was blocked from the
-  build environment, so the adapter is confidence-gated to fail safe).
+- ✅ **REAL ChatGPT adapter (WORK-030, PR #33-corrected)** — drives
+  `https://chatgpt.com/codex` (the CODEX coding-agent surface — never
+  conversational Chat for implementation; no silent fallback). Surface
+  capability model (conversational-chat vs coding-agent + readiness) exposed
+  in the popup + WorkflowOS UI; codingAgent stays 'unverified' pending live
+  signed-in verification. See `src/providers/chatgpt/README.md` for the
+  confidence-graded contract, surface gating, and fixture caveats.
 - ⏳ Claude = WORK-031 (placeholder only — no automation).
 
 ## Local development

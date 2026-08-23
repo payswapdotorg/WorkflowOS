@@ -72,6 +72,13 @@ describe('adapter registry (§26) — fake + Z.ai (029) + ChatGPT (030); claude 
       displayName: 'ChatGPT',
       supported: true,
       adapterAvailable: true,
+      // PR #33 review: implementation surface is the coding agent (Codex);
+      // readiness stays 'unverified' pending live verification.
+      surfaces: {
+        conversationalChat: 'ready',
+        codingAgent: 'unverified',
+        implementationSurface: 'coding-agent',
+      },
     });
     const meta = providerRegistry.pendingProviders;
     expect(meta.find((m) => m.providerId === 'zai')).toBeUndefined(); // shipped

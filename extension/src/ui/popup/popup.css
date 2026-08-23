@@ -49,3 +49,8 @@ footer { text-align: center; margin-top: 4px; }
 
 #blocked-reason dd { color: #b45309; }
 .hidden { display: none !important; }
+
+.providers li .capabilities {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding-left: 0; color: #71717a; font-size: 10px; width: 100%;
+}

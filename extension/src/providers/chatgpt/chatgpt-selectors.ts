@@ -35,6 +35,51 @@ export interface SelectorMatch<T extends HTMLElement = HTMLElement> {
   readonly via: string | null;
 }
 
+// --- Surface detection (WORK-030 PR #33 review) ------------------------------
+//
+// The product distinguishes Chat (conversational), Work, and Codex (the
+// coding environment at chatgpt.com/codex — CONFIRMED from OpenAI's own
+// product pages; UI anchors below are confidence-graded in the README).
+
+/** HIGH confidence: the Codex web app path (official product URL). */
+export const CODEX_URL_PATTERN = /^\/codex(\/|$)/;
+/** MEDIUM confidence: Work surface path. */
+export const WORK_URL_PATTERN = /^\/work(\/|$)/;
+/** Chat conversations: /c/<uuid>; the root is the fresh Chat composer. */
+export const CHAT_URL_PATTERN = /^\/?$|^\/c\//;
+
+/** Codex surface anchors (MEDIUM — "New task" flow per product docs). */
+export const CODEX_SURFACE: readonly SelectorStrategy[] = [
+  {
+    describe: 'New task control (Codex)',
+    find: (d) =>
+      [...d.querySelectorAll('button, a[role="button"], [data-testid]')].filter((el) =>
+        /^new task$/i.test((el.textContent ?? '').trim()),
+      ),
+  },
+  {
+    describe: '[data-testid*=codex i]',
+    find: (d) => [...d.querySelectorAll('[data-testid*="codex" i]')],
+  },
+];
+
+/** Conversational Chat surface anchors (the composer itself proves Chat). */
+export const CHAT_SURFACE: readonly SelectorStrategy[] = COMPOSER_STRATEGIES();
+
+function COMPOSER_STRATEGIES() {
+  // Late-bound to avoid declaration-order issues; same shape as COMPOSER.
+  return [
+    {
+      describe: 'div#prompt-textarea[contenteditable]',
+      find: (d: Document) => [...d.querySelectorAll('#prompt-textarea[contenteditable="true"]')],
+    },
+    {
+      describe: 'textarea#prompt-textarea',
+      find: (d: Document) => [...d.querySelectorAll('textarea#prompt-textarea')],
+    },
+  ];
+}
+
 // --- Composer (prompt input) ---------------------------------------------
 
 export const COMPOSER: readonly SelectorStrategy[] = [
@@ -132,7 +177,7 @@ export const LOGIN_WALL: readonly SelectorStrategy[] = [
 ];
 
 /** Login-wall URL paths (the product redirects unauthenticated visits). */
-export const LOGIN_PATH_PATTERN = /^\/(auth\/login|auth\/signup|login)$/i;
+export const LOGIN_PATH_PATTERN = /^\/(auth\/login|auth\/signup|login|codex\/auth\/login)$/i;
 
 // --- Transcript / result regions ------------------------------------------------
 

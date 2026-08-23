@@ -2,8 +2,9 @@
  * WORK-030 — ChatGPT adapter fixture browser E2E.
  *
  * Proves the REAL extension + REAL ChatGPT adapter code (chatgpt-bridge content
- * script + chatgpt-page-runtime + ChatgptProviderAdapter) against a LOCAL fixture
- * server that reproduces the OBSERVED chatgpt.com DOM (2026-08-24). No live
+ * script + chatgpt-page-runtime + ChatgptProviderAdapter) against LOCAL fixtures
+ * (PR #33 review: the CODING-AGENT surface at /codex is the implementation
+ * target; a Chat-only page must BLOCK with no fallback) that reproduces the OBSERVED chatgpt.com DOM (2026-08-24). No live
  * ChatGPT dependency:
  *
  *   external execution (provider=chatgpt)
@@ -78,7 +79,14 @@ let criterionId: string;
 async function startFixtureServer(): Promise<void> {
   fixtureServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', FIXTURE_ORIGIN);
-    const path = url.pathname === '/' ? '/index.html' : url.pathname;
+    let path = url.pathname === '/' ? '/index.html' : url.pathname;
+    // PR #33 review: the CODING fixture lives at /codex/ — map the surface
+    // root to codex.html and resolve its relative script path.
+    if (/^\/codex\/codex-agent\.js$/.test(path)) {
+      path = '/codex-agent.js';
+    } else if (/^\/codex(\/|$)/.test(path)) {
+      path = '/codex.html';
+    }
     try {
       const file = join(FIXTURE_DIR, path.replace(/^\//, ''));
       const body = await readFile(file);
@@ -363,9 +371,11 @@ test.describe('WORKFLOWOS — WORK-030 ChatGPT adapter fixture E2E', () => {
 
       // Stage the fixture origin (incl. the XSS payload variant) — the
       // adapter then opens the fixture instead of the real chat.z.ai.
+      // PR #33 review: implementation targets the CODING surface — stage the
+      // Codex fixture (with the XSS probe variant for output-safety proof).
       await sw.evaluate((origin: string) => {
         return (globalThis as { chrome?: { storage: { session: { set: (i: Record<string, string>) => Promise<void> } } } }).chrome!.storage.session.set({ 'wfos.chatgpt.fixtureOrigin': origin });
-      }, `${FIXTURE_ORIGIN}/?xss=1`);
+      }, `${FIXTURE_ORIGIN}/codex/?xss=1`);
 
       const page = context.pages()[0] ?? (await context.newPage());
       await page.goto('/');
@@ -406,7 +416,7 @@ test.describe('WORKFLOWOS — WORK-030 ChatGPT adapter fixture E2E', () => {
         .poll(
           async () =>
             (await fixturePage!.evaluate(
-              () => (window as unknown as { __chatgptFixture?: { submits: number } }).__chatgptFixture?.submits ?? 0,
+              () => (window as unknown as { __codexFixture?: { submits: number } }).__codexFixture?.submits ?? 0,
             )),
           { timeout: 20_000 },
         )
@@ -414,8 +424,8 @@ test.describe('WORKFLOWOS — WORK-030 ChatGPT adapter fixture E2E', () => {
       // The submitted prompt is the EXACT WorkflowOS prompt (fixture recorded it).
       const submitted = await fixturePage!.evaluate(
         () =>
-          (window as unknown as { __chatgptFixture?: { submittedTexts: string[]; conversationPath: string } })
-            .__chatgptFixture,
+          (window as unknown as { __codexFixture?: { submittedTexts: string[]; taskPath: string } })
+            .__codexFixture,
       );
       expect(submitted!.submittedTexts[0]).toContain('# Implementation Instructions — WORK-CGPT-E2E-001');
 
@@ -440,8 +450,8 @@ test.describe('WORKFLOWOS — WORK-030 ChatGPT adapter fixture E2E', () => {
       await expect(popup.locator('#work-item')).toHaveText('WORK-CGPT-E2E-001');
       await expect(popup.locator('#provider')).toHaveText('ChatGPT');
       await expect(popup.locator('#status')).toContainText('completed');
-      // ChatGPT conversation URLs are /c/<uuid> (the fixture mirrors this).
-      await expect(popup.locator('#conversation')).toContainText('/c-');
+      // Codex task URLs are /codex/<id> (the fixture mirrors this).
+      await expect(popup.locator('#conversation')).toContainText('/codex/');
       await popup.close();
     } finally {
       await context.close();
@@ -512,6 +522,82 @@ test.describe('WORKFLOWOS — WORK-030 ChatGPT adapter fixture E2E', () => {
         );
         expect(submits).toBe(0);
       }
+    } finally {
+      await context.close();
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // PR #33 review: NO SILENT CHAT FALLBACK — a Chat-only surface (no Codex)
+  // must BLOCK implementation with zero submissions.
+  // ---------------------------------------------------------------------
+  test('chat-only surface → BLOCKED "ChatGPT coding environment unavailable or unverified." — no Chat fallback', async () => {
+    test.setTimeout(120_000);
+
+    const userDataDir = mkdtempSync(join(tmpdir(), 'wfos-cgpt-chatonly-'));
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      channel: 'chromium',
+      headless: true,
+      args: [
+        `--disable-extensions-except=${EXTENSION_DIST}`,
+        `--load-extension=${EXTENSION_DIST}`,
+        '--no-sandbox',
+      ],
+    });
+
+    try {
+      let sw: Worker | undefined = context.serviceWorkers().find((w) => w.url().includes('background'));
+      if (!sw) {
+        sw = (await context.waitForEvent('serviceworker', { timeout: 20_000 })) as Worker;
+      }
+      const extensionId = new URL(sw.url()).host;
+      // Stage the CHAT fixture root (conversational surface, composer
+      // present — but NOT the coding environment).
+      await sw.evaluate((origin: string) => {
+        return (globalThis as { chrome?: { storage: { session: { set: (i: Record<string, string>) => Promise<void> } } } }).chrome!.storage.session.set({ 'wfos.chatgpt.fixtureOrigin': origin });
+      }, `${FIXTURE_ORIGIN}/`);
+
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto('/');
+      await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
+
+      const wi = await createReadyWorkItem('WORK-CGPT-CHAT-001');
+      await page.goto(`/work-items/${wi.id}`);
+      await page.getByRole('button', { name: /Start Implementation/ }).first().click();
+      const dialog = page.locator('[role="dialog"]');
+      await dialog.getByLabel('External execution').check();
+      await dialog.locator('#execution-provider').selectOption('chatgpt');
+      await dialog.getByRole('button', { name: 'Start Implementation' }).click();
+
+      const handoffDialog = page.locator('[role="dialog"]');
+      await expect(handoffDialog).toContainText('External Execution', { timeout: 15_000 });
+      await handoffDialog.getByRole('button', { name: /Open with Companion/ }).click();
+      await page.waitForURL(/\/companion\/handoff#/, { timeout: 15_000 });
+      const executionId = page.url().match(/exec=(wf_[0-9a-f]+)/)![1]!;
+
+      // The adapter BLOCKS: chat surface ≠ coding environment.
+      const popup = await context.newPage();
+      await popup.goto(`chrome-extension://${extensionId}/ui/popup/index.html`);
+      await expect(popup.locator('#blocked-reason')).toContainText(
+        'ChatGPT coding environment unavailable or unverified.',
+        { timeout: 20_000 },
+      );
+      await expect(popup.locator('#status')).toContainText('blocked');
+      await popup.close();
+
+      // The execution record reflects the failure — NOT a fake start.
+      const final = await pollExecutionStatus(executionId, ['failed'], 40000);
+      expect(final).toBeTruthy();
+      expect(String(final?.benchmarkMetadata.lastEventType)).toBe('failed');
+
+      // The Chat composer received NOTHING (no silent fallback submit).
+      const chatPage = context.pages().find((p) => p.url().startsWith(`${FIXTURE_ORIGIN}/`));
+      expect(chatPage).toBeTruthy();
+      const submits = await chatPage!.evaluate(
+        () =>
+          (window as unknown as { __chatgptFixture?: { submits: number } }).__chatgptFixture?.submits ?? 0,
+      );
+      expect(submits).toBe(0);
     } finally {
       await context.close();
     }

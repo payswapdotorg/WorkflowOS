@@ -5,6 +5,34 @@ web product (https://chatgpt.com) inside the user's existing authenticated
 browser session — no OpenAI API calls, no cookie access, no credential
 capture of any kind.
 
+## Surfaces (PR #33 review): Chat vs Work vs Codex
+
+The current ChatGPT product distinguishes **Chat** (conversational),
+**Work**, and **Codex** — the dedicated coding environment (repositories,
+tests/commands, engineering changes). WorkflowOS implementation Work Orders
+**must execute on the coding-agent surface**:
+
+- `openTask` opens **`https://chatgpt.com/codex`** (OpenAI's official Codex
+  web-app URL — HIGH confidence).
+- The page runtime detects the surface BEFORE anything else (after the login
+  wall): URL `/codex` → coding-agent (HIGH); `/c/<uuid>` or the root →
+  conversational-chat; `/work` → work; anything else → unknown.
+- **Implementation + non-Codex surface → BLOCKED** *"ChatGPT coding
+  environment unavailable or unverified."* — the prompt is NEVER injected
+  into a conversational Chat and the adapter NEVER silently falls back.
+- Conversational Chat support is KEPT for `taskKind: 'conversational'`
+  tasks (the capability model distinguishes the surfaces; the bridge marks
+  WorkflowOS external executions as `implementation`).
+- Surface readiness is a **capability model** surfaced in both the
+  WorkflowOS UI and the extension popup: `conversationalChat` / `codingAgent`
+  ∈ {ready, unverified, not-available} + `implementationSurface`. ChatGPT's
+  `codingAgent` stays **'unverified'** until a live signed-in verification
+  pass — per the review, **fixture-only proof is deliberately insufficient**;
+  a static check guards the catalog value so flipping it to 'ready' is a
+  conscious act.
+- Model/mode names are still never assumed (§9): Codex task-creation
+  anchors are MEDIUM confidence and confidence-gated.
+
 ## Observed contract
 
 **Observed date: 2026-08-24.** ⚠️ **Confidence caveat:** live inspection from
@@ -146,10 +174,22 @@ When the adapter reports *BLOCKED — “ChatGPT UI changed”*:
 
 ## Fixture testing
 
-The browser E2E loads the REAL extension + REAL adapter code and drives the
-LOCAL fixture server (`http://127.0.0.1:3778`, served from
-`extension/tests/chatgpt/fixture/`) reproducing the observed DOM — no live
-ChatGPT account or network dependency:
+**Caveat (PR #33 review):** fixtures prove the ADAPTER MECHANICS
+deterministically in CI — they are NOT proof that the real signed-in Codex
+surface works. The catalog readiness stays 'unverified' until live
+verification; the runtime re-verifies the actual page surface on every
+execution.
+
+The browser E2E loads the REAL extension + REAL adapter code against LOCAL
+fixtures (`http://127.0.0.1:3778`, served from
+`extension/tests/chatgpt/fixture/`):
+
+- **`/codex/`** — the CODING-AGENT fixture (Codex task surface: "New task"
+  composer, task list, environments sidebar, `/codex/t/<id>` task URLs,
+  `data-testid` send/stop) — drives the implementation happy path.
+- **`/`** — the conversational Chat fixture — proves the NO-FALLBACK block
+  (implementation on a Chat-only page → BLOCKED with zero submissions).
+- Variants on both: `wall=login` · `fail=1` · `confirm=1` · `xss=1`.
 
 ```
 cd extension && bun install && bun run build

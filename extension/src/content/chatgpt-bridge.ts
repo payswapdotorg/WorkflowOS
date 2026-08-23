@@ -45,6 +45,9 @@ async function attachIfApplicable(): Promise<void> {
     prompt: session.prompt,
     promptDigest: session.promptDigest,
     promptSubmitted: session.promptSubmitted,
+    // WorkflowOS external executions are implementation Work Orders — they
+    // require the coding-agent surface (Codex). PR #33 review.
+    taskKind: 'implementation',
   });
   void chrome.runtime
     .sendMessage(

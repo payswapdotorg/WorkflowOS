@@ -40,7 +40,7 @@ describe('ChatgptProviderAdapter (background side)', () => {
     expect(await staged.matchesFixture(new URL('http://127.0.0.1:9999/'))).toBe(false);
   });
 
-  it('openTask prefers the staged fixture origin, else the ChatGPT new-task root', async () => {
+  it('openTask targets the CODING surface: chatgpt.com/codex (or the staged fixture)', async () => {
     const opened: string[] = [];
     const runtime = {
       openTab: async (url: string) => {
@@ -56,7 +56,8 @@ describe('ChatgptProviderAdapter (background side)', () => {
       Promise.resolve({ chatgptOrigin: 'https://chatgpt.com' }),
     );
     await prod.openTask({} as never, runtime);
-    expect(opened[0]).toBe('https://chatgpt.com/');
+    // PR #33 review: implementation targets Codex — never the Chat root.
+    expect(opened[0]).toBe('https://chatgpt.com/codex');
 
     const staged = new ChatgptProviderAdapter(
       { sendMessage: async () => null },
@@ -106,15 +107,29 @@ describe('ChatgptProviderAdapter (background side)', () => {
     expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(false);
   });
 
-  it('registry lists chatgpt with its display name; claude remains placeholder-only', () => {
+  it('registry lists chatgpt with display name + surface capabilities; claude remains placeholder-only', () => {
     const providers = providerRegistry.listProviders();
     expect(providers.find((p) => p.providerId === 'chatgpt')).toEqual({
       providerId: 'chatgpt',
       displayName: 'ChatGPT',
       supported: true,
       adapterAvailable: true,
+      surfaces: {
+        conversationalChat: 'ready',
+        codingAgent: 'unverified',
+        implementationSurface: 'coding-agent',
+      },
     });
     expect(providerRegistry.pendingProviders.map((p) => p.providerId)).toEqual(['claude']);
+  });
+
+  it('describeSurfaces(): implementation surface is coding-agent; coding stays unverified (no fixture-only readiness)', () => {
+    const adapter = new ChatgptProviderAdapter();
+    expect(adapter.describeSurfaces()).toEqual({
+      conversationalChat: 'ready',
+      codingAgent: 'unverified',
+      implementationSurface: 'coding-agent',
+    });
   });
 });
 

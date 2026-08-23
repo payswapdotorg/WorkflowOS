@@ -14,14 +14,31 @@ if (!(globalThis.crypto as { subtle?: unknown } | undefined)?.subtle) {
 
 export const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixture');
 
-export function loadFixture(variant: Record<string, string> = {}): Document {
-  const html = readFileSync(join(FIXTURE_DIR, 'index.html'), 'utf8');
+/** Fixture page kind: the conversational Chat page or the Codex coding page. */
+export type FixturePage = 'chat' | 'codex';
+
+const PAGES: Record<FixturePage, { file: string; path: string; loginPath: string; logId: string }> = {
+  chat: { file: 'index.html', path: '/', loginPath: '/auth/login', logId: '#transcript' },
+  codex: { file: 'codex.html', path: '/codex/', loginPath: '/codex/auth/login', logId: '#task-log' },
+};
+
+/**
+ * Load a fixture page into the CURRENT jsdom document (same realm).
+ * `page` selects the surface: 'chat' (conversational) or 'codex'
+ * (coding-agent — the implementation target per the PR #33 review).
+ */
+export function loadFixture(
+  variant: Record<string, string> = {},
+  page: FixturePage = 'chat',
+): Document {
+  const meta = PAGES[page];
+  const html = readFileSync(join(FIXTURE_DIR, meta.file), 'utf8');
   const bodyMatch = html.match(/<body>([\s\S]*)<\/body>/);
   document.body.innerHTML = bodyMatch ? bodyMatch[1]! : '';
   window.history.pushState(
     {},
     '',
-    `/fixture${variant && Object.keys(variant).length ? `?${new URLSearchParams(variant)}` : ''}`,
+    `${meta.path}${variant && Object.keys(variant).length ? `?${new URLSearchParams(variant)}` : ''}`,
   );
 
   if (variant.wall === 'login') {
@@ -31,7 +48,7 @@ export function loadFixture(variant: Record<string, string> = {}): Document {
     if (composer) composer.hidden = true;
     if (form) form.hidden = true;
     if (login) login.hidden = false;
-    window.history.replaceState({}, '', '/auth/login');
+    window.history.replaceState({}, '', meta.loginPath);
   }
   return document;
 }
@@ -70,7 +87,7 @@ export function agentMessage(
   text: string,
   state?: 'streaming' | 'done',
 ): void {
-  const transcript = doc.querySelector('#transcript');
+  const transcript = doc.querySelector('#transcript, #task-log');
   if (!transcript) throw new Error('fixture transcript missing');
   const div = doc.createElement('div');
   div.className = 'msg assistant';

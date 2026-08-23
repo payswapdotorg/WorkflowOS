@@ -41,6 +41,10 @@ import type {
   ChatgptPhase,
 } from './chatgpt-types.js';
 import {
+  CHAT_SURFACE,
+  CHAT_URL_PATTERN,
+  CODEX_SURFACE,
+  CODEX_URL_PATTERN,
   COMPOSER,
   CONFIRMATION_PATTERN,
   ERROR_SURFACES,
@@ -51,8 +55,10 @@ import {
   SESSION_EXPIRY_PATTERN,
   STREAMING_MARKER,
   TRANSCRIPT,
+  WORK_URL_PATTERN,
   resolve,
 } from './chatgpt-selectors.js';
+import type { DetectedSurface } from '../types.js';
 
 /** Completion stability window: transcript quiet before completing. */
 const COMPLETION_QUIET_MS = 2500;
@@ -166,7 +172,37 @@ export async function attach(session: ChatgptPageSession): Promise<ChatgptAttach
     return { attached: false, phase: 'blocked', detail: 'login-required' };
   }
 
-  // 2. Composer discovery (bounded retry; confidence-gated §31).
+  // 2. SURFACE detection (PR #33 review): implementation Work Orders
+  //     REQUIRE the coding-agent surface (Codex). A conversational Chat
+  //     accepting the prompt is NOT implementation execution — BLOCK with
+  //     an actionable reason; NEVER silently fall back to Chat (§8 of the
+  //     review). Conversational tasks may use the Chat surface (kept).
+  const surface = detectSurface();
+  if (session.taskKind === 'implementation' && surface.surface !== 'coding-agent') {
+    await emitObservation({
+      kind: 'blocked',
+      reason: 'ChatGPT coding environment unavailable or unverified.',
+      output:
+        surface.surface === 'unknown'
+          ? 'Could not confidently identify a ChatGPT surface (Chat / Work / Codex).'
+          : `Detected surface "${surface.surface}" is not the coding-agent environment (Codex); conversational fallback is not permitted for implementation tasks.`,
+    });
+    await emitPhase('blocked', `surface-${surface.surface}-not-coding-agent`);
+    await stop();
+    return { attached: false, phase: 'blocked', detail: 'coding-surface-unavailable' };
+  }
+  if (session.taskKind === 'conversational' && surface.surface !== 'conversational-chat') {
+    await emitObservation({
+      kind: 'blocked',
+      reason: 'ChatGPT conversational surface unavailable or unverified.',
+      output: `Detected surface "${surface.surface}"; this task requires the conversational Chat surface.`,
+    });
+    await emitPhase('blocked', `surface-${surface.surface}-not-conversational`);
+    await stop();
+    return { attached: false, phase: 'blocked', detail: 'chat-surface-unavailable' };
+  }
+
+  // 3. Composer discovery (bounded retry; confidence-gated §31).
   const composer = await waitForComposer();
   if (!composer) {
     await emitObservation({
@@ -238,6 +274,36 @@ export async function attach(session: ChatgptPageSession): Promise<ChatgptAttach
   observeTranscript();
 
   return { attached: true, phase: state.phase };
+}
+
+/**
+ * Detect the current ChatGPT surface (PR #33 review). URL patterns are the
+ * primary (HIGH) signal; page anchors confirm (MEDIUM). The Codex web app
+ * lives at /codex (confirmed from OpenAI product pages); Chat conversations
+ * at /c/<uuid> + the root composer; Work at /work.
+ */
+export function detectSurface(): DetectedSurface {
+  const path = location.pathname;
+  if (CODEX_URL_PATTERN.test(path)) {
+    const anchor = resolve(CODEX_SURFACE, document);
+    // URL is HIGH; anchors upgrade confidence context for reporting.
+    return {
+      surface: 'coding-agent',
+      confidence: 'high',
+      via: `url ${path}${anchor.element ? ` + ${anchor.via ?? ''}` : ''}`,
+    };
+  }
+  if (WORK_URL_PATTERN.test(path)) {
+    return { surface: 'work', confidence: 'medium', via: `url ${path}` };
+  }
+  if (CHAT_URL_PATTERN.test(path)) {
+    const anchor = resolve(CHAT_SURFACE, document);
+    if (anchor.element) {
+      return { surface: 'conversational-chat', confidence: 'high', via: anchor.via ?? 'chat composer' };
+    }
+    return { surface: 'unknown', confidence: 'none', via: `url ${path} (no composer anchor)` };
+  }
+  return { surface: 'unknown', confidence: 'none', via: `url ${path}` };
 }
 
 async function waitForComposer(): Promise<{ element: HTMLElement } | null> {
@@ -374,12 +440,16 @@ async function trackConversation(): Promise<void> {
   const deadline = Date.now() + CONVERSATION_POLL_MAX;
   while (Date.now() < deadline && state && !state.stopped) {
     const path = location.pathname;
-    if (/^\/c\//.test(path)) {
+    // Chat conversations (/c/<uuid>) and Codex tasks (/codex/<id>) — the
+    // safe externalSessionRef is the conversation/task URL path only. The
+    // Codex ROOT itself (the new-task composer) is NOT a task; require a
+    // deeper segment so the ref is the created task.
+    if (/^\/c\/.+/.test(path) || /^\/codex\/.+/.test(path)) {
       state.conversationPath = path;
       await emitObservation({
         kind: 'progress',
         externalSessionRef: path,
-        output: `ChatGPT conversation ${path}.`,
+        output: `ChatGPT ${/^\/codex\//.test(path) ? 'task' : 'conversation'} ${path}.`,
       });
       return;
     }
@@ -615,6 +685,7 @@ export const chatgptPageRuntime = {
   attach,
   stop,
   bindTransport,
+  detectSurface,
 };
 
 function sleep(ms: number): Promise<void> {

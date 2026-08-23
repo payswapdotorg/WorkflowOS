@@ -11,12 +11,15 @@
 #   with the scoped x-callback-token → WorkflowOS execution completes →
 #   popup shows the session → replayed handoff ref rejected (409).
 #
-# WORK-030 (ChatGPT adapter): the adapter opens its own LOCAL fixture server
-# (127.0.0.1:3778) reproducing the OBSERVED chatgpt.com DOM (contenteditable
-# #prompt-textarea composer, data-testid send/stop controls, /c/<uuid>
-# conversations) → same full loop: digest-verified single injection →
-# deterministic progress → completion → WorkflowOS completed event → popup;
-# login-wall fixture → BLOCKED "Please sign in to ChatGPT."; XSS inert.
+# WORK-030 (ChatGPT adapter, PR #33-corrected): implementation targets the
+# CODING surface — the adapter opens its own LOCAL fixture server
+# (127.0.0.1:3778) with a /codex/ coding-agent fixture (task composer,
+# data-testid send/stop, /codex/<id> task URLs) → surface detected →
+# digest-verified single injection → deterministic progress → completion →
+# WorkflowOS completed event → popup; login wall → BLOCKED "Please sign in
+# to ChatGPT."; Chat-only fixture → BLOCKED "ChatGPT coding environment
+# unavailable or unverified." with ZERO submits (no silent fallback); XSS
+# inert.
 #
 # WORK-029 (Z.ai adapter): the adapter opens a LOCAL fixture server
 # (127.0.0.1:3777) reproducing the OBSERVED chat.z.ai DOM → provider

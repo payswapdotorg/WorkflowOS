@@ -21,6 +21,7 @@ import {
   injectPrompt,
   normalizeEditorText,
   extractRepositoryObservations,
+  detectSurface,
   appliesTo,
   type ChatgptPageSession,
 } from '../../src/providers/chatgpt/chatgpt-page-runtime.js';
@@ -38,6 +39,7 @@ function makeSession(overrides: Partial<ChatgptPageSession> = {}): ChatgptPageSe
     prompt: PROMPT,
     promptDigest: sha256(PROMPT),
     promptSubmitted: false,
+    taskKind: 'implementation',
     ...overrides,
   };
 }
@@ -68,8 +70,8 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
     expect(appliesTo('claude')).toBe(false);
   });
 
-  it('happy path: digest verified → injected into contenteditable → submitted ONCE → conversation → completed', async () => {
-    const doc = loadFixture();
+  it('happy path (CODEX surface): digest verified → injected → submitted ONCE → task → completed', async () => {
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     const result = await attach(makeSession());
     expect(result.attached).toBe(true);
@@ -81,14 +83,14 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
     // Send button was clicked exactly once (real submit counter).
     expect(countSubmits()).toBe(1);
 
-    // Conversation created (/c/<uuid>) — safe externalSessionRef.
-    window.history.pushState({}, '', '/c/cgpt-abc123');
+    // Codex task created (/codex/t/<id>) — safe externalSessionRef.
+    window.history.pushState({}, '', '/codex/t/cgpt-abc123');
     await wait(600);
     expect(
       sent.some(
         (s) =>
           s.type === 'EXECUTION_PROGRESS' &&
-          s.payload.externalSessionRef === '/c/cgpt-abc123',
+          s.payload.externalSessionRef === '/codex/t/cgpt-abc123',
       ),
     ).toBe(true);
 
@@ -116,7 +118,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('duplicate prevention: re-attach after reload (promptSubmitted=true) NEVER re-injects', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     expect(countSubmits()).toBe(1);
@@ -133,7 +135,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('digest mismatch → BLOCKED and NO submission (§8/§33)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     const result = await attach(makeSession({ promptDigest: 'deadbeef'.repeat(8) }));
     expect(result.attached).toBe(false);
@@ -142,6 +144,57 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
     expect(blocked).toBeTruthy();
     expect(blocked!.payload.reason).toMatch(/digest mismatch/i);
     expect((doc.querySelector('#prompt-textarea') as HTMLElement).textContent).toBe('');
+    expect(countSubmits()).toBe(0);
+  });
+
+  // ------------------------------------------------------------------
+  // PR #33 review: SURFACE GATING — implementation requires Codex.
+  // ------------------------------------------------------------------
+
+  it('implementation on the CHAT surface → BLOCKED "ChatGPT coding environment unavailable or unverified." + ZERO submits (no silent fallback)', async () => {
+    const doc = loadFixture(); // conversational Chat page (composer present)
+    installFixtureComposer(doc);
+    const result = await attach(makeSession({ taskKind: 'implementation' }));
+    expect(result.attached).toBe(false);
+    expect(result.detail).toBe('coding-surface-unavailable');
+    const blocked = sent.find((s) => s.type === 'EXECUTION_BLOCKED');
+    expect(blocked).toBeTruthy();
+    expect(blocked!.payload.reason).toBe(
+      'ChatGPT coding environment unavailable or unverified.',
+    );
+    // The Chat composer received NOTHING — no fallback submit.
+    expect((doc.querySelector('#prompt-textarea') as HTMLElement).textContent).toBe('');
+    expect(countSubmits()).toBe(0);
+  });
+
+  it('detectSurface: /codex → coding-agent (HIGH); /c/<uuid> or root → conversational-chat; /work → work; else unknown', () => {
+    loadFixture({}, 'codex');
+    expect(detectSurface()).toMatchObject({ surface: 'coding-agent', confidence: 'high' });
+    loadFixture();
+    expect(detectSurface().surface).toBe('conversational-chat');
+    window.history.pushState({}, '', '/work');
+    expect(detectSurface()).toMatchObject({ surface: 'work' });
+    window.history.pushState({}, '', '/gpts/some-other-surface');
+    expect(detectSurface().surface).toBe('unknown');
+  });
+
+  it('conversational Chat support is KEPT for conversational tasks (no coding gate)', async () => {
+    const doc = loadFixture(); // Chat surface
+    installFixtureComposer(doc);
+    const result = await attach(makeSession({ taskKind: 'conversational' }));
+    expect(result.attached).toBe(true);
+    expect(countSubmits()).toBe(1);
+    expect(
+      sent.some((s) => s.type === 'EXECUTION_PROGRESS' && /submitted to ChatGPT/.test(String(s.payload.output))),
+    ).toBe(true);
+  });
+
+  it('implementation on an UNKNOWN surface → BLOCKED (never guesses, never submits)', async () => {
+    loadFixture();
+    window.history.pushState({}, '', '/gpts/some-other-surface');
+    const result = await attach(makeSession());
+    expect(result.attached).toBe(false);
+    expect(result.detail).toBe('coding-surface-unavailable');
     expect(countSubmits()).toBe(0);
   });
 
@@ -164,7 +217,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('visible generation failure → failed + stop (no infinite observation)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     setStreaming(doc, true);
@@ -181,7 +234,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('rate-limit error text → failed classification', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     showError(doc, "You've hit your usage limit — too many requests.");
@@ -191,7 +244,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('session-expiry error text → BLOCKED "ChatGPT session unavailable; please sign in again."', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     showError(doc, 'Your session has expired. Please log in to continue.');
@@ -201,7 +254,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('confirmation prompt → BLOCKED "ChatGPT requires user confirmation." (§16 stop + ask)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     const dlg = doc.createElement('div');
@@ -216,12 +269,12 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('cross-conversation scope: observations stop when the user navigates away (§18)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
-    window.history.pushState({}, '', '/c/cgpt-scope-1');
+    window.history.pushState({}, '', '/codex/t/cgpt-scope-1');
     await wait(600);
-    window.history.pushState({}, '', '/c/OTHER-conversation');
+    window.history.pushState({}, '', '/codex/t/OTHER-task');
     agentMessage(doc, 'a different conversation message', 'streaming');
     await wait(3000);
     expect(
@@ -230,7 +283,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('stop() disconnects observers — no further observations (§20)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     await stop();
@@ -242,7 +295,7 @@ describe('ChatGPT page runtime (fixture = observed DOM)', () => {
   });
 
   it('provider output is DATA: XSS payloads extracted as text, never executed (§22/§33)', async () => {
-    const doc = loadFixture();
+    const doc = loadFixture({}, 'codex');
     installFixtureComposer(doc);
     await attach(makeSession());
     agentMessage(

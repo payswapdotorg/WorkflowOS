@@ -36,13 +36,31 @@ const STATUS_ICONS: Record<string, string> = {
   expired: '⏱',
 };
 
+interface ProviderSurfaces {
+  conversationalChat: 'ready' | 'unverified' | 'not-available';
+  codingAgent: 'ready' | 'unverified' | 'not-available';
+  implementationSurface: 'conversational-chat' | 'coding-agent';
+}
+
 interface CompanionState {
   session: SessionView | null;
   connection: 'connected' | 'offline';
   pendingEvents: number;
-  providers: { providerId: string; displayName: string; supported: boolean; adapterAvailable: boolean }[];
+  providers: {
+    providerId: string;
+    displayName: string;
+    supported: boolean;
+    adapterAvailable: boolean;
+    surfaces?: ProviderSurfaces;
+  }[];
   pendingProviderMetadata: { providerId: string; displayName: string; workItem: string }[];
 }
+
+const READINESS_LABEL: Record<ProviderSurfaces['conversationalChat'], string> = {
+  ready: 'Available',
+  unverified: 'Unverified',
+  'not-available': 'Not available',
+};
 
 function send(msg: unknown): Promise<unknown> {
   return chrome.runtime.sendMessage(msg);
@@ -112,6 +130,18 @@ function render(state: CompanionState): void {
     status.textContent = p.adapterAvailable ? 'ready' : 'adapter pending';
     status.className = p.adapterAvailable ? '' : 'pending';
     li.append(name, status);
+    // WORK-030 (PR #33 review): surface readiness — Conversational vs
+    // Coding Agent — so the user sees which execution surface is usable.
+    if (p.surfaces) {
+      const cap = document.createElement('li');
+      cap.className = 'capabilities';
+      const conv = document.createElement('span');
+      conv.textContent = `Conversational: ${READINESS_LABEL[p.surfaces.conversationalChat]}`;
+      const coding = document.createElement('span');
+      coding.textContent = `Coding Agent: ${READINESS_LABEL[p.surfaces.codingAgent]}`;
+      cap.append(conv, coding);
+      li.append(cap);
+    }
     list.append(li);
   }
 }

@@ -4798,7 +4798,7 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
       join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'agent-provider-registry.types.ts'),
       'utf8',
     );
-    expect(src).toMatch(/\{ name: 'Fake \(test\)', provider: 'fake' \}/);
+    expect(src).toMatch(/name: 'Fake \(test\)',\s*provider: 'fake',/);
   });
 });
 
@@ -5186,6 +5186,63 @@ describe('WORK-030 invariants — ChatGPT adapter boundaries', () => {
       expect(agent).toContain(`params.get('${key}')`);
       expect(agent).toContain(`'${value}'`);
     }
+  });
+
+
+  // --- PR #33 review correction: SURFACE gating (coding-agent vs Chat) ---
+
+  it('PR #33 fix: implementation tasks REQUIRE the coding surface — gating precedes any injection (no silent Chat fallback)', () => {
+    const runtime = strip(readFileSync(join(CGPT_DIR, 'chatgpt-page-runtime.ts'), 'utf8'));
+    const surfaceGate = runtime.indexOf("'ChatGPT coding environment unavailable or unverified.'");
+    const noFallback = runtime.indexOf('coding-surface-unavailable');
+    const inject = runtime.indexOf('injectPrompt(');
+    const submit = runtime.indexOf('submit()');
+    expect(surfaceGate, 'surface-block reason must exist').toBeGreaterThan(-1);
+    expect(noFallback, 'no-fallback detail must exist').toBeGreaterThan(-1);
+    expect(surfaceGate, 'surface gating precedes injection').toBeLessThan(inject);
+    expect(noFallback, 'surface gating precedes submit').toBeLessThan(submit);
+    // Implementation tasks carry the requirement from the bridge.
+    const bridge = strip(readFileSync(join(EXT_SRC, 'content', 'chatgpt-bridge.ts'), 'utf8'));
+    expect(bridge).toContain("taskKind: 'implementation'");
+  });
+
+  it('PR #33 fix: openTask targets the CODING surface (chatgpt.com/codex) — never the Chat root', () => {
+    const adapter = strip(readFileSync(join(CGPT_DIR, 'chatgpt-provider-adapter.ts'), 'utf8'));
+    expect(adapter).toContain('`${chatgptOrigin}/codex`');
+    expect(adapter).not.toContain('`${chatgptOrigin}/`;');
+    expect(adapter).toMatch(/describeSurfaces\(\)/);
+    expect(adapter).toContain("implementationSurface: 'coding-agent'");
+  });
+
+  it('PR #33 fix: the surface capability model exists on BOTH sides (backend catalog + extension types)', () => {
+    // Backend catalog: chatgpt implementation surface = coding-agent, coding
+    // readiness 'unverified' — flipping it to 'ready' requires a conscious
+    // live signed-in verification pass (fixture-only proof is insufficient
+    // per the review).
+    const catalog = readFileSync(
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'agent-provider-registry.types.ts'),
+      'utf8',
+    );
+    expect(catalog).toMatch(/implementationSurface: 'coding-agent'/);
+    expect(catalog).toMatch(/codingAgent: 'unverified'/);
+    // Z.ai's implementation surface is unchanged (WORK-029 design).
+    expect(catalog).toMatch(/implementationSurface: 'conversational-chat'/);
+    // Extension: shared surface types + registry exposure.
+    const types = readFileSync(join(EXT_SRC, 'providers', 'types.ts'), 'utf8');
+    expect(types).toMatch(/export type ProviderSurfaceKind/);
+    expect(types).toMatch(/export type SurfaceReadiness/);
+    const registry = readFileSync(join(EXT_SRC, 'providers', 'registry.ts'), 'utf8');
+    expect(registry).toMatch(/describeSurfaces\?\.\(\)/);
+  });
+
+  it('PR #33 fix: a CODING-AGENT fixture exists representing the actual target surface', () => {
+    const fixtureDir = join(EXT_ROOT, 'tests', 'chatgpt', 'fixture');
+    const html = readFileSync(join(fixtureDir, 'codex.html'), 'utf8');
+    expect(html).toContain('data-testid="codex-sidebar"');
+    expect(html).toContain('aria-label="Describe a new coding task"');
+    const agent = readFileSync(join(fixtureDir, 'codex-agent.js'), 'utf8');
+    expect(agent).toMatch(/__codexFixture/);
+    expect(agent).toMatch(/\/codex\/t\//);
   });
 
   it('WORK-030: NO Claude automation exists (§36)', () => {

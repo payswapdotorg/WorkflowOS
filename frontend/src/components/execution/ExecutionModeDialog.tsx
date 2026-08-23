@@ -33,18 +33,33 @@ export interface ExecutionModeDialogProps {
   onSubmit: (input: { mode: ExecutionMode; provider: string; model?: string }) => void;
 }
 
+/** WORK-030 (PR #33 review): readiness label for a provider surface. */
+function surfaceLabel(readiness: 'ready' | 'unverified' | 'not-available'): string {
+  if (readiness === 'ready') return 'Ready';
+  if (readiness === 'unverified') return 'Unverified';
+  return 'Not available';
+}
+
 function ReadinessRow({ p }: { p: ExecutionProviderInfo }) {
   return (
-    <div className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs">
-      <span className="font-medium">{p.name}</span>
-      <span className="flex items-center gap-1.5">
-        <Badge variant={p.nativeApi === 'ready' ? 'default' : 'outline'} className="text-[10px]">
-          Native: {p.nativeApi === 'ready' ? 'Configured' : 'Not configured'}
-        </Badge>
-        <Badge variant={p.externalUi === 'available' ? 'default' : 'outline'} className="text-[10px]">
-          External: {p.externalUi === 'available' ? 'Available' : 'Not supported'}
-        </Badge>
-      </span>
+    <div className="rounded-md border px-3 py-1.5 text-xs">
+      <div className="flex items-center justify-between">
+        <span className="font-medium">{p.name}</span>
+        <span className="flex items-center gap-1.5">
+          <Badge variant={p.nativeApi === 'ready' ? 'default' : 'outline'} className="text-[10px]">
+            Native: {p.nativeApi === 'ready' ? 'Configured' : 'Not configured'}
+          </Badge>
+          <Badge variant={p.externalUi === 'available' ? 'default' : 'outline'} className="text-[10px]">
+            External: {p.externalUi === 'available' ? 'Available' : 'Not supported'}
+          </Badge>
+        </span>
+      </div>
+      {p.capabilities && (
+        <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+          <span>Conversational: {surfaceLabel(p.capabilities.conversationalChat)}</span>
+          <span>Coding Agent: {surfaceLabel(p.capabilities.codingAgent)}</span>
+        </div>
+      )}
     </div>
   );
 }

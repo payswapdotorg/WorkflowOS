@@ -21,6 +21,9 @@ export interface ChatgptAdapterConfig {
 }
 
 /** Token-free page-session payload consumed by the bridge runtime. */
+/** The kind of task being executed — decides the required surface. */
+export type ChatgptTaskKind = 'implementation' | 'conversational';
+
 export interface ChatgptPageSession {
   readonly executionId: string;
   readonly workItemLabel: string;
@@ -33,6 +36,13 @@ export interface ChatgptPageSession {
   readonly promptDigest: string;
   /** True once the prompt was submitted for this execution (reload guard). */
   readonly promptSubmitted: boolean;
+  /**
+   * WORK-030 (PR #33 review): WorkflowOS external executions are
+   * implementation Work Orders — they REQUIRE the coding-agent surface
+   * (Codex). 'conversational' keeps the generic Chat surface usable where
+   * useful, but implementation NEVER silently falls back to it.
+   */
+  readonly taskKind: ChatgptTaskKind;
 }
 
 /** Visible provider phases surfaced in the extension UI. */

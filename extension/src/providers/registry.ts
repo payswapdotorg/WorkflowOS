@@ -7,7 +7,7 @@
  * file stays provider-neutral: no selectors, no provider-specific logic —
  * the import + register calls are the entire provider surface here.
  */
-import type { ExternalProviderAdapter } from './types.js';
+import type { ExternalProviderAdapter, ProviderSurfaceCapabilities } from './types.js';
 
 /** Capability metadata row (concrete — never null providerId). */
 export interface ProviderInfo {
@@ -15,6 +15,8 @@ export interface ProviderInfo {
   readonly displayName: string;
   readonly supported: boolean;
   readonly adapterAvailable: boolean;
+  /** WORK-030 (PR #33 review): surface capabilities when the adapter declares them. */
+  readonly surfaces?: ProviderSurfaceCapabilities;
 }
 import { fakeProviderAdapter } from './fake/fake-provider-adapter.js';
 // WORK-029: the REAL Z.ai adapter (chat.z.ai, user's existing session).
@@ -61,6 +63,7 @@ export class ExternalProviderAdapterRegistry {
       displayName: a.displayName,
       supported: true,
       adapterAvailable: true,
+      surfaces: a.describeSurfaces?.(),
     }));
     const pending = PENDING_PROVIDERS.map((p) => ({
       providerId: p.providerId,

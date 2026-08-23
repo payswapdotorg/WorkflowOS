@@ -23,6 +23,7 @@ import type {
   ExternalProviderAdapter,
   ObservationSink,
   ProviderObservation,
+  ProviderSurfaceCapabilities,
 } from '../types.js';
 import type { ChatgptAdapterConfig } from './chatgpt-types.js';
 
@@ -91,11 +92,29 @@ export class ChatgptProviderAdapter implements ExternalProviderAdapter {
 
   async openTask(session: AdapterSession, runtime: AdapterRuntime): Promise<number | null> {
     const { chatgptOrigin, fixtureOrigin } = await this.config();
-    // Deterministic new-task path: the chatgpt.com ROOT renders a fresh
-    // composer; the adapter never opens an existing conversation (§7).
-    const target = fixtureOrigin ?? `${chatgptOrigin}/`;
+    // PR #33 review: implementation Work Orders target the CODING surface —
+    // the Codex web app at chatgpt.com/codex (OpenAI's official product
+    // URL). The page runtime verifies the surface before submitting and
+    // BLOCKS when it cannot confidently identify Codex (never silently
+    // falling back to conversational Chat). The staged fixture origin may
+    // carry its own path (e.g. http://127.0.0.1:3778/codex/).
+    const target = fixtureOrigin ?? `${chatgptOrigin}/codex`;
     void session;
     return runtime.openTab(target);
+  }
+
+  /**
+   * PR #33 review surface capabilities. Catalog-consistent: the coding
+   * agent (Codex) is 'unverified' until a live signed-in verification pass
+   * — the runtime detects the actual page surface and blocks otherwise, so
+   * fixture-only proof never reports 'ready' here.
+   */
+  describeSurfaces(): ProviderSurfaceCapabilities {
+    return {
+      conversationalChat: 'ready',
+      codingAgent: 'unverified',
+      implementationSurface: 'coding-agent',
+    };
   }
 
   /**
