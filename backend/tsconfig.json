@@ -27,7 +27,8 @@
       "@platform/*": ["src/platform/*"],
       "@api/*": ["src/api/*"],
       "@modules/*": ["src/modules/*"],
-      "@root/*": ["src/*"]
+      "@root/*": ["src/*"],
+      "@/*": ["../frontend/src/*"]
     },
     "types": ["node", "vitest/globals", "@testing-library/jest-dom"]
   },

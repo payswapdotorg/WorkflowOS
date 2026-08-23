@@ -3,11 +3,17 @@ import type { AuthorizationService } from '@modules/auth/index.js';
 import type {
   ProjectRepository,
   ProjectRepositoryAssociationRepository,
+  ProjectAccessRepository,
   ProjectState,
 } from '@modules/projects/index.js';
+import type {
+  MembershipRepository,
+  OrganizationRepository,
+} from '@modules/organizations/index.js';
 import {
   requireProjectAuthorization,
   requireOrganizationAuthorization,
+  requireUser,
   runAuthed,
 } from '../plugins/auth.plugin.js';
 
@@ -31,6 +37,16 @@ export interface ProjectsRouteDeps {
   authorizationService: AuthorizationService;
   projectRepository: ProjectRepository;
   repositoryAssociationRepository: ProjectRepositoryAssociationRepository;
+  /**
+   * Optional — when present, the `GET /projects` (list projects the current
+   * user has access to) and `GET /organizations` (list orgs the current user
+   * belongs to) routes are registered. The frontend product UI uses these for
+   * the project dashboard and the create-project flow. Existing test wiring
+   * that omits these deps is unaffected (the new routes are not registered).
+   */
+  projectAccessRepository?: ProjectAccessRepository;
+  organizationRepository?: OrganizationRepository;
+  membershipRepository?: MembershipRepository;
 }
 
 const VALID_STATES: ProjectState[] = ['active', 'archived'];
@@ -151,4 +167,56 @@ export async function projectsRoutes(app: FastifyInstance, deps: ProjectsRouteDe
       return { repositories: list };
     });
   });
+
+  // ----------------------------------------------------------------------
+  // WORK-022 product UI seams: list projects + organizations for the
+  // current user. The frontend product dashboard uses these to render the
+  // "your projects" grid + the create-project flow's org picker. Both are
+  // read-only + reuse existing repositories (ProjectAccessRepository,
+  // MembershipRepository, ProjectRepository, OrganizationRepository).
+  // Authorization is the same backend AuthorizationService — a user can only
+  // see projects/orgs they have been granted access to. The frontend never
+  // decides access; these endpoints just enumerate what the backend already
+  // authorized for the caller.
+  // ----------------------------------------------------------------------
+
+  // GET /projects — list projects the current user has explicit access to.
+  // Returns `{ projects: Project[] }` (de-duplicated, only projects the user
+  // can read). The shape mirrors other list endpoints (`{ architectures: ... }`).
+  if (deps.projectAccessRepository && deps.projectRepository) {
+    app.get('/projects', async (req, reply) => {
+      return runAuthed(req, async () => {
+        const user = await requireUser(req, reply);
+        const accesses = await deps.projectAccessRepository!.listForUser(user.id);
+        const projectIds = Array.from(new Set(accesses.map((a) => a.projectId)));
+        const projects = await Promise.all(
+          projectIds.map((id) => deps.projectRepository!.findById(id)),
+        );
+        // Filter + return only the projects that exist (defensive: a
+        // project_access row may outlive a deleted project).
+        const present = projects.filter((p): p is NonNullable<typeof p> => p !== null);
+        return { projects: present };
+      });
+    });
+  }
+
+  // GET /organizations — list organizations the current user belongs to.
+  // Returns `{ organizations: Array<Organization & { roleId: string }> }` — the
+  // caller's role on each org is included so the frontend can show "owner",
+  // "admin", etc. The create-project flow uses this to populate the org picker.
+  if (deps.membershipRepository && deps.organizationRepository) {
+    app.get('/organizations', async (req, reply) => {
+      return runAuthed(req, async () => {
+        const user = await requireUser(req, reply);
+        const memberships = await deps.membershipRepository!.listForUser(user.id);
+        const orgs = await Promise.all(
+          memberships.map((m) => deps.organizationRepository!.findById(m.organizationId)),
+        );
+        const present = orgs
+          .map((org, idx) => (org ? { ...org, roleId: memberships[idx]!.roleId } : null))
+          .filter((o): o is NonNullable<typeof o> => o !== null);
+        return { organizations: present };
+      });
+    });
+  }
 }

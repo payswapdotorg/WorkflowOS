@@ -1,19 +1,16 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
+import AppShell from './components/shell/AppShell';
 import LoginPage from './pages/LoginPage';
 import ProjectListPage from './pages/ProjectListPage';
-import ProjectPage from './pages/ProjectPage';
+import ProjectOverviewPage from './pages/ProjectOverviewPage';
+import ArchitecturePage from './pages/ArchitecturePage';
+import RequirementsPage from './pages/RequirementsPage';
+import WorkItemsPage from './pages/WorkItemsPage';
 import WorkItemPage from './pages/WorkItemPage';
-import AuditPage from './pages/AuditPage';
-import Layout from './components/Layout';
+import ActivityPage from './pages/ActivityPage';
+import SettingsPage from './pages/SettingsPage';
 
-/**
- * WORK-022 root application.
- *
- * The frontend is a consumer only — it never decides authorization. The
- * `useAuth` hook only tracks whether an API key has been entered locally;
- * the backend is the authority for every visible state value.
- */
 export default function App() {
   const { hasApiKey } = useAuth();
 
@@ -26,15 +23,66 @@ export default function App() {
   }
 
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<ProjectListPage />} />
-        <Route path="/projects" element={<ProjectListPage />} />
-        <Route path="/projects/:projectId" element={<ProjectPage />} />
-        <Route path="/work-items/:workItemId" element={<WorkItemPage />} />
-        <Route path="/projects/:projectId/audit" element={<AuditPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Layout>
+    <Routes>
+      <Route path="/" element={<ProjectListPage />} />
+      <Route path="/projects" element={<ProjectListPage />} />
+      <Route
+        path="/projects/:projectId"
+        element={
+          <AppShell>
+            <ProjectOverviewPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/architecture"
+        element={
+          <AppShell>
+            <ArchitecturePage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/requirements"
+        element={
+          <AppShell>
+            <RequirementsPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/work-items"
+        element={
+          <AppShell>
+            <WorkItemsPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/work-items/:workItemId"
+        element={
+          <AppShell>
+            <WorkItemPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/activity"
+        element={
+          <AppShell>
+            <ActivityPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/settings"
+        element={
+          <AppShell>
+            <SettingsPage />
+          </AppShell>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

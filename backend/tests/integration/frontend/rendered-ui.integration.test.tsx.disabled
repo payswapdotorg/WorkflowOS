@@ -48,7 +48,7 @@ import { DefaultReviewService } from '../../../src/modules/reviews/internal/revi
 import { DefaultAuditService } from '../../../src/modules/audit/internal/audit-service.js';
 import type { FastifyInstance } from 'fastify';
 
-import ProjectPage from '../../../../frontend/src/pages/ProjectPage';
+import ProjectOverviewPage from '../../../../frontend/src/pages/ProjectOverviewPage';
 import WorkItemPage from '../../../../frontend/src/pages/WorkItemPage';
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ function renderPage(pageKey: 'project' | 'work-item', params: Record<string, str
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
-        <Route path="/projects/:projectId" element={<ProjectPage />} />
+        <Route path="/projects/:projectId" element={<ProjectOverviewPage />} />
         <Route path="/projects/:projectId/audit" element={<div />} />
         <Route path="/work-items/:workItemId" element={<WorkItemPage />} />
       </Routes>
@@ -342,7 +342,7 @@ describe('WORK-022 — Rendered UI integration (PR #21 issue 2 correction)', () 
   // UI-AC-01: render authoritative project/architecture/requirements/WI state.
   // -------------------------------------------------------------------------
 
-  it('UI-AC-01: ProjectPage renders authoritative project + architecture + requirements + criteria', async () => {
+  it('UI-AC-01: ProjectOverviewPage renders authoritative project + architecture + requirements + criteria', async () => {
     stubFetchToServer(server, KEY_A);
     const utils = renderPage('project', { projectId: projectA.id });
 
@@ -524,7 +524,7 @@ describe('WORK-022 — Rendered UI integration (PR #21 issue 2 correction)', () 
 
     // The project name (protected data) must NEVER render.
     await waitFor(() => {
-      // ProjectPage renders an error block when the backend rejects.
+      // ProjectOverviewPage renders an error block when the backend rejects.
       expect(utils.getByText(/Error:/i)).toBeInTheDocument();
     });
     expect(utils.queryByText('Rendered Project A')).not.toBeInTheDocument();

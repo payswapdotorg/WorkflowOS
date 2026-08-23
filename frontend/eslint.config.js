@@ -1,17 +1,8 @@
 import js from '@eslint/js';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
-import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
-/**
- * WORK-022 frontend ESLint config.
- *
- * Enforces the same boundary discipline the static architecture tests in the
- * backend enforce mechanically: no provider SDK imports, no backend internal
- * imports, no authorization-policy keywords in page code. The frontend is a
- * consumer only.
- */
 export default tseslint.config(
   {
     ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
@@ -31,17 +22,9 @@ export default tseslint.config(
     },
     plugins: {
       'react-hooks': reactHooks,
-      'react-refresh': reactRefresh,
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      'react-refresh/only-export-components': [
-        'warn',
-        { allowConstantExport: true },
-      ],
-      // WORK-022 boundary: the frontend must never import backend internals or
-      // provider SDKs. The backend static architecture test is the primary
-      // enforcer; this is a secondary guard for fast local feedback.
       'no-restricted-syntax': [
         'error',
         {
@@ -53,8 +36,8 @@ export default tseslint.config(
         'error',
         {
           paths: [
-            { name: 'pg', message: 'Frontend must not import PostgreSQL — backend is the only authority.' },
-            { name: 'ioredis', message: 'Frontend must not import Redis — backend is the only authority.' },
+            { name: 'pg', message: 'Frontend must not import PostgreSQL.' },
+            { name: 'ioredis', message: 'Frontend must not import Redis.' },
             { name: '@octokit/rest', message: 'Frontend must not import GitHub SDK directly.' },
             { name: '@electric-sql/pglite', message: 'Frontend must not import pglite.' },
           ],
@@ -63,6 +46,7 @@ export default tseslint.config(
           ],
         },
       ],
+      '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },

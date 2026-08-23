@@ -106,6 +106,28 @@ export async function workItemsRoutes(
     });
   });
 
+  // GET /architecture-versions/:versionId/work-items — list work items for a
+  // frozen (or draft) architecture version. The frontend product UI uses this
+  // on the architecture + requirements workspaces to render the work-item
+  // backlog. Authorization walks the same traceability chain as every other
+  // work-item route: ArchitectureVersion → Architecture → Project.
+  // Returns `{ workItems: WorkItem[] }` (consistent with other list endpoints).
+  app.get('/architecture-versions/:versionId/work-items', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { versionId } = req.params as { versionId: string };
+      const version = await deps.architectureVersionRepository.findById(versionId);
+      if (!version) return reply.code(404).send({ error: 'version-not-found' });
+      const arch = await deps.architectureRepository.findById(version.architectureId);
+      if (!arch) return reply.code(404).send({ error: 'architecture-not-found' });
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId: arch.projectId,
+      });
+      const list = await deps.workItemRepository.findByArchitectureVersion(versionId);
+      return { workItems: list };
+    });
+  });
+
   // --- Requirement / Criterion associations ---
 
   app.post('/work-items/:workItemId/requirements', async (req, reply) => {

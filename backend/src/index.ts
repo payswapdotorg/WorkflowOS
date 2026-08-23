@@ -51,6 +51,19 @@ async function main(): Promise<void> {
               authorizationService: app.deps.authorizationService,
               projectRepository: app.deps.projectRepository,
               repositoryAssociationRepository: app.deps.repositoryAssociationRepository,
+              // WORK-022 product UI: optional repositories that enable the
+              // `GET /projects` (list user's projects) and `GET /organizations`
+              // (list user's orgs) routes. When absent, those routes are simply
+              // not registered — existing test wiring is unaffected.
+              ...(app.deps.projectAccessRepository
+                ? { projectAccessRepository: app.deps.projectAccessRepository }
+                : {}),
+              ...(app.deps.membershipRepository
+                ? { membershipRepository: app.deps.membershipRepository }
+                : {}),
+              ...(app.deps.organizationRepository
+                ? { organizationRepository: app.deps.organizationRepository }
+                : {}),
             },
           }
         : {}),

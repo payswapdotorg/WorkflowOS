@@ -23,7 +23,10 @@ import {
 } from './modules/auth/internal/authorization-service.js';
 import type { UserRepository } from '@modules/users/index.js';
 import { PgUserRepository } from './modules/users/internal/pg-user-repository.js';
-import type { OrganizationRepository } from '@modules/organizations/index.js';
+import type {
+  OrganizationRepository,
+  MembershipRepository,
+} from '@modules/organizations/index.js';
 import { PgOrganizationRepository } from './modules/organizations/internal/pg-organization-repository.js';
 import {
   PgMembershipRepository,
@@ -32,6 +35,7 @@ import {
 import type {
   ProjectRepository,
   ProjectRepositoryAssociationRepository,
+  ProjectAccessRepository,
 } from '@modules/projects/index.js';
 import {
   PgProjectRepository,
@@ -105,6 +109,11 @@ import type { AgentRunRepository } from '@modules/agents/index.js';
 import { DefaultLlmGateway } from './modules/llm/internal/llm-gateway.js';
 import type { LlmGateway, LlmExecutionRecordRepository } from '@modules/llm/index.js';
 import { PgLlmExecutionRecordRepository } from './modules/llm/internal/pg-llm-repository.js';
+import { createOpenAiCompatibleAdapterFromEnv } from './modules/llm/internal/openai-compatible-adapter.js';
+import type { LlmProviderAdapter } from './modules/llm/internal/llm.types.js';
+import { createOpenAiAgentAdapterFromEnv } from './modules/agents/internal/openai-agent-adapter.js';
+import type { AgentProviderAdapter } from './modules/agents/internal/agent.types.js';
+import { createS3ObjectStoreFromEnv, type S3ObjectStore } from './platform/storage/s3-object-store.js';
 import { DefaultArchitectService } from './modules/llm/internal/architect-service.js';
 import type { ArchitectService } from '@modules/llm/index.js';
 import { DefaultVerificationService } from './modules/verification/internal/verification-service.js';
@@ -151,8 +160,16 @@ export interface AppDeps {
   userRepository?: UserRepository;
   /** WORK-002: organization repository. Present when a database is configured. */
   organizationRepository?: OrganizationRepository;
+  /** WORK-002: organization membership repository. Present when a database is configured.
+   *  Exposed so the projects route can serve `GET /organizations` (list orgs for
+   *  the current user — the frontend create-project flow uses this). */
+  membershipRepository?: MembershipRepository;
   /** WORK-002: project repository. Present when a database is configured. */
   projectRepository?: ProjectRepository;
+  /** WORK-002: project access repository. Present when a database is configured.
+   *  Exposed so the projects route can serve `GET /projects` (list projects the
+   *  current user has access to — the frontend dashboard uses this). */
+  projectAccessRepository?: ProjectAccessRepository;
   /** WORK-004: project repository association repository. Present when a database is configured. */
   repositoryAssociationRepository?: ProjectRepositoryAssociationRepository;
   /** WORK-004: specification repository. Present when a database is configured. */
@@ -300,13 +317,20 @@ export async function buildApp(
     }
   }
   let objectStore: ObjectStore;
-  if (config.objectStorageDir) {
+  // PRODUCTION READINESS: S3-compatible object storage (Cloudflare R2).
+  // When OBJECT_STORAGE_PROVIDER=s3, use the S3 adapter. Otherwise fall back
+  // to filesystem (local dev) or in-memory (tests).
+  const s3Store = createS3ObjectStoreFromEnv();
+  if (s3Store) {
+    objectStore = s3Store;
+    logger.info('app.object_store.s3', { bucket: s3Store['config' as keyof S3ObjectStore] ? 'configured' : 'unknown' });
+  } else if (config.objectStorageDir) {
     objectStore = new FsObjectStore(config.objectStorageDir);
   } else {
     objectStore = new InMemoryObjectStore();
     if (!options.queue) {
       logger.warn('app.object_store.in_memory', {
-        reason: 'OBJECT_STORAGE_DIR not set; using non-durable in-memory object store',
+        reason: 'OBJECT_STORAGE_PROVIDER not s3 and OBJECT_STORAGE_DIR not set; using non-durable in-memory object store',
       });
     }
   }
@@ -342,7 +366,9 @@ export async function buildApp(
   let apiKeyProvisioner: ApiKeyCredentialProvisioner | undefined;
   let userRepository: UserRepository | undefined;
   let organizationRepository: OrganizationRepository | undefined;
+  let membershipRepo: MembershipRepository | undefined;
   let projectRepository: ProjectRepository | undefined;
+  let projectAccessRepo: ProjectAccessRepository | undefined;
   let repositoryAssociationRepository: ProjectRepositoryAssociationRepository | undefined;
   let specificationRepository: SpecificationRepository | undefined;
   let specificationVersionRepository: SpecificationVersionRepository | undefined;
@@ -383,11 +409,11 @@ export async function buildApp(
   const secretStore: SecretStore = new EnvSecretStore();
   if (database) {
     userRepository = new PgUserRepository(database);
-    const membershipRepo = new PgMembershipRepository(database);
+    membershipRepo = new PgMembershipRepository(database);
     const rolePermissionRepo = new PgRolePermissionRepository(database);
     organizationRepository = new PgOrganizationRepository(database);
     projectRepository = new PgProjectRepository(database);
-    const projectAccessRepo = new PgProjectAccessRepository(database);
+    projectAccessRepo = new PgProjectAccessRepository(database);
     repositoryAssociationRepository = new PgProjectRepositoryAssociationRepository(database);
     specificationRepository = new PgSpecificationRepository(database);
     specificationVersionRepository = new PgSpecificationVersionRepository(database);
@@ -428,11 +454,31 @@ export async function buildApp(
     // These services were previously only constructed in the test/E2E
     // composition. Production must wire them so every route group works.
     // WORK-012: agent gateway + run repository.
+    // PRODUCTION READINESS: use the OpenAI-compatible agent adapter when
+    // AGENT_API_KEY / LLM_API_KEY is set. Falls back to no adapters (tests inject FakeAgentAdapter).
     agentRunRepository = new PgAgentRunRepository(database);
-    agentGateway = new DefaultAgentGateway(database, logger, [], 3);
+    const agentAdapters: AgentProviderAdapter[] = [];
+    const agentAdapter = createOpenAiAgentAdapterFromEnv();
+    if (agentAdapter) {
+      agentAdapters.push(agentAdapter);
+      logger.info('app.agent.adapter', { provider: agentAdapter.providerName });
+    } else {
+      logger.warn('app.agent.no_adapter', { reason: 'AGENT_API_KEY not set; agent runs will fail' });
+    }
+    agentGateway = new DefaultAgentGateway(database, logger, agentAdapters, 3);
     // WORK-013/014: LLM gateway + architect service.
+    // PRODUCTION READINESS: use the OpenAI-compatible adapter when LLM_API_KEY
+    // is set. Falls back to no adapters (tests inject FakeLlmAdapter).
     llmExecutionRecordRepository = new PgLlmExecutionRecordRepository(database);
-    llmGateway = new DefaultLlmGateway(database, logger, [], 3);
+    const llmAdapters: LlmProviderAdapter[] = [];
+    const openaiAdapter = createOpenAiCompatibleAdapterFromEnv();
+    if (openaiAdapter) {
+      llmAdapters.push(openaiAdapter);
+      logger.info('app.llm.adapter', { provider: openaiAdapter.providerName });
+    } else {
+      logger.warn('app.llm.no_adapter', { reason: 'LLM_API_KEY not set; LLM routes will return errors' });
+    }
+    llmGateway = new DefaultLlmGateway(database, logger, llmAdapters, 3);
     architectService = new DefaultArchitectService(database, llmGateway, workOrderRepository, logger);
     // WORK-008/015: GitHub CI evidence ingestion + installation repo.
     githubInstallationRepository = new PgGitHubInstallationRepository(database);
@@ -513,7 +559,9 @@ export async function buildApp(
       apiKeyProvisioner,
       userRepository,
       organizationRepository,
+      membershipRepository: membershipRepo,
       projectRepository,
+      projectAccessRepository: projectAccessRepo,
       repositoryAssociationRepository,
       specificationRepository,
       specificationVersionRepository,
