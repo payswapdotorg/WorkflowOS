@@ -17,7 +17,7 @@ WorkflowOS
   → WorkflowOS observes authoritative GitHub/CI/verification/review state
 ```
 
-## Status (WORK-028)
+## Status (WORK-029)
 
 - ✅ Provider-neutral extension architecture (background service worker, thin
   content scripts, popup, message protocol, provider adapter registry).
@@ -26,9 +26,13 @@ WorkflowOS
   buffering + bounded backoff.
 - ✅ Deterministic **fake provider** (an extension page — no DOM scraping)
   proving the full lifecycle in dev/CI.
-- ⏳ Real provider adapters: **Z.ai = WORK-029**, ChatGPT = WORK-030,
-  Claude = WORK-031. No provider-specific DOM automation exists yet — by
-  design.
+- ✅ **REAL Z.ai adapter (WORK-029)** — drives `https://chat.z.ai` (the
+  user's existing session; prompt-digest-verified single injection;
+  multi-signal completion; blocked/failure classification). See
+  `src/providers/zai/README.md` for the observed UI contract + selector
+  strategy + fixture E2E.
+- ⏳ ChatGPT = WORK-030, Claude = WORK-031 (placeholders only — no
+  automation).
 
 ## Local development
 
@@ -54,14 +58,21 @@ bun run build:watch # rebuild on change
 
 ### End-to-end with a real backend
 
-The WORK-028 browser E2E loads the built extension into a persistent Chromium
-context and drives the real backend + SPA:
+The extension browser E2Es load the built extension into a persistent
+Chromium context and drive the real backend + SPA:
 
 ```bash
 cd extension && bun run build
 cd ../backend
+# WORK-028 fake-provider loop + WORK-029 Z.ai-adapter fixture loop:
 bunx playwright test --config playwright-extension.config.ts
 ```
+
+The WORK-029 spec starts its own local fixture server (127.0.0.1:3777)
+reproducing the OBSERVED chat.z.ai DOM — no live Z.ai account needed. See
+`src/providers/zai/README.md` for the observed contract, the optional live
+smoke test plan (`ZAI_LIVE_E2E=true`, not shipped enabled), and how to
+diagnose Z.ai UI changes.
 
 ## Architecture
 
@@ -74,7 +85,9 @@ extension/
     workflowos/               WorkflowOSClient (exactly two endpoints) +
                               ExecutionReporter (idempotency, backoff, expiry)
     providers/                provider-neutral adapter contract, detector,
-                              registry, fake/ (deterministic test adapter)
+                              registry, fake/ (deterministic test adapter),
+                              zai/ (REAL chat.z.ai adapter — selectors +
+                              page runtime + observed-contract README)
     background/               MV3 service worker: sessions, handoff
                               redemption, adapter lifecycle, tab lifecycle,
                               message routing
@@ -102,13 +115,17 @@ envelope carries `type`, `executionId`, `timestamp`, `payload`.
 `ExternalProviderAdapter` (`src/providers/types.ts`) is provider-neutral:
 `matchesPage`, `openTask`, `injectPrompt`, `observeExecution`,
 `detectCompletion`, `detectFailure`, `collectObservations`, `stop`. Adapters
-are registered in `ExternalProviderAdapterRegistry`. WORK-028 ships only the
-**fake** adapter; Z.ai / ChatGPT / Claude are placeholder metadata
-(adapter pending) until WORK-029/030/031.
+are registered in `ExternalProviderAdapterRegistry`.
 
-**WORK-029 integration point:** implement `zaiAdapter` in
-`src/providers/zai/`, register it, and extend the manifest only if additional
-host permissions are genuinely required (z.ai is already covered).
+Registered today: the **fake** adapter (deterministic test mode) and the
+**Z.ai** adapter (WORK-029 — all Z.ai DOM knowledge isolated in
+`src/providers/zai/`; see its README). ChatGPT/Claude remain placeholder
+metadata until WORK-030/031.
+
+**WORK-030/031 integration point:** mirror the Z.ai layout —
+`providers/<id>/` with selectors + page runtime + observed-contract README,
+register the adapter, and add a `<id>-bridge` manifest entry only if the
+page runtime needs a dedicated content script.
 
 ## Security model
 

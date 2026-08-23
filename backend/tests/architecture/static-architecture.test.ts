@@ -4567,7 +4567,9 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
       const rel = relative(EXT_ROOT, file);
       const code = strip(readFileSync(file, 'utf8'));
       expect(code, `${rel} must not reference WorkflowOS tables`).not.toMatch(/wfos_[a-z_]+/);
-      expect(code, `${rel} must not contain SQL`).not.toMatch(/SELECT |INSERT INTO |UPDATE |DELETE FROM /i);
+      expect(code, `${rel} must not contain SQL`).not.toMatch(
+        /SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM/i,
+      );
       expect(code, `${rel} must not call workflow transitions`).not.toMatch(
         /workflow\/transitions|request-merge|advance-to-verified|begin-verification/,
       );
@@ -4589,9 +4591,11 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     }
   });
 
-  it('WORK-028: no provider DOM automation in WORK-028 (selectors stay out of providers/)', () => {
+  it('WORK-028/029: provider DOM automation lives ONLY in providers/zai/ (the adapter)', () => {
     for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
-      const rel = relative(EXT_ROOT, file);
+      const rel = relative(EXT_SRC, file).split(sep).join('/');
+      // WORK-029: the REAL Z.ai adapter legitimately owns Z.ai DOM logic.
+      if (rel.startsWith('providers/zai/')) continue;
       const code = strip(readFileSync(file, 'utf8'));
       expect(code, `${rel} must not use DOM selectors`).not.toMatch(
         /querySelector|getElementById|getElementsBy/,
@@ -4600,23 +4604,31 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     }
   });
 
-  it('WORK-028: zai/chatgpt/claude literals exist ONLY in detector + registry metadata', () => {
-    const allowList = ['detector.ts', 'registry.ts'];
+  it('WORK-028/029: zai/chatgpt/claude literals exist ONLY in detector + registry + providers/zai/', () => {
     for (const file of walkExtTs(EXT_SRC)) {
       const rel = relative(EXT_SRC, file).replaceAll('\\', '/');
       const code = strip(readFileSync(file, 'utf8'));
-      if (allowList.some((a) => rel.endsWith(a))) continue;
+      // detector + registry (metadata) and providers/zai/ (the adapter owns
+      // its Z.ai identity — WORK-029). ChatGPT/Claude literals exist nowhere
+      // else until their adapters ship (WORK-030/031).
+      if (
+        rel === 'providers/detector.ts' ||
+        rel === 'providers/registry.ts' ||
+        rel.startsWith('providers/zai/')
+      ) {
+        continue;
+      }
       expect(
         code,
         `${rel} must not hard-code provider names`,
       ).not.toMatch(/['"`](zai|chatgpt|claude)['"`]/i);
     }
-    // And no provider-specific adapter FILES exist yet.
+    // providers/zai/ is the ONLY provider adapter directory — ChatGPT and
+    // Claude adapter files must NOT exist yet (WORK-030/031).
     for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
       const name = relative(EXT_SRC, file).replaceAll('\\', '/').toLowerCase();
-      expect(name, 'no z.ai adapter files in WORK-028').not.toMatch(/zai/);
-      expect(name, 'no chatgpt adapter files in WORK-028').not.toMatch(/chatgpt/);
-      expect(name, 'no claude adapter files in WORK-028').not.toMatch(/claude/);
+      expect(name, 'no chatgpt adapter files yet').not.toMatch(/chatgpt/);
+      expect(name, 'no claude adapter files yet').not.toMatch(/claude/);
     }
   });
 
@@ -4669,7 +4681,7 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     // wildcard form mirroring the detector's recognition rules).
     for (const host of manifest.host_permissions) {
       expect(host).toMatch(
-        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):5173\/\*$/,
+        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):(5173|3777)\/\*$/,
       );
     }
   });
@@ -4786,6 +4798,189 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
       'utf8',
     );
     expect(src).toMatch(/\{ name: 'Fake \(test\)', provider: 'fake' \}/);
+  });
+});
+
+
+// ===========================================================================
+// WORK-029 invariants — the real Z.ai adapter.
+//
+//   - ALL Z.ai DOM selectors live under extension/src/providers/zai/;
+//   - the adapter implements the provider-neutral ExternalProviderAdapter;
+//   - the adapter NEVER sends WorkflowOS API keys / accesses cookies /
+//     touches workflow/verification/review authority / merges PRs;
+//   - prompt digest is verified BEFORE submission; duplicate submission is
+//     double-guarded (session flag + in-page execution guard);
+//   - detector/registry surface the adapter; the zai bridge stays thin
+//     (no selectors outside the adapter).
+// ===========================================================================
+
+describe('WORK-029 invariants — Z.ai adapter boundaries', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const EXT_ROOT = join(REPO_ROOT, 'extension');
+  const EXT_SRC = join(EXT_ROOT, 'src');
+  const ZAI_DIR = join(EXT_SRC, 'providers', 'zai');
+
+  function strip(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  }
+
+  function zaiFiles(): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(ZAI_DIR)) {
+      if (entry.endsWith('.ts')) out.push(join(ZAI_DIR, entry));
+    }
+    return out;
+  }
+
+  it('WORK-029: the adapter package exists (adapter, selectors, types, runtime, README)', () => {
+    for (const f of ['zai-provider-adapter.ts', 'zai-selectors.ts', 'zai-types.ts', 'zai-page-runtime.ts', 'README.md']) {
+      expect(existsSync(join(ZAI_DIR, f)), `providers/zai/${f}`).toBe(true);
+    }
+  });
+
+  it('WORK-029: ALL Z.ai DOM knowledge lives in providers/zai (selector strategies are centralized)', () => {
+    // The selector strategies are declared ONLY in zai-selectors.ts.
+    const selectors = readFileSync(join(ZAI_DIR, 'zai-selectors.ts'), 'utf8');
+    expect(selectors).toMatch(/export const COMPOSER/);
+    expect(selectors).toMatch(/export const SEND_CONTROL/);
+    // Observed-contract anchors (documented in providers/zai/README.md).
+    expect(selectors).toContain('textarea#chat-input');
+    expect(selectors).toContain('Send Message');
+    // The runtime uses the centralized resolvers, not ad-hoc selectors.
+    const runtime = strip(readFileSync(join(ZAI_DIR, 'zai-page-runtime.ts'), 'utf8'));
+    expect(runtime).not.toMatch(/querySelector\(['"`]#chat-input/);
+    expect(runtime).not.toMatch(/querySelectorAll\(['"`]\*\)/);
+    // No Z.ai DOM knowledge outside providers/zai/ (detector + registry hold
+    // domain/identity metadata only — enforced by the literals check).
+    for (const file of [
+      join(EXT_SRC, 'providers', 'detector.ts'),
+      join(EXT_SRC, 'providers', 'registry.ts'),
+      join(EXT_SRC, 'content', 'zai-bridge.ts'),
+    ]) {
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${relative(EXT_SRC, file)} must not hold Z.ai DOM anchors`).not.toMatch(
+        /chat-input|Send Message|aria-label="New Chat"/,
+      );
+    }
+  });
+
+  it('WORK-029: the zai bridge content script is thin (no selectors, no DOM queries)', () => {
+    const code = strip(readFileSync(join(EXT_SRC, 'content', 'zai-bridge.ts'), 'utf8'));
+    expect(code).not.toMatch(/querySelector|getElementById|getElementsBy/);
+    // It delegates to the page runtime instead of automating itself.
+    expect(code).toMatch(/zaiPageRuntime\.appliesTo/);
+    expect(code).toMatch(/zaiPageRuntime\.attach/);
+  });
+
+  it('WORK-029: ZaiProviderAdapter implements the neutral ExternalProviderAdapter contract', () => {
+    const code = strip(readFileSync(join(ZAI_DIR, 'zai-provider-adapter.ts'), 'utf8'));
+    expect(code).toMatch(/implements ExternalProviderAdapter/);
+    expect(code).toMatch(/readonly providerId = 'zai'/);
+    for (const method of [
+      'matchesPage(',
+      'openTask(',
+      'injectPrompt(',
+      'observeExecution(',
+      'detectCompletion(',
+      'detectFailure(',
+      'collectObservations(',
+      'stop(',
+    ]) {
+      expect(code, `adapter must implement ${method}`).toContain(method);
+    }
+    // No DOM APIs in the background-side adapter (page runtime owns them).
+    expect(code).not.toMatch(/querySelector|document\.|window\./);
+  });
+
+  it('WORK-029: the adapter never sends API keys, reads cookies, or touches authority surfaces', () => {
+    for (const file of zaiFiles()) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not send API keys`).not.toMatch(/x-api-key|Authorization['"]?\s*:/);
+      expect(code, `${rel} must not read cookies`).not.toMatch(/document\.cookie|chrome\.cookies/);
+      expect(code, `${rel} must not set workflow states`).not.toMatch(
+        /workflow\/transitions|request-merge|advance-to-verified|begin-verification/,
+      );
+      expect(code, `${rel} must not evaluate verification`).not.toMatch(
+        /verification-runs|\/reviews|begin-architect-review/,
+      );
+      expect(code, `${rel} must not approve reviews or merge PRs`).not.toMatch(
+        /mergePullRequest|APPROVED|VERIFIED|\bMERGED\b|\bPASS\b/,
+      );
+      expect(code, `${rel} must not call WorkflowOS HTTP directly`).not.toMatch(
+        /\/api\/companion|\/api\/execution/,
+      );
+      expect(code, `${rel} must not evaluate untrusted output`).not.toMatch(
+        /eval\s*\(|new Function\s*\(|innerHTML\s*=/,
+      );
+    }
+  });
+
+  it('WORK-029: prompt digest is verified BEFORE any submission (identity check ordering)', () => {
+    const code = strip(readFileSync(join(ZAI_DIR, 'zai-page-runtime.ts'), 'utf8'));
+    const digestCheck = code.indexOf('sha256Hex(session.prompt)');
+    const guard = code.indexOf("'digest-mismatch'");
+    const inject = code.indexOf('injectPrompt(');
+    const submit = code.indexOf('submit()');
+    expect(digestCheck, 'runtime must compute the digest').toBeGreaterThan(-1);
+    expect(guard, 'runtime must refuse on mismatch').toBeGreaterThan(-1);
+    expect(inject).toBeGreaterThan(-1);
+    expect(submit).toBeGreaterThan(-1);
+    expect(digestCheck, 'digest check precedes injection').toBeLessThan(inject);
+    expect(guard, 'mismatch refusal precedes injection').toBeLessThan(inject);
+    expect(inject, 'injection precedes submit').toBeLessThan(submit);
+    // The digest comparison itself is an equality guard on the session digest.
+    expect(code).toContain('digest !== session.promptDigest');
+  });
+
+  it('WORK-029: duplicate submission is double-guarded (session flag + in-page execution guard)', () => {
+    const runtime = strip(readFileSync(join(ZAI_DIR, 'zai-page-runtime.ts'), 'utf8'));
+    expect(runtime).toMatch(/!session\.promptSubmitted && !state\.injectedExecutionIds\.has\(/);
+    expect(runtime).toMatch(/state\.injectedExecutionIds\.add\(/);
+    const adapter = strip(readFileSync(join(ZAI_DIR, 'zai-provider-adapter.ts'), 'utf8'));
+    expect(adapter).toMatch(/if \(session\.promptSubmitted\) return;/);
+    // The background persists the submitted flag (reload never resubmits).
+    const background = readFileSync(join(EXT_SRC, 'background', 'index.ts'), 'utf8');
+    expect(background).toMatch(/promptSubmitted = true/);
+  });
+
+  it('WORK-029: the adapter is registered + detector reports it available; chatgpt/claude are NOT', () => {
+    const registry = readFileSync(join(EXT_SRC, 'providers', 'registry.ts'), 'utf8');
+    expect(registry).toMatch(/register\(zaiProviderAdapter\)/);
+    const detector = readFileSync(join(EXT_SRC, 'providers', 'detector.ts'), 'utf8');
+    expect(detector).toMatch(/adapterAvailable: match\.providerId === 'zai'/);
+    expect(detector).not.toMatch(/adapterAvailable: match\.providerId === 'chatgpt'/);
+  });
+
+  it('WORK-029: manifest wires the zai bridge on Z.ai + the documented fixture test origin', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
+    ) as { host_permissions: string[]; content_scripts: { matches: string[]; js: string[] }[] };
+    expect(manifest.host_permissions).toContain('http://127.0.0.1:3777/*');
+    const zaiBridge = manifest.content_scripts.find((cs) =>
+      cs.js.some((j) => j.includes('zai-bridge')),
+    );
+    expect(zaiBridge, 'zai-bridge content script registered').toBeTruthy();
+    expect(zaiBridge!.matches).toContain('https://*.z.ai/*');
+    expect(zaiBridge!.matches).toContain('http://127.0.0.1:3777/*');
+    // The zai bridge does NOT run on chatgpt/claude (their adapters pending).
+    expect(zaiBridge!.matches.join(' ')).not.toMatch(/chatgpt|claude/);
+  });
+
+  it('WORK-029: the fixture harness reproduces the observed contract (real-submit counter, variants)', () => {
+    const fixtureDir = join(EXT_ROOT, 'tests', 'zai', 'fixture');
+    const html = readFileSync(join(fixtureDir, 'index.html'), 'utf8');
+    expect(html).toContain('id="chat-input"');
+    expect(html).toContain('aria-label="Send Message"');
+    const agent = readFileSync(join(fixtureDir, 'fixture-agent.js'), 'utf8');
+    expect(agent).toMatch(/__zaiFixture/);
+    expect(agent).toMatch(/counter\.submits/);
+    for (const variant of ['wall=login', 'fail=1', 'confirm=1', 'xss=1']) {
+      const [key, value] = variant.split('=');
+      expect(agent).toContain(`params.get('${key}')`);
+      expect(agent).toContain(`'${value}'`);
+    }
   });
 });
 

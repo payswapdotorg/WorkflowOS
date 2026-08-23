@@ -48,6 +48,17 @@ export interface ExternalExecutionSession {
   status: CompanionSessionStatus;
   startedAt: number | null;
   openedTabId: number | null;
+  /**
+   * WORK-029: true once the provider prompt was submitted for this
+   * execution — persisted so a page reload NEVER resubmits (§28).
+   */
+  promptSubmitted: boolean;
+  /** WORK-029: visible provider phase for the popup (§9). */
+  phase: string | null;
+  /** WORK-029: human-readable reason while BLOCKED (§26). */
+  blockedReason: string | null;
+  /** WORK-029: provider conversation reference (safe metadata, e.g. URL path). */
+  externalSessionRef: string | null;
 }
 
 /** Serializable view for the popup / provider pages — NO token material. */
@@ -61,8 +72,13 @@ export interface SessionView {
   readonly status: CompanionSessionStatus;
   readonly startedAt: number | null;
   readonly prompt: string;
+  readonly promptDigest: string;
   readonly verificationRequirements: readonly string[];
   readonly workflowosOrigin: string;
+  readonly promptSubmitted: boolean;
+  readonly phase: string | null;
+  readonly blockedReason: string | null;
+  readonly externalSessionRef: string | null;
 }
 
 export function toSessionView(session: ExternalExecutionSession): SessionView {
@@ -77,7 +93,12 @@ export function toSessionView(session: ExternalExecutionSession): SessionView {
     status: session.status,
     startedAt: session.startedAt,
     prompt: session.prompt,
+    promptDigest: session.promptDigest,
     verificationRequirements: session.verificationRequirements,
     workflowosOrigin: session.workflowosOrigin,
+    promptSubmitted: session.promptSubmitted,
+    phase: session.phase,
+    blockedReason: session.blockedReason,
+    externalSessionRef: session.externalSessionRef,
   };
 }

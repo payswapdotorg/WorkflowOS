@@ -1,26 +1,28 @@
 /**
- * WORK-028 — Companion extension browser E2E.
+ * WORK-029 — Z.ai adapter fixture browser E2E.
  *
- * Proves the REAL extension (loaded unpacked into a persistent Chromium
- * context — MV3 service worker + content scripts) communicates with the REAL
- * WorkflowOS backend through the full §27 loop:
+ * Proves the REAL extension + REAL Z.ai adapter code (zai-bridge content
+ * script + zai-page-runtime + ZaiProviderAdapter) against a LOCAL fixture
+ * server that reproduces the OBSERVED chat.z.ai DOM (2026-08-24). No live
+ * Z.ai dependency:
  *
- *   WorkflowOS SPA (Vite) → Start Implementation → External → Fake provider
- *   → Open with Companion → /companion/handoff#ref=… → extension bridge
- *   content script → background redeems the ONE-TIME handoff token
- *   (POST /api/companion/redeem, no API key) → session → fake provider
- *   extension page opens (auto lifecycle) → execution events reported with
- *   the scoped x-callback-token → WorkflowOS execution reaches `completed`.
+ *   external execution (provider=zai)
+ *     → Open with Companion
+ *     → adapter opens the fixture (fixture origin staged in storage.session)
+ *     → provider detected as Z.ai
+ *     → prompt injected (digest verified in-page)
+ *     → prompt sent EXACTLY ONCE (fixture counter)
+ *     → fixture agent progresses (streaming → repository observations)
+ *     → completion detected (quiet + stable + no streaming marker)
+ *     → WorkflowOS receives started/progress/completed (x-callback-token)
  *
- * Also proves: the popup renders the completed session; the consumed handoff
- * token cannot be redeemed twice (409); COMPANION_HANDOFF_REDEEMED +
- * EXECUTION_STARTED/COMPLETED audit events exist; the one-time ref appears
- * in the URL fragment only.
- *
- * Requires: `cd extension && bun install && bun run build` beforehand.
+ * Also proves: blocked login-wall flow (§5), XSS payload inertness (§35),
+ * and the popup Z.ai session view.
  */
 import { test, expect, chromium } from '@playwright/test';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,69 +60,89 @@ import type { Worker } from 'playwright';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_DIST = join(HERE, '..', '..', '..', 'extension', 'dist');
+const FIXTURE_DIR = join(HERE, '..', '..', '..', 'extension', 'tests', 'zai', 'fixture');
+const FIXTURE_PORT = 3777;
+const FIXTURE_ORIGIN = `http://127.0.0.1:${FIXTURE_PORT}`;
 
-const API_KEY = 'raw-key-work028-browser-e2e';
+const API_KEY = 'raw-key-work029-browser-e2e';
 
+let fixtureServer: Server;
 let stack: TestAuthStack;
 let server: FastifyInstance;
-let auditService: DefaultAuditService;
 let workflowEngine: DefaultWorkflowEngine;
 let project: { id: string };
 let version: { id: string };
 let requirementId: string;
 let criterionId: string;
 
+async function startFixtureServer(): Promise<void> {
+  fixtureServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', FIXTURE_ORIGIN);
+    const path = url.pathname === '/' ? '/index.html' : url.pathname;
+    try {
+      const file = join(FIXTURE_DIR, path.replace(/^\//, ''));
+      const body = await readFile(file);
+      res.writeHead(200, {
+        'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/html',
+      });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end('not found');
+    }
+  });
+  await new Promise<void>((resolve) => fixtureServer.listen(FIXTURE_PORT, '127.0.0.1', resolve));
+}
+
 test.beforeAll(async () => {
-  // The extension must be built first (CI workflow does this explicitly).
   test.skip(!existsSync(EXTENSION_DIST), 'extension/dist not built — run `cd extension && bun run build`');
+  await startFixtureServer();
 
   process.env.AGENT_PROVIDER_NAME = 'fake';
   process.env.AGENT_DEFAULT_MODEL = 'test-agent-model';
-  process.env.AGENT_API_KEY = 'work028-test-agent-key';
+  process.env.AGENT_API_KEY = 'work029-test-agent-key';
 
   stack = await buildAuthStack({
-    WFOS_TEST_WORK028_BROWSER_KEY: API_KEY,
-    AGENT_API_KEY: 'work028-test-agent-key',
+    WFOS_TEST_WORK029_BROWSER_KEY: API_KEY,
+    AGENT_API_KEY: 'work029-test-agent-key',
   });
-  const org = await stack.organizationRepository.create({ name: 'WORK-028 Browser E2E Org' });
+  const org = await stack.organizationRepository.create({ name: 'WORK-029 Browser E2E Org' });
   const user = await stack.userRepository.upsertByExternalId({
-    externalId: 'work028-browser-user',
-    displayName: 'WORK-028 Browser User',
+    externalId: 'work029-browser-user',
+    displayName: 'WORK-029 Browser User',
   });
   await stack.membershipRepository.assign({ userId: user.id, organizationId: org.id, roleId: 'owner' });
   await stack.apiKeyProvisioner.provision({
-    keyId: 'work028-browser-key',
-    secretRef: 'WFOS_TEST_WORK028_BROWSER_KEY',
-    externalId: 'work028-browser-user',
-    label: 'WORK-028 Browser Key',
+    keyId: 'work029-browser-key',
+    secretRef: 'WFOS_TEST_WORK029_BROWSER_KEY',
+    externalId: 'work029-browser-user',
+    label: 'WORK-029 Browser Key',
     rawKey: API_KEY,
   });
-  project = await stack.projectRepository.create({ organizationId: org.id, name: 'WORK-028 Project' });
+  project = await stack.projectRepository.create({ organizationId: org.id, name: 'WORK-029 Project' });
   await stack.projectAccessRepository.grant({ userId: user.id, projectId: project.id, roleId: 'owner' });
 
-  // Architecture chain.
-  const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'W28 Arch' });
+  const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'W29 Arch' });
   version = await stack.architectureVersionRepository.create({
     architectureId: arch.id,
-    contentInline: '# W28 constraints',
+    contentInline: '# W29 constraints',
   });
   await stack.architectureVersionRepository.transitionState(version.id, 'frozen', user.id);
   const req = await stack.requirementRepository.create({
     architectureVersionId: version.id,
-    requirementId: 'REQ-W028-001',
-    title: 'Companion loop works',
-    description: 'The extension completes a full execution lifecycle',
+    requirementId: 'REQ-W029-001',
+    title: 'Z.ai adapter loop works',
+    description: 'The adapter completes a full fixture execution lifecycle',
   });
   requirementId = req.id;
   const crit = await stack.acceptanceCriterionRepository.create({
     requirementId: req.id,
-    criterionId: 'AC-W028-1',
-    description: 'Execution completes via the Companion',
+    criterionId: 'AC-W029-1',
+    description: 'Execution completes via the Z.ai adapter',
     verificationExpectation: 'integration-test',
   });
   criterionId = crit.id;
 
-  // Backend topology (mirrors the work-027 spec + the companion route group).
   const capture = new CaptureStream();
   const logger = createLogger({ level: 'warn', destination: capture });
   const queue = new InMemoryQueue();
@@ -128,7 +150,7 @@ test.beforeAll(async () => {
   const agentGateway = new DefaultAgentGateway(stack.db.client, logger, [fakeAgent], 3);
   const agentRunRepo = new PgAgentRunRepository(stack.db.client);
   const reviewService = new DefaultReviewService(stack.db.client, stack.workItemRepository, logger);
-  auditService = new DefaultAuditService(stack.db.client, stack.db.logger);
+  const auditService = new DefaultAuditService(stack.db.client, stack.db.logger);
   workflowEngine = new DefaultWorkflowEngine(stack.db.client, stack.db.logger);
 
   const implementationContextRepo = new PgImplementationContextRepository(stack.db.client);
@@ -249,21 +271,6 @@ test.beforeAll(async () => {
       agentProviderRegistryService,
       agentProviderConfigRepository: new PgAgentProviderConfigRepository(stack.db.client),
     },
-    reviews: {
-      authorizationService: stack.authorizationService,
-      architectureRepository: stack.architectureRepository,
-      architectureVersionRepository: stack.architectureVersionRepository,
-      workItemRepository: stack.workItemRepository,
-      reviewService,
-    },
-    audit: {
-      authorizationService: stack.authorizationService,
-      projectRepository: stack.projectRepository,
-      architectureRepository: stack.architectureRepository,
-      architectureVersionRepository: stack.architectureVersionRepository,
-      workItemRepository: stack.workItemRepository,
-      auditQuery: auditService,
-    },
     execution: {
       authorizationService: stack.authorizationService,
       workItemRepository: stack.workItemRepository,
@@ -274,8 +281,6 @@ test.beforeAll(async () => {
       executionCallbackService,
       executionEventIngestionService,
     },
-    // WORK-028: the token-only companion redemption endpoint the extension
-    // calls (no API key — the one-time handoff token is the authority).
     companion: {
       executionHandoffService,
       executionCallbackService,
@@ -288,6 +293,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await server?.close();
   await stack?.teardown();
+  await new Promise<void>((resolve) => fixtureServer?.close(() => resolve()));
   delete process.env.AGENT_PROVIDER_NAME;
   delete process.env.AGENT_DEFAULT_MODEL;
   delete process.env.AGENT_API_KEY;
@@ -298,8 +304,8 @@ async function createReadyWorkItem(label: string) {
     architectureVersionId: version.id,
     workItemId: label,
     title: label,
-    objective: 'Prove the Companion extension loop',
-    scope: 'Extension handoff end-to-end',
+    objective: 'Prove the Z.ai adapter loop',
+    scope: 'Z.ai adapter end-to-end',
   });
   await stack.workItemRequirementRepository.associate(wi.id, requirementId);
   await stack.workItemCriterionRepository.associate(wi.id, criterionId);
@@ -307,23 +313,39 @@ async function createReadyWorkItem(label: string) {
     workItemId: wi.id,
     projectId: project.id,
     architectureVersionId: version.id,
-    scope: 'Extension handoff end-to-end',
+    scope: 'Z.ai adapter end-to-end',
     outOfScope: 'Nothing',
     architectureConstraints: 'None',
     verificationRequirements: ['All tests pass'],
   });
-  await workflowEngine.transition({ workItemId: wi.id, toState: 'ready', actor: 'w28-e2e' });
+  await workflowEngine.transition({ workItemId: wi.id, toState: 'ready', actor: 'w29-e2e' });
   return wi;
 }
 
-test.describe('WORKFLOWOS — WORK-028 Companion extension E2E', () => {
-  test('full loop: Open with Companion → extension redeems → fake provider → events → completed', async () => {
+async function pollExecutionStatus(executionId: string, until: string[], timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await server.inject({
+      method: 'GET',
+      url: `/execution/${executionId}`,
+      headers: { 'x-api-key': API_KEY },
+    });
+    if (res.statusCode === 200) {
+      const body = res.json() as { execution: { status: string; benchmarkMetadata: Record<string, unknown> } };
+      if (until.includes(body.execution.status)) return body.execution;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+test.describe('WORKFLOWOS — WORK-029 Z.ai adapter fixture E2E', () => {
+  test('full loop: Open with Companion → Z.ai detected → prompt injected once → fixture agent → completed', async () => {
     test.setTimeout(180_000);
 
-    // --- 1. Launch the persistent context with the REAL extension loaded. ---
-    const userDataDir = mkdtempSync(join(tmpdir(), 'wfos-companion-'));
+    const userDataDir = mkdtempSync(join(tmpdir(), 'wfos-zai-'));
     const context = await chromium.launchPersistentContext(userDataDir, {
-      channel: 'chromium', // new headless supports MV3 extensions
+      channel: 'chromium',
       headless: true,
       args: [
         `--disable-extensions-except=${EXTENSION_DIST}`,
@@ -333,116 +355,162 @@ test.describe('WORKFLOWOS — WORK-028 Companion extension E2E', () => {
     });
 
     try {
-      // Locate the extension's background service worker (proves MV3 boot).
-      let sw: Worker | undefined = context.serviceWorkers().find((w) =>
-        w.url().includes('background'),
-      );
+      let sw: Worker | undefined = context.serviceWorkers().find((w) => w.url().includes('background'));
       if (!sw) {
         sw = (await context.waitForEvent('serviceworker', { timeout: 20_000 })) as Worker;
       }
       const extensionId = new URL(sw.url()).host;
-      expect(extensionId).toBeTruthy();
 
-      // --- 2. Drive the WorkflowOS SPA. ---
-      const page =
-        context.pages()[0] ?? (await context.newPage());
+      // Stage the fixture origin (incl. the XSS payload variant) — the
+      // adapter then opens the fixture instead of the real chat.z.ai.
+      await sw.evaluate((origin: string) => {
+        return (globalThis as { chrome?: { storage: { session: { set: (i: Record<string, string>) => Promise<void> } } } }).chrome!.storage.session.set({ 'wfos.zai.fixtureOrigin': origin });
+      }, `${FIXTURE_ORIGIN}/?xss=1`);
+
+      const page = context.pages()[0] ?? (await context.newPage());
       await page.goto('/');
-      await page.evaluate((key) => {
-        localStorage.setItem('wfos_api_key', key);
-      }, API_KEY);
+      await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
 
-      const wi = await createReadyWorkItem('WORK-COMPANION-001');
+      const wi = await createReadyWorkItem('WORK-ZAI-E2E-001');
       await page.goto(`/work-items/${wi.id}`);
-      await expect(page.locator('h1')).toContainText('WORK-COMPANION-001');
-
-      // --- 3. Start Implementation → External → Fake (test) provider. ---
       await page.getByRole('button', { name: /Start Implementation/ }).first().click();
       const dialog = page.locator('[role="dialog"]');
-      await expect(dialog).toContainText('Start Implementation — WORK-COMPANION-001');
+      await expect(dialog).toContainText('Start Implementation — WORK-ZAI-E2E-001');
       await dialog.getByLabel('External execution').check();
-      await dialog.locator('#execution-provider').selectOption('fake');
+      await dialog.locator('#execution-provider').selectOption('zai');
       await dialog.getByRole('button', { name: 'Start Implementation' }).click();
 
-      // The external execution handoff dialog opens (handoff_ready).
       const handoffDialog = page.locator('[role="dialog"]');
       await expect(handoffDialog).toContainText('External Execution', { timeout: 15_000 });
-      await expect(handoffDialog).toContainText('Ready for external handoff');
-
-      // --- 4. Open with Companion → SPA navigates to the handoff page. ---
-      await handoffDialog
-        .getByRole('button', { name: /Open with Companion/ })
-        .click();
+      await handoffDialog.getByRole('button', { name: /Open with Companion/ }).click();
       await page.waitForURL(/\/companion\/handoff#/, { timeout: 15_000 });
-
-      // The URL fragment carries ONLY the one-time ref + execution id.
       const url = page.url();
-      expect(url).toMatch(/#ref=wfht_[0-9a-f]+/);
-      expect(url).not.toMatch(/wfct_|prompt/i);
-      const ref = new URL(url).hash.match(/ref=(wfht_[0-9a-f]+)/)![1]!;
       const executionId = url.match(/exec=(wf_[0-9a-f]+)/)![1]!;
+      expect(url).not.toMatch(/wfct_|prompt/i);
 
-      // --- 5. The extension picks the handoff up (bridge content script +
-      //     background redemption). The SPA page shows the connected state. ---
+      // The SPA page shows the Companion handshake.
       await expect(page.getByText('Companion connected')).toBeVisible({ timeout: 20_000 });
-      await expect(page.getByText(/Session opened with provider/i)).toBeVisible({
-        timeout: 20_000,
-      });
 
-      // --- 6. The fake provider page opened + auto-ran. Poll WorkflowOS
-      //     until the execution completes via the reported events. ---
-      let finalStatus = '';
-      for (let i = 0; i < 120; i++) {
-        const res = await server.inject({
-          method: 'GET',
-          url: `/execution/${executionId}`,
-          headers: { 'x-api-key': API_KEY },
-        });
-        if (res.statusCode === 200) {
-          const body = res.json() as { execution: { status: string } };
-          finalStatus = body.execution.status;
-          if (finalStatus === 'completed') break;
-        }
-        await page.waitForTimeout(500);
+      // The adapter opened the FIXTURE in a new tab (Z.ai DOM reproduced).
+      let fixturePage = context
+        .pages()
+        .find((p) => p.url().startsWith(FIXTURE_ORIGIN));
+      if (!fixturePage) {
+        await context.waitForEvent('page', { timeout: 20_000 });
+        fixturePage = context.pages().find((p) => p.url().startsWith(FIXTURE_ORIGIN));
       }
-      expect(finalStatus, 'execution should complete via Companion events').toBe('completed');
+      expect(fixturePage).toBeTruthy();
 
-      // --- 7. The popup renders the completed session. ---
+      // Prompt injected + sent EXACTLY ONCE (fixture counter), conversation created.
+      await expect
+        .poll(
+          async () =>
+            (await fixturePage!.evaluate(
+              () => (window as unknown as { __zaiFixture?: { submits: number } }).__zaiFixture?.submits ?? 0,
+            )),
+          { timeout: 20_000 },
+        )
+        .toBe(1);
+      // The submitted prompt is the EXACT WorkflowOS prompt (fixture recorded it).
+      const submitted = await fixturePage!.evaluate(
+        () =>
+          (window as unknown as { __zaiFixture?: { submittedTexts: string[]; conversationPath: string } })
+            .__zaiFixture,
+      );
+      expect(submitted!.submittedTexts[0]).toContain('# Implementation Instructions — WORK-ZAI-E2E-001');
+
+      // Completion detected → WorkflowOS receives the completed event.
+      const final = await pollExecutionStatus(executionId, ['completed', 'failed'], 40000);
+      expect(final?.status, 'execution should complete via the Z.ai adapter').toBe('completed');
+      expect(final?.benchmarkMetadata.reportedBranch).toBe('feat/work-fixture-001');
+      expect(final?.benchmarkMetadata.reportedCommitRef).toBe('1a2b3c4d5e6f');
+      expect(final?.benchmarkMetadata.reportedPullRequestRef).toBe('github:pr:9');
+
+      // XSS payload in the fixture output stayed inert (textContent only).
+      const pwned = await fixturePage!.evaluate(() => ({
+        a: (window as unknown as Record<string, unknown>).__pwned,
+        b: (window as unknown as Record<string, unknown>).__pwned2,
+      }));
+      expect(pwned.a).toBeUndefined();
+      expect(pwned.b).toBeUndefined();
+
+      // The popup renders the Z.ai session (work item, provider, conversation).
       const popup = await context.newPage();
       await popup.goto(`chrome-extension://${extensionId}/ui/popup/index.html`);
-      await expect(popup.locator('#work-item')).toHaveText('WORK-COMPANION-001');
-      // WORK-029: the popup resolves display labels from the registry's
-      // capability list — the fake provider renders as its display name.
-      await expect(popup.locator('#provider')).toHaveText('Fake (test)');
-      await expect(popup.locator('#branch')).toHaveText(/feat\/work-companion-001/);
-      // WORK-029 §26: the status renders as "✓ <phase> · <status>" — the
-      // fake-provider flow never updates the page phase, so assert the
-      // terminal status as a substring (as the WORK-029 spec does).
+      await expect(popup.locator('#work-item')).toHaveText('WORK-ZAI-E2E-001');
+      await expect(popup.locator('#provider')).toHaveText('Z.ai');
       await expect(popup.locator('#status')).toContainText('completed');
+      await expect(popup.locator('#conversation')).toContainText('/chat/');
+      await popup.close();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('login wall → BLOCKED "Please sign in to Z.ai." — no submission, no fake success', async () => {
+    test.setTimeout(120_000);
+
+    const userDataDir = mkdtempSync(join(tmpdir(), 'wfos-zai-wall-'));
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      channel: 'chromium',
+      headless: true,
+      args: [
+        `--disable-extensions-except=${EXTENSION_DIST}`,
+        `--load-extension=${EXTENSION_DIST}`,
+        '--no-sandbox',
+      ],
+    });
+
+    try {
+      let sw: Worker | undefined = context.serviceWorkers().find((w) => w.url().includes('background'));
+      if (!sw) {
+        sw = (await context.waitForEvent('serviceworker', { timeout: 20_000 })) as Worker;
+      }
+      const extensionId = new URL(sw.url()).host;
+      await sw.evaluate((origin: string) => {
+        return (globalThis as { chrome?: { storage: { session: { set: (i: Record<string, string>) => Promise<void> } } } }).chrome!.storage.session.set({ 'wfos.zai.fixtureOrigin': origin });
+      }, `${FIXTURE_ORIGIN}/?wall=login`);
+
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto('/');
+      await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
+
+      const wi = await createReadyWorkItem('WORK-ZAI-WALL-001');
+      await page.goto(`/work-items/${wi.id}`);
+      await page.getByRole('button', { name: /Start Implementation/ }).first().click();
+      const dialog = page.locator('[role="dialog"]');
+      await dialog.getByLabel('External execution').check();
+      await dialog.locator('#execution-provider').selectOption('zai');
+      await dialog.getByRole('button', { name: 'Start Implementation' }).click();
+
+      const handoffDialog = page.locator('[role="dialog"]');
+      await expect(handoffDialog).toContainText('External Execution', { timeout: 15_000 });
+      await handoffDialog.getByRole('button', { name: /Open with Companion/ }).click();
+      await page.waitForURL(/\/companion\/handoff#/, { timeout: 15_000 });
+      const executionId = page.url().match(/exec=(wf_[0-9a-f]+)/)![1]!;
+
+      // The login-wall fixture renders; the adapter BLOCKS with the exact
+      // reason and never submits.
+      const final = await pollExecutionStatus(executionId, ['failed'], 40000);
+      expect(final).toBeTruthy(); // blocked → failed event on the record
+      expect(String(final?.benchmarkMetadata.lastEventType)).toBe('failed');
+
+      const popup = await context.newPage();
+      await popup.goto(`chrome-extension://${extensionId}/ui/popup/index.html`);
+      await expect(popup.locator('#blocked-reason')).toContainText('Please sign in to Z.ai.', {
+        timeout: 10_000,
+      });
       await popup.close();
 
-      // --- 8. The fake provider tab exists (Companion-managed). ---
-      const fakePage = context
-        .pages()
-        .find((p) => p.url().includes('ui/fake-provider/index.html'));
-      expect(fakePage).toBeTruthy();
-
-      // --- 9. Audit trail: companion redemption + execution lifecycle. ---
-      const events = await auditService.listForProject(project.id, {});
-      const types = events
-        .filter((e) => e.executionId === executionId)
-        .map((e) => e.eventType);
-      expect(types).toContain('COMPANION_HANDOFF_REDEEMED');
-      expect(types).toContain('EXECUTION_STARTED');
-      expect(types).toContain('EXECUTION_COMPLETED');
-
-      // --- 10. One-time semantics: the consumed ref cannot redeem twice. ---
-      const replay = await server.inject({
-        method: 'POST',
-        url: '/companion/redeem',
-        headers: { 'x-handoff-token': ref },
-      });
-      expect(replay.statusCode).toBe(409);
-      expect((replay.json() as { error: string }).error).toBe('handoff-token-already-used');
+      // No fixture submission happened.
+      const fixturePage = context.pages().find((p) => p.url().startsWith(FIXTURE_ORIGIN));
+      if (fixturePage) {
+        const submits = await fixturePage.evaluate(
+          () =>
+            (window as unknown as { __zaiFixture?: { submits: number } }).__zaiFixture?.submits ?? 0,
+        );
+        expect(submits).toBe(0);
+      }
     } finally {
       await context.close();
     }

@@ -4,8 +4,9 @@ import { providerRegistry } from '../src/providers/registry.js';
 
 describe('provider detection (§11) — generic, no automation', () => {
   it('recognizes supported provider domains', () => {
+    // WORK-029: the Z.ai adapter shipped — adapterAvailable is now true.
     expect(detectProvider(new URL('https://z.ai/chat'))).toMatchObject({
-      providerId: 'zai', supported: true, adapterAvailable: false,
+      providerId: 'zai', supported: true, adapterAvailable: true,
     });
     expect(detectProvider(new URL('https://chatgpt.com/c/abc'))).toMatchObject({
       providerId: 'chatgpt', supported: true, adapterAvailable: false,
@@ -27,7 +28,7 @@ describe('provider detection (§11) — generic, no automation', () => {
     expect(detection).toMatchObject({
       providerId: 'zai',
       supported: true,
-      adapterAvailable: false,
+      adapterAvailable: true, // WORK-029 shipped the adapter
     });
   });
 
@@ -49,20 +50,25 @@ describe('provider detection (§11) — generic, no automation', () => {
   });
 });
 
-describe('adapter registry (§26) — no real provider adapters in WORK-028', () => {
-  it('registers exactly one adapter: the deterministic fake', () => {
+describe('adapter registry (§26) — WORK-028 fake + WORK-029 Z.ai; chatgpt/claude pending', () => {
+  it('registers the fake adapter AND the real Z.ai adapter (WORK-029)', () => {
     expect(providerRegistry.get('fake')).not.toBeNull();
-    expect(providerRegistry.get('zai')).toBeNull();
+    expect(providerRegistry.get('zai')).not.toBeNull();
     expect(providerRegistry.get('chatgpt')).toBeNull();
     expect(providerRegistry.get('claude')).toBeNull();
   });
 
-  it('surfaces placeholders as supported-but-pending with their work items', () => {
+  it('surfaces Z.ai as adapter-ready; chatgpt/claude remain placeholders', () => {
     const providers = providerRegistry.listProviders();
     const zai = providers.find((p) => p.providerId === 'zai');
-    expect(zai).toEqual({ providerId: 'zai', supported: true, adapterAvailable: false });
+    expect(zai).toEqual({
+      providerId: 'zai',
+      displayName: 'Z.ai',
+      supported: true,
+      adapterAvailable: true,
+    });
     const meta = providerRegistry.pendingProviders;
-    expect(meta.find((m) => m.providerId === 'zai')?.workItem).toBe('WORK-029');
+    expect(meta.find((m) => m.providerId === 'zai')).toBeUndefined(); // shipped
     expect(meta.find((m) => m.providerId === 'chatgpt')?.workItem).toBe('WORK-030');
     expect(meta.find((m) => m.providerId === 'claude')?.workItem).toBe('WORK-031');
   });

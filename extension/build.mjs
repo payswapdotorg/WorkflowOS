@@ -32,6 +32,8 @@ const entries = [
   { in: join(root, 'src/background/index.ts'), out: 'background' },
   { in: join(root, 'src/content/workflowos-bridge.ts'), out: 'content/workflowos-bridge' },
   { in: join(root, 'src/content/provider-detect.ts'), out: 'content/provider-detect' },
+  // WORK-029: the Z.ai page bridge (thin; Z.ai logic lives in providers/zai).
+  { in: join(root, 'src/content/zai-bridge.ts'), out: 'content/zai-bridge' },
   { in: join(root, 'src/ui/popup/popup.ts'), out: 'ui/popup/popup' },
   { in: join(root, 'src/ui/fake-provider/page.ts'), out: 'ui/fake-provider/page' },
 ];

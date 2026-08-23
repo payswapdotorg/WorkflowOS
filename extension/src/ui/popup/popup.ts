@@ -18,13 +18,29 @@ interface SessionView {
   branch: string;
   status: string;
   workflowosOrigin: string;
+  promptSubmitted: boolean;
+  phase: string | null;
+  blockedReason: string | null;
+  externalSessionRef: string | null;
 }
+
+/** WORK-029 §26: status glyph + tone. */
+const STATUS_ICONS: Record<string, string> = {
+  connecting: '…',
+  ready: '●',
+  running: '●',
+  completed: '✓',
+  failed: '✕',
+  blocked: '⚠',
+  stopped: '■',
+  expired: '⏱',
+};
 
 interface CompanionState {
   session: SessionView | null;
   connection: 'connected' | 'offline';
   pendingEvents: number;
-  providers: { providerId: string; supported: boolean; adapterAvailable: boolean }[];
+  providers: { providerId: string; displayName: string; supported: boolean; adapterAvailable: boolean }[];
   pendingProviderMetadata: { providerId: string; displayName: string; workItem: string }[];
 }
 
@@ -53,11 +69,28 @@ function render(state: CompanionState): void {
     sessionSection.classList.remove('hidden');
     const s = state.session;
     el('work-item').textContent = s.workItemLabel;
-    el('provider').textContent = s.providerLabel || s.provider;
+    // Display label: the capability list (registry) knows real display names.
+    const display =
+      state.providers.find((p) => p.providerId === s.provider)?.displayName ??
+      state.pendingProviderMetadata.find((p) => p.providerId === s.provider)?.displayName ??
+      s.providerLabel ??
+      s.provider;
+    el('provider').textContent = display;
     el('repository').textContent = s.repository ?? '(not linked)';
     el('branch').textContent = s.branch;
-    el('status').textContent = s.status;
+    const icon = STATUS_ICONS[s.status] ?? '●';
+    el('status').textContent = `${icon} ${s.phase ? `${s.phase} · ` : ''}${s.status}`;
     el('execution-id').textContent = s.executionId;
+    // §26: blocked reason + external conversation link.
+    const reasonEl = document.getElementById('blocked-reason');
+    if (reasonEl) {
+      reasonEl.textContent = s.blockedReason ?? '';
+      reasonEl.classList.toggle('hidden', !s.blockedReason);
+    }
+    const convEl = document.getElementById('conversation');
+    if (convEl) {
+      convEl.textContent = s.externalSessionRef ?? '—';
+    }
     const pendingRow = el<HTMLElement>('pending-row');
     if (state.pendingEvents > 0) {
       pendingRow.classList.remove('hidden');

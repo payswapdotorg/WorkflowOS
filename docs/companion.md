@@ -45,6 +45,21 @@ the user's own provider session — with WorkflowOS retaining every authority
 4. Watch status on the Work Item page (Executions card) or in the
    Companion popup.
 
+### Z.ai (WORK-029)
+
+The real Z.ai adapter drives `https://chat.z.ai` — you must be **signed in to
+Z.ai in the same browser** (the adapter uses your existing session; it never
+asks for or stores Z.ai credentials). Flow: the Companion opens a NEW Z.ai
+conversation, verifies the WorkflowOS prompt digest, injects the prompt
+exactly once, sends it, and observes progress (streaming → completion) with
+multi-signal completion detection. Repository/branch/commit/PR/test mentions
+in Z.ai's output are forwarded as **observations only** — WorkflowOS observes
+authoritative GitHub/CI/verification/review state independently. Blocked
+states are surfaced with a human-readable reason in the popup (sign-in
+required, session expired, confirmation needed, UI changed). The observed UI
+contract + selector strategy + troubleshooting live in
+`extension/src/providers/zai/README.md`.
+
 ## Security considerations
 
 - The extension **never** holds a WorkflowOS API key, GitHub token, Vercel
