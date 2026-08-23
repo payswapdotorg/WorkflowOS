@@ -20,6 +20,7 @@
     "http://localhost:5173/*",
     "http://127.0.0.1:5173/*",
     "http://127.0.0.1:3777/*",
+    "http://127.0.0.1:3778/*",
     "https://*.z.ai/*",
     "https://*.chatgpt.com/*",
     "https://*.claude.ai/*"
@@ -38,6 +39,11 @@
     {
       "matches": ["https://*.z.ai/*", "http://127.0.0.1:3777/*"],
       "js": ["content/zai-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.chatgpt.com/*", "http://127.0.0.1:3778/*"],
+      "js": ["content/chatgpt-bridge.js"],
       "run_at": "document_idle"
     }
   ]

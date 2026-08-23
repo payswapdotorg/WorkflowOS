@@ -11,6 +11,13 @@
 #   with the scoped x-callback-token → WorkflowOS execution completes →
 #   popup shows the session → replayed handoff ref rejected (409).
 #
+# WORK-030 (ChatGPT adapter): the adapter opens its own LOCAL fixture server
+# (127.0.0.1:3778) reproducing the OBSERVED chatgpt.com DOM (contenteditable
+# #prompt-textarea composer, data-testid send/stop controls, /c/<uuid>
+# conversations) → same full loop: digest-verified single injection →
+# deterministic progress → completion → WorkflowOS completed event → popup;
+# login-wall fixture → BLOCKED "Please sign in to ChatGPT."; XSS inert.
+#
 # WORK-029 (Z.ai adapter): the adapter opens a LOCAL fixture server
 # (127.0.0.1:3777) reproducing the OBSERVED chat.z.ai DOM → provider
 # detected as Z.ai → prompt injected (digest verified in-page) → sent
@@ -39,7 +46,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: companion extension E2E (WORK-028 + WORK-029)
+    name: companion extension E2E (WORK-028 + 029 + 030)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

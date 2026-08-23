@@ -17,7 +17,7 @@ WorkflowOS
   → WorkflowOS observes authoritative GitHub/CI/verification/review state
 ```
 
-## Status (WORK-029)
+## Status (WORK-030)
 
 - ✅ Provider-neutral extension architecture (background service worker, thin
   content scripts, popup, message protocol, provider adapter registry).
@@ -31,8 +31,13 @@ WorkflowOS
   multi-signal completion; blocked/failure classification). See
   `src/providers/zai/README.md` for the observed UI contract + selector
   strategy + fixture E2E.
-- ⏳ ChatGPT = WORK-030, Claude = WORK-031 (placeholders only — no
-  automation).
+- ✅ **REAL ChatGPT adapter (WORK-030)** — drives `https://chatgpt.com`
+  (ProseMirror contenteditable composer; execCommand injection with
+  normalized read-back; stop-button streaming marker; data-testid send
+  control). See `src/providers/chatgpt/README.md` (includes the
+  confidence-graded observed contract — live inspection was blocked from the
+  build environment, so the adapter is confidence-gated to fail safe).
+- ⏳ Claude = WORK-031 (placeholder only — no automation).
 
 ## Local development
 
@@ -64,15 +69,15 @@ Chromium context and drive the real backend + SPA:
 ```bash
 cd extension && bun run build
 cd ../backend
-# WORK-028 fake-provider loop + WORK-029 Z.ai-adapter fixture loop:
+# WORK-028 fake loop + WORK-029 Z.ai + WORK-030 ChatGPT fixture loops:
 bunx playwright test --config playwright-extension.config.ts
 ```
 
-The WORK-029 spec starts its own local fixture server (127.0.0.1:3777)
-reproducing the OBSERVED chat.z.ai DOM — no live Z.ai account needed. See
-`src/providers/zai/README.md` for the observed contract, the optional live
-smoke test plan (`ZAI_LIVE_E2E=true`, not shipped enabled), and how to
-diagnose Z.ai UI changes.
+The WORK-029/030 specs start their own local fixture servers (127.0.0.1:3777
+Z.ai, 127.0.0.1:3778 ChatGPT) reproducing the OBSERVED provider DOMs — no
+live accounts needed. See each provider README for the observed contract, the
+optional live smoke test plans (`ZAI_LIVE_E2E=true` / `CHATGPT_LIVE_E2E=true`,
+not shipped enabled), and how to diagnose provider UI changes.
 
 ## Architecture
 
@@ -86,8 +91,10 @@ extension/
                               ExecutionReporter (idempotency, backoff, expiry)
     providers/                provider-neutral adapter contract, detector,
                               registry, fake/ (deterministic test adapter),
-                              zai/ (REAL chat.z.ai adapter — selectors +
-                              page runtime + observed-contract README)
+                              zai/ (REAL chat.z.ai adapter), chatgpt/
+                              (REAL chatgpt.com adapter) — each with
+                              selectors + page runtime + observed-contract
+                              README
     background/               MV3 service worker: sessions, handoff
                               redemption, adapter lifecycle, tab lifecycle,
                               message routing
@@ -117,15 +124,14 @@ envelope carries `type`, `executionId`, `timestamp`, `payload`.
 `detectCompletion`, `detectFailure`, `collectObservations`, `stop`. Adapters
 are registered in `ExternalProviderAdapterRegistry`.
 
-Registered today: the **fake** adapter (deterministic test mode) and the
-**Z.ai** adapter (WORK-029 — all Z.ai DOM knowledge isolated in
-`src/providers/zai/`; see its README). ChatGPT/Claude remain placeholder
-metadata until WORK-030/031.
+Registered today: the **fake** adapter (deterministic test mode), the
+**Z.ai** adapter (WORK-029), and the **ChatGPT** adapter (WORK-030) — all
+provider DOM knowledge isolated under `src/providers/<id>/` (see each
+README). Claude remains placeholder metadata until WORK-031.
 
-**WORK-030/031 integration point:** mirror the Z.ai layout —
-`providers/<id>/` with selectors + page runtime + observed-contract README,
-register the adapter, and add a `<id>-bridge` manifest entry only if the
-page runtime needs a dedicated content script.
+**WORK-031 integration point:** mirror the existing layout —
+`providers/claude/` with selectors + page runtime + observed-contract README,
+register the adapter, and add a `claude-bridge` manifest entry.
 
 ## Security model
 
