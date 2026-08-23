@@ -1,35 +1,18 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Send, Check, Snowflake, Sparkles } from 'lucide-react';
+import {
+  architect,
+  type ArchitectProvider,
+  type ParsedArchitecture,
+} from '@/api/client';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-}
-
-interface ParsedArchitecture {
-  architecture?: { name: string; content: string; constraints?: string[] };
-  requirements?: Array<{
-    requirementId: string;
-    title: string;
-    description?: string;
-    criteria?: Array<{ criterionId: string; description: string }>;
-  }>;
-  workItems?: Array<{
-    workItemId: string;
-    title: string;
-    objective?: string;
-    scope?: string;
-    dependencies?: string[];
-  }>;
-  summary?: string;
-}
-
-function getApiKey(): string {
-  return localStorage.getItem('wfos_api_key') || '';
 }
 
 export default function ArchitectPage() {
@@ -42,13 +25,72 @@ export default function ArchitectPage() {
   const [parsed, setParsed] = useState<ParsedArchitecture | null>(null);
   const [applied, setApplied] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [providers, setProviders] = useState<ArchitectProvider[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Load provider config + persisted session on mount.
+  const loadInitialState = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      // Load providers.
+      const provRes = await architect.getProviders(projectId);
+      setProviders(provRes.providers);
+      const ready = provRes.providers.find((p) => p.status === 'ready');
+      if (ready) {
+        setSelectedProvider(ready.provider);
+        setSelectedModel(ready.model);
+      }
+
+      // Load persisted session.
+      const sessRes = await architect.getSession(projectId);
+      if (sessRes.session) {
+        setMessages(sessRes.session.messages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        })));
+        if (sessRes.session.parsed_plan) {
+          setParsed(sessRes.session.parsed_plan as ParsedArchitecture);
+        }
+      }
+    } catch {
+      // Non-fatal — session may not exist yet.
+    } finally {
+      setSessionLoaded(true);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    loadInitialState();
+  }, [loadInitialState]);
+
+  // Auto-scroll to bottom when messages change.
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Save session whenever messages or parsed plan change.
+  const saveSession = useCallback(async () => {
+    if (!projectId || !sessionLoaded) return;
+    try {
+      await architect.saveSession(projectId, {
+        messages,
+        parsedPlan: parsed as Record<string, unknown> | undefined,
+        provider: selectedProvider,
+        model: selectedModel,
+      });
+    } catch {
+      // Non-fatal — session persistence is best-effort.
+    }
+  }, [projectId, messages, parsed, selectedProvider, selectedModel, sessionLoaded]);
+
+  useEffect(() => {
+    if (sessionLoaded) saveSession();
+  }, [messages, parsed, saveSession, sessionLoaded]);
 
   const send = async () => {
     if (!input.trim() || !projectId) return;
@@ -59,24 +101,15 @@ export default function ArchitectPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/projects/${projectId}/architect/converse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
-        body: JSON.stringify({
-          prompt: userMsg.content,
-          conversation: messages.length > 0 ? messages : undefined,
-          provider: 'zai',
-          model: 'glm-4-flash',
-        }),
+      const data = await architect.converse(projectId, {
+        prompt: userMsg.content,
+        conversation: messages.length > 0 ? messages : undefined,
+        provider: selectedProvider || undefined,
+        model: selectedModel || undefined,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message || body.error || `HTTP ${res.status}`);
-      }
-      const data = await res.json() as { content: string; parsed: ParsedArchitecture | null };
       setMessages([...newMessages, { role: 'assistant', content: data.content }]);
       if (data.parsed) {
-        setParsed(data.parsed);
+        setParsed(data.parsed as ParsedArchitecture);
         setApplied(false);
       }
     } catch (err) {
@@ -91,18 +124,8 @@ export default function ArchitectPage() {
     setApplying(true);
     setError(null);
     try {
-      const res = await fetch(`/api/projects/${projectId}/architect/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
-        body: JSON.stringify(parsed),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      await res.json();
+      await architect.apply(projectId, parsed as Record<string, unknown>);
       setApplied(true);
-      // Navigate to the architecture page so the user can freeze.
       navigate(`/projects/${projectId}/architecture`);
     } catch (err) {
       setError((err as Error).message);
@@ -111,20 +134,29 @@ export default function ArchitectPage() {
     }
   };
 
-  const freezeAndContinue = async () => {
-    if (!projectId) return;
-    // Navigate to architecture page where the user can freeze.
-    navigate(`/projects/${projectId}/architecture`);
-  };
+  const readyProvider = providers.find((p) => p.status === 'ready');
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="flex items-center gap-2 text-xl font-semibold">
-          <Sparkles className="h-5 w-5 text-primary" />
-          Architect
-        </h1>
-        <p className="text-sm text-muted-foreground">Describe what you want to build. The architect will generate a structured plan.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-semibold">
+            <Sparkles className="h-5 w-5 text-primary" />
+            Architect
+          </h1>
+          <p className="text-sm text-muted-foreground">Describe what you want to build. The architect will generate a structured plan.</p>
+        </div>
+        {/* Provider readiness indicator */}
+        <div className="text-right text-xs">
+          {providers.length > 0 && readyProvider ? (
+            <div>
+              <p className="font-medium text-success">{readyProvider.name}</p>
+              <p className="text-muted-foreground">{readyProvider.model}</p>
+            </div>
+          ) : providers.length > 0 ? (
+            <p className="text-muted-foreground">Provider not configured</p>
+          ) : null}
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -172,11 +204,12 @@ export default function ArchitectPage() {
                 placeholder="Message the architect…"
                 disabled={loading}
               />
-              <Button size="icon" onClick={send} disabled={loading || !input.trim()}>
+              <Button size="icon" onClick={send} disabled={loading || !input.trim() || !readyProvider}>
                 <Send className="h-4 w-4" />
               </Button>
             </div>
             {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+            {!readyProvider && <p className="mt-2 text-xs text-muted-foreground">Configure an LLM provider in the server environment to enable the architect.</p>}
           </div>
         </Card>
 
@@ -191,7 +224,7 @@ export default function ArchitectPage() {
               </Button>
             )}
             {applied && (
-              <Button size="sm" variant="outline" onClick={freezeAndContinue}>
+              <Button size="sm" variant="outline" onClick={() => navigate(`/projects/${projectId}/architecture`)}>
                 <Snowflake className="mr-1 h-3.5 w-3.5" />
                 Go to Architecture
               </Button>
@@ -205,15 +238,12 @@ export default function ArchitectPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {/* Summary */}
                 {parsed.summary && (
                   <div className="rounded-md bg-muted p-3">
                     <p className="text-sm font-medium">Summary</p>
                     <p className="mt-1 text-sm text-muted-foreground">{parsed.summary}</p>
                   </div>
                 )}
-
-                {/* Architecture */}
                 {parsed.architecture && (
                   <div>
                     <p className="mb-1 text-sm font-medium">Architecture: {parsed.architecture.name}</p>
@@ -230,8 +260,6 @@ export default function ArchitectPage() {
                     )}
                   </div>
                 )}
-
-                {/* Requirements */}
                 {parsed.requirements && parsed.requirements.length > 0 && (
                   <div>
                     <p className="mb-1 text-sm font-medium">Requirements ({parsed.requirements.length})</p>
@@ -250,8 +278,6 @@ export default function ArchitectPage() {
                     </div>
                   </div>
                 )}
-
-                {/* Work Items */}
                 {parsed.workItems && parsed.workItems.length > 0 && (
                   <div>
                     <p className="mb-1 text-sm font-medium">Work Items ({parsed.workItems.length})</p>

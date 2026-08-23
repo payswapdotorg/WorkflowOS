@@ -2,7 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import type { AuthorizationService } from '@modules/auth/index.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
 import type { ArchitectureRepository, ArchitectureVersionRepository } from '@modules/architecture/index.js';
-import type { WorkItemRepository, WorkOrderRepository } from '@modules/work-items/index.js';
+import type {
+  WorkItemRepository,
+  WorkOrderRepository,
+  WorkItemRequirementRepository,
+  WorkItemCriterionRepository,
+  WorkItemDependencyRepository,
+} from '@modules/work-items/index.js';
 import type { RequirementRepository, AcceptanceCriterionRepository } from '@modules/requirements/index.js';
 import type { LlmGateway, ArchitectService } from '@modules/llm/index.js';
 import type { DatabaseClient } from '@platform/index.js';
@@ -16,6 +22,9 @@ export interface ArchitectRouteDeps {
   architectureVersionRepository: ArchitectureVersionRepository;
   workItemRepository: WorkItemRepository;
   workOrderRepository: WorkOrderRepository;
+  workItemRequirementRepository: WorkItemRequirementRepository;
+  workItemCriterionRepository: WorkItemCriterionRepository;
+  workItemDependencyRepository: WorkItemDependencyRepository;
   requirementRepository: RequirementRepository;
   acceptanceCriterionRepository: AcceptanceCriterionRepository;
   llmGateway: LlmGateway;
@@ -268,6 +277,7 @@ Rules:
 
       // 3. Create Requirements + Criteria
       const createdReqs: Array<{ id: string; requirementId: string }> = [];
+      const createdCriteria: Array<{ id: string; criterionId: string }> = [];
       if (body.requirements) {
         for (const req of body.requirements) {
           const created = await deps.requirementRepository.create({
@@ -280,11 +290,12 @@ Rules:
 
           if (req.criteria) {
             for (const crit of req.criteria) {
-              await deps.acceptanceCriterionRepository.create({
+              const createdCrit = await deps.acceptanceCriterionRepository.create({
                 requirementId: created.id,
                 criterionId: crit.criterionId,
                 description: crit.description,
               });
+              createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId });
             }
           }
         }
@@ -305,8 +316,29 @@ Rules:
         }
       }
 
-      // 5. Create dependencies via DB (the work-items dependency route requires
-      // auth context — here we use the DB directly since we're already authorized).
+      // 5. Associate Work Items with Requirements + Criteria through the
+      //    existing /work-items repository contracts (NOT raw SQL).
+      //    Each generated Work Item is associated with ALL generated requirements
+      //    and criteria (they all belong to the same architecture version).
+      for (const wi of createdWorkItems) {
+        for (const req of createdReqs) {
+          try {
+            await deps.workItemRequirementRepository.associate(wi.id, req.id);
+          } catch {
+            // Association may already exist — ignore.
+          }
+        }
+        for (const crit of createdCriteria) {
+          try {
+            await deps.workItemCriterionRepository.associate(wi.id, crit.id);
+          } catch {
+            // Association may already exist — ignore.
+          }
+        }
+      }
+
+      // 6. Create dependencies through the existing WorkItemDependencyRepository
+      //    contract (NOT raw SQL). This preserves the /work-items authority boundary.
       if (body.workItems) {
         for (const wi of body.workItems) {
           if (wi.dependencies) {
@@ -316,10 +348,7 @@ Rules:
               const target = createdWorkItems.find(c => c.workItemId === depId);
               if (target) {
                 try {
-                  await deps.db.query(
-                    'INSERT INTO wfos_work_item_dependencies (work_item_id, depends_on_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-                    [source.id, target.id],
-                  );
+                  await deps.workItemDependencyRepository.add(source.id, target.id);
                 } catch {
                   // Dependency may already exist — ignore.
                 }
@@ -333,8 +362,128 @@ Rules:
         architectureId: arch.id,
         architectureVersionId: version.id,
         requirements: createdReqs,
+        criteria: createdCriteria,
         workItems: createdWorkItems,
       });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // WORK-025: Provider configuration — returns available LLM/agent providers
+  // without exposing secrets. The frontend uses this to show provider
+  // readiness and let the user select a provider/model.
+  // -----------------------------------------------------------------------
+  app.get('/projects/:projectId/architect/providers', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId } = req.params as { projectId: string };
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read', projectId,
+      });
+      // Return configured providers based on environment.
+      // The actual secrets (API keys) stay server-side — only the
+      // provider name, model, and readiness are returned.
+      const providers: Array<{
+        name: string;
+        provider: string;
+        model: string;
+        status: 'ready' | 'not-configured';
+      }> = [];
+      // Check if LLM_API_KEY is configured.
+      const llmKey = process.env.LLM_API_KEY;
+      const llmProvider = process.env.LLM_PROVIDER_NAME ?? 'openai-compatible';
+      const llmModel = process.env.LLM_DEFAULT_MODEL ?? 'gpt-4o';
+      if (llmKey) {
+        providers.push({
+          name: llmProvider,
+          provider: llmProvider,
+          model: llmModel,
+          status: 'ready',
+        });
+      } else {
+        providers.push({
+          name: 'No provider configured',
+          provider: 'none',
+          model: '',
+          status: 'not-configured',
+        });
+      }
+      return reply.code(200).send({ providers });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // WORK-025: Architect conversation persistence.
+  //
+  // GET /projects/:projectId/architect/session
+  // Returns the active architect session (messages + last parsed plan).
+  //
+  // PUT /projects/:projectId/architect/session
+  // Updates the session (appends a message, updates the parsed plan).
+  // -----------------------------------------------------------------------
+  app.get('/projects/:projectId/architect/session', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId } = req.params as { projectId: string };
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read', projectId,
+      });
+      const result = await deps.db.query(
+        'SELECT id, messages, parsed_plan, revision_count, provider, model, status, created_at, updated_at FROM wfos_architect_sessions WHERE project_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1',
+        [projectId, 'active'],
+      );
+      if (result.rows.length === 0) {
+        return reply.code(200).send({ session: null });
+      }
+      return reply.code(200).send({ session: result.rows[0] });
+    });
+  });
+
+  app.put('/projects/:projectId/architect/session', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId } = req.params as { projectId: string };
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+      const body = req.body as {
+        messages?: Array<{ role: string; content: string }>;
+        parsedPlan?: Record<string, unknown>;
+        provider?: string;
+        model?: string;
+      };
+      // Find or create an active session.
+      const existing = await deps.db.query(
+        'SELECT id FROM wfos_architect_sessions WHERE project_id = $1 AND status = $2',
+        [projectId, 'active'],
+      );
+      if (existing.rows.length > 0) {
+        const sessionId = existing.rows[0]!.id;
+        await deps.db.query(
+          `UPDATE wfos_architect_sessions
+           SET messages = $1, parsed_plan = $2, provider = $3, model = $4,
+               revision_count = revision_count + 1, updated_at = NOW()
+           WHERE id = $5`,
+          [
+            JSON.stringify(body.messages ?? []),
+            body.parsedPlan ? JSON.stringify(body.parsedPlan) : null,
+            body.provider ?? '',
+            body.model ?? '',
+            sessionId,
+          ],
+        );
+        return reply.code(200).send({ sessionId });
+      } else {
+        const result = await deps.db.query(
+          `INSERT INTO wfos_architect_sessions (project_id, messages, parsed_plan, provider, model)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [
+            projectId,
+            JSON.stringify(body.messages ?? []),
+            body.parsedPlan ? JSON.stringify(body.parsedPlan) : null,
+            body.provider ?? '',
+            body.model ?? '',
+          ],
+        );
+        return reply.code(201).send({ sessionId: result.rows[0]!.id });
+      }
     });
   });
 }

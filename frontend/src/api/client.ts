@@ -796,3 +796,82 @@ export const notifications = {
   listForProject: (projectId: string) => apiGet<NotificationRequest[]>(`/projects/${projectId}/notifications`),
   listForWorkItem: (workItemId: string) => apiGet<NotificationRequest[]>(`/work-items/${workItemId}/notifications`),
 };
+
+// --- Architect (WORK-025) ---
+
+export interface ParsedArchitecture {
+  architecture?: { name: string; content: string; constraints?: string[] };
+  requirements?: Array<{
+    requirementId: string;
+    title: string;
+    description?: string;
+    criteria?: Array<{ criterionId: string; description: string }>;
+  }>;
+  workItems?: Array<{
+    workItemId: string;
+    title: string;
+    objective?: string;
+    scope?: string;
+    dependencies?: string[];
+  }>;
+  summary?: string;
+}
+
+export interface ArchitectProvider {
+  name: string;
+  provider: string;
+  model: string;
+  status: 'ready' | 'not-configured';
+}
+
+export interface ArchitectSession {
+  id: string;
+  messages: Array<{ role: string; content: string }>;
+  parsed_plan: Record<string, unknown> | null;
+  revision_count: number;
+  provider: string;
+  model: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArchitectConverseResponse {
+  executionId: string;
+  content: string;
+  parsed: Record<string, unknown> | null;
+  usage: Record<string, unknown>;
+}
+
+export interface ArchitectApplyResponse {
+  architectureId: string;
+  architectureVersionId: string;
+  requirements: Array<{ id: string; requirementId: string }>;
+  criteria: Array<{ id: string; criterionId: string }>;
+  workItems: Array<{ id: string; workItemId: string }>;
+}
+
+export const architect = {
+  converse: (projectId: string, body: {
+    prompt: string;
+    conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    provider?: string;
+    model?: string;
+  }) => apiPost<ArchitectConverseResponse>(`/projects/${projectId}/architect/converse`, body),
+
+  apply: (projectId: string, body: Record<string, unknown>) =>
+    apiPost<ArchitectApplyResponse>(`/projects/${projectId}/architect/apply`, body),
+
+  getProviders: (projectId: string) =>
+    apiGet<{ providers: ArchitectProvider[] }>(`/projects/${projectId}/architect/providers`),
+
+  getSession: (projectId: string) =>
+    apiGet<{ session: ArchitectSession | null }>(`/projects/${projectId}/architect/session`),
+
+  saveSession: (projectId: string, body: {
+    messages?: Array<{ role: string; content: string }>;
+    parsedPlan?: Record<string, unknown>;
+    provider?: string;
+    model?: string;
+  }) => apiPost<{ sessionId: string }>(`/projects/${projectId}/architect/session`, body),
+};

@@ -292,6 +292,9 @@ async function main(): Promise<void> {
       app.deps.architectureVersionRepository &&
       app.deps.workItemRepository &&
       app.deps.workOrderRepository &&
+      app.deps.workItemRequirementRepository &&
+      app.deps.workItemCriterionRepository &&
+      app.deps.workItemDependencyRepository &&
       app.deps.requirementRepository &&
       app.deps.acceptanceCriterionRepository &&
       app.deps.llmGateway &&
@@ -304,6 +307,9 @@ async function main(): Promise<void> {
               architectureVersionRepository: app.deps.architectureVersionRepository,
               workItemRepository: app.deps.workItemRepository,
               workOrderRepository: app.deps.workOrderRepository,
+              workItemRequirementRepository: app.deps.workItemRequirementRepository,
+              workItemCriterionRepository: app.deps.workItemCriterionRepository,
+              workItemDependencyRepository: app.deps.workItemDependencyRepository,
               requirementRepository: app.deps.requirementRepository,
               acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
               llmGateway: app.deps.llmGateway,
