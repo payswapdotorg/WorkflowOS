@@ -1373,6 +1373,13 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       'ImplementationContextContent',
       'ImplementationContextRepository',
       'ImplementationContextBuilder',
+      // WORK-027: deterministic implementation prompt + provider-independent
+      // ExecutionTask construction (feeds the /agents ExecutionService).
+      'ExecutionPrompt',
+      'ExecutionPromptBuilder',
+      'ExecutionTaskService',
+      'ExecutionTaskServiceInput',
+      'BuiltExecutionTask',
     ]);
     const exported: string[] = [];
     for (const m of wiIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -3934,6 +3941,17 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
       'DefaultAgentProviderRegistry',
       'DefaultAgentProviderRegistryService',
       'DefaultRuntimeStatusService',
+      // WORK-027: execution provider abstraction services.
+      'PgExecutionRecordRepository',
+      'PgExecutionEventRepository',
+      'PgExecutionHandoffRepository',
+      'NativeExecutionProvider',
+      'ExternalExecutionProvider',
+      'DefaultExecutionService',
+      'DefaultExecutionHandoffService',
+      'DefaultExecutionEventIngestionService',
+      'DefaultExecutionPromptBuilder',
+      'DefaultExecutionTaskService',
     ];
     const missing: string[] = [];
     for (const svc of REQUIRED_SERVICES) {
@@ -3995,11 +4013,20 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
     expect(routeSection![0]).toMatch(/agentRunId:\s*submission\.agentRunId/);
   });
 
-  it('PR #29 fix #1: DefaultStartImplementationService calls AgentGateway.execute', () => {
+  it('PR #29 fix #1 (WORK-027 refactor): NativeExecutionProvider calls AgentGateway.execute', () => {
+    // WORK-027 moved the single native gateway invocation from
+    // DefaultStartImplementationService (/work-items) into NativeExecutionProvider
+    // (/agents) behind the ExecutionService boundary. The native path must
+    // still reach the AgentGateway — from exactly one place.
     const svcFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'start-implementation-service.ts');
     const src = readFileSync(svcFile, 'utf8');
     const codeOnly = stripComments(src);
-    expect(codeOnly).toMatch(/agentGateway\.execute\s*\(/);
+    // The service delegates to the provider boundary instead.
+    expect(codeOnly).toMatch(/executionService\.submit\s*\(/);
+    expect(codeOnly).toMatch(/executionTaskService\.build\s*\(/);
+    const providerFile = join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'native-execution-provider.ts');
+    const providerSrc = stripComments(readFileSync(providerFile, 'utf8'));
+    expect(providerSrc).toMatch(/agentGateway\.execute\s*\(/);
   });
 
   // -------------------------------------------------------------------------
@@ -4056,6 +4083,288 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
     expect(codeOnly).not.toMatch(/if\s*\(!crit\)\s*continue/);
     // MUST throw with a descriptive error.
     expect(codeOnly).toMatch(/implementation-context-criterion-missing/);
+  });
+});
+
+// ===========================================================================
+// WORK-027 invariants — execution provider abstraction.
+//
+// One Work Order, two execution modes (native via AgentGateway / external via
+// secure handoff package) behind one provider-independent boundary, with:
+//   - workflow authority untouched (/workflows owns the state machine),
+//   - verification/review authority untouched,
+//   - GitHub authoritative for PR/merge (external execution only REPORTS),
+//   - no secrets in execution packages,
+//   - no provider-specific (Z.ai/ChatGPT/Claude) adapters/URLs/DOM logic yet,
+//   - one-time, short-lived, authenticated handoff tokens.
+// ===========================================================================
+
+describe('WORK-027 invariants — execution provider abstraction', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const AGENTS_EXECUTION_FILES = [
+    'execution.types.ts',
+    'pg-execution-repository.ts',
+    'native-execution-provider.ts',
+    'external-execution-provider.ts',
+    'execution-service.ts',
+    'execution-handoff-service.ts',
+    'execution-event-ingestion-service.ts',
+  ] as const;
+
+  /** Strip block + line comments so checks match CODE, not prose in comments. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+  }
+
+  function readAgentsExecutionFile(name: string): string {
+    return readFileSync(
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', name),
+      'utf8',
+    );
+  }
+
+  // --- Boundary shape ---
+
+  it('WORK-027: /agents execution files exist and stay inside the module', () => {
+    for (const f of AGENTS_EXECUTION_FILES) {
+      expect(existsSync(join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', f)), f).toBe(true);
+    }
+  });
+
+  it('WORK-027: ExecutionTask carries the provider-independent execution contract', () => {
+    const src = readAgentsExecutionFile('execution.types.ts');
+    for (const field of [
+      'projectId',
+      'workItemId',
+      'workOrderId',
+      'implementationContextId',
+      'repositoryOwner',
+      'branch'.replace('branch', 'implementationBranch'),
+      'expectedOutputs',
+      'verificationRequirements',
+      'mode',
+      'promptDigest',
+    ]) {
+      expect(src, `ExecutionTask must declare ${field}`).toMatch(new RegExp(`readonly ${field}`));
+    }
+  });
+
+  it('WORK-027: execution state machine is separate from the workflow state machine', () => {
+    const types = readAgentsExecutionFile('execution.types.ts');
+    // The 9 execution states belong to execution records only.
+    for (const state of [
+      "'created'", "'queued'", "'running'", "'handoff_ready'", "'submitted'",
+      "'completed'", "'failed'", "'cancelled'", "'expired'",
+    ]) {
+      expect(types, `execution state ${state}`).toContain(state);
+    }
+    // No execution file may declare workflow states or a second workflow
+    // state machine.
+    for (const f of AGENTS_EXECUTION_FILES) {
+      const codeOnly = stripComments(readAgentsExecutionFile(f));
+      expect(codeOnly, `${f} must not declare LEGAL_TRANSITIONS`).not.toMatch(/LEGAL_TRANSITIONS/);
+      expect(codeOnly, `${f} must not declare WorkflowState`).not.toMatch(
+        /type\s+WorkflowState\s*=/,
+      );
+    }
+  });
+
+  it('WORK-027: NativeExecutionProvider uses the existing AgentGateway (no second gateway)', () => {
+    const src = stripComments(readAgentsExecutionFile('native-execution-provider.ts'));
+    expect(src).toMatch(/agentGateway\.execute\s*\(/);
+    // It must NOT construct its own gateway or repository.
+    expect(src).not.toMatch(/new\s+DefaultAgentGateway/);
+    expect(src).not.toMatch(/new\s+PgAgentRunRepository/);
+  });
+
+  it('WORK-027: ImplementationContextBuilder remains the context authority', () => {
+    // The ExecutionTaskService (/work-items) must build the context through
+    // the builder — execution code never reconstructs Work Orders from raw
+    // requirement/criterion repositories.
+    const taskService = stripComments(
+      readFileSync(
+        join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'execution-task-service.ts'),
+        'utf8',
+      ),
+    );
+    expect(taskService).toMatch(/implementationContextBuilder\.build\s*\(/);
+    // No /agents execution file may import requirement/architecture repos.
+    for (const f of AGENTS_EXECUTION_FILES) {
+      const src = readAgentsExecutionFile(f);
+      expect(src, `${f} must not import /requirements`).not.toMatch(/@modules\/requirements/);
+      expect(src, `${f} must not import /architecture`).not.toMatch(/@modules\/architecture/);
+      expect(src, `${f} must not import /work-items`).not.toMatch(/@modules\/work-items/);
+    }
+  });
+
+  // --- Authority invariants ---
+
+  it('WORK-027: external execution never mutates workflow state directly', () => {
+    for (const f of AGENTS_EXECUTION_FILES) {
+      const codeOnly = stripComments(readAgentsExecutionFile(f));
+      expect(codeOnly, `${f} must not import WorkflowEngine`).not.toMatch(
+        /@modules\/workflows/,
+      );
+      expect(codeOnly, `${f} must not reference wfos_workflow_ tables`).not.toMatch(
+        /wfos_workflow_/,
+      );
+      expect(codeOnly, `${f} must not call workflowEngine.transition`).not.toMatch(
+        /workflowEngine\.transition\s*\(/,
+      );
+    }
+    const ingestionRoute = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution.route.ts'),
+      'utf8',
+    );
+    expect(stripComments(ingestionRoute)).not.toMatch(/workflowEngine|orchestrator/);
+  });
+
+  it('WORK-027: external execution does not set verification PASS / APPROVED / MERGED', () => {
+    for (const f of AGENTS_EXECUTION_FILES) {
+      const codeOnly = stripComments(readAgentsExecutionFile(f));
+      expect(codeOnly, `${f} must not import /verification`).not.toMatch(/@modules\/verification/);
+      expect(codeOnly, `${f} must not import /reviews`).not.toMatch(/@modules\/reviews/);
+      expect(codeOnly, `${f} must not reference verification tables`).not.toMatch(
+        /wfos_verification_runs/,
+      );
+      expect(codeOnly, `${f} must not reference review tables`).not.toMatch(/wfos_reviews/);
+      expect(codeOnly, `${f} must not set approved/merged workflow states`).not.toMatch(
+        /toState:\s*'(approved|merged|verified)'/,
+      );
+    }
+  });
+
+  // --- Package security ---
+
+  it('WORK-027: ExternalExecutionPackage declares no secret/token fields', () => {
+    const src = readAgentsExecutionFile('execution.types.ts');
+    // Extract the ExternalExecutionPackage interface body.
+    const match = src.match(/interface ExternalExecutionPackage \{[\s\S]*?\n\}/);
+    expect(match, 'ExternalExecutionPackage interface').not.toBeNull();
+    const body = match![0];
+    expect(body).not.toMatch(/(api[_-]?key|apikey|secret|github[_-]?token|access[_-]?token|webhook[_-]?secret|password|credential)\s*:/i);
+  });
+
+  it('WORK-027: external provider never reads secrets or SecretStore', () => {
+    const src = stripComments(readAgentsExecutionFile('external-execution-provider.ts'));
+    expect(src).not.toMatch(/SecretStore/);
+    expect(src).not.toMatch(/getSecret\s*\(/);
+    expect(src).not.toMatch(/process\.env/);
+  });
+
+  it('WORK-027: handoff tokens are stored hashed + one-time + short-lived', () => {
+    const svc = readAgentsExecutionFile('execution-handoff-service.ts');
+    expect(svc).toMatch(/createHash\('sha256'\)/);
+    expect(svc).toMatch(/handoffTtlMs/);
+    expect(svc).toMatch(/handoff-token-already-used/);
+    expect(svc).toMatch(/handoff-token-expired/);
+    expect(svc).toMatch(/handoff-token-invalid/);
+    // The Pg repository must NOT store the raw token column.
+    const repo = readAgentsExecutionFile('pg-execution-repository.ts');
+    expect(repo).not.toMatch(/raw_token/);
+  });
+
+  it('WORK-027: execution package retrieval requires auth + one-time token (no public URLs)', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution.route.ts'),
+      'utf8',
+    );
+    // The package route must check project authorization + the token header.
+    const packageRoute = routeSrc.match(/app\.get\('\/execution\/:executionId\/package'[\s\S]*?\n  \}\);/);
+    expect(packageRoute, 'package route').not.toBeNull();
+    expect(packageRoute![0]).toMatch(/requireProjectAuthorization/);
+    expect(packageRoute![0]).toMatch(/x-handoff-token/);
+    // The token must NOT travel in a URL query string.
+    expect(routeSrc).not.toMatch(/querystring/);
+    expect(packageRoute![0]).not.toMatch(/\?token=/);
+  });
+
+  // --- Provider-specific logic stays behind provider boundaries ---
+
+  it('WORK-027: no provider-specific external adapters, URLs, or DOM automation exist yet', () => {
+    // Backend: provider names may appear ONLY in the registry catalog file.
+    const catalogFile = 'agent-provider-registry.types.ts';
+    for (const file of walkTs(join(BACKEND_ROOT, 'src'))) {
+      const rel = relative(BACKEND_ROOT, file);
+      if (rel.includes('node_modules')) continue;
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (rel.endsWith(catalogFile)) continue;
+      expect(
+        codeOnly,
+        `${rel} must not hard-code external provider names (zai/chatgpt/claude)`,
+      ).not.toMatch(/['"`](zai|chatgpt|claude)['"`]/i);
+    }
+    // Frontend: no extension/DOM automation + no provider platform URLs.
+    for (const file of walkTs(join(REPO_ROOT, 'frontend', 'src'))) {
+      const rel = relative(REPO_ROOT, file);
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      expect(codeOnly, `${rel} must not contain extension APIs`).not.toMatch(
+        /chrome\.runtime|browser\.runtime/,
+      );
+      expect(codeOnly, `${rel} must not contain provider platform URLs`).not.toMatch(
+        /chat\.openai\.com|claude\.ai|z\.ai\/chat/i,
+      );
+    }
+  });
+
+  it('WORK-027: execution routes delegate to services (no SQL, no provider calls in routes)', () => {
+    const routeSrc = stripComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution.route.ts'), 'utf8'),
+    );
+    expect(routeSrc).not.toMatch(/SELECT |INSERT |UPDATE |DELETE FROM /i);
+    expect(routeSrc).not.toMatch(/new\s+\w*ExecutionProvider/);
+    expect(routeSrc).toMatch(/executionHandoffService\.issue\s*\(/);
+    expect(routeSrc).toMatch(/executionHandoffService\.redeem\s*\(/);
+    expect(routeSrc).toMatch(/executionEventIngestionService\.ingest\s*\(/);
+  });
+
+  it('WORK-027: workflow route exposes the mode-aware execution endpoint', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'),
+      'utf8',
+    );
+    expect(routeSrc).toMatch(/app\.post\('\/work-items\/:workItemId\/execution'/);
+    expect(stripComments(routeSrc)).toMatch(/executionService\.submit\s*\(/);
+    expect(stripComments(routeSrc)).toMatch(/executionTaskService\.build\s*\(/);
+    // External mode must validate against the registry catalog.
+    expect(stripComments(routeSrc)).toMatch(/isExternalProviderSupported/);
+  });
+
+  it('WORK-027: frontend never persists handoff tokens or packages', () => {
+    for (const file of walkTs(join(REPO_ROOT, 'frontend', 'src'))) {
+      const rel = relative(REPO_ROOT, file);
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      const storageWrites = [...codeOnly.matchAll(/localStorage\.setItem\(\s*['"]([^'"]+)['"]/g)];
+      for (const m of storageWrites) {
+        expect(m[1], `${rel} may only persist the API key in localStorage`).toBe('wfos_api_key');
+      }
+    }
+  });
+
+  it('WORK-027: audit events use the /audit authority with UPPER_SNAKE names', () => {
+    const serviceSrc = readAgentsExecutionFile('execution-service.ts');
+    expect(serviceSrc).toMatch(/auditService\.write\s*\(/);
+    for (const evt of ['EXECUTION_CREATED', 'EXECUTION_HANDOFF_READY', 'EXECUTION_COMPLETED', 'EXECUTION_FAILED']) {
+      expect(serviceSrc, `execution-service must audit ${evt}`).toContain(evt);
+    }
+    const handoffSrc = readAgentsExecutionFile('execution-handoff-service.ts');
+    expect(handoffSrc).toContain('EXECUTION_EXPIRED');
+    const ingestSrc = readAgentsExecutionFile('execution-event-ingestion-service.ts');
+    for (const evt of ['EXECUTION_STARTED', 'EXECUTION_COMPLETED', 'EXECUTION_FAILED']) {
+      expect(ingestSrc, `ingestion must audit ${evt}`).toContain(evt);
+    }
+  });
+
+  it('WORK-027: index.ts passes the execution route group to buildServer', () => {
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/execution:\s*\{/);
+    expect(indexSrc).toMatch(/executionTaskService/);
+    expect(indexSrc).toMatch(/executionService/);
   });
 });
 

@@ -152,6 +152,9 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
     // instance. Order: child tables first, then parents.
     await client.exec(`
       TRUNCATE wfos_agent_runs RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_execution_handoffs RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_execution_events RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_executions RESTART IDENTITY CASCADE;
       TRUNCATE wfos_llm_execution_records RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_transitions RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_executions RESTART IDENTITY CASCADE;

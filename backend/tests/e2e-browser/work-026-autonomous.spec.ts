@@ -129,6 +129,12 @@ import {
 import {
   DefaultStartImplementationService,
 } from '../../src/modules/work-items/internal/start-implementation-service.js';
+// WORK-027: execution provider abstraction internals.
+import { PgExecutionRecordRepository } from '../../src/modules/agents/internal/pg-execution-repository.js';
+import { NativeExecutionProvider } from '../../src/modules/agents/internal/native-execution-provider.js';
+import { DefaultExecutionService } from '../../src/modules/agents/internal/execution-service.js';
+import { DefaultExecutionPromptBuilder } from '../../src/modules/work-items/internal/execution-prompt-builder.js';
+import { DefaultExecutionTaskService } from '../../src/modules/work-items/internal/execution-task-service.js';
 import type { FastifyInstance } from 'fastify';
 
 let stack: TestAuthStack;
@@ -301,16 +307,11 @@ test.beforeAll(async () => {
     },
   );
 
-  // PR #29 fix #1: DefaultStartImplementationService wires the persisted
-  // ImplementationContext to the AgentGateway. There is NO production no-op.
-  const startImplementationService = new DefaultStartImplementationService({
-    agentGateway,
-    agentRunRepository: agentRunRepo,
-    workItemRepository: stack.workItemRepository,
-    workOrderRepository: stack.workOrderRepository,
-    contextRepository: implementationContextRepo,
-    logger,
-  });
+  // PR #29 fix #1 + WORK-027 refactor: DefaultStartImplementationService now
+  // delegates to the ExecutionService boundary (NativeExecutionProvider
+  // wraps the AgentGateway — the single native execution path; no no-op).
+  // NOTE: constructed AFTER auditService below (the ExecutionService emits
+  // audit events) — see the WORK-027 block following auditService.
 
   // PR #29 fix #2: AgentProviderRegistryService — the start-implementation
   // route validates provider/model against this registry before invoking the
@@ -349,6 +350,38 @@ test.beforeAll(async () => {
     stack.db.client,
   );
   const auditService = new DefaultAuditService(stack.db.client, stack.db.logger);
+
+  // WORK-027: execution provider abstraction (task service + native provider
+  // + ExecutionService). DefaultStartImplementationService delegates here.
+  const executionPromptBuilder = new DefaultExecutionPromptBuilder();
+  const executionTaskService = new DefaultExecutionTaskService({
+    workItemRepository: stack.workItemRepository,
+    workOrderRepository: stack.workOrderRepository,
+    architectureVersionRepository: stack.architectureVersionRepository,
+    architectureRepository: stack.architectureRepository,
+    implementationContextBuilder,
+    contextRepository: implementationContextRepo,
+    promptBuilder: executionPromptBuilder,
+    logger,
+  });
+  const nativeExecutionProvider = new NativeExecutionProvider({
+    agentGateway,
+    agentRunRepository: agentRunRepo,
+    logger,
+  });
+  const executionRecordRepository = new PgExecutionRecordRepository(stack.db.client);
+  const executionService = new DefaultExecutionService({
+    executionRecordRepository,
+    providers: [nativeExecutionProvider],
+    auditService,
+    logger,
+  });
+  const startImplementationService = new DefaultStartImplementationService({
+    executionTaskService,
+    executionService,
+    logger,
+  });
+
   const depService = new DefaultWorkItemDependencyService(stack.db.client);
   workflowEngine = new DefaultWorkflowEngine(
     stack.db.client,

@@ -1,4 +1,4 @@
-import { Play, GitMerge, CheckCircle2, FlaskConical, FileCheck, Activity } from 'lucide-react';
+import { Play, GitMerge, CheckCircle2, FlaskConical, FileCheck, Activity, Rocket } from 'lucide-react';
 import { LoadingState } from '@/components/domain/loading-state';
 import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
@@ -9,12 +9,16 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '@/components/domain/status-badge';
 import { WorkflowTimeline } from '@/components/domain/workflow-timeline';
+import { ExecutionModeDialog } from '@/components/execution/ExecutionModeDialog';
+import { ExternalExecutionDialog } from '@/components/execution/ExternalExecutionDialog';
 import {
   workItems, workflow, agentRuns, reviews, verification, audit,
+  execution, executionProviders,
   type WorkItem, type WorkflowExecution, type WorkflowTransition,
   type WorkOrder, type PrAssociation, type AgentRun,
   type Review, type ReviewFinding, type AuditEvent,
   type VerificationRun, type VerificationEvidence,
+  type ExecutionMode, type ExecutionSummary, type ExecutionProviderInfo,
   ApiError,
 } from '@/api/client';
 
@@ -34,6 +38,14 @@ export default function WorkItemPage() {
   const [verRuns, setVerRuns] = useState<VerificationRun[]>([]);
   const [verEvidence, setVerEvidence] = useState<Record<string, VerificationEvidence[]>>({});
 
+  // WORK-027: execution mode selection + external handoff state.
+  const [executions, setExecutions] = useState<ExecutionSummary[]>([]);
+  const [executionProviderList, setExecutionProviderList] = useState<ExecutionProviderInfo[]>([]);
+  const [modeDialogOpen, setModeDialogOpen] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [externalDialogExecution, setExternalDialogExecution] = useState<ExecutionSummary | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -41,7 +53,10 @@ export default function WorkItemPage() {
 
   const loadAll = useCallback(async () => {
     if (!workItemId) return;
-    setLoading(true);
+    // WORK-027: refreshes never flip `loading` back on — the initial mount
+    // state (true) covers the first load, and refreshes keep the DOM mounted
+    // so dialog state (e.g. the external handoff package view) survives
+    // background reloads after actions.
     setError(null);
     try {
       // --- Explicitly named variables for each resource ---
@@ -62,6 +77,12 @@ export default function WorkItemPage() {
 
       const ars = await agentRuns.listForWorkItem(workItemId).catch(() => []);
       setAgentRunList(ars);
+
+      // WORK-027: safe execution metadata + provider readiness (safe data).
+      const execs = await execution.listForWorkItem(workItemId).catch(() => []);
+      setExecutions(execs);
+      const eprovs = await executionProviders.listGlobal().catch(() => []);
+      setExecutionProviderList(eprovs);
 
       const revs = await reviews.listForWorkItem(workItemId).catch(() => []);
       setReviewList(revs);
@@ -109,6 +130,48 @@ export default function WorkItemPage() {
     }
   };
 
+  // WORK-027: Start Implementation submits through the mode-aware execution
+  // endpoint. Native completes synchronously (agentRunId appears in Agent
+  // Runs); external returns handoff-ready → open the External Execution view.
+  const startExecution = async (input: { mode: ExecutionMode; provider: string; model?: string }) => {
+    setStartBusy(true);
+    setStartError(null);
+    try {
+      const created = await execution.start(workItemId!, input);
+      setModeDialogOpen(false);
+      if (created.mode === 'external') {
+        // Refresh, then open the external handoff view for the new execution.
+        const summary = await execution.get(created.executionId).catch(() => null);
+        setExternalDialogExecution(summary ?? {
+          executionId: created.executionId,
+          mode: 'external',
+          provider: created.provider,
+          model: created.model,
+          status: created.status,
+          agentRunId: null,
+          externalSessionRef: null,
+          repository: created.repository,
+          branch: created.branch,
+          promptDigest: '',
+          benchmarkMetadata: {},
+          startedAt: null,
+          completedAt: null,
+          expiresAt: created.expiresAt,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      await loadAll();
+    } catch (err) {
+      setStartError(err instanceof ApiError ? err.message : (err as Error).message);
+    } finally {
+      setStartBusy(false);
+    }
+  };
+
+  const canStartImplementation =
+    workflowState?.currentState === 'ready' || workflowState?.currentState === 'changes_requested';
+
   if (loading) return <LoadingState label="Loading work item…" />;
   if (error) return <ErrorState message={error} />;
   if (!workItem) return <ErrorState message="Work item not found" />;
@@ -137,6 +200,14 @@ export default function WorkItemPage() {
         <CardHeader><CardTitle className="text-sm">Workflow Actions</CardTitle></CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={actionLoading || !canStartImplementation}
+              title={canStartImplementation ? 'Choose Native or External execution' : 'Requires workflow state ready or changes_requested'}
+              onClick={() => setModeDialogOpen(true)}
+            >
+              <Rocket className="mr-1 h-3.5 w-3.5" />Start Implementation
+            </Button>
             <Button size="sm" variant="outline" disabled={actionLoading} onClick={() => handleAction(() => workflow.transition(workItemId!, 'ready'))}>
               <Play className="mr-1 h-3.5 w-3.5" />Ready
             </Button>
@@ -208,6 +279,39 @@ export default function WorkItemPage() {
                         <StatusBadge value={wo.state} />
                       </div>
                       {wo.scope && <p className="mt-1 text-sm">{wo.scope}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Executions (WORK-027: native + external, safe metadata) */}
+          <Card>
+            <CardHeader><CardTitle className="text-sm">Executions</CardTitle></CardHeader>
+            <CardContent>
+              {executions.length === 0 ? (
+                <EmptyState title="No executions" description="Start implementation to create an execution (native or external)." />
+              ) : (
+                <div className="space-y-2">
+                  {executions.map((ex) => (
+                    <div key={ex.executionId} className="flex items-center justify-between rounded-md border p-3">
+                      <div>
+                        <p className="text-sm font-medium">
+                          {ex.mode === 'external' ? 'External' : 'Native'} · {ex.provider}
+                          {ex.model ? <span className="text-muted-foreground"> ({ex.model})</span> : null}
+                        </p>
+                        <p className="font-mono text-xs text-muted-foreground">{ex.executionId}</p>
+                        {ex.repository && <p className="text-xs text-muted-foreground">repo: {ex.repository}</p>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <StatusBadge value={ex.status} />
+                        {ex.mode === 'external' && (ex.status === 'handoff_ready' || ex.status === 'submitted') && (
+                          <Button size="sm" variant="outline" onClick={() => setExternalDialogExecution(ex)}>
+                            External Handoff
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -365,6 +469,23 @@ export default function WorkItemPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* WORK-027: Execution Mode selector + External Execution handoff view */}
+      <ExecutionModeDialog
+        open={modeDialogOpen}
+        onOpenChange={setModeDialogOpen}
+        workItemLabel={workItem.workItemId}
+        providers={executionProviderList}
+        busy={startBusy}
+        error={startError}
+        onSubmit={startExecution}
+      />
+      <ExternalExecutionDialog
+        open={externalDialogExecution !== null}
+        onOpenChange={(open) => { if (!open) setExternalDialogExecution(null); }}
+        executionSummary={externalDialogExecution}
+        onStatusChange={loadAll}
+      />
     </div>
   );
 }

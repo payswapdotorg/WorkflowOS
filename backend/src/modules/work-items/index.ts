@@ -48,6 +48,18 @@ export type {
   ImplementationContextRepository,
   ImplementationContextBuilder,
 } from './internal/implementation-context.types.js';
+// WORK-027: deterministic implementation prompt + provider-independent
+// ExecutionTask construction (consumes the persisted ImplementationContext;
+// the task feeds the /agents ExecutionService provider boundary).
+export type {
+  ExecutionPrompt,
+  ExecutionPromptBuilder,
+} from './internal/execution-prompt-builder.js';
+export type {
+  ExecutionTaskService,
+  ExecutionTaskServiceInput,
+  BuiltExecutionTask,
+} from './internal/execution-task-service.js';
 
 /**
  * Public capabilities exposed by the /work-items module to other modules.
