@@ -31,6 +31,27 @@
  * because session acceptance is performed by a TRANSACTION-SCOPED
  * ArchitectSessionRepository constructed inside the same db.transaction
  * callback as the other repositories.
+ *
+ * PLAN-INTEGRITY CONTRACT (WORK-025 PR #28 correction #2):
+ * The applier MUST NOT silently ignore invalid references in the plan.
+ * Before any plan artifact is written, the applier validates:
+ *
+ *   1. Every requirementId referenced by a Work Item resolves to a
+ *      Requirement declared in the same plan.
+ *   2. Every criterionId referenced by a Work Item resolves to a
+ *      Criterion declared in the same plan.
+ *   3. Every dependency ID referenced by a Work Item resolves to a
+ *      Work Item declared in the same plan.
+ *   4. Work Item IDs are unique within the plan.
+ *   5. Requirement IDs are unique within the plan.
+ *   6. Criterion IDs are unique within the plan.
+ *   7. A criterion is declared under exactly one requirement (a
+ *      criterionId cannot appear under two different requirements).
+ *   8. Unknown references cause the apply() call to throw BEFORE any
+ *      plan artifact is persisted.
+ *
+ * On any invalid reference: the apply() call rejects, the transaction
+ * rolls back (if it had begun), and the session remains active.
  */
 import type { DatabaseClient } from '@platform/index.js';
 import type { Logger } from '@platform/logger.js';
@@ -99,6 +120,28 @@ export interface ApplyPlanResult {
   acceptedSessionIds: string[];
 }
 
+/**
+ * Error thrown when an Architect-generated plan contains an invalid
+ * reference (unknown id, duplicate id, or a criterion declared under the
+ * wrong requirement). Callers can inspect `kind` to differentiate.
+ */
+export class ArchitectPlanIntegrityError extends Error {
+  constructor(
+    public readonly kind:
+      | 'duplicate-work-item-id'
+      | 'duplicate-requirement-id'
+      | 'duplicate-criterion-id'
+      | 'unknown-requirement-reference'
+      | 'unknown-criterion-reference'
+      | 'unknown-dependency-reference'
+      | 'criterion-declared-under-wrong-requirement',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ArchitectPlanIntegrityError';
+  }
+}
+
 export class ArchitectPlanApplier {
   constructor(
     private readonly db: DatabaseClient,
@@ -114,6 +157,17 @@ export class ArchitectPlanApplier {
   ) {}
 
   async apply(projectId: string, plan: ArchitectPlanInput): Promise<ApplyPlanResult> {
+    // ---------------------------------------------------------------------
+    // PLAN-INTEGRITY VALIDATION (PR #28 correction #2).
+    //
+    // Validate the plan BEFORE entering the transaction. Malformed plans
+    // fail fast without touching the DB. This runs BEFORE the session
+    // lookup, so a malformed plan does NOT even reach the session lookup
+    // (let alone any plan-artifact write). The session therefore remains
+    // untouched in `active` status.
+    // ---------------------------------------------------------------------
+    this.validatePlan(plan);
+
     // Look up the active session BEFORE the transaction. The lookup is a
     // read, so it doesn't need to be transactional — but the accept does.
     const session = await this.sessionRepository.findActiveByProject(projectId);
@@ -163,12 +217,15 @@ export class ArchitectPlanApplier {
         const workItem = createdWorkItems.find(c => c.workItemId === wi.workItemId);
         if (!workItem) continue;
         for (const reqId of wi.requirementIds ?? []) {
-          const req = createdReqs.find(r => r.requirementId === reqId);
-          if (req) await wiReqRepo.associate(workItem.id, req.id);
+          // Plan-integrity validation already proved this resolves.
+          // The find() is structural — if it returned undefined here, that's
+          // a bug in the applier, not in the plan.
+          const req = createdReqs.find(r => r.requirementId === reqId)!;
+          await wiReqRepo.associate(workItem.id, req.id);
         }
         for (const critId of wi.criterionIds ?? []) {
-          const crit = createdCriteria.find(c => c.criterionId === critId);
-          if (crit) await wiCritRepo.associate(workItem.id, crit.id);
+          const crit = createdCriteria.find(c => c.criterionId === critId)!;
+          await wiCritRepo.associate(workItem.id, crit.id);
         }
       }
 
@@ -177,8 +234,8 @@ export class ArchitectPlanApplier {
         const source = createdWorkItems.find(c => c.workItemId === wi.workItemId);
         if (!source) continue;
         for (const depId of wi.dependencies) {
-          const target = createdWorkItems.find(c => c.workItemId === depId);
-          if (target) await depRepo.add(source.id, target.id);
+          const target = createdWorkItems.find(c => c.workItemId === depId)!;
+          await depRepo.add(source.id, target.id);
         }
       }
 
@@ -213,5 +270,112 @@ export class ArchitectPlanApplier {
         acceptedSessionIds,
       };
     });
+  }
+
+  /**
+   * Validate the plan's internal references BEFORE any plan artifact is
+   * persisted. Throws ArchitectPlanIntegrityError on the first violation.
+   *
+   * The order of checks is significant: structural uniqueness checks
+   * (duplicate ids) run first, then cross-reference checks (unknown ids,
+   * criterion-under-wrong-requirement). This produces the most specific
+   * error message for each malformed plan.
+   */
+  private validatePlan(plan: ArchitectPlanInput): void {
+    const requirements = plan.requirements ?? [];
+    const workItems = plan.workItems ?? [];
+
+    // --- Build the set of declared ids for cross-reference checks ---
+
+    const requirementIds = new Set<string>();
+    const criterionIds = new Set<string>();
+    // Map criterionId → the requirementId it is declared under.
+    const criterionToRequirement = new Map<string, string>();
+
+    // --- Check 5: duplicate requirement IDs ---
+    for (const req of requirements) {
+      if (requirementIds.has(req.requirementId)) {
+        throw new ArchitectPlanIntegrityError(
+          'duplicate-requirement-id',
+          `Duplicate requirementId "${req.requirementId}" — requirement IDs must be unique within a plan`,
+        );
+      }
+      requirementIds.add(req.requirementId);
+    }
+
+    // --- Check 6: duplicate criterion IDs + Check 7: criterion-under-wrong-requirement ---
+    for (const req of requirements) {
+      for (const crit of req.criteria ?? []) {
+        if (criterionIds.has(crit.criterionId)) {
+          throw new ArchitectPlanIntegrityError(
+            'duplicate-criterion-id',
+            `Duplicate criterionId "${crit.criterionId}" — criterion IDs must be unique within a plan`,
+          );
+        }
+        criterionIds.add(crit.criterionId);
+        criterionToRequirement.set(crit.criterionId, req.requirementId);
+      }
+    }
+
+    // --- Check 4: duplicate Work Item IDs ---
+    const workItemIds = new Set<string>();
+    for (const wi of workItems) {
+      if (workItemIds.has(wi.workItemId)) {
+        throw new ArchitectPlanIntegrityError(
+          'duplicate-work-item-id',
+          `Duplicate workItemId "${wi.workItemId}" — Work Item IDs must be unique within a plan`,
+        );
+      }
+      workItemIds.add(wi.workItemId);
+    }
+
+    // --- Cross-reference checks: every Work Item reference resolves to a
+    //     declared entity in the same plan. ---
+
+    for (const wi of workItems) {
+      // --- Check 1: every requirementId referenced by a Work Item resolves ---
+      for (const reqId of wi.requirementIds ?? []) {
+        if (!requirementIds.has(reqId)) {
+          throw new ArchitectPlanIntegrityError(
+            'unknown-requirement-reference',
+            `Work Item "${wi.workItemId}" references unknown requirementId "${reqId}" — every requirementId in a Work Item MUST resolve to a Requirement declared in the same plan`,
+          );
+        }
+      }
+
+      // --- Check 2: every criterionId referenced by a Work Item resolves ---
+      // --- Check 7 (deferred): criterion declared under the WRONG requirement ---
+      //     A Work Item can only reference a criterion if that criterion is
+      //     declared under one of the requirementIds the Work Item also
+      //     references. If the criterion exists but is declared under a
+      //     requirement NOT in the Work Item's requirementIds, that's a
+      //     "criterion-declared-under-wrong-requirement" violation.
+      const wiRequirementIds = new Set(wi.requirementIds ?? []);
+      for (const critId of wi.criterionIds ?? []) {
+        const declaredUnder = criterionToRequirement.get(critId);
+        if (declaredUnder === undefined) {
+          throw new ArchitectPlanIntegrityError(
+            'unknown-criterion-reference',
+            `Work Item "${wi.workItemId}" references unknown criterionId "${critId}" — every criterionId in a Work Item MUST resolve to a Criterion declared in the same plan`,
+          );
+        }
+        if (!wiRequirementIds.has(declaredUnder)) {
+          throw new ArchitectPlanIntegrityError(
+            'criterion-declared-under-wrong-requirement',
+            `Work Item "${wi.workItemId}" references criterionId "${critId}" but that criterion is declared under requirementId "${declaredUnder}", which is NOT in this Work Item's requirementIds — a criterion reference must belong to a requirement the Work Item also declares`,
+          );
+        }
+      }
+
+      // --- Check 3: every dependency ID referenced by a Work Item resolves ---
+      for (const depId of wi.dependencies ?? []) {
+        if (!workItemIds.has(depId)) {
+          throw new ArchitectPlanIntegrityError(
+            'unknown-dependency-reference',
+            `Work Item "${wi.workItemId}" references unknown dependency "${depId}" — every dependency in a Work Item MUST resolve to a Work Item declared in the same plan`,
+          );
+        }
+      }
+    }
   }
 }

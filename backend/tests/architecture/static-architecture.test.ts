@@ -1559,6 +1559,7 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
       'ProviderConfig',
       // WORK-025: Atomic plan applier
       'ApplyPlanResult', 'RepositoryFactories', 'ArchitectPlanApplier', 'ArchitectPlanInput',
+      'ArchitectPlanIntegrityError',
       // Module contract const
       'llmModule',
     ]);
@@ -1641,6 +1642,101 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
     // ArchitectPlanInput (the shared type).
     expect(applySection![0]).not.toMatch(/body\s+as\s+any/);
     expect(applySection![0]).toMatch(/as\s+ArchitectPlanInput/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #28 correction #2 — plan-integrity validation.
+  //
+  // The applier MUST NOT silently ignore invalid references in the plan.
+  // It must throw BEFORE any plan artifact is persisted for:
+  //   1. Unknown requirementId referenced by a Work Item
+  //   2. Unknown criterionId referenced by a Work Item
+  //   3. Unknown dependency ID referenced by a Work Item
+  //   4. Duplicate Work Item IDs
+  //   5. Duplicate requirement IDs
+  //   6. Duplicate criterion IDs
+  //   7. Criterion declared under the wrong requirement (referenced by a
+  //      Work Item that does NOT also reference the criterion's parent
+  //      requirement)
+  //
+  // The static checks below structurally enforce that the applier:
+  //   - Has a validatePlan method
+  //   - Calls it BEFORE the db.transaction
+  //   - Throws ArchitectPlanIntegrityError for each violation kind
+  //   - Does NOT silently skip associations on `find` returning undefined
+  //     (the `if (req) await associate(...)` anti-pattern was the original
+  //     PR #28 #2 bug — silent skip let malformed plans partially apply)
+  // -------------------------------------------------------------------------
+
+  it('ArchitectPlanApplier exposes a validatePlan method called BEFORE the db.transaction', () => {
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // validatePlan must exist as a private method.
+    expect(codeOnly).toMatch(/private\s+validatePlan\s*\(plan:\s*ArchitectPlanInput\)\s*:\s*void/);
+    // apply() MUST call this.validatePlan(plan) BEFORE this.db.transaction(...).
+    const applyMatch = codeOnly.match(/async\s+apply\s*\([\s\S]*?\n  \}/);
+    expect(applyMatch, 'expected apply method').not.toBeNull();
+    const applyBody = applyMatch![0];
+    const validateIdx = applyBody.indexOf('this.validatePlan(plan)');
+    const txIdx = applyBody.indexOf('this.db.transaction(');
+    expect(validateIdx, 'apply() must call this.validatePlan(plan)').toBeGreaterThan(-1);
+    expect(txIdx, 'apply() must call this.db.transaction(').toBeGreaterThan(-1);
+    expect(validateIdx, 'validatePlan must be called BEFORE db.transaction').toBeLessThan(txIdx);
+  });
+
+  it('ArchitectPlanApplier.validatePlan throws ArchitectPlanIntegrityError for every violation kind', () => {
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The ArchitectPlanIntegrityError class must be declared.
+    expect(codeOnly).toMatch(/class\s+ArchitectPlanIntegrityError\s+extends\s+Error/);
+    // Every required violation kind must be thrown inside validatePlan.
+    // We extract the validatePlan body and check each kind appears in a
+    // `new ArchitectPlanIntegrityError(...)` call.
+    const validateMatch = codeOnly.match(/private\s+validatePlan\s*\([\s\S]*?\n  \}/);
+    expect(validateMatch, 'expected validatePlan method').not.toBeNull();
+    const validateBody = validateMatch![0];
+    const requiredKinds = [
+      'duplicate-work-item-id',
+      'duplicate-requirement-id',
+      'duplicate-criterion-id',
+      'unknown-requirement-reference',
+      'unknown-criterion-reference',
+      'unknown-dependency-reference',
+      'criterion-declared-under-wrong-requirement',
+    ];
+    for (const kind of requiredKinds) {
+      expect(
+        validateBody,
+        `validatePlan must throw ArchitectPlanIntegrityError with kind "${kind}"`,
+      ).toMatch(new RegExp(`'${kind}'`));
+    }
+  });
+
+  it('ArchitectPlanApplier does NOT silently skip associations when a reference is missing', () => {
+    // The original PR #28 #2 bug: the applier used `if (req) await associate(...)`
+    // which silently skipped association if the reference didn't resolve.
+    // After the fix, validatePlan throws BEFORE any write, so the
+    // association code can safely use `find(...)!` (non-null assertion)
+    // because the plan was already validated.
+    //
+    // This static check enforces that the association code does NOT contain
+    // `if (req)`, `if (crit)`, or `if (target)` guards — those were the
+    // silent-skip anti-pattern. The validated code uses non-null assertions.
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // Strip the validatePlan body — we don't want its `if (!requirementIds.has(...))`
+    // checks to be confused with the association `if (req)` anti-pattern.
+    const withoutValidate = codeOnly.replace(
+      /private\s+validatePlan\s*\([\s\S]*?\n  \}/,
+      '/* validatePlan removed */',
+    );
+    // The association code MUST NOT use the `if (X) await ...` silent-skip pattern.
+    expect(withoutValidate).not.toMatch(/if\s*\(req\)\s+await\s+wiReqRepo\.associate/);
+    expect(withoutValidate).not.toMatch(/if\s*\(crit\)\s+await\s+wiCritRepo\.associate/);
+    expect(withoutValidate).not.toMatch(/if\s*\(target\)\s+await\s+depRepo\.add/);
   });
 });
 

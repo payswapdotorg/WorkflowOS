@@ -246,15 +246,32 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
       // operation fails (plan artifact creation OR session acceptance), the
       // entire transaction rolls back and the session is NOT marked accepted.
       // No partial plans.
+      //
+      // PLAN-INTEGRITY: ArchitectPlanApplier.validatePlan runs BEFORE the
+      // transaction and throws ArchitectPlanIntegrityError if the plan
+      // contains unknown/duplicate references. The route detects that by
+      // the error's `name` property (not via `instanceof` — the class is
+      // internal to /llm and only the type is exported through the barrel).
+      // Integrity errors are 400 (client-supplied malformed plan); other
+      // errors are 500 (apply-failed with full rollback).
       try {
         const result = await deps.planApplier.apply(projectId, body);
         return reply.code(201).send(result);
       } catch (err) {
+        const e = err as Error & { kind?: string };
+        if (e.name === 'ArchitectPlanIntegrityError') {
+          return reply.code(400).send({
+            error: 'plan-integrity-violation',
+            kind: e.kind,
+            message: e.message,
+            detail: 'The plan contains invalid references. No changes were applied.',
+          });
+        }
         // Transaction rolled back — no partial plan persisted.
         // Session is NOT accepted.
         return reply.code(500).send({
           error: 'apply-failed',
-          message: (err as Error).message,
+          message: e.message,
           detail: 'The architecture plan was not applied. All changes were rolled back.',
         });
       }
