@@ -8,7 +8,22 @@
  * GitHub SDK/provider code stays inside /github internal/. Other modules
  * consume only the provider-independent interfaces (GitHubAdapter,
  * WebhookEventRepository, WebhookProcessingService).
+ *
+ * WORK-026 extends {@link GitHubAdapter} with repository provisioning methods
+ * (createRepository / createBranch / createPullRequest / getBranch / health).
+ * The input/result DTOs for those methods live in
+ * `./project-github-repository.types.ts` and are imported below.
  */
+import type {
+  CreateBranchInput,
+  CreateBranchResult,
+  CreatePullRequestInput,
+  CreatePullRequestResult,
+  CreateRepositoryInput,
+  CreateRepositoryResult,
+  GetBranchInput,
+  GetBranchResult,
+} from './project-github-repository.types.js';
 
 // --- Webhook event receipt ---
 
@@ -87,6 +102,53 @@ export interface GitHubAdapter {
     prNumber: number;
     commitMessage?: string;
   }): Promise<GitHubMergeResult>;
+
+  // --- WORK-026: repository provisioning extensions ---
+
+  /**
+   * Create a new GitHub repository under `input.owner`.
+   *
+   * WORK-026: used by the project runtime provisioning flow to stand up the
+   * GitHub repository for a WorkflowOS project. The concrete impl
+   * ({@link DefaultGitHubAdapter}) throws `'github-not-configured'` until
+   * GitHub App credentials are wired; tests use {@link FakeGitHubAdapter}.
+   */
+  createRepository(input: CreateRepositoryInput): Promise<CreateRepositoryResult>;
+
+  /**
+   * Create a new branch on an existing repository.
+   *
+   * WORK-026: used by the autonomous implementation loop to create the
+   * implementation branch the agent will push commits to.
+   */
+  createBranch(input: CreateBranchInput): Promise<CreateBranchResult>;
+
+  /**
+   * Open a pull request on an existing repository.
+   *
+   * WORK-026: used by the autonomous implementation loop to open the PR
+   * that carries the agent's implementation commits into the default branch.
+   */
+  createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult>;
+
+  /**
+   * Look up a branch's current HEAD SHA + whether it is the default branch.
+   *
+   * WORK-026: used to resolve the `fromSha` for `createBranch` and to
+   * detect whether a branch has moved since the last poll.
+   */
+  getBranch(input: GetBranchInput): Promise<GetBranchResult>;
+
+  /**
+   * Adapter readiness probe.
+   *
+   * - `'connected'`     — adapter has live credentials and can reach GitHub.
+   * - `'not-configured'` — credentials are not wired (production default
+   *                       until WORK-026 follow-on wires GITHUB_APP_*).
+   * - `'error'`         — credentials present but the provider call failed.
+   * - `'test-mode'`     — fake/test adapter (no live GitHub calls).
+   */
+  health(): Promise<'connected' | 'not-configured' | 'error' | 'test-mode'>;
 }
 
 /**

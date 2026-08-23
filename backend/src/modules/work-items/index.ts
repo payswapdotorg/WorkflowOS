@@ -40,6 +40,14 @@ export type {
   WorkItemDependencyService,
   WorkItemCompletionService,
 } from './internal/work-item.types.js';
+// WORK-026: ImplementationContext — persisted snapshot consumed by the
+// autonomous-implementation entry point (POST /work-items/:workItemId/start-implementation).
+export type {
+  ImplementationContext,
+  ImplementationContextContent,
+  ImplementationContextRepository,
+  ImplementationContextBuilder,
+} from './internal/implementation-context.types.js';
 
 /**
  * Public capabilities exposed by the /work-items module to other modules.

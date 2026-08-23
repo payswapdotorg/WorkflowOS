@@ -541,6 +541,20 @@ export const workflow = {
   advanceToVerified: (workItemId: string) =>
     apiPost<{ signalId: string; accepted: boolean; verified: boolean; reason?: string }>(`/work-items/${workItemId}/workflow/advance-to-verified`, {}),
   getNextWorkItem: (projectId: string) => apiGet<{ nextWorkItemId: string | null }>(`/projects/${projectId}/workflow/next-work-item`),
+  // WORK-026 (SUB-I): autonomous-implementation entry point. Builds + persists
+  // the ImplementationContext for the work item (validates that the workflow
+  // state is 'ready' or 'changes_requested' server-side), and optionally fans
+  // out a submission to the AgentGateway when the startImplementationService
+  // is wired by the composition root. The response carries the persisted
+  // context summary (id / revision / kind) and the agentRunId when an agent
+  // run was started. The FULL ImplementationContextContent is not returned
+  // (a dedicated GET /work-items/:id/implementation-context route is not
+  // implemented — see worklog SUB-H note at line 3594).
+  startImplementation: (workItemId: string) =>
+    apiPost<StartImplementationResponse>(
+      `/work-items/${workItemId}/start-implementation`,
+      {},
+    ),
 };
 
 // --- Agent Runs ---
@@ -890,3 +904,346 @@ export const architect = {
     model?: string;
   }) => apiPost<{ sessionId: string }>(`/projects/${projectId}/architect/session`, body),
 };
+
+// --- WORK-026: Runtime / GitHub provisioning / Agent providers ---
+//
+// These namespaces consume the SUB-F routes. The frontend never makes direct
+// GitHub/Vercel API calls — every operation goes through the WorkflowOS
+// backend so secrets stay inside the adapter boundary (the static-architecture
+// check `frontend has no provider secrets` + `no direct GitHub/Vercel API from
+// frontend` enforces this).
+
+// Runtime — provider-independent deployment / preview environment boundary.
+// Backed by /runtime routes (runtime.route.ts). The runtime status response is
+// an aggregation of github + vercel + architect + agent dimensions produced by
+// the DefaultRuntimeStatusService (composed in app.ts).
+
+export type RuntimeProviderStatus =
+  | 'connected'
+  | 'not-configured'
+  | 'error'
+  | 'test-mode';
+
+export interface RuntimeIntegration {
+  id: string;
+  projectId: string;
+  provider: string;
+  projectExternalId: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface Deployment {
+  id: string;
+  integrationId: string;
+  externalId: string;
+  status: string;
+  previewUrl: string | null;
+  commitSha: string | null;
+  branch: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface RuntimeProviderHealth {
+  name: string;
+  status: RuntimeProviderStatus;
+}
+
+export interface ProjectRuntimeStatus {
+  github: {
+    status: RuntimeProviderStatus;
+    owner?: string;
+    repository?: string;
+    defaultBranch?: string | null;
+  };
+  vercel: {
+    status: RuntimeProviderStatus;
+    projectId?: string;
+    previewUrl?: string | null;
+    latestDeployment?: Deployment | null;
+  };
+  architect: {
+    status: RuntimeProviderStatus;
+    providers: Array<{
+      name: string;
+      provider: string;
+      model: string;
+      status: 'ready' | 'not-configured';
+    }>;
+  };
+  agent: {
+    status: RuntimeProviderStatus;
+    providers: Array<{
+      name: string;
+      provider: string;
+      model: string;
+      status: 'ready' | 'not-configured';
+    }>;
+  };
+}
+
+export interface CreateRuntimeIntegrationInput {
+  provider: string;
+  projectExternalId: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RecordDeploymentInput {
+  provider: string;
+  externalId: string;
+  commitSha?: string;
+  branch?: string;
+  previewUrl?: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export const runtime = {
+  getStatus: (projectId: string) =>
+    apiGet<ProjectRuntimeStatus>(`/projects/${projectId}/runtime`),
+  listIntegrations: async (projectId: string): Promise<RuntimeIntegration[]> => {
+    const body = await apiGet<{ integrations: RuntimeIntegration[] }>(
+      `/projects/${projectId}/runtime/integrations`,
+    );
+    return body.integrations ?? [];
+  },
+  createIntegration: (projectId: string, input: CreateRuntimeIntegrationInput) =>
+    apiPost<RuntimeIntegration>(`/projects/${projectId}/runtime/integrations`, input),
+  removeIntegration: (projectId: string, integrationId: string) =>
+    apiFetch(`/projects/${projectId}/runtime/integrations/${integrationId}`, {
+      method: 'DELETE',
+    }).then(() => undefined),
+  listDeployments: async (projectId: string): Promise<Deployment[]> => {
+    const body = await apiGet<{ deployments: Deployment[] }>(
+      `/projects/${projectId}/runtime/deployments`,
+    );
+    return body.deployments ?? [];
+  },
+  recordDeployment: (projectId: string, input: RecordDeploymentInput) =>
+    apiPost<Deployment>(`/projects/${projectId}/runtime/deployments`, input),
+  getLatestDeployment: (projectId: string) =>
+    apiGet<{ deployment: Deployment | null }>(
+      `/projects/${projectId}/runtime/deployments/latest`,
+    ),
+  listProviders: async (projectId: string): Promise<RuntimeProviderHealth[]> => {
+    const body = await apiGet<{ providers: RuntimeProviderHealth[] }>(
+      `/projects/${projectId}/runtime/providers`,
+    );
+    return body.providers ?? [];
+  },
+};
+
+// GitHub provisioning — surface GitHub App repository-provisioning capability.
+// Backed by /github routes (github-provisioning.route.ts). The route never
+// accepts the GitHub App private key — it delegates to the adapter (the only
+// @octokit caller, wired by the composition root via the SecretStore).
+
+export interface ProjectGitHubRepositoryLink {
+  id: string;
+  projectId: string;
+  installationId: string;
+  owner: string;
+  repository: string;
+  defaultBranch: string;
+  linkType: 'created' | 'linked';
+  externalRepoId: string | null;
+  metadata?: Record<string, unknown>;
+  linkedAt?: string;
+  createdAt?: string;
+}
+
+export interface CreateGitHubRepositoryInput {
+  owner: string;
+  repository: string;
+  visibility?: 'public' | 'private';
+  description?: string;
+  defaultBranch?: string;
+  installationId: string;
+}
+
+export interface LinkGitHubRepositoryInput {
+  owner: string;
+  repository: string;
+  installationId: string;
+  defaultBranch?: string;
+}
+
+export interface CreateGitHubRepositoryResult {
+  repository: ProjectGitHubRepositoryLink;
+  github: {
+    owner: string;
+    repository: string;
+    url: string;
+    defaultBranch: string;
+    installationId: string;
+    externalRepoId?: string;
+  };
+}
+
+export interface LinkGitHubRepositoryResult {
+  repository: ProjectGitHubRepositoryLink;
+}
+
+export const githubProvisioning = {
+  getRepository: (projectId: string) =>
+    apiGet<{ repository: ProjectGitHubRepositoryLink | null }>(
+      `/projects/${projectId}/github/repository`,
+    ),
+  createRepository: (projectId: string, input: CreateGitHubRepositoryInput) =>
+    apiPost<CreateGitHubRepositoryResult>(
+      `/projects/${projectId}/github/repository`,
+      input,
+    ),
+  linkRepository: (projectId: string, input: LinkGitHubRepositoryInput) =>
+    apiPost<LinkGitHubRepositoryResult>(
+      `/projects/${projectId}/github/link`,
+      input,
+    ),
+  getHealth: (projectId: string) =>
+    apiGet<{ status: RuntimeProviderStatus }>(
+      `/projects/${projectId}/github/health`,
+    ),
+};
+
+// Agent providers — readiness surface for the implementation agent gateway.
+// Backed by /agents routes (agent.route.ts). The `secretRef` field accepted by
+// POST /projects/:id/agents/providers is the NAME of the env var, NOT the
+// value — the route never accepts the secret value in the request body.
+
+export interface AgentProviderConfig {
+  name: string;
+  provider: string;
+  model: string;
+  status: 'ready' | 'not-configured';
+}
+
+export interface AgentProviderConfigRecord {
+  id: string;
+  projectId: string;
+  provider: string;
+  model: string;
+  /** SecretStore key name (e.g. env var name) — NEVER the secret value. */
+  secretRef: string;
+  metadata?: Record<string, unknown>;
+  isDefault: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CreateAgentProviderConfigInput {
+  provider: string;
+  model: string;
+  /** SecretStore key name (e.g. env var name) — NEVER the secret value. */
+  secretRef: string;
+  metadata?: Record<string, unknown>;
+  isDefault?: boolean;
+}
+
+export const agentProviders = {
+  listGlobal: async (): Promise<AgentProviderConfig[]> => {
+    const body = await apiGet<{ providers: AgentProviderConfig[] }>(
+      `/agents/providers`,
+    );
+    return body.providers ?? [];
+  },
+  listForProject: async (projectId: string): Promise<AgentProviderConfig[]> => {
+    const body = await apiGet<{ providers: AgentProviderConfig[] }>(
+      `/projects/${projectId}/agents/providers`,
+    );
+    return body.providers ?? [];
+  },
+  createForProject: (
+    projectId: string,
+    input: CreateAgentProviderConfigInput,
+  ) =>
+    apiPost<AgentProviderConfigRecord>(
+      `/projects/${projectId}/agents/providers`,
+      input,
+    ),
+};
+
+// --- WORK-026: workflow start-implementation + implementation-context view ---
+//
+// The POST /work-items/:workItemId/start-implementation route is the
+// autonomous-implementation entry point. It builds + persists the
+// ImplementationContext (revision + kind) and, when wired by the composition
+// root, fans out a submission to the AgentGateway. The response carries the
+// persisted context summary (id / revision / kind) — the FULL content is not
+// returned (a dedicated GET /work-items/:workItemId/implementation-context
+// route is NOT implemented; see worklog SUB-H note at line 3594).
+//
+// `getImplementationContext` is intentionally ABSENT from this namespace:
+// calling a non-existent endpoint would 404. The frontend renders whatever
+// summary fields the start-implementation response carries + the
+// ImplementationContextViewer component (which accepts an
+// ImplementationContextContent prop) is reusable for a future GET endpoint.
+
+export interface StartImplementationResponse {
+  implementationContextId: string;
+  workItemId: string;
+  revision: number;
+  kind: 'initial' | 'correction';
+  agentRunId?: string;
+}
+
+/**
+ * Reusable shape for the ImplementationContext content payload (mirrors the
+ * backend `ImplementationContextContent` interface declared in
+ * `backend/src/modules/work-items/internal/implementation-context.types.ts`).
+ * Used by the ImplementationContextViewer component — currently populated by
+ * the start-implementation response summary only (the full content stays
+ * server-side until a dedicated GET route is added).
+ */
+export interface ImplementationContextContent {
+  objective: string | null;
+  scope: string | null;
+  outOfScope: string | null;
+  architectureConstraints: string | null;
+  projectId: string;
+  architectureVersionId: string;
+  workItemId: string;
+  workOrderId: string | null;
+  requirements: Array<{
+    requirementId: string;
+    title: string;
+    description: string | null;
+    criteria: Array<{ criterionId: string; description: string }>;
+  }>;
+  dependencies: Array<{ workItemId: string; title: string }>;
+  repository: {
+    owner: string | null;
+    repository: string | null;
+    defaultBranch: string | null;
+    implementationBranch: string | null;
+    currentPullRequest: {
+      number: number;
+      url: string;
+      headSha: string;
+    } | null;
+  };
+  expectedTests: string[];
+  verificationRequirements: string[];
+  browserTestRequirements: string[];
+  priorAgentRuns: Array<{
+    executionId: string;
+    provider: string;
+    model: string;
+    status: string;
+    commitRef: string | null;
+    pullRequestRef: string | null;
+    createdAt: string;
+  }>;
+  priorReviewFindings: Array<{
+    reviewId: string;
+    verdict: string;
+    summary: string;
+    findings: string[];
+    createdAt: string;
+  }>;
+  instructions: string[];
+  architectureContent: string | null;
+  architectureName: string | null;
+}

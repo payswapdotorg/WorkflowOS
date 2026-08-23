@@ -30,7 +30,8 @@ export type ModuleName =
   | '/agents'
   | '/github'
   | '/notifications'
-  | '/audit';
+  | '/audit'
+  | '/runtime';
 
 /**
  * Marker interface implemented by every module's public surface.
@@ -66,4 +67,5 @@ export const FROZEN_MODULE_NAMES: readonly ModuleName[] = [
   '/github',
   '/notifications',
   '/audit',
+  '/runtime',
 ];

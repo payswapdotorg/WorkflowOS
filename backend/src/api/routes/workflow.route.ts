@@ -2,13 +2,36 @@ import type { FastifyInstance } from 'fastify';
 import type { AuthorizationService } from '@modules/auth/index.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
 import type { ArchitectureRepository, ArchitectureVersionRepository } from '@modules/architecture/index.js';
-import type { WorkItemRepository } from '@modules/work-items/index.js';
+import type {
+  WorkItemRepository,
+  ImplementationContextBuilder,
+} from '@modules/work-items/index.js';
 import type { WorkflowEngine, WorkflowState, TransitionRequest, WorkflowOrchestrator } from '@modules/workflows/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 import {
   requireProjectAuthorization,
   runAuthed,
 } from '../plugins/auth.plugin.js';
+
+/**
+ * Optional start-implementation service — when wired by the composition root
+ * (SUB-F), this submits the persisted ImplementationContext to the
+ * AgentGateway and returns an execution id + agent run id. When absent, the
+ * start-implementation route persists the context and returns 201 with the
+ * context summary (the actual agent submission is then wired later).
+ */
+export interface StartImplementationService {
+  start(input: {
+    workItemId: string;
+    implementationContextId: string;
+    implementationContextRevision: number;
+    implementationContextKind: 'initial' | 'correction';
+    executionId: string;
+  }): Promise<{
+    agentRunId?: string;
+    executionId: string;
+  }>;
+}
 
 /**
  * Protected workflow routes (WORKFLOW-001..005, WORK-017 convergence).
@@ -32,6 +55,10 @@ export interface WorkflowRouteDeps {
   workflowEngine: WorkflowEngine;
   /** WORK-017: convergence orchestrator (optional — present when wired). */
   orchestrator?: WorkflowOrchestrator;
+  /** WORK-026: builds + persists the ImplementationContext revision. */
+  implementationContextBuilder?: ImplementationContextBuilder;
+  /** WORK-026: submits the persisted context to the AgentGateway (optional — when absent, the route returns 201 with the context summary only). */
+  startImplementationService?: StartImplementationService;
 }
 
 async function resolveProjectForWorkItem(
@@ -416,6 +443,90 @@ export async function workflowRoutes(
       }
       const nextWorkItemId = await deps.orchestrator.selectNextWorkItem(projectId);
       return reply.code(200).send({ nextWorkItemId });
+    });
+  });
+
+  // --- WORK-026: Autonomous-implementation entry point ---
+
+  // POST /work-items/:workItemId/start-implementation — build + persist the
+  // ImplementationContext for the work item, then optionally submit it to
+  // the AgentGateway via the startImplementationService.
+  //
+  // The route validates:
+  //   - the work item exists (404 'work-item-not-found' if not),
+  //   - the caller has project.write (403 'forbidden' if not),
+  //   - the workflow state is 'ready' (initial run) or 'changes_requested'
+  //     (correction cycle) — 400 'invalid-state' otherwise,
+  //   - the implementationContextBuilder is wired (501
+  //     'implementation-context-builder-not-configured' if not).
+  //
+  // The route does NOT mutate workflow state — that remains the exclusive
+  // authority of the /workflows WorkflowEngine. It only builds + persists the
+  // context (201 Created) and, when the startImplementationService is
+  // available, fans out the submission (returning the agent run id). The
+  // actual AgentGateway submission wiring lands in SUB-F.
+  app.post('/work-items/:workItemId/start-implementation', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+
+      // 1. Validate work item exists + belongs to the project.
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+
+      // 2. Check the caller has project.write on the work item's project.
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+
+      if (!deps.implementationContextBuilder) {
+        return reply
+          .code(501)
+          .send({ error: 'implementation-context-builder-not-configured' });
+      }
+
+      // 3. Check workflow state is 'ready' or 'changes_requested'.
+      const execution = await deps.workflowEngine.getState(workItemId);
+      const currentState = execution?.currentState ?? null;
+      if (currentState !== 'ready' && currentState !== 'changes_requested') {
+        return reply.code(400).send({
+          error: 'invalid-state',
+          currentState,
+          expectedStates: ['ready', 'changes_requested'],
+        });
+      }
+
+      // 4. Build + persist the ImplementationContext. The builder resolves
+      // the latest Work Order internally and derives `kind` from the prior
+      // context + prior review findings (correction cycle).
+      const implementationContext =
+        await deps.implementationContextBuilder.build(workItemId);
+
+      // 5. If a startImplementationService is available, call it to submit
+      // to the AgentGateway — otherwise return 201 with the context summary
+      // only. The actual agent submission will be wired in SUB-F composition
+      // root.
+      const executionId = generateExecutionId();
+      let agentRunId: string | undefined;
+      if (deps.startImplementationService) {
+        const submission = await deps.startImplementationService.start({
+          workItemId,
+          implementationContextId: implementationContext.id,
+          implementationContextRevision: implementationContext.revision,
+          implementationContextKind: implementationContext.kind,
+          executionId,
+        });
+        agentRunId = submission.agentRunId;
+      }
+
+      return reply.code(201).send({
+        implementationContextId: implementationContext.id,
+        workItemId,
+        revision: implementationContext.revision,
+        kind: implementationContext.kind,
+        ...(agentRunId !== undefined ? { agentRunId } : {}),
+      });
     });
   });
 }

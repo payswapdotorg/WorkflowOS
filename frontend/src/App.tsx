@@ -11,6 +11,8 @@ import WorkItemsPage from './pages/WorkItemsPage';
 import WorkItemPage from './pages/WorkItemPage';
 import ActivityPage from './pages/ActivityPage';
 import SettingsPage from './pages/SettingsPage';
+import IntegrationsPage from './pages/IntegrationsPage';
+import ProviderSettingsPage from './pages/ProviderSettingsPage';
 
 export default function App() {
   const { hasApiKey } = useAuth();
@@ -88,6 +90,22 @@ export default function App() {
         element={
           <AppShell>
             <SettingsPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/integrations"
+        element={
+          <AppShell>
+            <IntegrationsPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/settings/providers"
+        element={
+          <AppShell>
+            <ProviderSettingsPage />
           </AppShell>
         }
       />
