@@ -1558,7 +1558,7 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
       'ConversationalArchitectResult', 'ConversationalArchitectService',
       'ProviderConfig',
       // WORK-025: Atomic plan applier
-      'ApplyPlanResult', 'RepositoryFactories', 'ArchitectPlanApplier',
+      'ApplyPlanResult', 'RepositoryFactories', 'ArchitectPlanApplier', 'ArchitectPlanInput',
       // Module contract const
       'llmModule',
     ]);
@@ -1574,6 +1574,73 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
     }
     const unexpected = exported.filter((n) => !allowed.has(n));
     expect(unexpected, `/llm exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #28 regression — atomicity of Architect session acceptance.
+  //
+  // The plan artifacts (Architecture, ArchitectureVersion, Requirements,
+  // Criteria, Work Items, associations, dependencies, Work Orders) and
+  // Architect session acceptance MUST commit or roll back together inside
+  // a single db.transaction callback. This is structurally enforced by
+  // requiring:
+  //   1. createArchitectSessionRepository is declared on RepositoryFactories
+  //   2. The applier constructs the transaction-scoped session repo via
+  //      factories.createArchitectSessionRepository(txClient) INSIDE the
+  //      db.transaction callback.
+  //   3. markAccepted is invoked INSIDE the db.transaction callback (NOT
+  //      after it returns).
+  //   4. The apply route does NOT cast the body with `as any` — it must
+  //      use the shared ArchitectPlanInput type.
+  // -------------------------------------------------------------------------
+
+  it('ArchitectPlanApplier requires createArchitectSessionRepository on RepositoryFactories', () => {
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    expect(src).toMatch(/createArchitectSessionRepository\s*:\s*\(db\s*:\s*DatabaseClient\)\s*=>\s*ArchitectSessionRepository/);
+  });
+
+  it('ArchitectPlanApplier constructs a transaction-scoped session repo and calls markAccepted on it', () => {
+    // The applier MUST use `factories.createArchitectSessionRepository(txClient)`
+    // (transaction-scoped) and call `sessionRepo.markAccepted(...)` on it.
+    // The txClient is the TxDatabaseClientAdapter bound to the transaction —
+    // using it proves the session repo's writes go through the SAME
+    // connection as the other plan artifacts, so they commit/rollback together.
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    expect(src).toMatch(/factories\.createArchitectSessionRepository\(txClient\)/);
+    expect(src).toMatch(/sessionRepo\.markAccepted/);
+  });
+
+  it('ArchitectPlanApplier does NOT call markAccepted on the ROOT session repository', () => {
+    // The root `sessionRepository` (constructor-injected) is used ONLY for
+    // the pre-transaction `findActiveByProject` lookup. The `markAccepted`
+    // call MUST go through the transaction-scoped `sessionRepo` (constructed
+    // inside the db.transaction callback via the factory). This is the key
+    // atomicity fix: if markAccepted were called on the root repo, it
+    // would commit independently of the plan writes — the original PR #28 bug.
+    const applierFile = join(MODULES_DIR, 'llm', 'internal', 'architect-plan-applier.ts');
+    const src = readFileSync(applierFile, 'utf8');
+    // Strip comments before checking — otherwise doc comments mentioning
+    // the pattern would create false positives.
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // `sessionRepository.markAccepted` (root repo) must NOT appear in code.
+    expect(codeOnly).not.toMatch(/sessionRepository\.markAccepted/);
+    // `sessionRepository.findActiveByProject` (the only allowed root-repo use)
+    // MUST appear — it's the pre-tx lookup.
+    expect(codeOnly).toMatch(/sessionRepository\.findActiveByProject/);
+  });
+
+  it('architect apply route does not cast body with `as any`', () => {
+    const routeFile = join(SRC_ROOT, 'api', 'routes', 'architect.route.ts');
+    const src = readFileSync(routeFile, 'utf8');
+    // Locate the /architect/apply route section.
+    const applySection = src.match(/app\.post\('\/projects\/:projectId\/architect\/apply'[\s\S]*?\n  \}\);/);
+    expect(applySection, 'expected /architect/apply route to exist').not.toBeNull();
+    // The route must NOT cast the body with `as any`. It MUST cast to
+    // ArchitectPlanInput (the shared type).
+    expect(applySection![0]).not.toMatch(/body\s+as\s+any/);
+    expect(applySection![0]).toMatch(/as\s+ArchitectPlanInput/);
   });
 });
 

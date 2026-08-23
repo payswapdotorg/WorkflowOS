@@ -53,7 +53,7 @@ export type {
 } from './internal/conversational-architect.types.js';
 
 // WORK-025: Atomic plan applier.
-export type { ApplyPlanResult, RepositoryFactories, ArchitectPlanApplier } from './internal/architect-plan-applier.js';
+export type { ApplyPlanResult, RepositoryFactories, ArchitectPlanApplier, ArchitectPlanInput } from './internal/architect-plan-applier.js';
 
 /**
  * Public capabilities exposed by the /llm module to other modules.

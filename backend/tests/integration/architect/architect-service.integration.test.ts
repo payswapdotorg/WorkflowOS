@@ -6,9 +6,11 @@ import { DefaultArchitectService } from '../../../src/modules/llm/internal/archi
 import { PgArchitectureRepository, PgArchitectureVersionRepository } from '../../../src/modules/architecture/internal/pg-architecture-repository.js';
 import { PgRequirementRepository, PgAcceptanceCriterionRepository } from '../../../src/modules/requirements/internal/pg-requirement-repository.js';
 import { PgWorkItemRepository, PgWorkItemRequirementRepository, PgWorkItemCriterionRepository, PgWorkOrderRepository, PgWorkItemDependencyRepository } from '../../../src/modules/work-items/internal/pg-work-item-repository.js';
+import { PgArchitectSessionRepository } from '../../../src/modules/llm/internal/pg-architect-session-repository.js';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
 import type { ArchitectExecutionResult } from '@modules/llm/index.js';
+import type { DatabaseClient } from '@platform/index.js';
 
 describe('WORK-014 — Architect execution and Work Order generation', () => {
   let stack: TestAuthStack;
@@ -131,17 +133,18 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
         architectService,
         planApplier: new (await import('../../../src/modules/llm/internal/architect-plan-applier.js')).ArchitectPlanApplier(
           stack.db.client,
-          new (await import('../../../src/modules/llm/internal/pg-architect-session-repository.js')).PgArchitectSessionRepository(stack.db.client),
+          new PgArchitectSessionRepository(stack.db.client),
           {
-            createArchitectureRepository: (db: any) => new PgArchitectureRepository(db),
-            createArchitectureVersionRepository: (db: any) => new PgArchitectureVersionRepository(db),
-            createRequirementRepository: (db: any) => new PgRequirementRepository(db),
-            createAcceptanceCriterionRepository: (db: any) => new PgAcceptanceCriterionRepository(db),
-            createWorkItemRepository: (db: any) => new PgWorkItemRepository(db),
-            createWorkItemRequirementRepository: (db: any) => new PgWorkItemRequirementRepository(db),
-            createWorkItemCriterionRepository: (db: any) => new PgWorkItemCriterionRepository(db),
-            createWorkOrderRepository: (db: any) => new PgWorkOrderRepository(db),
-            createWorkItemDependencyRepository: (db: any) => new PgWorkItemDependencyRepository(db),
+            createArchitectureRepository: (db: DatabaseClient) => new PgArchitectureRepository(db),
+            createArchitectureVersionRepository: (db: DatabaseClient) => new PgArchitectureVersionRepository(db),
+            createRequirementRepository: (db: DatabaseClient) => new PgRequirementRepository(db),
+            createAcceptanceCriterionRepository: (db: DatabaseClient) => new PgAcceptanceCriterionRepository(db),
+            createWorkItemRepository: (db: DatabaseClient) => new PgWorkItemRepository(db),
+            createWorkItemRequirementRepository: (db: DatabaseClient) => new PgWorkItemRequirementRepository(db),
+            createWorkItemCriterionRepository: (db: DatabaseClient) => new PgWorkItemCriterionRepository(db),
+            createWorkOrderRepository: (db: DatabaseClient) => new PgWorkOrderRepository(db),
+            createWorkItemDependencyRepository: (db: DatabaseClient) => new PgWorkItemDependencyRepository(db),
+            createArchitectSessionRepository: (db: DatabaseClient) => new PgArchitectSessionRepository(db),
           },
           stack.db.logger,
         ),
@@ -151,7 +154,7 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
           stack.requirementRepository, stack.acceptanceCriterionRepository,
           stack.workItemRepository, new (await import('../../../src/platform/default-provider-registry.js')).DefaultProviderRegistry(stack.secretStore), stack.db.logger,
         ),
-        sessionRepository: new (await import('../../../src/modules/llm/internal/pg-architect-session-repository.js')).PgArchitectSessionRepository(stack.db.client),
+        sessionRepository: new PgArchitectSessionRepository(stack.db.client),
         db: stack.db.client,
       },
     });

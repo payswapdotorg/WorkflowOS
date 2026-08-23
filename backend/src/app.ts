@@ -509,6 +509,7 @@ export async function buildApp(
         createWorkItemCriterionRepository: (db) => new wiRepoModule.PgWorkItemCriterionRepository(db),
         createWorkOrderRepository: (db) => new wiRepoModule.PgWorkOrderRepository(db),
         createWorkItemDependencyRepository: (db) => new wiRepoModule.PgWorkItemDependencyRepository(db),
+        createArchitectSessionRepository: (db) => new PgArchitectSessionRepository(db),
       },
       logger,
     );

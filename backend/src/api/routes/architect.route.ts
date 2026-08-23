@@ -7,6 +7,7 @@ import type {
   ConversationalArchitectService,
   ArchitectSessionRepository,
   ArchitectPlanApplier,
+  ArchitectPlanInput,
 } from '@modules/llm/index.js';
 import type { DatabaseClient } from '@platform/index.js';
 import { generateExecutionId } from '@platform/ids.js';
@@ -231,35 +232,22 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write', projectId,
       });
-      const body = req.body as {
-        architecture?: { name: string; content: string; constraints?: string[] };
-        requirements?: Array<{
-          requirementId: string;
-          title: string;
-          description?: string;
-          criteria?: Array<{ criterionId: string; description: string }>;
-        }>;
-        workItems?: Array<{
-          workItemId: string;
-          title: string;
-          objective?: string;
-          scope?: string;
-          requirementIds?: string[];
-          criterionIds?: string[];
-          dependencies?: string[];
-        }>;
-      };
+      // Cast to the shared ArchitectPlanInput type (same shape as ArchitectParsedPlan).
+      // No `as any` — the route and the applier share a single typed contract.
+      const body = req.body as ArchitectPlanInput;
 
       if (!body?.architecture?.name || !body?.architecture?.content) {
         return reply.code(400).send({ error: 'architecture.name and architecture.content required' });
       }
 
       // ATOMIC apply: delegates to ArchitectPlanApplier which runs all
-      // writes inside a single DB transaction using transaction-scoped
-      // repositories. If ANY operation fails, the entire transaction
-      // rolls back and the session is NOT marked accepted. No partial plans.
+      // writes — including Architect session acceptance — inside a single
+      // DB transaction using transaction-scoped repositories. If ANY
+      // operation fails (plan artifact creation OR session acceptance), the
+      // entire transaction rolls back and the session is NOT marked accepted.
+      // No partial plans.
       try {
-        const result = await deps.planApplier.apply(projectId, body as any);
+        const result = await deps.planApplier.apply(projectId, body);
         return reply.code(201).send(result);
       } catch (err) {
         // Transaction rolled back — no partial plan persisted.
