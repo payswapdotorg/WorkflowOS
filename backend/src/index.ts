@@ -266,6 +266,17 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-028: Companion extension handoff redemption. Registered WITHOUT
+      // the auth guard — the route's authority is the ONE-TIME handoff token
+      // itself (the extension holds no WorkflowOS API key by design).
+      ...(app.deps.executionHandoffService && app.deps.executionCallbackService
+        ? {
+            companion: {
+              executionHandoffService: app.deps.executionHandoffService,
+              executionCallbackService: app.deps.executionCallbackService,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

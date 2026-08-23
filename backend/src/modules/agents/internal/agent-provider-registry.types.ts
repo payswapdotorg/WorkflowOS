@@ -143,10 +143,17 @@ export interface ExecutionProviderInfo {
  * driven through the EXTERNAL execution mode (execution package → Companion
  * extension → the provider's native chat UI). The catalog is pure display +
  * validation metadata — NO credentials, NO URLs, NO DOM automation (those
- * belong to the Companion extension, WORK-028/029).
+ * belong to the Companion extension).
+ *
+ * WORK-028: 'fake' is the deterministic TEST-MODE external provider — the
+ * Companion extension's built-in fake provider adapter claims it (mirrors
+ * the FakeGitHubAdapter / FakeDeploymentProvider precedent: always
+ * registered so dev/test/CI parity is preserved). Real provider adapters
+ * (Z.ai = WORK-029, ChatGPT = WORK-030, Claude = WORK-031) are pending.
  */
 export const EXTERNAL_UI_CATALOG: readonly { name: string; provider: string }[] = [
   { name: 'Z.ai', provider: 'zai' },
   { name: 'ChatGPT', provider: 'chatgpt' },
   { name: 'Claude', provider: 'claude' },
+  { name: 'Fake (test)', provider: 'fake' },
 ];

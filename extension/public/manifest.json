@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "WorkflowOS Companion",
+  "version": "0.1.0",
+  "description": "Bridge between WorkflowOS external execution packages and your existing AI platform session (Z.ai / ChatGPT / Claude). Reports execution events back to WorkflowOS — never holds a WorkflowOS API key.",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "ui/popup/index.html",
+    "default_title": "WorkflowOS Companion"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:5173/*",
+    "http://127.0.0.1:5173/*",
+    "https://z.ai/*",
+    "https://chatgpt.com/*",
+    "https://claude.ai/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
+      "js": ["content/workflowos-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://z.ai/*", "https://chatgpt.com/*", "https://claude.ai/*"],
+      "js": ["content/provider-detect.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

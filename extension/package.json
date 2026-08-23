@@ -1,0 +1,25 @@
+{
+  "name": "workflowos-companion-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WorkflowOS Companion browser extension (Manifest V3). Bridges WorkflowOS external execution packages to the user's AI platform session and reports execution events back via scoped callback tokens. Never holds a WorkflowOS API key.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/chrome": "^0.0.280",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^2.1.0"
+  }
+}

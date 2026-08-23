@@ -1,0 +1,82 @@
+# WORK-028 Companion Extension E2E CI for WorkflowOS.
+#
+# Builds the WorkflowOS Companion browser extension, then runs the Playwright
+# test that loads it UNPACKED into a persistent Chromium context and proves
+# the full loop against the real backend + real Vite SPA:
+#
+#   WorkflowOS "Open with Companion" → /companion/handoff#ref=… → extension
+#   bridge content script → background service worker redeems the ONE-TIME
+#   handoff token (POST /api/companion/redeem, no API key) → fake provider
+#   extension page runs a deterministic lifecycle → execution events reported
+#   with the scoped x-callback-token → WorkflowOS execution completes →
+#   popup shows the session → replayed handoff ref rejected (409).
+#
+# Deterministic: no real Z.ai/ChatGPT/Claude interaction (the fake provider
+# is an extension page; provider adapters for real platforms are WORK-029+).
+#
+# On failure, the Playwright HTML report is uploaded as a CI artifact.
+name: work-028-companion-extension-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: work-028 companion extension E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: bun install --frozen-lockfile
+
+      - name: Build the Companion extension
+        working-directory: extension
+        run: |
+          bun install
+          bun run typecheck
+          bun run lint
+          bun run test
+          bun run build
+
+      - name: Install frontend dependencies (for the Playwright webServer)
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers (chromium)
+        working-directory: backend
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run WORK-028 companion extension E2E
+        working-directory: backend
+        run: bunx playwright test --config playwright-extension.config.ts
+
+      - name: Upload Playwright HTML report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-work-028-extension-report
+          path: backend/playwright-report
+          retention-days: 7

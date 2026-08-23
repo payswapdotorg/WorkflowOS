@@ -31,6 +31,18 @@ export interface ExternalExecutionDialogProps {
   onStatusChange?: () => void;
 }
 
+/**
+ * WORK-028 §19: build the Companion handoff deep link. The fragment carries
+ * ONLY the one-time opaque handoff reference (+ execution id for the page's
+ * own status polling) — never the prompt, never the callback token. The
+ * extension's content script picks the fragment up; the SPA never learns
+ * whether the extension is installed from this URL alone.
+ */
+export function buildCompanionHandoffPath(handoffToken: string, executionId: string): string {
+  const params = new URLSearchParams({ ref: handoffToken, exec: executionId });
+  return `/companion/handoff#${params.toString()}`;
+}
+
 type Stage =
   | { phase: 'prepared' }
   | { phase: 'busy'; action: string }
@@ -49,6 +61,7 @@ export function ExternalExecutionDialog({
 }: ExternalExecutionDialogProps) {
   const [stage, setStage] = React.useState<Stage>({ phase: 'prepared' });
   const [promptExpanded, setPromptExpanded] = React.useState(false);
+  const [companionBusy, setCompanionBusy] = React.useState(false);
 
   React.useEffect(() => {
     if (open) {
@@ -59,6 +72,22 @@ export function ExternalExecutionDialog({
 
   if (!executionSummary) return null;
   const ex = executionSummary;
+
+  /** WORK-028: Open with Companion — a FRESH one-time handoff for the
+   *  extension (the package-preview token stays unconsumed by the UI). */
+  async function openWithCompanion() {
+    if (!executionSummary) return;
+    setCompanionBusy(true);
+    setStage({ phase: 'busy', action: 'Preparing Companion session…' });
+    try {
+      const issued = await execution.prepareHandoff(ex.executionId);
+      // Navigate to the handoff page — the extension redeems the ref.
+      window.location.assign(buildCompanionHandoffPath(issued.handoffToken, ex.executionId));
+    } catch (err) {
+      setStage({ phase: 'error', message: (err as Error).message });
+      setCompanionBusy(false);
+    }
+  }
 
   async function prepareExternalSession() {
     setStage({ phase: 'busy', action: 'Preparing external session…' });
@@ -133,6 +162,14 @@ export function ExternalExecutionDialog({
                 </ul>
               </div>
               <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={openWithCompanion}
+                  disabled={companionBusy || (ex.status !== 'handoff_ready' && ex.status !== 'submitted')}
+                  title="Hand this execution to the WorkflowOS Companion browser extension (no copy/paste)"
+                >
+                  {companionBusy ? 'Preparing…' : 'Open with Companion'}
+                </Button>
                 <Button
                   onClick={prepareExternalSession}
                   disabled={ex.status !== 'handoff_ready' && ex.status !== 'submitted'}

@@ -13,6 +13,7 @@ import ActivityPage from './pages/ActivityPage';
 import SettingsPage from './pages/SettingsPage';
 import IntegrationsPage from './pages/IntegrationsPage';
 import ProviderSettingsPage from './pages/ProviderSettingsPage';
+import CompanionHandoffPage from './pages/CompanionHandoffPage';
 
 export default function App() {
   const { hasApiKey } = useAuth();
@@ -28,6 +29,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<ProjectListPage />} />
+      {/* WORK-028: Companion handoff bridge page (fragment-only deep link). */}
+      <Route path="/companion/handoff" element={<CompanionHandoffPage />} />
       <Route path="/projects" element={<ProjectListPage />} />
       <Route
         path="/projects/:projectId"

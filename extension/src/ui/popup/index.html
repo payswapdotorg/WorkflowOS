@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkflowOS Companion</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>WorkflowOS Companion</h1>
+      <span id="connection" class="badge">…</span>
+    </header>
+
+    <section id="no-session" class="section hidden">
+      <p class="muted">No active execution session.</p>
+      <p class="muted small">
+        Prepare an external session in WorkflowOS and choose
+        <em>Open with Companion</em>.
+      </p>
+    </section>
+
+    <section id="session" class="section hidden">
+      <dl>
+        <div><dt>Work Item</dt><dd id="work-item">—</dd></div>
+        <div><dt>Provider</dt><dd id="provider">—</dd></div>
+        <div><dt>Repository</dt><dd id="repository">—</dd></div>
+        <div><dt>Branch</dt><dd id="branch" class="mono">—</dd></div>
+        <div><dt>Status</dt><dd id="status">—</dd></div>
+        <div><dt>Execution</dt><dd id="execution-id" class="mono small">—</dd></div>
+        <div id="pending-row" class="hidden">
+          <dt>Buffered events</dt><dd id="pending">0</dd></div>
+        </div>
+      </dl>
+
+      <div class="actions">
+        <button id="open-provider" type="button">Open provider</button>
+        <button id="resume" type="button">Resume session</button>
+        <button id="stop" type="button">Stop</button>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Providers</h2>
+      <ul id="providers" class="providers"></ul>
+    </section>
+
+    <footer>
+      <button id="open-workflowos" type="button" class="link">Open WorkflowOS</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

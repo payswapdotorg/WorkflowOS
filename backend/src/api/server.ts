@@ -20,6 +20,7 @@ import { notificationRoutes, type NotificationRouteDeps } from './routes/notific
 import { runtimeRoutes, type RuntimeRouteDeps } from './routes/runtime.route.js';
 import { githubProvisioningRoutes, type GithubProvisioningRouteDeps } from './routes/github-provisioning.route.js';
 import { executionRoutes, type ExecutionRouteDeps } from './routes/execution.route.js';
+import { companionRoutes, type CompanionRouteDeps } from './routes/companion.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -76,6 +77,8 @@ export interface ServerDeps extends JobsRouteDeps {
   githubProvisioning?: GithubProvisioningRouteDeps;
   /** WORK-027: execution routes (external handoff + event ingestion). Backend-authorized. */
   execution?: ExecutionRouteDeps;
+  /** WORK-028: Companion extension handoff redemption (one-time-token authorized). */
+  companion?: CompanionRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -159,6 +162,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.execution) {
     await executionRoutes(app, deps.execution);
+  }
+  if (deps.companion) {
+    await companionRoutes(app, deps.companion);
   }
   return app;
 }

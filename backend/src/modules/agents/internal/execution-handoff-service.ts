@@ -28,6 +28,7 @@ import type {
   ExecutionRecordRepository,
   IssuedExecutionHandoff,
   RedeemedExecutionPackage,
+  CompanionRedeemedHandoff,
 } from './execution.types.js';
 import { ExecutionHandoffError } from './execution.types.js';
 
@@ -159,6 +160,133 @@ export class DefaultExecutionHandoffService implements ExecutionHandoffService {
       executionId,
       status: updated?.status ?? 'submitted',
       package: record.packageValue,
+    };
+  }
+
+  /**
+   * WORK-028: COMPANION redemption — authenticate by the ONE-TIME handoff
+   * token ALONE (no WorkflowOS API key). The WorkflowOS "Open with Companion"
+   * flow passes only an opaque one-time reference to the extension; the
+   * extension redeems it here.
+   *
+   * The lookup runs hash → handoff row → execution record, so the token
+   * inherently scopes the redemption to EXACTLY ONE execution. One-time
+   * semantics are PRESERVED: the token is consumed atomically on redemption
+   * (a second redeem — by anyone — is rejected with 'already-used'). Short
+   * TTL + lazy execution expiry apply exactly as in redeem().
+   *
+   * Emits the COMPANION_HANDOFF_REDEEMED audit event (the companion can hold
+   * NO API key, so audit attribution happens server-side at redemption).
+   */
+  async redeemByToken(rawToken: string): Promise<CompanionRedeemedHandoff> {
+    if (
+      typeof rawToken !== 'string' ||
+      rawToken.length < 20 ||
+      !/^wfht_[0-9a-f]+$/.test(rawToken)
+    ) {
+      throw new ExecutionHandoffError(
+        'handoff-token-invalid: malformed handoff token',
+        'handoff-token-invalid',
+      );
+    }
+
+    // Hash → handoff row → execution record (the token alone identifies the
+    // execution; there is no caller-supplied executionId to trust).
+    const handoff = await this.deps.handoffRepository.findLatestByHash(hashToken(rawToken));
+    if (!handoff) {
+      throw new ExecutionHandoffError(
+        'handoff-token-invalid: unknown handoff token',
+        'handoff-token-invalid',
+      );
+    }
+    const record = await this.deps.executionRecordRepository.findById(handoff.executionRecordId);
+    if (!record) {
+      throw new ExecutionHandoffError(
+        `execution-not-found: handoff references execution record ${handoff.executionRecordId}`,
+        'execution-not-found',
+      );
+    }
+
+    // Reuse the full validation + consumption semantics of redeem() by
+    // re-checking against THIS record (external mode, state, one-time
+    // consume, expiry, lazy execution expiry).
+    if (record.mode !== 'external') {
+      throw new ExecutionHandoffError(
+        `handoff-not-external-execution: execution ${record.executionId} is mode "${record.mode}"`,
+        'not-external-execution',
+      );
+    }
+    if (
+      record.expiresAt &&
+      record.expiresAt.getTime() <= this.now().getTime() &&
+      !['completed', 'failed', 'cancelled', 'expired'].includes(record.status)
+    ) {
+      await this.deps.executionRecordRepository.updateStatus(record.id, {
+        status: 'expired',
+      });
+      await this.audit(record.projectId, record.id, record.executionId, 'EXECUTION_EXPIRED', {
+        previousStatus: record.status,
+      });
+      throw new ExecutionHandoffError(
+        `execution-expired: external handoff window for ${record.executionId} elapsed`,
+        'execution-expired',
+      );
+    }
+    // Replay first: a consumed token is ALWAYS reported as a replay —
+    // regardless of what the execution record did afterwards (the token's
+    // one-time semantics must not depend on the record's later lifecycle).
+    if (handoff.consumedAt) {
+      throw new ExecutionHandoffError(
+        'handoff-token-already-used: one-time handoff token was already redeemed (replay rejected)',
+        'handoff-token-already-used',
+      );
+    }
+    if (handoff.expiresAt.getTime() <= this.now().getTime()) {
+      throw new ExecutionHandoffError(
+        'handoff-token-expired: handoff token TTL elapsed',
+        'handoff-token-expired',
+      );
+    }
+    if (record.status !== 'handoff_ready' && record.status !== 'submitted') {
+      throw new ExecutionHandoffError(
+        `handoff-invalid-execution-state: execution ${record.executionId} is "${record.status}"`,
+        'invalid-execution-state',
+      );
+    }
+
+    // One-time: consume FIRST so a concurrent replay cannot win.
+    const consumed = await this.deps.handoffRepository.consume(handoff.id, this.now());
+    if (!consumed) {
+      throw new ExecutionHandoffError(
+        'handoff-token-already-used: one-time handoff token was already redeemed (replay rejected)',
+        'handoff-token-already-used',
+      );
+    }
+
+    if (!record.packageValue) {
+      throw new ExecutionHandoffError(
+        `handoff-package-missing: execution ${record.executionId} has no stored package`,
+        'invalid-execution-state',
+      );
+    }
+
+    // The package is now in the extension's hands → 'submitted'.
+    const updated = await this.deps.executionRecordRepository.updateStatus(record.id, {
+      status: record.status === 'handoff_ready' ? 'submitted' : record.status,
+    });
+
+    await this.audit(
+      record.projectId,
+      record.id,
+      record.executionId,
+      'COMPANION_HANDOFF_REDEEMED',
+      { status: updated?.status ?? 'submitted' },
+    );
+
+    return {
+      record: updated ?? record,
+      status: updated?.status ?? record.status,
+      pkg: record.packageValue,
     };
   }
 

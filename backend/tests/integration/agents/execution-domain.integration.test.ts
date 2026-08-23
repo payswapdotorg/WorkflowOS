@@ -807,9 +807,10 @@ describe('WORK-027 — execution provider abstraction', () => {
     expect(zai).toMatchObject({ name: 'Z.ai', nativeApi: 'not-configured', externalUi: 'available' });
     expect(chatgpt).toMatchObject({ name: 'ChatGPT', externalUi: 'available' });
     expect(claude).toMatchObject({ name: 'Claude', externalUi: 'available' });
-    // The configured 'fake' native provider is appended with external NOT supported.
+    // WORK-028: 'fake' is now ALSO in the external catalog (test-mode
+    // external provider claimed by the Companion extension's fake adapter).
     const fake = providers.find((p) => p.provider === 'fake');
-    expect(fake).toMatchObject({ nativeApi: 'ready', externalUi: 'not-supported' });
+    expect(fake).toMatchObject({ nativeApi: 'ready', externalUi: 'available' });
   });
 
   // ------------------------------------------------------------------

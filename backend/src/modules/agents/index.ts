@@ -49,6 +49,7 @@ export type {
   ExecutionHandoffRepository,
   IssuedExecutionHandoff,
   RedeemedExecutionPackage,
+  CompanionRedeemedHandoff,
   ExecutionHandoffService,
   // WORK-027 (PR #30 review fix #2): scoped execution callback credentials.
   ExecutionCallbackRecord,
