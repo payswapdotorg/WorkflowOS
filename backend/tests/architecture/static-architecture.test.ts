@@ -1537,6 +1537,11 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
       'ArchitectRepositoryEvidence', 'ArchitectVerificationEvidence',
       'ArchitectExecutionRequest', 'ArchitectExecutionResult',
       'WorkOrderCandidate', 'ArchitectService',
+      // Conversational Architect (WORK-025)
+      'ArchitectMessage', 'ArchitectRevision', 'ArchitectParsedPlan',
+      'ArchitectSession', 'ArchitectSessionRepository',
+      'ConversationalArchitectResult', 'ConversationalArchitectService',
+      'ProviderConfig',
       // Module contract const
       'llmModule',
     ]);

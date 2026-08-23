@@ -298,7 +298,9 @@ async function main(): Promise<void> {
       app.deps.requirementRepository &&
       app.deps.acceptanceCriterionRepository &&
       app.deps.llmGateway &&
-      app.deps.architectService
+      app.deps.architectService &&
+      app.deps.conversationalArchitectService &&
+      app.deps.architectSessionRepository
         ? {
             architect: {
               authorizationService: app.deps.authorizationService,
@@ -314,6 +316,8 @@ async function main(): Promise<void> {
               acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
               llmGateway: app.deps.llmGateway,
               architectService: app.deps.architectService,
+              conversationalArchitectService: app.deps.conversationalArchitectService,
+              sessionRepository: app.deps.architectSessionRepository,
               db: app.deps.infrastructure?.database as never,
             },
           }

@@ -121,6 +121,13 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
         acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
         llmGateway,
         architectService,
+        conversationalArchitectService: new (await import('../../../src/modules/llm/internal/conversational-architect-service.js')).DefaultConversationalArchitectService(
+          stack.db.client, llmGateway, stack.projectRepository,
+          stack.architectureRepository, stack.architectureVersionRepository,
+          stack.requirementRepository, stack.acceptanceCriterionRepository,
+          stack.workItemRepository, stack.secretStore, stack.db.logger,
+        ),
+        sessionRepository: new (await import('../../../src/modules/llm/internal/pg-architect-session-repository.js')).PgArchitectSessionRepository(stack.db.client),
         db: stack.db.client,
       },
     });

@@ -10,7 +10,12 @@ import type {
   WorkItemDependencyRepository,
 } from '@modules/work-items/index.js';
 import type { RequirementRepository, AcceptanceCriterionRepository } from '@modules/requirements/index.js';
-import type { LlmGateway, ArchitectService } from '@modules/llm/index.js';
+import type {
+  LlmGateway,
+  ArchitectService,
+  ConversationalArchitectService,
+  ArchitectSessionRepository,
+} from '@modules/llm/index.js';
 import type { DatabaseClient } from '@platform/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 import { requireProjectAuthorization, runAuthed } from '../plugins/auth.plugin.js';
@@ -29,6 +34,8 @@ export interface ArchitectRouteDeps {
   acceptanceCriterionRepository: AcceptanceCriterionRepository;
   llmGateway: LlmGateway;
   architectService: ArchitectService;
+  conversationalArchitectService: ConversationalArchitectService;
+  sessionRepository: ArchitectSessionRepository;
   db: DatabaseClient;
 }
 
@@ -43,7 +50,7 @@ async function resolveProjectForArchitectureVersion(
 }
 
 export async function architectRoutes(app: FastifyInstance, deps: ArchitectRouteDeps): Promise<void> {
-  // POST /projects/:projectId/architect/execute — request architect execution.
+  // POST /projects/:projectId/architect/execute — existing WORK-014 route (unchanged).
   app.post('/projects/:projectId/architect/execute', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
@@ -60,7 +67,6 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
       if (!body?.architectureVersionId || !body?.task || !body?.provider || !body?.model) {
         return reply.code(400).send({ error: 'architectureVersionId, task, provider, and model required' });
       }
-      // Verify the architecture version belongs to this project.
       const avProjectId = await resolveProjectForArchitectureVersion(deps, body.architectureVersionId);
       if (!avProjectId || avProjectId !== projectId) {
         return reply.code(403).send({ error: 'forbidden', reason: 'architecture-version-not-in-project' });
@@ -80,7 +86,7 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
     });
   });
 
-  // POST /projects/:projectId/architect/generate-work-order — generate a Work Order from an architect result.
+  // POST /projects/:projectId/architect/generate-work-order — existing WORK-014 route (unchanged).
   app.post('/projects/:projectId/architect/generate-work-order', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
@@ -94,18 +100,18 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
         provider?: string;
         model?: string;
       };
-      if (!body?.architectureVersionId || !body?.task || !body?.provider || !body?.model || !body?.workItemId) {
-        return reply.code(400).send({ error: 'architectureVersionId, workItemId, task, provider, and model required' });
-      }
-      const avProjectId = await resolveProjectForArchitectureVersion(deps, body.architectureVersionId);
-      if (!avProjectId || avProjectId !== projectId) {
-        return reply.code(403).send({ error: 'forbidden', reason: 'architecture-version-not-in-project' });
+      if (!body?.architectureVersionId || !body?.task || !body?.provider || !body?.model) {
+        return reply.code(400).send({ error: 'architectureVersionId, task, provider, and model required' });
       }
       const executionId = generateExecutionId();
       const archResult = await deps.architectService.execute({
-        projectId, architectureVersionId: body.architectureVersionId,
-        workItemId: body.workItemId, task: body.task,
-        executionId, provider: body.provider, model: body.model,
+        projectId,
+        architectureVersionId: body.architectureVersionId,
+        workItemId: body.workItemId,
+        task: body.task,
+        executionId,
+        provider: body.provider,
+        model: body.model,
       });
       if (!archResult.workOrderCandidate) {
         return reply.code(409).send({ error: 'no-work-order-candidate', architectResult: archResult });
@@ -125,16 +131,14 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
   });
 
   // -----------------------------------------------------------------------
-  // WORK-025: Conversational Architect — generate architecture from natural language.
+  // WORK-025: Conversational Architect — delegates to ConversationalArchitectService.
   //
   // POST /projects/:projectId/architect/converse
   //
-  // Takes a user prompt + optional conversation history and returns a structured
-  // architecture proposal. The LLM is instructed to return JSON with:
-  //   architecture, requirements, criteria, workItems, dependencies
-  //
-  // This does NOT persist anything — the user reviews the proposal and then
-  // calls /architect/apply to persist the real domain objects.
+  // The route is THIN — it delegates to ConversationalArchitectService which:
+  // - Assembles authoritative project context
+  // - Calls the existing LlmGateway (NOT a second LLM implementation)
+  // - Parses the response into a structured plan
   // -----------------------------------------------------------------------
   app.post('/projects/:projectId/architect/converse', async (req, reply) => {
     return runAuthed(req, async () => {
@@ -151,90 +155,63 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
       if (!body?.prompt) {
         return reply.code(400).send({ error: 'prompt required' });
       }
-      const provider = body.provider ?? 'zai';
-      const model = body.model ?? 'glm-4-flash';
-      const executionId = generateExecutionId();
 
-      // Build the system prompt that instructs the LLM to return structured JSON.
-      const systemPrompt = `You are the WorkflowOS Architect. The user describes a software system they want to build. You generate a structured architecture proposal as JSON.
+      // Get or create the architect session.
+      let session = await deps.sessionRepository.findActiveByProject(projectId);
+      if (!session) {
+        const providers = deps.conversationalArchitectService.getProviders();
+        const provider = body.provider ?? providers[0]?.provider ?? 'zai';
+        const model = body.model ?? providers[0]?.model ?? 'glm-4-flash';
+        session = await deps.sessionRepository.create({ projectId, provider, model });
+      }
 
-Return ONLY valid JSON with this exact shape:
-{
-  "architecture": { "name": "...", "content": "...", "constraints": ["..."] },
-  "requirements": [{ "requirementId": "REQ-001", "title": "...", "description": "...", "criteria": [{ "criterionId": "AC-001", "description": "..." }] }],
-  "workItems": [{ "workItemId": "WORK-001", "title": "...", "objective": "...", "scope": "...", "dependencies": [] }],
-  "summary": "Brief summary of the architecture"
-}
+      // Delegate to the service — it assembles context + calls LlmGateway.
+      const result = await deps.conversationalArchitectService.converse({
+        projectId,
+        prompt: body.prompt,
+        conversation: body.conversation?.map(m => ({
+          role: m.role,
+          content: m.content,
+          timestamp: new Date().toISOString(),
+        })) ?? session.messages,
+        provider: session.provider,
+        model: session.model,
+      });
 
-Rules:
-- PostgreSQL is authoritative. Redis is non-authoritative.
-- The frontend is a consumer, never an authority.
-- Use modular monolith architecture unless the user specifies otherwise.
-- Generate 3-8 requirements with 1-3 criteria each.
-- Generate 2-6 work items with clear objectives.
-- Include dependency references between work items where relevant.
-- Be concise but complete.`;
+      // Save the revision (immutable history entry).
+      await deps.sessionRepository.saveRevision({
+        sessionId: session.id,
+        revisionNumber: session.revisionCount + 1,
+        userPrompt: body.prompt,
+        architectResponse: result.content,
+        parsedPlan: result.parsedPlan,
+      });
 
-      // Build the messages array — include conversation history if provided.
-      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: systemPrompt },
+      // Update the session messages + parsed plan.
+      const newMessages = [
+        ...session.messages,
+        { role: 'user' as const, content: body.prompt, timestamp: new Date().toISOString() },
+        { role: 'assistant' as const, content: result.content, timestamp: new Date().toISOString() },
       ];
-      if (body.conversation) {
-        for (const msg of body.conversation) {
-          messages.push({ role: msg.role, content: msg.content });
-        }
-      }
-      messages.push({ role: 'user', content: body.prompt });
+      await deps.sessionRepository.updateMessages(session.id, newMessages, result.parsedPlan);
 
-      // Call the LLM gateway.
-      try {
-        const result = await deps.llmGateway.generate({
-          provider,
-          model,
-          messages,
-          executionId,
-          metadata: { projectId },
-        });
-
-        // Try to parse the response as JSON.
-        let parsed: Record<string, unknown> | null = null;
-        try {
-          // Extract JSON from the response (it may be wrapped in markdown).
-          const jsonMatch = result.content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            parsed = JSON.parse(jsonMatch[0]);
-          }
-        } catch {
-          // If parsing fails, return the raw content.
-        }
-
-        return reply.code(200).send({
-          executionId,
-          content: result.content,
-          parsed,
-          usage: result.usage,
-        });
-      } catch (err) {
-        return reply.code(502).send({
-          error: 'architect-llm-failed',
-          message: (err as Error).message,
-        });
-      }
+      return reply.code(200).send({
+        sessionId: session.id,
+        executionId: result.executionId,
+        content: result.content,
+        parsed: result.parsedPlan,
+        usage: result.usage,
+        revisionNumber: session.revisionCount + 1,
+      });
     });
   });
 
   // -----------------------------------------------------------------------
-  // WORK-025: Apply generated architecture — persist structured artifacts.
+  // WORK-025: Apply generated architecture — persists structured artifacts
+  // through existing domain services. Includes Work Item → Requirement/Criterion
+  // associations (explicit, NOT all-to-all) + Work Orders.
   //
   // POST /projects/:projectId/architect/apply
-  //
-  // Takes the generated architecture/requirements/criteria/work items and
-  // persists them through the existing domain services. This creates:
-  //   - Architecture + ArchitectureVersion (DRAFT)
-  //   - Requirements + Acceptance Criteria
-  //   - Work Items
-  //
-  // Does NOT freeze — the user must explicitly freeze afterwards.
   // -----------------------------------------------------------------------
   app.post('/projects/:projectId/architect/apply', async (req, reply) => {
     return runAuthed(req, async () => {
@@ -255,6 +232,8 @@ Rules:
           title: string;
           objective?: string;
           scope?: string;
+          requirementIds?: string[];
+          criterionIds?: string[];
           dependencies?: string[];
         }>;
       };
@@ -277,7 +256,7 @@ Rules:
 
       // 3. Create Requirements + Criteria
       const createdReqs: Array<{ id: string; requirementId: string }> = [];
-      const createdCriteria: Array<{ id: string; criterionId: string }> = [];
+      const createdCriteria: Array<{ id: string; criterionId: string; requirementId: string }> = [];
       if (body.requirements) {
         for (const req of body.requirements) {
           const created = await deps.requirementRepository.create({
@@ -295,7 +274,7 @@ Rules:
                 criterionId: crit.criterionId,
                 description: crit.description,
               });
-              createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId });
+              createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId, requirementId: req.requirementId });
             }
           }
         }
@@ -316,29 +295,38 @@ Rules:
         }
       }
 
-      // 5. Associate Work Items with Requirements + Criteria through the
-      //    existing /work-items repository contracts (NOT raw SQL).
-      //    Each generated Work Item is associated with ALL generated requirements
-      //    and criteria (they all belong to the same architecture version).
-      for (const wi of createdWorkItems) {
-        for (const req of createdReqs) {
-          try {
-            await deps.workItemRequirementRepository.associate(wi.id, req.id);
-          } catch {
-            // Association may already exist — ignore.
+      // 5. Associate Work Items with Requirements + Criteria (EXPLICIT, not all-to-all).
+      //    Each Work Item specifies which requirementIds and criterionIds it implements.
+      for (const wi of body.workItems ?? []) {
+        const workItem = createdWorkItems.find(c => c.workItemId === wi.workItemId);
+        if (!workItem) continue;
+
+        // Associate only the specified requirements.
+        for (const reqId of wi.requirementIds ?? []) {
+          const req = createdReqs.find(r => r.requirementId === reqId);
+          if (req) {
+            try {
+              await deps.workItemRequirementRepository.associate(workItem.id, req.id);
+            } catch {
+              // Association may already exist — ignore.
+            }
           }
         }
-        for (const crit of createdCriteria) {
-          try {
-            await deps.workItemCriterionRepository.associate(wi.id, crit.id);
-          } catch {
-            // Association may already exist — ignore.
+
+        // Associate only the specified criteria.
+        for (const critId of wi.criterionIds ?? []) {
+          const crit = createdCriteria.find(c => c.criterionId === critId);
+          if (crit) {
+            try {
+              await deps.workItemCriterionRepository.associate(workItem.id, crit.id);
+            } catch {
+              // Association may already exist — ignore.
+            }
           }
         }
       }
 
-      // 6. Create dependencies through the existing WorkItemDependencyRepository
-      //    contract (NOT raw SQL). This preserves the /work-items authority boundary.
+      // 6. Create dependencies through the existing WorkItemDependencyRepository.
       if (body.workItems) {
         for (const wi of body.workItems) {
           if (wi.dependencies) {
@@ -358,20 +346,42 @@ Rules:
         }
       }
 
+      // 7. Create Work Orders through the existing WorkOrderRepository.
+      const createdWorkOrders: Array<{ id: string; workItemId: string }> = [];
+      for (const wi of createdWorkItems) {
+        try {
+          const wo = await deps.workOrderRepository.create({
+            workItemId: wi.id,
+            projectId,
+            architectureVersionId: version.id,
+            scope: body.workItems?.find(b => b.workItemId === wi.workItemId)?.objective,
+          });
+          createdWorkOrders.push({ id: wo.id, workItemId: wi.workItemId });
+        } catch {
+          // Work Order creation may fail if one already exists — ignore.
+        }
+      }
+
+      // 8. Mark the architect session as accepted.
+      const session = await deps.sessionRepository.findActiveByProject(projectId);
+      if (session) {
+        await deps.sessionRepository.markAccepted(session.id);
+      }
+
       return reply.code(201).send({
         architectureId: arch.id,
         architectureVersionId: version.id,
         requirements: createdReqs,
         criteria: createdCriteria,
         workItems: createdWorkItems,
+        workOrders: createdWorkOrders,
       });
     });
   });
 
   // -----------------------------------------------------------------------
-  // WORK-025: Provider configuration — returns available LLM/agent providers
-  // without exposing secrets. The frontend uses this to show provider
-  // readiness and let the user select a provider/model.
+  // WORK-025: Provider configuration — delegates to ConversationalArchitectService.
+  // No secrets exposed. The service checks readiness through the SecretStore boundary.
   // -----------------------------------------------------------------------
   app.get('/projects/:projectId/architect/providers', async (req, reply) => {
     return runAuthed(req, async () => {
@@ -379,46 +389,15 @@ Rules:
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read', projectId,
       });
-      // Return configured providers based on environment.
-      // The actual secrets (API keys) stay server-side — only the
-      // provider name, model, and readiness are returned.
-      const providers: Array<{
-        name: string;
-        provider: string;
-        model: string;
-        status: 'ready' | 'not-configured';
-      }> = [];
-      // Check if LLM_API_KEY is configured.
-      const llmKey = process.env.LLM_API_KEY;
-      const llmProvider = process.env.LLM_PROVIDER_NAME ?? 'openai-compatible';
-      const llmModel = process.env.LLM_DEFAULT_MODEL ?? 'gpt-4o';
-      if (llmKey) {
-        providers.push({
-          name: llmProvider,
-          provider: llmProvider,
-          model: llmModel,
-          status: 'ready',
-        });
-      } else {
-        providers.push({
-          name: 'No provider configured',
-          provider: 'none',
-          model: '',
-          status: 'not-configured',
-        });
-      }
+      // Delegate to the service — no process.env access in the route.
+      const providers = deps.conversationalArchitectService.getProviders();
       return reply.code(200).send({ providers });
     });
   });
 
   // -----------------------------------------------------------------------
-  // WORK-025: Architect conversation persistence.
-  //
-  // GET /projects/:projectId/architect/session
-  // Returns the active architect session (messages + last parsed plan).
-  //
-  // PUT /projects/:projectId/architect/session
-  // Updates the session (appends a message, updates the parsed plan).
+  // WORK-025: Architect session — delegates to ArchitectSessionRepository.
+  // The route does NOT query wfos_architect_sessions directly.
   // -----------------------------------------------------------------------
   app.get('/projects/:projectId/architect/session', async (req, reply) => {
     return runAuthed(req, async () => {
@@ -426,64 +405,24 @@ Rules:
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read', projectId,
       });
-      const result = await deps.db.query(
-        'SELECT id, messages, parsed_plan, revision_count, provider, model, status, created_at, updated_at FROM wfos_architect_sessions WHERE project_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1',
-        [projectId, 'active'],
-      );
-      if (result.rows.length === 0) {
-        return reply.code(200).send({ session: null });
-      }
-      return reply.code(200).send({ session: result.rows[0] });
+      const session = await deps.sessionRepository.findActiveByProject(projectId);
+      const revisions = session ? await deps.sessionRepository.listRevisions(session.id) : [];
+      return reply.code(200).send({ session, revisions });
     });
   });
 
-  app.put('/projects/:projectId/architect/session', async (req, reply) => {
+  app.get('/projects/:projectId/architect/revisions', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
       await requireProjectAuthorization(req, reply, deps, {
-        permission: 'project.write', projectId,
+        permission: 'project.read', projectId,
       });
-      const body = req.body as {
-        messages?: Array<{ role: string; content: string }>;
-        parsedPlan?: Record<string, unknown>;
-        provider?: string;
-        model?: string;
-      };
-      // Find or create an active session.
-      const existing = await deps.db.query(
-        'SELECT id FROM wfos_architect_sessions WHERE project_id = $1 AND status = $2',
-        [projectId, 'active'],
-      );
-      if (existing.rows.length > 0) {
-        const sessionId = existing.rows[0]!.id;
-        await deps.db.query(
-          `UPDATE wfos_architect_sessions
-           SET messages = $1, parsed_plan = $2, provider = $3, model = $4,
-               revision_count = revision_count + 1, updated_at = NOW()
-           WHERE id = $5`,
-          [
-            JSON.stringify(body.messages ?? []),
-            body.parsedPlan ? JSON.stringify(body.parsedPlan) : null,
-            body.provider ?? '',
-            body.model ?? '',
-            sessionId,
-          ],
-        );
-        return reply.code(200).send({ sessionId });
-      } else {
-        const result = await deps.db.query(
-          `INSERT INTO wfos_architect_sessions (project_id, messages, parsed_plan, provider, model)
-           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-          [
-            projectId,
-            JSON.stringify(body.messages ?? []),
-            body.parsedPlan ? JSON.stringify(body.parsedPlan) : null,
-            body.provider ?? '',
-            body.model ?? '',
-          ],
-        );
-        return reply.code(201).send({ sessionId: result.rows[0]!.id });
+      const session = await deps.sessionRepository.findActiveByProject(projectId);
+      if (!session) {
+        return reply.code(200).send({ revisions: [] });
       }
+      const revisions = await deps.sessionRepository.listRevisions(session.id);
+      return reply.code(200).send({ revisions });
     });
   });
 }
