@@ -40,6 +40,27 @@ export type {
   ArchitectService,
 } from './internal/architect.types.js';
 
+// WORK-025: Conversational Architect types.
+export type {
+  ArchitectMessage,
+  ArchitectRevision,
+  ArchitectParsedPlan,
+  ArchitectSession,
+  ArchitectSessionRepository,
+  ConversationalArchitectResult,
+  ConversationalArchitectService,
+  ProviderConfig,
+} from './internal/conversational-architect.types.js';
+
+// WORK-025: Atomic plan applier.
+export type {
+  ApplyPlanResult,
+  RepositoryFactories,
+  ArchitectPlanApplier,
+  ArchitectPlanInput,
+  ArchitectPlanIntegrityError,
+} from './internal/architect-plan-applier.js';
+
 /**
  * Public capabilities exposed by the /llm module to other modules.
  */

@@ -114,6 +114,7 @@ import type { LlmProviderAdapter } from './modules/llm/internal/llm.types.js';
 import { createOpenAiAgentAdapterFromEnv } from './modules/agents/internal/openai-agent-adapter.js';
 import type { AgentProviderAdapter } from './modules/agents/internal/agent.types.js';
 import { createS3ObjectStoreFromEnv, type S3ObjectStore } from './platform/storage/s3-object-store.js';
+import { DefaultProviderRegistry } from './platform/default-provider-registry.js';
 import { DefaultArchitectService } from './modules/llm/internal/architect-service.js';
 import type { ArchitectService } from '@modules/llm/index.js';
 import { DefaultVerificationService } from './modules/verification/internal/verification-service.js';
@@ -224,6 +225,12 @@ export interface AppDeps {
   llmExecutionRecordRepository?: LlmExecutionRecordRepository;
   /** WORK-014: architect service. Present when DB configured. */
   architectService?: ArchitectService;
+  /** WORK-025: Conversational Architect service. */
+  conversationalArchitectService?: import('@modules/llm/index.js').ConversationalArchitectService;
+  /** WORK-025: Architect session repository. */
+  architectSessionRepository?: import('@modules/llm/index.js').ArchitectSessionRepository;
+  /** WORK-025: Atomic plan applier (transaction-scoped). */
+  planApplier?: import('@modules/llm/index.js').ArchitectPlanApplier;
   /** WORK-015: verification service. Present when DB configured. */
   verificationService?: VerificationService;
   /** WORK-016: review service. Present when DB configured. */
@@ -396,6 +403,9 @@ export async function buildApp(
   let llmGateway: LlmGateway | undefined;
   let llmExecutionRecordRepository: LlmExecutionRecordRepository | undefined;
   let architectService: ArchitectService | undefined;
+  let conversationalArchitectService: import('@modules/llm/index.js').ConversationalArchitectService | undefined;
+  let architectSessionRepository: import('@modules/llm/index.js').ArchitectSessionRepository | undefined;
+  let planApplier: import('@modules/llm/index.js').ArchitectPlanApplier | undefined;
   let verificationService: VerificationService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
@@ -480,6 +490,35 @@ export async function buildApp(
     }
     llmGateway = new DefaultLlmGateway(database, logger, llmAdapters, 3);
     architectService = new DefaultArchitectService(database, llmGateway, workOrderRepository, logger);
+    // WORK-025: Conversational Architect service + session repository.
+    const { PgArchitectSessionRepository } = await import('./modules/llm/internal/pg-architect-session-repository.js');
+    const { DefaultConversationalArchitectService } = await import('./modules/llm/internal/conversational-architect-service.js');
+    architectSessionRepository = new PgArchitectSessionRepository(database);
+    const archRepoModule = await import('./modules/architecture/internal/pg-architecture-repository.js');
+    const reqRepoModule = await import('./modules/requirements/internal/pg-requirement-repository.js');
+    const wiRepoModule = await import('./modules/work-items/internal/pg-work-item-repository.js');
+    planApplier = new (await import('./modules/llm/internal/architect-plan-applier.js')).ArchitectPlanApplier(
+      database, architectSessionRepository,
+      {
+        createArchitectureRepository: (db) => new archRepoModule.PgArchitectureRepository(db),
+        createArchitectureVersionRepository: (db) => new archRepoModule.PgArchitectureVersionRepository(db),
+        createRequirementRepository: (db) => new reqRepoModule.PgRequirementRepository(db),
+        createAcceptanceCriterionRepository: (db) => new reqRepoModule.PgAcceptanceCriterionRepository(db),
+        createWorkItemRepository: (db) => new wiRepoModule.PgWorkItemRepository(db),
+        createWorkItemRequirementRepository: (db) => new wiRepoModule.PgWorkItemRequirementRepository(db),
+        createWorkItemCriterionRepository: (db) => new wiRepoModule.PgWorkItemCriterionRepository(db),
+        createWorkOrderRepository: (db) => new wiRepoModule.PgWorkOrderRepository(db),
+        createWorkItemDependencyRepository: (db) => new wiRepoModule.PgWorkItemDependencyRepository(db),
+        createArchitectSessionRepository: (db) => new PgArchitectSessionRepository(db),
+      },
+      logger,
+    );
+    conversationalArchitectService = new DefaultConversationalArchitectService(
+      database, llmGateway, projectRepository,
+      architectureRepository, architectureVersionRepository,
+      requirementRepository, acceptanceCriterionRepository,
+      workItemRepository, new DefaultProviderRegistry(secretStore), logger,
+    );
     // WORK-008/015: GitHub CI evidence ingestion + installation repo.
     githubInstallationRepository = new PgGitHubInstallationRepository(database);
     const ciIngestionRepo = new PgCiEvidenceIngestionRepository(database);
@@ -513,7 +552,8 @@ export async function buildApp(
         // WORK-007: work item completion service.
         new DefaultWorkItemCompletionService(workItemRepository as PgWorkItemRepository),
         pullRequestAssociationRepository, agentGateway, agentRunRepository,
-        architectService, verificationService, reviewService, githubAdapter,
+        architectService,
+        verificationService, reviewService, githubAdapter,
         architectureVersionRepository, architectureRepository,
         projectRepository, generateExecutionId,
       );
@@ -589,6 +629,9 @@ export async function buildApp(
       llmGateway,
       llmExecutionRecordRepository,
       architectService,
+      conversationalArchitectService,
+      architectSessionRepository,
+      planApplier,
       verificationService,
       reviewService,
       ciEvidenceIngestionService,

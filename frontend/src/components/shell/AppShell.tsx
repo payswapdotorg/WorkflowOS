@@ -3,6 +3,7 @@ import { Link, useLocation, useParams, useNavigate } from 'react-router-dom';
 import {
   FolderKanban,
   Boxes,
+  Sparkles,
   ListChecks,
   Activity,
   Settings,
@@ -55,6 +56,7 @@ interface NavItem {
 
 const PROJECT_NAV: NavItem[] = [
   { to: '', label: 'Overview', icon: FolderKanban, match: (p) => p === '' || p === '/' },
+  { to: 'architect', label: 'Architect', icon: Sparkles, match: (p) => p.startsWith('architect') },
   { to: 'architecture', label: 'Architecture', icon: Boxes, match: (p) => p.startsWith('architecture') },
   { to: 'requirements', label: 'Requirements', icon: ListChecks, match: (p) => p.startsWith('requirements') },
   { to: 'work-items', label: 'Work Items', icon: PanelsTopLeft, match: (p) => p.startsWith('work-items') },

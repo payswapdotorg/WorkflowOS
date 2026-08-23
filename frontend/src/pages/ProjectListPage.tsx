@@ -1,23 +1,36 @@
 import { useState, useEffect } from 'react';
-import { Plus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { Plus, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { auth } from '@/api/client';
+import { LoadingState } from '@/components/domain/loading-state';
+import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
+import { auth, projects, organizations, type Project } from '@/api/client';
 
 export default function ProjectListPage() {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
+  const [projectList, setProjectList] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // The backend doesn't have a "list projects for user" endpoint.
-    // For the product, we show a create flow + a simple input to open a project by ID.
-    setLoading(false);
-  }, []);
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await projects.listForUser();
+      setProjectList(list);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
@@ -45,19 +58,48 @@ export default function ProjectListPage() {
           </Button>
         </div>
 
-        {showCreate && <CreateProjectForm onCreated={(id) => navigate(`/projects/${id}`)} onCancel={() => setShowCreate(false)} />}
+        {showCreate && (
+          <CreateProjectForm
+            onCreated={(id) => navigate(`/projects/${id}`)}
+            onCancel={() => setShowCreate(false)}
+          />
+        )}
 
         {loading ? (
-          <div className="py-12 text-center text-sm text-muted-foreground">Loading…</div>
-        ) : (
+          <LoadingState label="Loading projects…" />
+        ) : error ? (
+          <ErrorState message={error} />
+        ) : projectList.length === 0 ? (
           <Card>
             <CardContent className="py-12">
               <EmptyState
                 title="No projects yet"
                 description="Create your first project or enter a project ID below to access an existing one."
+                action={<Button onClick={() => setShowCreate(true)}><Plus className="mr-1 h-4 w-4" />Create Project</Button>}
               />
             </CardContent>
           </Card>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {projectList.map((p) => (
+              <Card
+                key={p.id}
+                className="cursor-pointer hover:shadow-md"
+                onClick={() => navigate(`/projects/${p.id}`)}
+              >
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between text-base">
+                    <span>{p.name}</span>
+                    <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-xs text-muted-foreground font-mono">{p.id.slice(0, 8)}</p>
+                  {p.state && <p className="mt-1 text-xs text-muted-foreground capitalize">{p.state}</p>}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         )}
 
         {/* Open by ID */}
@@ -70,27 +112,31 @@ export default function ProjectListPage() {
 }
 
 function CreateProjectForm({ onCreated, onCancel }: { onCreated: (id: string) => void; onCancel: () => void }) {
+  const [orgList, setOrgList] = useState<{ id: string; name: string }[]>([]);
+  const [selectedOrg, setSelectedOrg] = useState('');
   const [name, setName] = useState('');
-  const [orgId, setOrgId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    organizations.listForUser()
+      .then((orgs) => {
+        setOrgList(orgs);
+        if (orgs.length > 0) setSelectedOrg(orgs[0].id);
+      })
+      .catch(() => {});
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !orgId.trim()) {
-      setError('Project name and organization ID are required');
+    if (!name.trim() || !selectedOrg) {
+      setError('Project name and organization are required');
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/organizations/' + orgId.trim() + '/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': localStorage.getItem('wfos_api_key') || '' },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      if (!res.ok) throw new Error(`Failed to create project: ${res.status}`);
-      const project = await res.json() as { id: string };
+      const project = await projects.create(selectedOrg, { name: name.trim() });
       onCreated(project.id);
     } catch (err) {
       setError((err as Error).message);
@@ -101,18 +147,32 @@ function CreateProjectForm({ onCreated, onCancel }: { onCreated: (id: string) =>
 
   return (
     <Card className="mb-6">
-      <CardHeader>
-        <CardTitle>Create Project</CardTitle>
-      </CardHeader>
+      <CardHeader><CardTitle>Create Project</CardTitle></CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="org-id">Organization ID</Label>
-            <Input id="org-id" value={orgId} onChange={(e) => setOrgId(e.target.value)} placeholder="UUID" />
-          </div>
+          {orgList.length > 0 ? (
+            <div className="space-y-2">
+              <Label htmlFor="org-select">Organization</Label>
+              <select
+                id="org-select"
+                value={selectedOrg}
+                onChange={(e) => setSelectedOrg(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+              >
+                {orgList.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No organizations available. Enter an org ID manually.</p>
+          )}
           <div className="space-y-2">
             <Label htmlFor="project-name">Project Name</Label>
-            <Input id="project-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="My Project" />
+            <Input
+              id="project-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My Project"
+            />
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <div className="flex gap-2">

@@ -292,22 +292,25 @@ async function main(): Promise<void> {
       app.deps.architectureVersionRepository &&
       app.deps.workItemRepository &&
       app.deps.workOrderRepository &&
+      app.deps.workItemRequirementRepository &&
+      app.deps.workItemCriterionRepository &&
+      app.deps.workItemDependencyRepository &&
       app.deps.requirementRepository &&
       app.deps.acceptanceCriterionRepository &&
       app.deps.llmGateway &&
-      app.deps.architectService
+      app.deps.architectService &&
+      app.deps.conversationalArchitectService &&
+      app.deps.architectSessionRepository &&
+      app.deps.planApplier
         ? {
             architect: {
               authorizationService: app.deps.authorizationService,
               projectRepository: app.deps.projectRepository,
-              architectureRepository: app.deps.architectureRepository,
-              architectureVersionRepository: app.deps.architectureVersionRepository,
-              workItemRepository: app.deps.workItemRepository,
-              workOrderRepository: app.deps.workOrderRepository,
-              requirementRepository: app.deps.requirementRepository,
-              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
               llmGateway: app.deps.llmGateway,
               architectService: app.deps.architectService,
+              conversationalArchitectService: app.deps.conversationalArchitectService,
+              sessionRepository: app.deps.architectSessionRepository,
+              planApplier: app.deps.planApplier,
               db: app.deps.infrastructure?.database as never,
             },
           }
