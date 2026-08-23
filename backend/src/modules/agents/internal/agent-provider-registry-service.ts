@@ -93,6 +93,27 @@ export class DefaultAgentProviderRegistryService {
   }
 
   /**
+   * Return the platform-default provider name (when the platform registry has
+   * a ready provider). Used by the start-implementation route as the fallback
+   * when the caller does not explicitly supply a provider. Returns undefined
+   * when no platform provider is ready (the route then returns 400).
+   */
+  getPlatformDefaultProvider(): string | undefined {
+    const ready = this.platformRegistry.getProviders().find(p => p.status === 'ready');
+    return ready?.provider;
+  }
+
+  /**
+   * Return the platform-default model (when the platform registry has a ready
+   * provider). Used by the start-implementation route as the fallback when
+   * the caller does not explicitly supply a model.
+   */
+  getPlatformDefaultModel(): string | undefined {
+    const ready = this.platformRegistry.getProviders().find(p => p.status === 'ready');
+    return ready?.model;
+  }
+
+  /**
    * Map a persisted {@link AgentProviderConfigRecord} to a readiness-only
    * {@link AgentProviderConfig}. Resolves the `secretRef` via the SecretStore
    * to determine `status` — the secret value is consumed ONLY for the

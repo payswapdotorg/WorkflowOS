@@ -3929,6 +3929,7 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
       'PgProjectGitHubRepositoryRepository',
       'PgImplementationContextRepository',
       'DefaultImplementationContextBuilder',
+      'DefaultStartImplementationService',
       'PgAgentProviderConfigRepository',
       'DefaultAgentProviderRegistry',
       'DefaultAgentProviderRegistryService',
@@ -3957,6 +3958,104 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
       indexSrc,
       'index.ts must wire the githubProvisioning route group',
     ).toMatch(/githubProvisioning\s*:/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #1: Start Implementation MUST actually invoke AgentGateway.
+  //
+  // The start-implementation route must NOT return success without an
+  // AgentRun. The StartImplementationService must be wired in production
+  // (app.ts) + passed to buildServer (index.ts). The route must return 503
+  // (NOT 201) when the service is absent.
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #1: app.ts wires DefaultStartImplementationService', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultStartImplementationService/);
+    expect(appSrc).toMatch(/startImplementationService\s*=\s*new\s+DefaultStartImplementationService/);
+  });
+
+  it('PR #29 fix #1: index.ts passes startImplementationService to buildServer', () => {
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/startImplementationService/);
+  });
+
+  it('PR #29 fix #1: start-implementation route returns 503 when service is absent (NOT 201)', () => {
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8');
+    // The route must check for the service + return 503 'service-unavailable'.
+    expect(routeSrc).toMatch(/startImplementationService/);
+    expect(routeSrc).toMatch(/503/);
+    expect(routeSrc).toMatch(/service-unavailable/);
+    // The route must NOT have a fallback that returns 201 without an agentRunId.
+    // Extract the start-implementation route body + verify it doesn't contain
+    // a bare `return reply.code(201)` that doesn't include agentRunId.
+    const routeSection = routeSrc.match(/app\.post\('\/work-items\/:workItemId\/start-implementation'[\s\S]*?\n  \}\);/);
+    expect(routeSection, 'expected start-implementation route').not.toBeNull();
+    // The 201 response MUST include agentRunId (not optional).
+    expect(routeSection![0]).toMatch(/agentRunId:\s*submission\.agentRunId/);
+  });
+
+  it('PR #29 fix #1: DefaultStartImplementationService calls AgentGateway.execute', () => {
+    const svcFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'start-implementation-service.ts');
+    const src = readFileSync(svcFile, 'utf8');
+    const codeOnly = stripComments(src);
+    expect(codeOnly).toMatch(/agentGateway\.execute\s*\(/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #2: Vercel Connect must actually invoke the provider.
+  //
+  // The POST /runtime/connect route must call DeploymentService.provisionProject()
+  // or linkRepository() — NOT just persist a manual external ID. The route
+  // must return 503 when the provider is not configured (NO fake connected state).
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #2: runtime route exposes POST /runtime/connect that invokes the provider', () => {
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'runtime.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/app\.post\('\/projects\/:projectId\/runtime\/connect'/);
+    // The route must call deploymentService.provisionProject or linkRepository.
+    expect(routeSrc).toMatch(/deploymentService\.provisionProject\s*\(/);
+    expect(routeSrc).toMatch(/deploymentService\.linkRepository\s*\(/);
+    // The route must check provider health + return 503 when not configured.
+    expect(routeSrc).toMatch(/provider-not-configured/);
+    expect(routeSrc).toMatch(/health\(\)/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #4: ImplementationContextBuilder must fail loudly on missing refs.
+  //
+  // The builder must NOT use the `if (!X) continue` silent-skip pattern for
+  // requirements, criteria, or dependency targets. It must throw.
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing requirement (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!requirement) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!requirement\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-requirement-missing/);
+  });
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing dependency target (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!target) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!target\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-dependency-missing/);
+  });
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing criterion (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!crit) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!crit\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-criterion-missing/);
   });
 });
 

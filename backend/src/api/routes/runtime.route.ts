@@ -59,6 +59,14 @@ export interface RuntimeRouteDeps {
    * recent deployments across all providers.
    */
   deploymentRepository: DeploymentRepository;
+  /**
+   * WORK-026 (PR #29 fix #2): Optional GitHub repo association resolver.
+   * When present, the POST /runtime/connect route auto-links the GitHub
+   * repository to the Vercel project (the user does NOT need to manually
+   * supply a Vercel external project ID). When absent, the connect route
+   * requires an explicit `projectExternalId` in the body.
+   */
+  projectGitHubRepositoryResolver?: (projectId: string) => Promise<{ owner: string; repository: string; defaultBranch: string } | null>;
 }
 
 const VALID_PROVIDERS = new Set<string>(['vercel', 'fake']);
@@ -116,6 +124,120 @@ export async function runtimeRoutes(
         metadata: body.metadata,
       });
       return reply.code(201).send(integration);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // WORK-026 (PR #29 fix #2): POST /projects/:projectId/runtime/connect
+  //
+  // Actually invokes the deployment provider (createProject or linkRepository)
+  // — does NOT merely persist a manual external ID. This is the user-facing
+  // "Connect Vercel" action: the user picks a provider, optionally supplies
+  // a Vercel project name (defaults to the project name), and the route
+  // calls DeploymentService.provisionProject() which delegates to the
+  // provider's createProject(). The provider returns the external project
+  // ID + metadata, which the service persists.
+  //
+  // If a GitHub repository is already linked to the project (via the
+  // projectGitHubRepositoryResolver), the route calls linkRepository()
+  // instead — auto-linking the GitHub repo to the Vercel project.
+  //
+  // If the provider is not configured (health() returns 'not-configured'),
+  // the route returns 503 'provider-not-configured' — NO fake connected
+  // state.
+  // -----------------------------------------------------------------------
+  app.post('/projects/:projectId/runtime/connect', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId } = req.params as { projectId: string };
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write',
+        projectId,
+      });
+      const body = req.body as {
+        provider?: string;
+        projectName?: string;
+        linkExistingProjectExternalId?: string;
+        metadata?: Record<string, unknown>;
+      };
+      const provider = body?.provider ?? 'vercel';
+      if (!VALID_PROVIDERS.has(provider)) {
+        return reply.code(400).send({
+          error: 'invalid-provider',
+          provider,
+          allowed: Array.from(VALID_PROVIDERS),
+        });
+      }
+      const project = await deps.projectRepository.findById(projectId);
+      if (!project) {
+        return reply.code(404).send({ error: 'project-not-found' });
+      }
+
+      // Check provider health — refuse to fake a connected state.
+      const providerAdapter = deps.deploymentService.getProvider(provider);
+      if (!providerAdapter) {
+        return reply.code(503).send({
+          error: 'provider-not-configured',
+          provider,
+          message: `Provider "${provider}" is not registered on the server. Configure the provider credentials (e.g. VERCEL_API_TOKEN) on the server.`,
+        });
+      }
+      const health = await providerAdapter.health();
+      if (health === 'not-configured') {
+        return reply.code(503).send({
+          error: 'provider-not-configured',
+          provider,
+          message: `Provider "${provider}" is registered but not configured (credentials missing). Set the required env vars on the server.`,
+        });
+      }
+      if (health === 'error') {
+        return reply.code(502).send({
+          error: 'provider-error',
+          provider,
+          message: `Provider "${provider}" reported an error during health check.`,
+        });
+      }
+
+      try {
+        // If the user supplied an existing Vercel project external ID, link it.
+        if (body?.linkExistingProjectExternalId) {
+          const integration = await deps.deploymentService.provisionProject({
+            projectId,
+            provider,
+            name: body.projectName ?? project.name,
+            metadata: { ...body.metadata, linkExistingProjectExternalId: body.linkExistingProjectExternalId },
+          });
+          return reply.code(201).send(integration);
+        }
+        // If a GitHub repo is already linked, auto-link it to the Vercel project.
+        if (deps.projectGitHubRepositoryResolver) {
+          const ghRepo = await deps.projectGitHubRepositoryResolver(projectId);
+          if (ghRepo) {
+            const integration = await deps.deploymentService.linkRepository({
+              projectId,
+              provider,
+              repositoryRef: `${ghRepo.owner}/${ghRepo.repository}`,
+              branch: ghRepo.defaultBranch,
+              metadata: body?.metadata,
+            });
+            return reply.code(201).send(integration);
+          }
+        }
+        // Otherwise, create a new Vercel project from the project name.
+        const integration = await deps.deploymentService.provisionProject({
+          projectId,
+          provider,
+          name: body?.projectName ?? project.name,
+          metadata: body?.metadata,
+        });
+        return reply.code(201).send(integration);
+      } catch (err) {
+        return reply.code(502).send({
+          error: 'provider-invocation-failed',
+          provider,
+          message: (err as Error).message,
+          detail: `The "${provider}" provider was invoked but returned an error. No integration was persisted.`,
+        });
+      }
     });
   });
 

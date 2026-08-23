@@ -167,7 +167,17 @@ export class DefaultImplementationContextBuilder
     >();
     const expectedTests: string[] = [];
     for (const crit of resolvedCriteria) {
-      if (!crit) continue;
+      // FK guarantees existence — if find() returns null here, that's a real
+      // data-integrity violation, NOT a "skip and continue" situation. The
+      // agent must NEVER receive an incomplete context while WorkflowOS
+      // believes context generation succeeded.
+      if (!crit) {
+        throw new Error(
+          'implementation-context-criterion-missing: ' +
+            'a work_item_criteria association references a criterion id that does not resolve. ' +
+            'The implementation context cannot be generated; this is a data-integrity violation.',
+        );
+      }
       const list = criteriaByRequirementId.get(crit.requirementId) ?? [];
       list.push({ criterionId: crit.id, description: crit.description });
       criteriaByRequirementId.set(crit.requirementId, list);
@@ -181,7 +191,18 @@ export class DefaultImplementationContextBuilder
       const requirement = await this.requirementRepository.findById(
         assoc.requirementId,
       );
-      if (!requirement) continue; // FK guarantees existence; defensive guard.
+      // FK guarantees existence — a missing requirement means a data-integrity
+      // violation. The agent must NEVER receive an incomplete context. Fail
+      // loudly so the caller can fix the underlying data instead of silently
+      // producing instructions that omit a requirement.
+      if (!requirement) {
+        throw new Error(
+          'implementation-context-requirement-missing: ' +
+            `a work_item_requirements association references requirement id "${assoc.requirementId}" ` +
+            'that does not resolve. The implementation context cannot be generated; ' +
+            'this is a data-integrity violation.',
+        );
+      }
       requirements.push({
         requirementId: requirement.id,
         title: requirement.title,
@@ -197,7 +218,17 @@ export class DefaultImplementationContextBuilder
     const dependencies: ImplementationContextContent['dependencies'] = [];
     for (const dep of deps) {
       const target = await this.workItemRepository.findById(dep.dependsOnId);
-      if (!target) continue; // FK guarantees existence; defensive guard.
+      // FK guarantees existence — a missing dependency target means a
+      // data-integrity violation. The agent must NEVER receive an incomplete
+      // context (missing a dependency means it won't know to wait for it).
+      if (!target) {
+        throw new Error(
+          'implementation-context-dependency-missing: ' +
+            `a work_item_dependencies association references target work item id "${dep.dependsOnId}" ` +
+            'that does not resolve. The implementation context cannot be generated; ' +
+            'this is a data-integrity violation.',
+        );
+      }
       dependencies.push({ workItemId: target.id, title: target.title });
     }
 

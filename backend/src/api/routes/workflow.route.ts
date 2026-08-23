@@ -14,11 +14,16 @@ import {
 } from '../plugins/auth.plugin.js';
 
 /**
- * Optional start-implementation service — when wired by the composition root
- * (SUB-F), this submits the persisted ImplementationContext to the
- * AgentGateway and returns an execution id + agent run id. When absent, the
- * start-implementation route persists the context and returns 201 with the
- * context summary (the actual agent submission is then wired later).
+ * Required start-implementation service — submits the persisted
+ * ImplementationContext to the AgentGateway and returns the agent run id.
+ *
+ * In PRODUCTION composition (app.ts + index.ts), this MUST be wired — there
+ * is NO production no-op path that returns success without an AgentRun.
+ * The service is optional only in isolated test fixtures that construct
+ * WorkflowRouteDeps directly without the production wiring.
+ *
+ * The route handler treats absence as a 503 'service-unavailable' error
+ * (NOT a silent success) so production misconfiguration fails loudly.
  */
 export interface StartImplementationService {
   start(input: {
@@ -27,8 +32,10 @@ export interface StartImplementationService {
     implementationContextRevision: number;
     implementationContextKind: 'initial' | 'correction';
     executionId: string;
+    provider: string;
+    model: string;
   }): Promise<{
-    agentRunId?: string;
+    agentRunId: string;
     executionId: string;
   }>;
 }
@@ -57,8 +64,22 @@ export interface WorkflowRouteDeps {
   orchestrator?: WorkflowOrchestrator;
   /** WORK-026: builds + persists the ImplementationContext revision. */
   implementationContextBuilder?: ImplementationContextBuilder;
-  /** WORK-026: submits the persisted context to the AgentGateway (optional — when absent, the route returns 201 with the context summary only). */
+  /**
+   * WORK-026: submits the persisted context to the AgentGateway. In PRODUCTION
+   * composition (app.ts + index.ts), this MUST be wired — there is no
+   * production no-op path. The route returns 503 if absent.
+   */
   startImplementationService?: StartImplementationService;
+  /**
+   * WORK-026: agent provider registry — used by the start-implementation
+   * route to validate provider/model + resolve platform defaults. Optional
+   * (tests may omit it), but production wires it.
+   */
+  agentProviderRegistryService?: {
+    isProviderConfigured(provider: string, model: string, projectId?: string): Promise<boolean>;
+    getPlatformDefaultProvider(): string | undefined;
+    getPlatformDefaultModel(): string | undefined;
+  };
 }
 
 async function resolveProjectForWorkItem(
@@ -449,22 +470,24 @@ export async function workflowRoutes(
   // --- WORK-026: Autonomous-implementation entry point ---
 
   // POST /work-items/:workItemId/start-implementation — build + persist the
-  // ImplementationContext for the work item, then optionally submit it to
-  // the AgentGateway via the startImplementationService.
+  // ImplementationContext for the work item, then submit it to the
+  // AgentGateway via the startImplementationService. There is NO production
+  // no-op path: if the service is absent, the route returns 503
+  // 'service-unavailable' (NOT a silent 201).
   //
   // The route validates:
   //   - the work item exists (404 'work-item-not-found' if not),
   //   - the caller has project.write (403 'forbidden' if not),
   //   - the workflow state is 'ready' (initial run) or 'changes_requested'
   //     (correction cycle) — 400 'invalid-state' otherwise,
-  //   - the implementationContextBuilder is wired (501
-  //     'implementation-context-builder-not-configured' if not).
+  //   - the implementationContextBuilder is wired (503 if not),
+  //   - the startImplementationService is wired (503 if not),
+  //   - the provider + model are supplied and validated against the
+  //     AgentProviderRegistry (400 'provider-not-configured' if invalid).
   //
   // The route does NOT mutate workflow state — that remains the exclusive
-  // authority of the /workflows WorkflowEngine. It only builds + persists the
-  // context (201 Created) and, when the startImplementationService is
-  // available, fans out the submission (returning the agent run id). The
-  // actual AgentGateway submission wiring lands in SUB-F.
+  // authority of the /workflows WorkflowEngine. It builds + persists the
+  // context, submits to the AgentGateway, and returns the agent run id.
   app.post('/work-items/:workItemId/start-implementation', async (req, reply) => {
     return runAuthed(req, async () => {
       const { workItemId } = req.params as { workItemId: string };
@@ -482,8 +505,14 @@ export async function workflowRoutes(
 
       if (!deps.implementationContextBuilder) {
         return reply
-          .code(501)
-          .send({ error: 'implementation-context-builder-not-configured' });
+          .code(503)
+          .send({ error: 'service-unavailable', reason: 'implementation-context-builder-not-configured' });
+      }
+
+      if (!deps.startImplementationService) {
+        return reply
+          .code(503)
+          .send({ error: 'service-unavailable', reason: 'start-implementation-service-not-configured' });
       }
 
       // 3. Check workflow state is 'ready' or 'changes_requested'.
@@ -497,36 +526,66 @@ export async function workflowRoutes(
         });
       }
 
-      // 4. Build + persist the ImplementationContext. The builder resolves
+      // 4. Validate provider + model against the AgentProviderRegistry (when
+      //    wired). The route never accepts arbitrary provider/model values
+      //    from the browser — the same pattern as the /architect/converse
+      //    route validates against the LLM ProviderRegistry.
+      const body = req.body as { provider?: string; model?: string } | null;
+      const provider = body?.provider ?? deps.agentProviderRegistryService?.getPlatformDefaultProvider();
+      const model = body?.model ?? deps.agentProviderRegistryService?.getPlatformDefaultModel();
+      if (!provider || !model) {
+        return reply.code(400).send({
+          error: 'provider-not-configured',
+          message: 'No implementation agent provider is configured. Set AGENT_PROVIDER_NAME / AGENT_API_KEY / AGENT_DEFAULT_MODEL on the server, or POST /projects/:projectId/agents/providers to configure a project-specific provider.',
+        });
+      }
+      if (deps.agentProviderRegistryService) {
+        const configured = await deps.agentProviderRegistryService.isProviderConfigured(provider, model, projectId);
+        if (!configured) {
+          return reply.code(400).send({
+            error: 'provider-not-configured',
+            message: `Provider "${provider}" with model "${model}" is not configured.`,
+          });
+        }
+      }
+
+      // 5. Build + persist the ImplementationContext. The builder resolves
       // the latest Work Order internally and derives `kind` from the prior
       // context + prior review findings (correction cycle).
       const implementationContext =
         await deps.implementationContextBuilder.build(workItemId);
 
-      // 5. If a startImplementationService is available, call it to submit
-      // to the AgentGateway — otherwise return 201 with the context summary
-      // only. The actual agent submission will be wired in SUB-F composition
-      // root.
+      // 6. Submit to the AgentGateway via the startImplementationService.
+      //    If the gateway rejects, the service propagates the error — the
+      //    route returns 502 'agent-gateway-failed' and NO fake AgentRun is
+      //    persisted as successful.
       const executionId = generateExecutionId();
-      let agentRunId: string | undefined;
-      if (deps.startImplementationService) {
+      try {
         const submission = await deps.startImplementationService.start({
           workItemId,
           implementationContextId: implementationContext.id,
           implementationContextRevision: implementationContext.revision,
           implementationContextKind: implementationContext.kind,
           executionId,
+          provider,
+          model,
         });
-        agentRunId = submission.agentRunId;
+        return reply.code(201).send({
+          implementationContextId: implementationContext.id,
+          workItemId,
+          revision: implementationContext.revision,
+          kind: implementationContext.kind,
+          agentRunId: submission.agentRunId,
+          executionId: submission.executionId,
+        });
+      } catch (err) {
+        return reply.code(502).send({
+          error: 'agent-gateway-failed',
+          message: (err as Error).message,
+          implementationContextId: implementationContext.id,
+          detail: 'The implementation context was persisted but the agent execution failed. No fake AgentRun was recorded.',
+        });
       }
-
-      return reply.code(201).send({
-        implementationContextId: implementationContext.id,
-        workItemId,
-        revision: implementationContext.revision,
-        kind: implementationContext.kind,
-        ...(agentRunId !== undefined ? { agentRunId } : {}),
-      });
     });
   });
 }

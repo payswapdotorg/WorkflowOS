@@ -164,6 +164,18 @@ async function main(): Promise<void> {
               ...(app.deps.implementationContextBuilder
                 ? { implementationContextBuilder: app.deps.implementationContextBuilder }
                 : {}),
+              // WORK-026 (PR #29 fix #1): StartImplementationService — submits
+              // the persisted ImplementationContext to the AgentGateway. In
+              // production, this MUST be wired (no production no-op path).
+              ...(app.deps.startImplementationService
+                ? { startImplementationService: app.deps.startImplementationService }
+                : {}),
+              // WORK-026 (PR #29 fix #1): AgentProviderRegistryService — used by
+              // the start-implementation route to validate provider/model + resolve
+              // platform defaults.
+              ...(app.deps.agentProviderRegistryService
+                ? { agentProviderRegistryService: app.deps.agentProviderRegistryService }
+                : {}),
             },
           }
         : {}),
@@ -184,6 +196,17 @@ async function main(): Promise<void> {
               runtimeStatusService: app.deps.runtimeStatusService,
               runtimeIntegrationRepository: app.deps.runtimeIntegrationRepository,
               deploymentRepository: app.deps.deploymentRepository,
+              // WORK-026 (PR #29 fix #2): expose the GitHub repo association
+              // resolver so the /runtime/connect route can auto-link the
+              // GitHub repo to the Vercel project.
+              ...(app.deps.projectGitHubRepositoryRepository
+                ? {
+                    projectGitHubRepositoryResolver: (async (projectId: string) => {
+                      const r = await app.deps.projectGitHubRepositoryRepository!.findByProject(projectId);
+                      return r ? { owner: r.owner, repository: r.repository, defaultBranch: r.defaultBranch } : null;
+                    }),
+                  }
+                : {}),
             },
           }
         : {}),

@@ -152,6 +152,8 @@ import type { ProjectGitHubRepositoryRepository } from '@modules/github/index.js
 // WORK-026: /work-items ImplementationContext.
 import { PgImplementationContextRepository } from './modules/work-items/internal/pg-implementation-context-repository.js';
 import { DefaultImplementationContextBuilder } from './modules/work-items/internal/implementation-context-builder.js';
+import { DefaultStartImplementationService } from './modules/work-items/internal/start-implementation-service.js';
+import type { StartImplementationService } from './api/routes/workflow.route.js';
 import type { ImplementationContextBuilder } from '@modules/work-items/index.js';
 // WORK-026: /agents provider registry.
 import { PgAgentProviderConfigRepository } from './modules/agents/internal/pg-agent-provider-config-repository.js';
@@ -290,6 +292,8 @@ export interface AppDeps {
   projectGitHubRepositoryRepository?: ProjectGitHubRepositoryRepository;
   /** WORK-026: builds + persists ImplementationContext revisions for autonomous implementation. Present when DB configured. */
   implementationContextBuilder?: ImplementationContextBuilder;
+  /** WORK-026 (PR #29 fix #1): submits the persisted ImplementationContext to the AgentGateway. PRODUCTION MUST WIRE THIS. */
+  startImplementationService?: StartImplementationService;
   /** WORK-026: per-project agent provider config repository. Present when DB configured. */
   agentProviderConfigRepository?: AgentProviderConfigRepository;
   /** WORK-026: composes platform + per-project agent provider registry. Present when DB configured. */
@@ -466,6 +470,7 @@ export async function buildApp(
   let deploymentRepository: DeploymentRepository | undefined;
   let projectGitHubRepositoryRepository: ProjectGitHubRepositoryRepository | undefined;
   let implementationContextBuilder: ImplementationContextBuilder | undefined;
+  let startImplementationService: StartImplementationService | undefined;
   let agentProviderConfigRepository: AgentProviderConfigRepository | undefined;
   let agentProviderRegistryService: DefaultAgentProviderRegistryService | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
@@ -753,6 +758,20 @@ export async function buildApp(
       reviewResolver,
     );
 
+    // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1). ---
+    // Wires the persisted ImplementationContext to the AgentGateway. In
+    // production, this service MUST be wired — there is NO production no-op
+    // path that returns success without an AgentRun. The route returns 503
+    // if this service is absent.
+    startImplementationService = new DefaultStartImplementationService({
+      agentGateway: agentGateway!,
+      agentRunRepository: agentRunRepository!,
+      workItemRepository,
+      workOrderRepository,
+      contextRepository: implementationContextRepository,
+      logger,
+    });
+
     // --- /agents module: provider registry (SUB-E). ---
     // `DefaultAgentProviderRegistry` lives in the platform layer (mirrors the
     // /llm ProviderRegistry pattern). It is NOT exported through the platform
@@ -908,6 +927,7 @@ export async function buildApp(
       deploymentRepository,
       projectGitHubRepositoryRepository,
       implementationContextBuilder,
+      startImplementationService,
       agentProviderConfigRepository,
       agentProviderRegistryService,
     },

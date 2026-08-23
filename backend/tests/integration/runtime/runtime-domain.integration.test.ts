@@ -403,4 +403,62 @@ describe('WORK-026 SUB-H — /runtime domain integration', () => {
     const deployment = res.json() as Deployment;
     expect('secret' in deployment).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #2: POST /runtime/connect must actually invoke the provider.
+  //
+  // The connect route calls DeploymentService.provisionProject() (or
+  // linkRepository() when a GitHub repo is already linked), which delegates
+  // to the provider's createProject()/linkRepository(). The provider returns
+  // the external project ID + metadata, which the service persists.
+  //
+  // If the provider is not configured, the route returns 503 — NO fake
+  // connected state.
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #2: POST /runtime/connect — invokes the provider + persists integration (201)', async () => {
+    // Use the 'fake' provider — always registered, health()='test-mode'.
+    const res = await server.inject({
+      method: 'POST',
+      url: `/projects/${projectA.id}/runtime/connect`,
+      headers: { 'x-api-key': 'raw-key-runtime-a' },
+      payload: { provider: 'fake', projectName: 'My Test Project' },
+    });
+    expect(res.statusCode).toBe(201);
+    const integration = res.json() as RuntimeIntegration;
+    expect(integration.provider).toBe('fake');
+    // The FakeDeploymentProvider returns a deterministic projectExternalId.
+    expect(integration.projectExternalId).toBeTruthy();
+    expect(integration.projectExternalId).toContain('fake-project-');
+    // The integration is persisted — verify by listing.
+    const list = await server.inject({
+      method: 'GET',
+      url: `/projects/${projectA.id}/runtime/integrations`,
+      headers: { 'x-api-key': 'raw-key-runtime-a' },
+    });
+    const listBody = list.json() as { integrations: RuntimeIntegration[] };
+    expect(listBody.integrations.some(i => i.id === integration.id)).toBe(true);
+  });
+
+  it('PR #29 fix #2: POST /runtime/connect — returns 503 when provider is not registered', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/projects/${projectA.id}/runtime/connect`,
+      headers: { 'x-api-key': 'raw-key-runtime-a' },
+      payload: { provider: 'unregistered-provider' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { error: string; allowed: string[] };
+    expect(body.error).toBe('invalid-provider');
+  });
+
+  it('PR #29 fix #2: tenant isolation — User A cannot connect Vercel for User B project (403)', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/projects/${projectB.id}/runtime/connect`,
+      headers: { 'x-api-key': 'raw-key-runtime-a' },
+      payload: { provider: 'fake' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
 });
