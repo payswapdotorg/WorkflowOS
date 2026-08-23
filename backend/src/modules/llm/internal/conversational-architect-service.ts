@@ -14,7 +14,7 @@
 import type { Logger } from '@platform/logger.js';
 import type { LlmGateway } from './llm.types.js';
 import type { DatabaseClient } from '@platform/index.js';
-import type { SecretStore } from '@platform/index.js';
+import type { ProviderRegistry } from '@platform/index.js';
 import type { ArchitectureRepository, ArchitectureVersionRepository } from '@modules/architecture/index.js';
 import type { RequirementRepository, AcceptanceCriterionRepository } from '@modules/requirements/index.js';
 import type { WorkItemRepository } from '@modules/work-items/index.js';
@@ -58,7 +58,7 @@ export class DefaultConversationalArchitectService implements ConversationalArch
     private readonly requirementRepository: RequirementRepository,
     private readonly acceptanceCriterionRepository: AcceptanceCriterionRepository,
     private readonly workItemRepository: WorkItemRepository,
-    private readonly _secretStore: SecretStore,
+    private readonly _providerRegistry: ProviderRegistry,
     private readonly logger: Logger,
   ) {}
 
@@ -125,62 +125,17 @@ export class DefaultConversationalArchitectService implements ConversationalArch
   }
 
   getProviders(): ProviderConfig[] {
-    // Provider readiness is checked through the SecretStore — NOT process.env.
-    // The SecretStore is the existing boundary for credential access.
-    // Provider name + model are non-secret configuration values that can
-    // be read from env directly (they are not credentials).
-    const providerName = process.env.LLM_PROVIDER_NAME ?? 'openai-compatible';
-    const model = process.env.LLM_DEFAULT_MODEL ?? 'gpt-4o';
-
-    // Check if the LLM_API_KEY secret is available through the SecretStore.
-    // This is the ONLY secret access path — the route never sees the value.
-    // We use a synchronous check since EnvSecretStore is synchronous internally.
-    // If the SecretStore is a real vault backend, this would be async.
-    const hasSecret = this.checkSecretSync('LLM_API_KEY');
-
-    if (hasSecret) {
-      return [{
-        name: providerName,
-        provider: providerName,
-        model,
-        status: 'ready',
-      }];
-    }
-    return [{
-      name: 'No provider configured',
-      provider: 'none',
-      model: '',
-      status: 'not-configured',
-    }];
+    // Delegate to the ProviderRegistry — the /llm service does NOT
+    // read process.env or check secrets directly.
+    return this._providerRegistry.getProviders();
   }
 
   /**
-   * Synchronously check if a secret exists (without exposing its value).
-   * Uses the SecretStore boundary — NOT process.env directly.
-   * For EnvSecretStore this is effectively synchronous (Promise resolves immediately).
+   * Validate that a provider+model combination is configured.
+   * Used by the route to reject arbitrary browser-submitted values.
    */
-  private checkSecretSync(key: string): boolean {
-    // The SecretStore is the established boundary. We don't read the value —
-    // we just check if it exists. For EnvSecretStore, getSecret reads from
-    // process.env. For a real vault backend, this would make a network call.
-    // Since getProviders() is synchronous, we use a cached result from
-    // the last async check (or do a one-time sync check for EnvSecretStore).
-    try {
-      // For the synchronous case, we check process.env[key] !== undefined.
-      // This is NOT reading the secret value through process.env — it's
-      // checking *existence* through the same mechanism the SecretStore uses.
-      // The actual value is only ever retrieved through SecretStore.getSecret()
-      // by the LlmGateway when it needs to authenticate.
-      // Provider name and model are non-secret config values.
-      // The key existence check here is equivalent to what the SecretStore does.
-      const ref = this._secretStore.ref(key);
-      // We can't call getSecret synchronously, but we can check if the key
-      // would resolve by checking if the ref key exists in the env.
-      // This is the same check EnvSecretStore.getSecret does internally.
-      return process.env[ref.key] !== undefined && process.env[ref.key] !== '';
-    } catch {
-      return false;
-    }
+  isProviderConfigured(provider: string, model: string): boolean {
+    return this._providerRegistry.isConfigured(provider, model);
   }
 
   /**

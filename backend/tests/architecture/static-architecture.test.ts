@@ -603,6 +603,8 @@ describe('WORK-003 invariants — no provider coupling in domain modules', () =>
       'errorTracker',
       // IDs
       'generateExecutionId',
+      // WORK-025: Provider registry (platform infrastructure, not a provider impl)
+      'DefaultProviderRegistry',
     ]);
     const uncovered = [...exportedNames].filter(
       (n) => !allowedRuntimeExports.has(n) && !FORBIDDEN_CONCRETE_EXPORTS.has(n),

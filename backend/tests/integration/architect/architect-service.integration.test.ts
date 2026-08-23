@@ -125,7 +125,7 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
           stack.db.client, llmGateway, stack.projectRepository,
           stack.architectureRepository, stack.architectureVersionRepository,
           stack.requirementRepository, stack.acceptanceCriterionRepository,
-          stack.workItemRepository, stack.secretStore, stack.db.logger,
+          stack.workItemRepository, new (await import('../../../src/platform/default-provider-registry.js')).DefaultProviderRegistry(stack.secretStore), stack.db.logger,
         ),
         sessionRepository: new (await import('../../../src/modules/llm/internal/pg-architect-session-repository.js')).PgArchitectSessionRepository(stack.db.client),
         db: stack.db.client,

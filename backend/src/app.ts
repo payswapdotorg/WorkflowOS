@@ -114,6 +114,7 @@ import type { LlmProviderAdapter } from './modules/llm/internal/llm.types.js';
 import { createOpenAiAgentAdapterFromEnv } from './modules/agents/internal/openai-agent-adapter.js';
 import type { AgentProviderAdapter } from './modules/agents/internal/agent.types.js';
 import { createS3ObjectStoreFromEnv, type S3ObjectStore } from './platform/storage/s3-object-store.js';
+import { DefaultProviderRegistry } from './platform/default-provider-registry.js';
 import { DefaultArchitectService } from './modules/llm/internal/architect-service.js';
 import type { ArchitectService } from '@modules/llm/index.js';
 import { DefaultVerificationService } from './modules/verification/internal/verification-service.js';
@@ -494,7 +495,7 @@ export async function buildApp(
       database, llmGateway, projectRepository,
       architectureRepository, architectureVersionRepository,
       requirementRepository, acceptanceCriterionRepository,
-      workItemRepository, secretStore, logger,
+      workItemRepository, new DefaultProviderRegistry(secretStore), logger,
     );
     // WORK-008/015: GitHub CI evidence ingestion + installation repo.
     githubInstallationRepository = new PgGitHubInstallationRepository(database);

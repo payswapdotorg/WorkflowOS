@@ -139,4 +139,10 @@ export interface ConversationalArchitectService {
    * Get available provider configurations (readiness only — no secrets).
    */
   getProviders(): ProviderConfig[];
+
+  /**
+   * Validate that a provider+model combination is configured.
+   * Used by the route to reject arbitrary browser-submitted values.
+   */
+  isProviderConfigured(provider: string, model: string): boolean;
 }

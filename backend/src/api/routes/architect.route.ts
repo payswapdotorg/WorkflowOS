@@ -156,16 +156,26 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
         return reply.code(400).send({ error: 'prompt required' });
       }
 
-      // Get or create the architect session.
+      // Validate provider/model against the configured provider registry.
+      // The browser cannot submit arbitrary provider/model values.
+      const defaultProvider = deps.conversationalArchitectService.getProviders().find(p => p.status === 'ready');
+      const provider = body.provider ?? defaultProvider?.provider;
+      const model = body.model ?? defaultProvider?.model;
+      if (!provider || !model || !deps.conversationalArchitectService.isProviderConfigured(provider, model)) {
+        return reply.code(400).send({
+          error: 'provider-not-configured',
+          message: `Provider "${provider ?? 'none'}" with model "${model ?? 'none'}" is not configured. Available providers: ${deps.conversationalArchitectService.getProviders().map(p => `${p.provider}/${p.model} (${p.status})`).join(', ')}`,
+        });
+      }
+
+      // Get or create the architect session with the validated provider/model.
       let session = await deps.sessionRepository.findActiveByProject(projectId);
       if (!session) {
-        const providers = deps.conversationalArchitectService.getProviders();
-        const provider = body.provider ?? providers[0]?.provider ?? 'zai';
-        const model = body.model ?? providers[0]?.model ?? 'glm-4-flash';
         session = await deps.sessionRepository.create({ projectId, provider, model });
       }
 
       // Delegate to the service — it assembles context + calls LlmGateway.
+      // Provider/model come from the validated session, NOT from the browser.
       const result = await deps.conversationalArchitectService.converse({
         projectId,
         prompt: body.prompt,
@@ -174,8 +184,8 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
           content: m.content,
           timestamp: new Date().toISOString(),
         })) ?? session.messages,
-        provider: session.provider,
-        model: session.model,
+        provider, // validated against registry
+        model,   // validated against registry
       });
 
       // Save the revision (immutable history entry).
@@ -242,140 +252,144 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
         return reply.code(400).send({ error: 'architecture.name and architecture.content required' });
       }
 
-      // 1. Create Architecture
-      const arch = await deps.architectureRepository.create({
-        projectId,
-        name: body.architecture.name,
-      });
-
-      // 2. Create Architecture Version (DRAFT)
-      const version = await deps.architectureVersionRepository.create({
-        architectureId: arch.id,
-        contentInline: body.architecture.content,
-      });
-
-      // 3. Create Requirements + Criteria
-      const createdReqs: Array<{ id: string; requirementId: string }> = [];
-      const createdCriteria: Array<{ id: string; criterionId: string; requirementId: string }> = [];
-      if (body.requirements) {
-        for (const req of body.requirements) {
-          const created = await deps.requirementRepository.create({
-            architectureVersionId: version.id,
-            requirementId: req.requirementId,
-            title: req.title,
-            description: req.description ?? undefined,
+      // ATOMIC apply: all persistence operations run inside a single DB
+      // transaction. If ANY operation fails, the entire plan is rolled back
+      // and the session is NOT marked accepted. No partial plans.
+      try {
+        const result = await deps.db.transaction(async () => {
+          // 1. Create Architecture
+          const arch = await deps.architectureRepository.create({
+            projectId,
+            name: body.architecture!.name!,
           });
-          createdReqs.push({ id: created.id, requirementId: req.requirementId });
 
-          if (req.criteria) {
-            for (const crit of req.criteria) {
-              const createdCrit = await deps.acceptanceCriterionRepository.create({
-                requirementId: created.id,
-                criterionId: crit.criterionId,
-                description: crit.description,
+          // 2. Create Architecture Version (DRAFT)
+          const version = await deps.architectureVersionRepository.create({
+            architectureId: arch.id,
+            contentInline: body.architecture!.content!,
+          });
+
+          // 3. Create Requirements + Criteria
+          const createdReqs: Array<{ id: string; requirementId: string }> = [];
+          const createdCriteria: Array<{ id: string; criterionId: string; requirementId: string }> = [];
+          if (body.requirements) {
+            for (const req of body.requirements) {
+              const created = await deps.requirementRepository.create({
+                architectureVersionId: version.id,
+                requirementId: req.requirementId,
+                title: req.title,
+                description: req.description ?? undefined,
               });
-              createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId, requirementId: req.requirementId });
-            }
-          }
-        }
-      }
+              createdReqs.push({ id: created.id, requirementId: req.requirementId });
 
-      // 4. Create Work Items
-      const createdWorkItems: Array<{ id: string; workItemId: string }> = [];
-      if (body.workItems) {
-        for (const wi of body.workItems) {
-          const created = await deps.workItemRepository.create({
-            architectureVersionId: version.id,
-            workItemId: wi.workItemId,
-            title: wi.title,
-            objective: wi.objective,
-            scope: wi.scope,
-          });
-          createdWorkItems.push({ id: created.id, workItemId: wi.workItemId });
-        }
-      }
-
-      // 5. Associate Work Items with Requirements + Criteria (EXPLICIT, not all-to-all).
-      //    Each Work Item specifies which requirementIds and criterionIds it implements.
-      for (const wi of body.workItems ?? []) {
-        const workItem = createdWorkItems.find(c => c.workItemId === wi.workItemId);
-        if (!workItem) continue;
-
-        // Associate only the specified requirements.
-        for (const reqId of wi.requirementIds ?? []) {
-          const req = createdReqs.find(r => r.requirementId === reqId);
-          if (req) {
-            try {
-              await deps.workItemRequirementRepository.associate(workItem.id, req.id);
-            } catch {
-              // Association may already exist — ignore.
-            }
-          }
-        }
-
-        // Associate only the specified criteria.
-        for (const critId of wi.criterionIds ?? []) {
-          const crit = createdCriteria.find(c => c.criterionId === critId);
-          if (crit) {
-            try {
-              await deps.workItemCriterionRepository.associate(workItem.id, crit.id);
-            } catch {
-              // Association may already exist — ignore.
-            }
-          }
-        }
-      }
-
-      // 6. Create dependencies through the existing WorkItemDependencyRepository.
-      if (body.workItems) {
-        for (const wi of body.workItems) {
-          if (wi.dependencies) {
-            const source = createdWorkItems.find(c => c.workItemId === wi.workItemId);
-            if (!source) continue;
-            for (const depId of wi.dependencies) {
-              const target = createdWorkItems.find(c => c.workItemId === depId);
-              if (target) {
-                try {
-                  await deps.workItemDependencyRepository.add(source.id, target.id);
-                } catch {
-                  // Dependency may already exist — ignore.
+              if (req.criteria) {
+                for (const crit of req.criteria) {
+                  const createdCrit = await deps.acceptanceCriterionRepository.create({
+                    requirementId: created.id,
+                    criterionId: crit.criterionId,
+                    description: crit.description,
+                  });
+                  createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId, requirementId: req.requirementId });
                 }
               }
             }
           }
-        }
-      }
 
-      // 7. Create Work Orders through the existing WorkOrderRepository.
-      const createdWorkOrders: Array<{ id: string; workItemId: string }> = [];
-      for (const wi of createdWorkItems) {
-        try {
-          const wo = await deps.workOrderRepository.create({
-            workItemId: wi.id,
-            projectId,
+          // 4. Create Work Items
+          const createdWorkItems: Array<{ id: string; workItemId: string }> = [];
+          if (body.workItems) {
+            for (const wi of body.workItems) {
+              const created = await deps.workItemRepository.create({
+                architectureVersionId: version.id,
+                workItemId: wi.workItemId,
+                title: wi.title,
+                objective: wi.objective,
+                scope: wi.scope,
+              });
+              createdWorkItems.push({ id: created.id, workItemId: wi.workItemId });
+            }
+          }
+
+          // 5. Associate Work Items with Requirements + Criteria (EXPLICIT, not all-to-all).
+          //    NO try/catch — failures propagate and roll back the transaction.
+          for (const wi of body.workItems ?? []) {
+            const workItem = createdWorkItems.find(c => c.workItemId === wi.workItemId);
+            if (!workItem) continue;
+
+            for (const reqId of wi.requirementIds ?? []) {
+              const req = createdReqs.find(r => r.requirementId === reqId);
+              if (req) {
+                await deps.workItemRequirementRepository.associate(workItem.id, req.id);
+              }
+            }
+
+            for (const critId of wi.criterionIds ?? []) {
+              const crit = createdCriteria.find(c => c.criterionId === critId);
+              if (crit) {
+                await deps.workItemCriterionRepository.associate(workItem.id, crit.id);
+              }
+            }
+          }
+
+          // 6. Create dependencies through the existing WorkItemDependencyRepository.
+          //    NO try/catch — failures propagate and roll back.
+          if (body.workItems) {
+            for (const wi of body.workItems) {
+              if (wi.dependencies) {
+                const source = createdWorkItems.find(c => c.workItemId === wi.workItemId);
+                if (!source) continue;
+                for (const depId of wi.dependencies) {
+                  const target = createdWorkItems.find(c => c.workItemId === depId);
+                  if (target) {
+                    await deps.workItemDependencyRepository.add(source.id, target.id);
+                  }
+                }
+              }
+            }
+          }
+
+          // 7. Create Work Orders with full traceability (requirementIds + criterionIds).
+          //    NO try/catch — failures propagate and roll back.
+          const createdWorkOrders: Array<{ id: string; workItemId: string }> = [];
+          for (const wi of createdWorkItems) {
+            const wiInput = body.workItems?.find(b => b.workItemId === wi.workItemId);
+            const wo = await deps.workOrderRepository.create({
+              workItemId: wi.id,
+              projectId,
+              architectureVersionId: version.id,
+              scope: wiInput?.objective,
+              requirementIds: wiInput?.requirementIds?.map(rid => createdReqs.find(r => r.requirementId === rid)?.id).filter((id): id is string => !!id),
+              criterionIds: wiInput?.criterionIds?.map(cid => createdCriteria.find(c => c.criterionId === cid)?.id).filter((id): id is string => !!id),
+            });
+            createdWorkOrders.push({ id: wo.id, workItemId: wi.workItemId });
+          }
+
+          return {
+            architectureId: arch.id,
             architectureVersionId: version.id,
-            scope: body.workItems?.find(b => b.workItemId === wi.workItemId)?.objective,
-          });
-          createdWorkOrders.push({ id: wo.id, workItemId: wi.workItemId });
-        } catch {
-          // Work Order creation may fail if one already exists — ignore.
+            requirements: createdReqs,
+            criteria: createdCriteria,
+            workItems: createdWorkItems,
+            workOrders: createdWorkOrders,
+          };
+        });
+
+        // 8. Only mark the session accepted AFTER the transaction succeeds.
+        const session = await deps.sessionRepository.findActiveByProject(projectId);
+        if (session) {
+          await deps.sessionRepository.markAccepted(session.id);
         }
-      }
 
-      // 8. Mark the architect session as accepted.
-      const session = await deps.sessionRepository.findActiveByProject(projectId);
-      if (session) {
-        await deps.sessionRepository.markAccepted(session.id);
+        return reply.code(201).send(result);
+      } catch (err) {
+        // Transaction rolled back — no partial plan persisted.
+        // Session is NOT accepted.
+        return reply.code(500).send({
+          error: 'apply-failed',
+          message: (err as Error).message,
+          detail: 'The architecture plan was not applied. All changes were rolled back.',
+        });
       }
-
-      return reply.code(201).send({
-        architectureId: arch.id,
-        architectureVersionId: version.id,
-        requirements: createdReqs,
-        criteria: createdCriteria,
-        workItems: createdWorkItems,
-        workOrders: createdWorkOrders,
-      });
     });
   });
 
