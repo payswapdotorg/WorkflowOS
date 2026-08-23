@@ -183,13 +183,17 @@ function CreateVersionForm({ archId, onCreated, onCancel }: { archId: string; on
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!content.trim()) {
+      setError('Architecture content is required');
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const res = await fetch('/api/architectures/' + archId + '/versions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
-        body: JSON.stringify({ contentInline: content.trim() || 'Architecture constraints' }),
+        body: JSON.stringify({ contentInline: content.trim() }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
