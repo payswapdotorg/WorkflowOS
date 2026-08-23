@@ -46,3 +46,6 @@ button.link { border: none; background: none; color: #71717a; text-decoration: u
 }
 .providers li span.pending { color: #a1a1aa; }
 footer { text-align: center; margin-top: 4px; }
+
+#blocked-reason dd { color: #b45309; }
+.hidden { display: none !important; }

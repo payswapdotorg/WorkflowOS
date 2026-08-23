@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!--
+  WORK-029: Z.ai test fixture — reproduces the DOM structure OBSERVED on
+  https://chat.z.ai (2026-08-24, unauthenticated view; see
+  src/providers/zai/README.md). Served by the fixture harness at
+  http://127.0.0.1:3777 for deterministic unit tests + the browser E2E.
+
+  Observed elements reproduced:
+    - textarea#chat-input + placeholder "How can I help you today?"
+    - div[aria-label="Send Message"] > button[type=submit][disabled]
+    - div[aria-label="New Chat"] / "Chat History" / "Deep think enabled"
+    - button "ZCode" (coding-agent mode) + button[aria-label="Select a model"]
+    - "Sign in" buttons on the login-wall variant
+
+  Fixture-only behavior (mimics the product contract for testing):
+    - send → conversation created (history.pushState /chat/<uuid>)
+    - deterministic agent: streaming → progress (branch/commit/PR/tests) → done
+    - variants: ?wall=login  ?fail=1  ?confirm=1  ?xss=1
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Z.ai Fixture</title>
+    <style>
+      body { font-family: system-ui; margin: 0; display: flex; }
+      #sidebar { width: 220px; border-right: 1px solid #eee; padding: 10px; }
+      #main { flex: 1; display: flex; flex-direction: column; height: 100vh; }
+      #transcript { flex: 1; overflow-y: auto; padding: 16px; }
+      .msg { margin: 8px 0; padding: 8px 12px; border-radius: 8px; background: #f6f6f7; white-space: pre-wrap; }
+      .msg.assistant { background: #eef4ff; }
+      #composer { border-top: 1px solid #eee; padding: 12px; display: flex; gap: 8px; }
+      #chat-input { flex: 1; height: 64px; }
+      [role="alert"] { background: #fee2e2; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
+      [role="alertdialog"] { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid; place-items: center; }
+      [role="alertdialog"] > div { background: #fff; padding: 20px; border-radius: 10px; }
+      .signin { position: absolute; top: 10px; right: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="sidebar">
+      <div aria-label="Chat History" data-state="closed">Chat History</div>
+      <div aria-label="New Chat" data-state="closed">New Chat</div>
+    </div>
+    <div id="main">
+      <div id="topbar">
+        <button id="zcode-btn">ZCode</button>
+        <button aria-label="Select a model">GLM-4.7</button>
+        <div aria-label="Deep think enabled" data-state="on">Deep think enabled</div>
+        <button class="signin" id="signin-btn" hidden>Sign in</button>
+      </div>
+      <div id="transcript" role="log" aria-live="polite"></div>
+      <div id="error-slot"></div>
+      <form id="composer-form">
+        <div id="composer">
+          <textarea id="chat-input" placeholder="How can I help you today?"></textarea>
+          <div aria-label="Upload Files"><button type="button" aria-hidden="true">📎</button></div>
+          <div aria-label="Send Message"><button type="submit" id="send-btn" disabled>➤</button></div>
+        </div>
+      </form>
+    </div>
+
+    <script src="./fixture-agent.js"></script>
+  </body>
+</html>

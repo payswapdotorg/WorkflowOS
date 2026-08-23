@@ -40,6 +40,11 @@ export type AdapterSession = {
   readonly branch: string;
   readonly prompt: string;
   readonly verificationRequirements: readonly string[];
+  /**
+   * WORK-029 (optional, additive): true once the prompt was submitted for
+   * this execution — adapters use it to refuse duplicate submission.
+   */
+  readonly promptSubmitted?: boolean;
 };
 
 /** Where observations flow (the background wires this to the reporter). */

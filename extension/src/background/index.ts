@@ -165,6 +165,44 @@ export class CompanionBackground {
       case 'GET_SESSION':
         respond(this.getSessionView());
         break;
+      case 'PROMPT_SUBMITTED': {
+        // §28/§38.4: mark submitted EXACTLY once — persisted so a reload
+        // never triggers a second submission.
+        if (this.session && msg.executionId === this.session.executionId && !this.session.promptSubmitted) {
+          this.session.promptSubmitted = true;
+          this.session.phase = 'task-sent';
+          if (msg.payload.externalSessionRef) {
+            this.session.externalSessionRef = msg.payload.externalSessionRef;
+          }
+          await this.store.setJson(SESSION_KEY, this.session);
+        }
+        respond({ ok: true });
+        break;
+      }
+      case 'PROVIDER_STATUS': {
+        // §9: visible provider phase for the popup. NOTE: the BLOCKED reason
+        // from the observation path (human-readable, e.g. "Please sign in to
+        // Z.ai.") takes precedence — the phase detail here is a terse code.
+        if (this.session && msg.executionId === this.session.executionId) {
+          this.session.phase = msg.payload.phase;
+          if (msg.payload.phase === 'blocked' && msg.payload.detail && !this.session.blockedReason) {
+            this.session.blockedReason = msg.payload.detail;
+          }
+          await this.store.setJson(SESSION_KEY, this.session);
+        }
+        respond({ ok: true });
+        break;
+      }
+      case 'BRIDGE_READY': {
+        // The provider adapter bridge is live — if the prompt has not been
+        // submitted yet, command the injection (idempotent; the page runtime
+        // also self-attaches on load).
+        if (this.session && !this.session.promptSubmitted) {
+          await this.startObserving();
+        }
+        respond({ ok: true });
+        break;
+      }
       case 'COMPANION_PING':
       case 'COMPANION_PONG':
       case 'WORKFLOWOS_HANDOFF_RESULT':
@@ -205,6 +243,10 @@ export class CompanionBackground {
         status: 'ready',
         startedAt: null,
         openedTabId: null,
+        promptSubmitted: false,
+        phase: 'connecting',
+        blockedReason: null,
+        externalSessionRef: null,
       };
       await this.store.setJson(SESSION_KEY, this.session);
       this.reporter = this.makeReporter(this.client);
@@ -254,6 +296,15 @@ export class CompanionBackground {
       await adapter.observeExecution(this.toAdapterSession(), this.adapterRuntime, (observation) => {
         void this.onObservation(observation);
       });
+      // WORK-029: real providers need an explicit prompt injection command
+      // (the fake page self-drives). Idempotent: the adapter + page runtime
+      // both refuse when the prompt was already submitted.
+      if (adapter.capabilities.injectPrompt && !this.session.promptSubmitted) {
+        await adapter.injectPrompt(
+          { ...this.toAdapterSession(), promptSubmitted: this.session.promptSubmitted },
+          this.adapterRuntime,
+        );
+      }
       // The provider session has begun → report `started` exactly once
       // (§25: execution.started). Subsequent lifecycle events come from the
       // adapter's observations.
@@ -302,6 +353,9 @@ export class CompanionBackground {
         if (this.session.status !== 'completed' && this.session.status !== 'failed') {
           this.session.status = 'running';
         }
+        if (observation.externalSessionRef && !this.session.externalSessionRef) {
+          this.session.externalSessionRef = observation.externalSessionRef;
+        }
         await this.reporter.report(this.session, { eventType: 'progress', ...payload });
         break;
       case 'completed':
@@ -314,10 +368,12 @@ export class CompanionBackground {
         break;
       case 'blocked':
         this.session.status = 'blocked';
+        this.session.blockedReason =
+          (observation as { reason?: string }).reason ?? 'Provider blocked automatic execution.';
         await this.reporter.report(this.session, {
           eventType: 'failed',
           ...payload,
-          output: payload.output ?? 'blocked',
+          output: payload.output ?? this.session.blockedReason,
         });
         break;
       case 'note':

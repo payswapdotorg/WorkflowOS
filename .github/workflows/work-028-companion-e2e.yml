@@ -1,4 +1,4 @@
-# WORK-028 Companion Extension E2E CI for WorkflowOS.
+# WorkflowOS Companion extension E2E CI (WORK-028 + WORK-029).
 #
 # Builds the WorkflowOS Companion browser extension, then runs the Playwright
 # test that loads it UNPACKED into a persistent Chromium context and proves
@@ -11,11 +11,19 @@
 #   with the scoped x-callback-token → WorkflowOS execution completes →
 #   popup shows the session → replayed handoff ref rejected (409).
 #
+# WORK-029 (Z.ai adapter): the adapter opens a LOCAL fixture server
+# (127.0.0.1:3777) reproducing the OBSERVED chat.z.ai DOM → provider
+# detected as Z.ai → prompt injected (digest verified in-page) → sent
+# EXACTLY ONCE (fixture counter) → deterministic agent progress → completion
+# detected → WorkflowOS receives started/progress/completed → popup shows the
+# Z.ai session; login-wall fixture → BLOCKED "Please sign in to Z.ai." with
+# zero submissions; XSS payloads stay inert. No live Z.ai dependency.
+#
 # Deterministic: no real Z.ai/ChatGPT/Claude interaction (the fake provider
 # is an extension page; provider adapters for real platforms are WORK-029+).
 #
 # On failure, the Playwright HTML report is uploaded as a CI artifact.
-name: work-028-companion-extension-e2e
+name: companion-extension-e2e
 
 on:
   push:
@@ -31,7 +39,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: work-028 companion extension E2E
+    name: companion extension E2E (WORK-028 + WORK-029)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -69,7 +77,7 @@ jobs:
         working-directory: backend
         run: bunx playwright install --with-deps chromium
 
-      - name: Run WORK-028 companion extension E2E
+      - name: Run companion extension E2E suite (WORK-028 + WORK-029)
         working-directory: backend
         run: bunx playwright test --config playwright-extension.config.ts
 

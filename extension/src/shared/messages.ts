@@ -19,8 +19,11 @@ export const MESSAGE_TYPES = [
   'WORKFLOWOS_HANDOFF_RESULT',
   'COMPANION_PING',
   'COMPANION_PONG',
-  // Provider detection
+  // Provider detection + WORK-029 bridge lifecycle
   'PROVIDER_DETECTED',
+  'BRIDGE_READY',
+  'PROMPT_SUBMITTED',
+  'PROVIDER_STATUS',
   // Execution control
   'START_EXECUTION',
   'STOP_EXECUTION',
@@ -83,6 +86,23 @@ export interface ProviderDetectedPayload {
 }
 export type ProviderDetectedMessage = MessageEnvelope<'PROVIDER_DETECTED', ProviderDetectedPayload>;
 
+// --- WORK-029: provider bridge lifecycle (provider-neutral envelopes) ---
+
+/** A provider page's adapter bridge finished loading and is ready (§5). */
+export type BridgeReadyMessage = MessageEnvelope<'BRIDGE_READY', { providerId: string }>;
+
+/** The provider page submitted the prompt for this execution — EXACTLY ONCE. */
+export type PromptSubmittedMessage = MessageEnvelope<
+  'PROMPT_SUBMITTED',
+  { externalSessionRef?: string }
+>;
+
+/** Visible provider phase for the extension UI (§9). */
+export type ProviderStatusMessage = MessageEnvelope<
+  'PROVIDER_STATUS',
+  { phase: string; detail?: string }
+>;
+
 // --- Execution control (popup / pages → background) ---
 
 export type StartExecutionMessage = MessageEnvelope<'START_EXECUTION', { auto: boolean }>;
@@ -101,6 +121,8 @@ export interface ExecutionObservationPayload {
   readonly pullRequestRef?: string;
   readonly testSummary?: Record<string, unknown>;
   readonly externalSessionRef?: string;
+  /** WORK-029: human-readable BLOCKED reason (login required, UI changed…). */
+  readonly reason?: string;
 }
 export type ExecutionProgressMessage = MessageEnvelope<'EXECUTION_PROGRESS', ExecutionObservationPayload>;
 export type ExecutionCompletedMessage = MessageEnvelope<'EXECUTION_COMPLETED', ExecutionObservationPayload>;
@@ -119,6 +141,9 @@ export type CompanionMessage =
   | CompanionPingMessage
   | CompanionPongMessage
   | ProviderDetectedMessage
+  | BridgeReadyMessage
+  | PromptSubmittedMessage
+  | ProviderStatusMessage
   | StartExecutionMessage
   | StopExecutionMessage
   | OpenProviderMessage
