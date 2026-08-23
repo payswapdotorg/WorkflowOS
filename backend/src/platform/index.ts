@@ -120,3 +120,6 @@ export { EnvSecretStore } from './secrets/env-secret-store.js';
 // WORK-025: Provider registry (readiness checks without exposing secrets).
 export type { ProviderConfig, ProviderRegistry } from './provider-registry.js';
 export { DefaultProviderRegistry } from './default-provider-registry.js';
+
+// WORK-025: Transaction-scoped adapter for atomic apply operations.
+export { TxDatabaseClientAdapter } from './postgres/tx-database-client-adapter.js';

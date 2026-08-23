@@ -1,20 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { AuthorizationService } from '@modules/auth/index.js';
 import type { ProjectRepository } from '@modules/projects/index.js';
-import type { ArchitectureRepository, ArchitectureVersionRepository } from '@modules/architecture/index.js';
-import type {
-  WorkItemRepository,
-  WorkOrderRepository,
-  WorkItemRequirementRepository,
-  WorkItemCriterionRepository,
-  WorkItemDependencyRepository,
-} from '@modules/work-items/index.js';
-import type { RequirementRepository, AcceptanceCriterionRepository } from '@modules/requirements/index.js';
 import type {
   LlmGateway,
   ArchitectService,
   ConversationalArchitectService,
   ArchitectSessionRepository,
+  ArchitectPlanApplier,
 } from '@modules/llm/index.js';
 import type { DatabaseClient } from '@platform/index.js';
 import { generateExecutionId } from '@platform/ids.js';
@@ -23,31 +15,25 @@ import { requireProjectAuthorization, runAuthed } from '../plugins/auth.plugin.j
 export interface ArchitectRouteDeps {
   authorizationService: AuthorizationService;
   projectRepository: ProjectRepository;
-  architectureRepository: ArchitectureRepository;
-  architectureVersionRepository: ArchitectureVersionRepository;
-  workItemRepository: WorkItemRepository;
-  workOrderRepository: WorkOrderRepository;
-  workItemRequirementRepository: WorkItemRequirementRepository;
-  workItemCriterionRepository: WorkItemCriterionRepository;
-  workItemDependencyRepository: WorkItemDependencyRepository;
-  requirementRepository: RequirementRepository;
-  acceptanceCriterionRepository: AcceptanceCriterionRepository;
   llmGateway: LlmGateway;
   architectService: ArchitectService;
   conversationalArchitectService: ConversationalArchitectService;
   sessionRepository: ArchitectSessionRepository;
+  planApplier: ArchitectPlanApplier;
   db: DatabaseClient;
 }
 
-async function resolveProjectForArchitectureVersion(
-  deps: ArchitectRouteDeps,
-  architectureVersionId: string,
-): Promise<string | null> {
-  const version = await deps.architectureVersionRepository.findById(architectureVersionId);
-  if (!version) return null;
-  const arch = await deps.architectureRepository.findById(version.architectureId);
-  return arch?.projectId ?? null;
-}
+// The existing /architect/execute and /architect/generate-work-order routes
+// need architecture repository access for project resolution. These are
+// the WORK-014 routes — they use the existing ArchitectService which has
+// its own repository access internally. The route only needs project
+// authorization + the service.
+// (The resolveProjectForArchitectureVersion helper is no longer needed
+//  since the service handles project verification internally.)
+
+// (resolveProjectForArchitectureVersion removed — the existing execute route
+// uses project authorization directly. The service validates the
+// architecture version belongs to the project.)
 
 export async function architectRoutes(app: FastifyInstance, deps: ArchitectRouteDeps): Promise<void> {
   // POST /projects/:projectId/architect/execute — existing WORK-014 route (unchanged).
@@ -67,22 +53,38 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
       if (!body?.architectureVersionId || !body?.task || !body?.provider || !body?.model) {
         return reply.code(400).send({ error: 'architectureVersionId, task, provider, and model required' });
       }
-      const avProjectId = await resolveProjectForArchitectureVersion(deps, body.architectureVersionId);
-      if (!avProjectId || avProjectId !== projectId) {
-        return reply.code(403).send({ error: 'forbidden', reason: 'architecture-version-not-in-project' });
+      // The ArchitectService validates the architecture version belongs to
+      // the project internally. If the version doesn't belong to this project,
+      // the service will throw — we return 403.
+      try {
+        // Verify the architecture version belongs to this project.
+        const avResult = await deps.db.query(
+          `SELECT a.project_id FROM wfos_architecture_versions av
+           JOIN wfos_architectures a ON a.id = av.architecture_id
+           WHERE av.id = $1`,
+          [body.architectureVersionId],
+        );
+        if (avResult.rows.length === 0 || avResult.rows[0]!.project_id !== projectId) {
+          return reply.code(403).send({ error: 'forbidden', reason: 'architecture-version-not-in-project' });
+        }
+        const executionId = generateExecutionId();
+        const result = await deps.architectService.execute({
+          projectId,
+          architectureVersionId: body.architectureVersionId,
+          workItemId: body.workItemId,
+          task: body.task,
+          executionId,
+          provider: body.provider,
+          model: body.model,
+        });
+        void user;
+        return reply.code(200).send(result);
+      } catch (err) {
+        if ((err as Error).message.includes('not found') || (err as Error).message.includes('does not belong')) {
+          return reply.code(403).send({ error: 'forbidden', reason: 'architecture-version-not-in-project' });
+        }
+        throw err;
       }
-      const executionId = generateExecutionId();
-      const result = await deps.architectService.execute({
-        projectId,
-        architectureVersionId: body.architectureVersionId,
-        workItemId: body.workItemId,
-        task: body.task,
-        executionId,
-        provider: body.provider,
-        model: body.model,
-      });
-      void user;
-      return reply.code(200).send(result);
     });
   });
 
@@ -252,134 +254,12 @@ export async function architectRoutes(app: FastifyInstance, deps: ArchitectRoute
         return reply.code(400).send({ error: 'architecture.name and architecture.content required' });
       }
 
-      // ATOMIC apply: all persistence operations run inside a single DB
-      // transaction. If ANY operation fails, the entire plan is rolled back
-      // and the session is NOT marked accepted. No partial plans.
+      // ATOMIC apply: delegates to ArchitectPlanApplier which runs all
+      // writes inside a single DB transaction using transaction-scoped
+      // repositories. If ANY operation fails, the entire transaction
+      // rolls back and the session is NOT marked accepted. No partial plans.
       try {
-        const result = await deps.db.transaction(async () => {
-          // 1. Create Architecture
-          const arch = await deps.architectureRepository.create({
-            projectId,
-            name: body.architecture!.name!,
-          });
-
-          // 2. Create Architecture Version (DRAFT)
-          const version = await deps.architectureVersionRepository.create({
-            architectureId: arch.id,
-            contentInline: body.architecture!.content!,
-          });
-
-          // 3. Create Requirements + Criteria
-          const createdReqs: Array<{ id: string; requirementId: string }> = [];
-          const createdCriteria: Array<{ id: string; criterionId: string; requirementId: string }> = [];
-          if (body.requirements) {
-            for (const req of body.requirements) {
-              const created = await deps.requirementRepository.create({
-                architectureVersionId: version.id,
-                requirementId: req.requirementId,
-                title: req.title,
-                description: req.description ?? undefined,
-              });
-              createdReqs.push({ id: created.id, requirementId: req.requirementId });
-
-              if (req.criteria) {
-                for (const crit of req.criteria) {
-                  const createdCrit = await deps.acceptanceCriterionRepository.create({
-                    requirementId: created.id,
-                    criterionId: crit.criterionId,
-                    description: crit.description,
-                  });
-                  createdCriteria.push({ id: createdCrit.id, criterionId: crit.criterionId, requirementId: req.requirementId });
-                }
-              }
-            }
-          }
-
-          // 4. Create Work Items
-          const createdWorkItems: Array<{ id: string; workItemId: string }> = [];
-          if (body.workItems) {
-            for (const wi of body.workItems) {
-              const created = await deps.workItemRepository.create({
-                architectureVersionId: version.id,
-                workItemId: wi.workItemId,
-                title: wi.title,
-                objective: wi.objective,
-                scope: wi.scope,
-              });
-              createdWorkItems.push({ id: created.id, workItemId: wi.workItemId });
-            }
-          }
-
-          // 5. Associate Work Items with Requirements + Criteria (EXPLICIT, not all-to-all).
-          //    NO try/catch — failures propagate and roll back the transaction.
-          for (const wi of body.workItems ?? []) {
-            const workItem = createdWorkItems.find(c => c.workItemId === wi.workItemId);
-            if (!workItem) continue;
-
-            for (const reqId of wi.requirementIds ?? []) {
-              const req = createdReqs.find(r => r.requirementId === reqId);
-              if (req) {
-                await deps.workItemRequirementRepository.associate(workItem.id, req.id);
-              }
-            }
-
-            for (const critId of wi.criterionIds ?? []) {
-              const crit = createdCriteria.find(c => c.criterionId === critId);
-              if (crit) {
-                await deps.workItemCriterionRepository.associate(workItem.id, crit.id);
-              }
-            }
-          }
-
-          // 6. Create dependencies through the existing WorkItemDependencyRepository.
-          //    NO try/catch — failures propagate and roll back.
-          if (body.workItems) {
-            for (const wi of body.workItems) {
-              if (wi.dependencies) {
-                const source = createdWorkItems.find(c => c.workItemId === wi.workItemId);
-                if (!source) continue;
-                for (const depId of wi.dependencies) {
-                  const target = createdWorkItems.find(c => c.workItemId === depId);
-                  if (target) {
-                    await deps.workItemDependencyRepository.add(source.id, target.id);
-                  }
-                }
-              }
-            }
-          }
-
-          // 7. Create Work Orders with full traceability (requirementIds + criterionIds).
-          //    NO try/catch — failures propagate and roll back.
-          const createdWorkOrders: Array<{ id: string; workItemId: string }> = [];
-          for (const wi of createdWorkItems) {
-            const wiInput = body.workItems?.find(b => b.workItemId === wi.workItemId);
-            const wo = await deps.workOrderRepository.create({
-              workItemId: wi.id,
-              projectId,
-              architectureVersionId: version.id,
-              scope: wiInput?.objective,
-              requirementIds: wiInput?.requirementIds?.map(rid => createdReqs.find(r => r.requirementId === rid)?.id).filter((id): id is string => !!id),
-              criterionIds: wiInput?.criterionIds?.map(cid => createdCriteria.find(c => c.criterionId === cid)?.id).filter((id): id is string => !!id),
-            });
-            createdWorkOrders.push({ id: wo.id, workItemId: wi.workItemId });
-          }
-
-          return {
-            architectureId: arch.id,
-            architectureVersionId: version.id,
-            requirements: createdReqs,
-            criteria: createdCriteria,
-            workItems: createdWorkItems,
-            workOrders: createdWorkOrders,
-          };
-        });
-
-        // 8. Only mark the session accepted AFTER the transaction succeeds.
-        const session = await deps.sessionRepository.findActiveByProject(projectId);
-        if (session) {
-          await deps.sessionRepository.markAccepted(session.id);
-        }
-
+        const result = await deps.planApplier.apply(projectId, body as any);
         return reply.code(201).send(result);
       } catch (err) {
         // Transaction rolled back — no partial plan persisted.

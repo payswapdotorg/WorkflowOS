@@ -229,6 +229,8 @@ export interface AppDeps {
   conversationalArchitectService?: import('@modules/llm/index.js').ConversationalArchitectService;
   /** WORK-025: Architect session repository. */
   architectSessionRepository?: import('@modules/llm/index.js').ArchitectSessionRepository;
+  /** WORK-025: Atomic plan applier (transaction-scoped). */
+  planApplier?: import('@modules/llm/index.js').ArchitectPlanApplier;
   /** WORK-015: verification service. Present when DB configured. */
   verificationService?: VerificationService;
   /** WORK-016: review service. Present when DB configured. */
@@ -403,6 +405,7 @@ export async function buildApp(
   let architectService: ArchitectService | undefined;
   let conversationalArchitectService: import('@modules/llm/index.js').ConversationalArchitectService | undefined;
   let architectSessionRepository: import('@modules/llm/index.js').ArchitectSessionRepository | undefined;
+  let planApplier: import('@modules/llm/index.js').ArchitectPlanApplier | undefined;
   let verificationService: VerificationService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
@@ -491,6 +494,24 @@ export async function buildApp(
     const { PgArchitectSessionRepository } = await import('./modules/llm/internal/pg-architect-session-repository.js');
     const { DefaultConversationalArchitectService } = await import('./modules/llm/internal/conversational-architect-service.js');
     architectSessionRepository = new PgArchitectSessionRepository(database);
+    const archRepoModule = await import('./modules/architecture/internal/pg-architecture-repository.js');
+    const reqRepoModule = await import('./modules/requirements/internal/pg-requirement-repository.js');
+    const wiRepoModule = await import('./modules/work-items/internal/pg-work-item-repository.js');
+    planApplier = new (await import('./modules/llm/internal/architect-plan-applier.js')).ArchitectPlanApplier(
+      database, architectSessionRepository,
+      {
+        createArchitectureRepository: (db) => new archRepoModule.PgArchitectureRepository(db),
+        createArchitectureVersionRepository: (db) => new archRepoModule.PgArchitectureVersionRepository(db),
+        createRequirementRepository: (db) => new reqRepoModule.PgRequirementRepository(db),
+        createAcceptanceCriterionRepository: (db) => new reqRepoModule.PgAcceptanceCriterionRepository(db),
+        createWorkItemRepository: (db) => new wiRepoModule.PgWorkItemRepository(db),
+        createWorkItemRequirementRepository: (db) => new wiRepoModule.PgWorkItemRequirementRepository(db),
+        createWorkItemCriterionRepository: (db) => new wiRepoModule.PgWorkItemCriterionRepository(db),
+        createWorkOrderRepository: (db) => new wiRepoModule.PgWorkOrderRepository(db),
+        createWorkItemDependencyRepository: (db) => new wiRepoModule.PgWorkItemDependencyRepository(db),
+      },
+      logger,
+    );
     conversationalArchitectService = new DefaultConversationalArchitectService(
       database, llmGateway, projectRepository,
       architectureRepository, architectureVersionRepository,
@@ -609,6 +630,7 @@ export async function buildApp(
       architectService,
       conversationalArchitectService,
       architectSessionRepository,
+      planApplier,
       verificationService,
       reviewService,
       ciEvidenceIngestionService,

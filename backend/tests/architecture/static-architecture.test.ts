@@ -603,8 +603,9 @@ describe('WORK-003 invariants — no provider coupling in domain modules', () =>
       'errorTracker',
       // IDs
       'generateExecutionId',
-      // WORK-025: Provider registry (platform infrastructure, not a provider impl)
+      // WORK-025: Provider registry + transaction adapter (platform infrastructure)
       'DefaultProviderRegistry',
+      'TxDatabaseClientAdapter',
     ]);
     const uncovered = [...exportedNames].filter(
       (n) => !allowedRuntimeExports.has(n) && !FORBIDDEN_CONCRETE_EXPORTS.has(n),
@@ -1085,6 +1086,9 @@ describe('WORK-005 invariants — architecture module boundaries', () => {
       'ArchitectureChangeRequestRepository',
       'ArchitectureService',
       'architectureModule',
+      // WORK-025: re-exported for transaction-scoped plan apply
+      'PgArchitectureRepository',
+      'PgArchitectureVersionRepository',
     ]);
     const exported: string[] = [];
     for (const m of archIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -1232,6 +1236,9 @@ describe('WORK-006 invariants — requirements module boundaries', () => {
       'AddEvidenceReferenceInput',
       'EvidenceReferenceRepository',
       'requirementsModule',
+      // WORK-025: re-exported for transaction-scoped plan apply
+      'PgRequirementRepository',
+      'PgAcceptanceCriterionRepository',
     ]);
     const exported: string[] = [];
     for (const m of reqIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -1352,6 +1359,12 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       'WorkItemDependencyService',
       'WorkItemCompletionService',
       'workItemsModule',
+      // WORK-025: re-exported for transaction-scoped plan apply
+      'PgWorkItemRepository',
+      'PgWorkItemRequirementRepository',
+      'PgWorkItemCriterionRepository',
+      'PgWorkOrderRepository',
+      'PgWorkItemDependencyRepository',
     ]);
     const exported: string[] = [];
     for (const m of wiIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -1544,6 +1557,8 @@ describe('WORK-014 invariants — /llm (Architect Service) module boundaries', (
       'ArchitectSession', 'ArchitectSessionRepository',
       'ConversationalArchitectResult', 'ConversationalArchitectService',
       'ProviderConfig',
+      // WORK-025: Atomic plan applier
+      'ApplyPlanResult', 'RepositoryFactories', 'ArchitectPlanApplier',
       // Module contract const
       'llmModule',
     ]);

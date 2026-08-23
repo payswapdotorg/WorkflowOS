@@ -3,6 +3,9 @@ import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stac
 import { buildServer } from '@api/server.js';
 import { DefaultLlmGateway, FakeLlmAdapter } from '../../../src/modules/llm/internal/llm-gateway.js';
 import { DefaultArchitectService } from '../../../src/modules/llm/internal/architect-service.js';
+import { PgArchitectureRepository, PgArchitectureVersionRepository } from '../../../src/modules/architecture/internal/pg-architecture-repository.js';
+import { PgRequirementRepository, PgAcceptanceCriterionRepository } from '../../../src/modules/requirements/internal/pg-requirement-repository.js';
+import { PgWorkItemRepository, PgWorkItemRequirementRepository, PgWorkItemCriterionRepository, PgWorkOrderRepository, PgWorkItemDependencyRepository } from '../../../src/modules/work-items/internal/pg-work-item-repository.js';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
 import type { ArchitectExecutionResult } from '@modules/llm/index.js';
@@ -89,19 +92,24 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
         workItemDependencyRepository: stack.workItemDependencyRepository,
         pullRequestAssociationRepository: stack.pullRequestAssociationRepository,
         workOrderRepository: stack.workOrderRepository,
+        
       },
       requirements: {
         authorizationService: stack.authorizationService,
         architectureRepository: stack.architectureRepository,
         architectureVersionRepository: stack.architectureVersionRepository,
         requirementRepository: stack.requirementRepository,
-        requirementDependencyRepository: stack.requirementDependencyRepository,
         acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
+        requirementDependencyRepository: stack.requirementDependencyRepository,
+        
         evidenceReferenceRepository: stack.evidenceReferenceRepository,
       },
       workflow: {
         authorizationService: stack.authorizationService,
         projectRepository: stack.projectRepository,
+        
+        
+        
         architectureRepository: stack.architectureRepository,
         architectureVersionRepository: stack.architectureVersionRepository,
         workItemRepository: stack.workItemRepository,
@@ -110,18 +118,34 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
       architect: {
         authorizationService: stack.authorizationService,
         projectRepository: stack.projectRepository,
-        architectureRepository: stack.architectureRepository,
-        architectureVersionRepository: stack.architectureVersionRepository,
-        workItemRepository: stack.workItemRepository,
-        workOrderRepository: stack.workOrderRepository,
-        workItemRequirementRepository: stack.workItemRequirementRepository,
-        workItemCriterionRepository: stack.workItemCriterionRepository,
-        workItemDependencyRepository: stack.workItemDependencyRepository,
-        requirementRepository: stack.requirementRepository,
-        acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
+        
+        
+        
+        
+        
+        
+        
+        
+        
         llmGateway,
         architectService,
-        conversationalArchitectService: new (await import('../../../src/modules/llm/internal/conversational-architect-service.js')).DefaultConversationalArchitectService(
+        planApplier: new (await import('../../../src/modules/llm/internal/architect-plan-applier.js')).ArchitectPlanApplier(
+          stack.db.client,
+          new (await import('../../../src/modules/llm/internal/pg-architect-session-repository.js')).PgArchitectSessionRepository(stack.db.client),
+          {
+            createArchitectureRepository: (db: any) => new PgArchitectureRepository(db),
+            createArchitectureVersionRepository: (db: any) => new PgArchitectureVersionRepository(db),
+            createRequirementRepository: (db: any) => new PgRequirementRepository(db),
+            createAcceptanceCriterionRepository: (db: any) => new PgAcceptanceCriterionRepository(db),
+            createWorkItemRepository: (db: any) => new PgWorkItemRepository(db),
+            createWorkItemRequirementRepository: (db: any) => new PgWorkItemRequirementRepository(db),
+            createWorkItemCriterionRepository: (db: any) => new PgWorkItemCriterionRepository(db),
+            createWorkOrderRepository: (db: any) => new PgWorkOrderRepository(db),
+            createWorkItemDependencyRepository: (db: any) => new PgWorkItemDependencyRepository(db),
+          },
+          stack.db.logger,
+        ),
+        conversationalArchitectService: new (await import("../../../src/modules/llm/internal/conversational-architect-service.js")).DefaultConversationalArchitectService(
           stack.db.client, llmGateway, stack.projectRepository,
           stack.architectureRepository, stack.architectureVersionRepository,
           stack.requirementRepository, stack.acceptanceCriterionRepository,
