@@ -11,6 +11,13 @@ import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-ag
 import { PgAgentProviderConfigRepository } from '../../../src/modules/agents/internal/pg-agent-provider-config-repository.js';
 import { DefaultAgentProviderRegistryService } from '../../../src/modules/agents/internal/agent-provider-registry-service.js';
 import { DefaultAgentProviderRegistry } from '../../../src/platform/default-agent-provider-registry.js';
+// WORK-027: execution provider abstraction internals.
+import { PgExecutionRecordRepository } from '../../../src/modules/agents/internal/pg-execution-repository.js';
+import { NativeExecutionProvider } from '../../../src/modules/agents/internal/native-execution-provider.js';
+import { DefaultExecutionService } from '../../../src/modules/agents/internal/execution-service.js';
+import { DefaultExecutionPromptBuilder } from '../../../src/modules/work-items/internal/execution-prompt-builder.js';
+import { DefaultExecutionTaskService } from '../../../src/modules/work-items/internal/execution-task-service.js';
+import { DefaultAuditService } from '../../../src/modules/audit/internal/audit-service.js';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@modules/users/index.js';
 import type { ImplementationContextContent } from '@modules/work-items/index.js';
@@ -151,14 +158,35 @@ describe('WORK-026 — ImplementationContext + start-implementation', () => {
       },
     );
 
-    // PR #29 fix #1: wire the StartImplementationService with the real
-    // AgentGateway. There is NO production no-op path.
-    const startImplementationService = new DefaultStartImplementationService({
-      agentGateway,
-      agentRunRepository: agentRunRepo,
+    // PR #29 fix #1 + WORK-027 refactor: wire the StartImplementationService
+    // through the ExecutionService boundary (NativeExecutionProvider wraps
+    // the real AgentGateway — the single native execution path).
+    const executionPromptBuilder = new DefaultExecutionPromptBuilder();
+    const executionTaskService = new DefaultExecutionTaskService({
       workItemRepository: stack.workItemRepository,
       workOrderRepository: stack.workOrderRepository,
+      architectureVersionRepository: stack.architectureVersionRepository,
+      architectureRepository: stack.architectureRepository,
+      implementationContextBuilder: builder,
       contextRepository: contextRepo,
+      promptBuilder: executionPromptBuilder,
+      logger: stack.db.logger,
+    });
+    const nativeExecutionProvider = new NativeExecutionProvider({
+      agentGateway,
+      agentRunRepository: agentRunRepo,
+      logger: stack.db.logger,
+    });
+    const executionRecordRepository = new PgExecutionRecordRepository(stack.db.client);
+    const executionService = new DefaultExecutionService({
+      executionRecordRepository,
+      providers: [nativeExecutionProvider],
+      auditService: new DefaultAuditService(stack.db.client, stack.db.logger),
+      logger: stack.db.logger,
+    });
+    const startImplementationService = new DefaultStartImplementationService({
+      executionTaskService,
+      executionService,
       logger: stack.db.logger,
     });
 

@@ -24,7 +24,44 @@ export type {
   AgentProviderRegistry,
   AgentProviderConfigRepository,
   AgentProviderConfigRecord,
+  ExecutionProviderInfo,
 } from './internal/agent-provider-registry.types.js';
+// WORK-027: Execution provider abstraction — the provider-independent boundary
+// for executing a Work Order either NATIVELY (via the existing AgentGateway)
+// or EXTERNALLY (via a secure, one-time, short-lived handoff package for the
+// future Companion extension). Concrete implementations stay in internal/;
+// this barrel exposes the contract types only.
+export type {
+  ExecutionMode,
+  ExecutionState,
+  ExecutionTask,
+  ExecutionSubmission,
+  ExecutionProvider,
+  ExternalExecutionPackage,
+  ExecutionRecord,
+  CreateExecutionRecordInput,
+  UpdateExecutionStatusInput,
+  ExecutionRecordRepository,
+  ExecutionEventRecord,
+  AppendExecutionEventInput,
+  ExecutionEventRepository,
+  ExecutionHandoffRecord,
+  ExecutionHandoffRepository,
+  IssuedExecutionHandoff,
+  RedeemedExecutionPackage,
+  ExecutionHandoffService,
+  // WORK-027 (PR #30 review fix #2): scoped execution callback credentials.
+  ExecutionCallbackRecord,
+  ExecutionCallbackRepository,
+  IssuedExecutionCallback,
+  ValidatedExecutionCallback,
+  ExecutionCallbackService,
+  IngestExecutionEventInput,
+  IngestedExecutionEvent,
+  ExecutionEventIngestionService,
+  ExecutionSubmitResult,
+  ExecutionService,
+} from './internal/execution.types.js';
 
 export interface AgentsModuleApi {}
 

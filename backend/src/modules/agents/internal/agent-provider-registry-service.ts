@@ -36,7 +36,9 @@ import type {
   AgentProviderRegistry,
   AgentProviderConfigRepository,
   AgentProviderConfigRecord,
+  ExecutionProviderInfo,
 } from './agent-provider-registry.types.js';
+import { EXTERNAL_UI_CATALOG } from './agent-provider-registry.types.js';
 
 export class DefaultAgentProviderRegistryService {
   constructor(
@@ -144,5 +146,62 @@ export class DefaultAgentProviderRegistryService {
     const ref = this.secretStore.ref(secretRef);
     const value = await this.secretStore.getSecret(ref);
     return value !== null && value !== '';
+  }
+
+  // ---------------------------------------------------------------------
+  // WORK-027: execution capability surface (native vs external).
+  // ---------------------------------------------------------------------
+
+  /**
+   * List providers with their EXECUTION capabilities: native API readiness
+   * (backed by a configured credential) + external UI availability (catalog).
+   *
+   * Merges:
+   *   1. The EXTERNAL_UI_CATALOG entries (Z.ai / ChatGPT / Claude) — external
+   *      'available' by design; native readiness reflects configuration.
+   *   2. Any configured provider (platform or project layer) not already in
+   *      the catalog — surfaced with its native readiness and external
+   *      'not-supported' (only catalog providers have a Companion-extension
+   *      execution path).
+   *
+   * Readiness metadata only — never secrets. Safe for frontend display.
+   */
+  async getExecutionProviders(projectId?: string): Promise<ExecutionProviderInfo[]> {
+    const configured = await this.getProviders(projectId);
+    const catalogProviders = new Set(EXTERNAL_UI_CATALOG.map((c) => c.provider));
+
+    const result: ExecutionProviderInfo[] = EXTERNAL_UI_CATALOG.map((entry) => {
+      const native = configured.find((c) => c.provider === entry.provider && c.status === 'ready');
+      return {
+        name: entry.name,
+        provider: entry.provider,
+        model: native?.model ?? 'default',
+        nativeApi: native ? 'ready' : 'not-configured',
+        externalUi: 'available' as const,
+      };
+    });
+
+    for (const c of configured) {
+      if (catalogProviders.has(c.provider)) continue;
+      result.push({
+        name: c.name,
+        provider: c.provider,
+        model: c.model,
+        nativeApi: c.status === 'ready' ? 'ready' : 'not-configured',
+        externalUi: 'not-supported',
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Whether `provider` can be driven through the EXTERNAL execution mode
+   * (i.e. it is in the external-UI catalog). External execution needs NO
+   * WorkflowOS-side credential for the provider — the user's own browser
+   * session in the external platform drives it.
+   */
+  async isExternalProviderSupported(provider: string, _projectId?: string): Promise<boolean> {
+    return EXTERNAL_UI_CATALOG.some((c) => c.provider === provider);
   }
 }

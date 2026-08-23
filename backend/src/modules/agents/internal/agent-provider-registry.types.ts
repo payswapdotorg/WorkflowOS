@@ -114,3 +114,39 @@ export interface AgentProviderConfigRepository {
 
   remove(id: string): Promise<void>;
 }
+
+/**
+ * WORK-027: Execution-capability surface for a provider — distinguishes the
+ * NATIVE execution path (WorkflowOS → provider API → agent/model, readiness
+ * backed by a configured secret) from the EXTERNAL execution path (external
+ * execution package → Companion extension → the provider's chat UI, available
+ * without any WorkflowOS-side credentials because the user's own browser
+ * session drives it).
+ *
+ * Readiness metadata only — never secrets. Safe to display in the frontend.
+ */
+export interface ExecutionProviderInfo {
+  /** Display name (e.g. 'Z.ai'). */
+  readonly name: string;
+  /** Provider identifier (e.g. 'zai'). */
+  readonly provider: string;
+  /** Model (from the configured native credential; 'default' for catalog-only entries). */
+  readonly model: string;
+  /** Native API readiness — 'ready' iff a usable provider credential exists. */
+  readonly nativeApi: 'ready' | 'not-configured';
+  /** External UI availability — catalog providers are always 'available'. */
+  readonly externalUi: 'available' | 'not-supported';
+}
+
+/**
+ * WORK-027: the external-UI provider catalog. Providers listed here can be
+ * driven through the EXTERNAL execution mode (execution package → Companion
+ * extension → the provider's native chat UI). The catalog is pure display +
+ * validation metadata — NO credentials, NO URLs, NO DOM automation (those
+ * belong to the Companion extension, WORK-028/029).
+ */
+export const EXTERNAL_UI_CATALOG: readonly { name: string; provider: string }[] = [
+  { name: 'Z.ai', provider: 'zai' },
+  { name: 'ChatGPT', provider: 'chatgpt' },
+  { name: 'Claude', provider: 'claude' },
+];

@@ -1247,3 +1247,167 @@ export interface ImplementationContextContent {
   architectureContent: string | null;
   architectureName: string | null;
 }
+
+// --- WORK-027: execution provider abstraction (native vs external) ---
+//
+// One Work Order, two execution modes behind POST /work-items/:id/execution:
+//   native   → ExecutionService → NativeExecutionProvider → AgentGateway
+//   external → ExecutionService → ExternalExecutionProvider → deterministic,
+//              secret-free handoff package retrieved ONLY via a one-time,
+//              short-lived token (x-handoff-token header — never a URL).
+//
+// The frontend is a CONSUMER: no provider secrets, no workflow state machines,
+// no provider-specific (Z.ai/ChatGPT/Claude) adapters or URLs — the Companion
+// extension integration belongs to WORK-028/029.
+
+export type ExecutionMode = 'native' | 'external';
+
+export type ExecutionStatus =
+  | 'created' | 'queued' | 'running' | 'handoff_ready' | 'submitted'
+  | 'completed' | 'failed' | 'cancelled' | 'expired';
+
+export interface ExecutionProviderInfo {
+  name: string;
+  provider: string;
+  model: string;
+  nativeApi: 'ready' | 'not-configured';
+  externalUi: 'available' | 'not-supported';
+}
+
+export interface StartExecutionResponse {
+  executionId: string;
+  mode: ExecutionMode;
+  provider: string;
+  model: string | null;
+  status: ExecutionStatus;
+  agentRunId: string | null;
+  repository: string | null;
+  branch: string | null;
+  implementationContextId: string;
+  revision: number;
+  kind: 'initial' | 'correction';
+  expiresAt: string | null;
+}
+
+export interface ExecutionSummary {
+  executionId: string;
+  mode: ExecutionMode;
+  provider: string;
+  model: string | null;
+  status: ExecutionStatus;
+  agentRunId: string | null;
+  externalSessionRef: string | null;
+  repository: string | null;
+  branch: string | null;
+  promptDigest: string;
+  benchmarkMetadata: Record<string, unknown>;
+  startedAt: string | null;
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalExecutionPackageView {
+  executionId: string;
+  mode: 'external';
+  projectId: string;
+  workItemId: string;
+  workItemLabel: string;
+  workOrderId: string;
+  implementationContextId: string;
+  provider: string;
+  model: string | null;
+  repository: {
+    owner: string | null;
+    name: string | null;
+    url: string | null;
+    defaultBranch: string | null;
+  };
+  branch: string;
+  prompt: string;
+  structuredInstructions: string[];
+  verificationRequirements: string[];
+  expectedOutputs: string[];
+  browserTestRequirements: string[];
+  returnCallback: {
+    eventsPath: string;
+    eventTypes: string[];
+    auth: string;
+    note: string;
+  };
+  expiration: string;
+}
+
+/**
+ * PR #30 review fix #2: preparing an external session issues BOTH (a) the
+ * ONE-TIME package handoff token and (b) a scoped event-ingestion callback
+ * token — the ONLY credential the future Companion extension needs. It never
+ * holds or obtains the user's general WorkflowOS API key. Both raw tokens are
+ * returned here exactly once (hashes are stored server-side) and must live in
+ * memory only.
+ */
+export interface IssuedHandoff {
+  executionId: string;
+  handoffToken: string;
+  expiresAt: string;
+  callbackToken: string;
+  callbackExpiresAt: string;
+}
+
+export const execution = {
+  /** Start an execution (native or external) for a Work Item. */
+  start: (workItemId: string, input: { mode: ExecutionMode; provider?: string; model?: string }) =>
+    apiPost<StartExecutionResponse>(`/work-items/${workItemId}/execution`, input),
+
+  /** List safe execution metadata for a Work Item. */
+  listForWorkItem: async (workItemId: string): Promise<ExecutionSummary[]> => {
+    const body = await apiGet<{ executions: ExecutionSummary[] }>(
+      `/work-items/${workItemId}/executions`,
+    );
+    return body.executions ?? [];
+  },
+
+  /** Fetch one execution (safe metadata). */
+  get: async (executionId: string): Promise<ExecutionSummary> => {
+    const body = await apiGet<{ execution: ExecutionSummary }>(`/execution/${executionId}`);
+    return body.execution;
+  },
+
+  /** Issue a ONE-TIME, short-lived handoff token (project.write). */
+  prepareHandoff: (executionId: string) =>
+    apiPost<IssuedHandoff>(`/execution/${executionId}/handoff`, {}),
+
+  /**
+   * Redeem a one-time handoff token for the full external package. The token
+   * travels in the x-handoff-token HEADER (never a URL) and is consumed by
+   * this call — a replay throws 409.
+   */
+  getPackage: async (
+    executionId: string,
+    handoffToken: string,
+  ): Promise<{ executionId: string; status: ExecutionStatus; package: ExternalExecutionPackageView }> => {
+    const res = await apiFetch(`/execution/${executionId}/package`, {
+      method: 'GET',
+      headers: { 'x-handoff-token': handoffToken },
+    });
+    return res.json();
+  },
+};
+
+export const executionProviders = {
+  /** Global execution-capability list (native readiness + external UI). */
+  listGlobal: async (): Promise<ExecutionProviderInfo[]> => {
+    const body = await apiGet<{ providers: ExecutionProviderInfo[] }>(
+      `/agents/execution-providers`,
+    );
+    return body.providers ?? [];
+  },
+  /** Project-scoped execution-capability list. */
+  listForProject: async (projectId: string): Promise<ExecutionProviderInfo[]> => {
+    const body = await apiGet<{ providers: ExecutionProviderInfo[] }>(
+      `/projects/${projectId}/agents/execution-providers`,
+    );
+    return body.providers ?? [];
+  },
+};

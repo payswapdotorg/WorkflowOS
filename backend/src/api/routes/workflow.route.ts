@@ -5,7 +5,9 @@ import type { ArchitectureRepository, ArchitectureVersionRepository } from '@mod
 import type {
   WorkItemRepository,
   ImplementationContextBuilder,
+  ExecutionTaskService,
 } from '@modules/work-items/index.js';
+import type { ExecutionService } from '@modules/agents/index.js';
 import type { WorkflowEngine, WorkflowState, TransitionRequest, WorkflowOrchestrator } from '@modules/workflows/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 import {
@@ -74,12 +76,33 @@ export interface WorkflowRouteDeps {
    * WORK-026: agent provider registry — used by the start-implementation
    * route to validate provider/model + resolve platform defaults. Optional
    * (tests may omit it), but production wires it.
+   *
+   * WORK-027: extended with the execution-capability surface
+   * (getExecutionProviders / isExternalProviderSupported) used by the
+   * POST /work-items/:workItemId/execution route for EXTERNAL mode
+   * validation.
    */
   agentProviderRegistryService?: {
     isProviderConfigured(provider: string, model: string, projectId?: string): Promise<boolean>;
     getPlatformDefaultProvider(): string | undefined;
     getPlatformDefaultModel(): string | undefined;
+    getExecutionProviders(projectId?: string): Promise<{
+      name: string;
+      provider: string;
+      model: string;
+      nativeApi: 'ready' | 'not-configured';
+      externalUi: 'available' | 'not-supported';
+    }[]>;
+    isExternalProviderSupported(provider: string, projectId?: string): Promise<boolean>;
   };
+  /** WORK-027: builds the provider-independent ExecutionTask from the
+   *  persisted ImplementationContext. PRODUCTION MUST WIRE THIS (503 when
+   *  absent — never a silent success). */
+  executionTaskService?: ExecutionTaskService;
+  /** WORK-027: submits the task through the ExecutionProvider boundary
+   *  (native → AgentGateway; external → secure handoff package). PRODUCTION
+   *  MUST WIRE THIS (503 when absent). */
+  executionService?: ExecutionService;
 }
 
 async function resolveProjectForWorkItem(
@@ -584,6 +607,172 @@ export async function workflowRoutes(
           message: (err as Error).message,
           implementationContextId: implementationContext.id,
           detail: 'The implementation context was persisted but the agent execution failed. No fake AgentRun was recorded.',
+        });
+      }
+    });
+  });
+
+  // --- WORK-027: Execution mode entry point ---
+
+  // POST /work-items/:workItemId/execution — start an implementation
+  // execution in NATIVE or EXTERNAL mode behind the provider-independent
+  // ExecutionService boundary:
+  //
+  //   native   → ExecutionService → NativeExecutionProvider → AgentGateway
+  //              (the unchanged native path; returns agentRunId)
+  //   external → ExecutionService → ExternalExecutionProvider
+  //              (deterministic package; NO execution happens — status
+  //              'handoff-ready'; the package is retrieved ONLY through the
+  //              one-time, short-lived, authenticated handoff mechanism)
+  //
+  // Validation mirrors start-implementation exactly (404 / 403 / 400
+  // invalid-state / provider checks) plus mode-aware provider validation:
+  //   - native: provider+model must be configured (registry check)
+  //   - external: provider must be in the external-UI catalog (zai/chatgpt/
+  //     claude); model is optional
+  //
+  // The route does NOT mutate workflow state (≤1 transition call in this
+  // file — that call belongs to /workflow/transitions above).
+  app.post('/work-items/:workItemId/execution', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { workItemId } = req.params as { workItemId: string };
+
+      // 1. Work item exists + belongs to the project.
+      const projectId = await resolveProjectForWorkItem(deps, workItemId);
+      if (!projectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+
+      // 2. project.write.
+      await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write', projectId,
+      });
+
+      // 3. Required services — 503, never a silent success.
+      if (!deps.executionTaskService) {
+        return reply
+          .code(503)
+          .send({ error: 'service-unavailable', reason: 'execution-task-service-not-configured' });
+      }
+      if (!deps.executionService) {
+        return reply
+          .code(503)
+          .send({ error: 'service-unavailable', reason: 'execution-service-not-configured' });
+      }
+
+      // 4. Same state gate as start-implementation.
+      const execution = await deps.workflowEngine.getState(workItemId);
+      const currentState = execution?.currentState ?? null;
+      if (currentState !== 'ready' && currentState !== 'changes_requested') {
+        return reply.code(400).send({
+          error: 'invalid-state',
+          currentState,
+          expectedStates: ['ready', 'changes_requested'],
+        });
+      }
+
+      const body = req.body as {
+        mode?: 'native' | 'external';
+        provider?: string;
+        model?: string;
+      } | null;
+      const mode = body?.mode === 'external' ? 'external' : 'native';
+
+      // 5. Mode-aware provider resolution + validation.
+      let provider: string | undefined;
+      let model: string | null = null;
+      if (mode === 'native') {
+        provider = body?.provider ?? deps.agentProviderRegistryService?.getPlatformDefaultProvider();
+        model = body?.model ?? deps.agentProviderRegistryService?.getPlatformDefaultModel() ?? null;
+        if (!provider || !model) {
+          return reply.code(400).send({
+            error: 'provider-not-configured',
+            message: 'No implementation agent provider is configured. Set AGENT_PROVIDER_NAME / AGENT_API_KEY / AGENT_DEFAULT_MODEL on the server, or POST /projects/:projectId/agents/providers to configure a project-specific provider.',
+          });
+        }
+        if (deps.agentProviderRegistryService) {
+          const configured = await deps.agentProviderRegistryService.isProviderConfigured(
+            provider, model, projectId,
+          );
+          if (!configured) {
+            return reply.code(400).send({
+              error: 'provider-not-configured',
+              message: `Provider "${provider}" with model "${model}" is not configured.`,
+            });
+          }
+        }
+      } else {
+        // EXTERNAL: provider must be in the external-UI catalog. External
+        // execution needs NO WorkflowOS-side credential — the user's own
+        // browser session in the external platform drives it.
+        if (!deps.agentProviderRegistryService) {
+          return reply.code(503).send({
+            error: 'service-unavailable',
+            reason: 'agent-provider-registry-service-not-configured',
+          });
+        }
+        provider = body?.provider;
+        if (!provider) {
+          return reply.code(400).send({
+            error: 'external-provider-required',
+            message: 'External execution requires an explicit provider (e.g. zai, chatgpt, claude).',
+          });
+        }
+        const supported = await deps.agentProviderRegistryService.isExternalProviderSupported(
+          provider, projectId,
+        );
+        if (!supported) {
+          return reply.code(400).send({
+            error: 'external-provider-not-supported',
+            message: `Provider "${provider}" does not support external UI execution.`,
+          });
+        }
+        model = body?.model ?? null;
+      }
+
+      // 6. Build the provider-independent ExecutionTask from the persisted
+      //    ImplementationContext (single build — the task service constructs
+      //    the context revision itself).
+      const executionId = generateExecutionId();
+      try {
+        const built = await deps.executionTaskService.build({
+          workItemId,
+          mode,
+          provider: provider!,
+          model,
+          executionId,
+        });
+
+        // 7. Submit through the provider boundary.
+        const result = await deps.executionService.submit(built.task);
+
+        // 8. Safe metadata response — the external package itself is
+        //    retrievable ONLY via the one-time handoff token mechanism.
+        return reply.code(201).send({
+          executionId: result.executionId,
+          mode: result.mode,
+          provider: result.provider,
+          model,
+          status: result.status,
+          agentRunId: result.agentRunId,
+          repository: result.repositoryRef,
+          branch: result.branch,
+          implementationContextId: built.implementationContext.id,
+          revision: built.implementationContext.revision,
+          kind: built.implementationContext.kind,
+          expiresAt: result.expiresAt,
+        });
+      } catch (err) {
+        if (mode === 'native') {
+          return reply.code(502).send({
+            error: 'agent-gateway-failed',
+            message: (err as Error).message,
+            detail: 'The implementation context was persisted but the agent execution failed. No fake AgentRun was recorded.',
+          });
+        }
+        return reply.code(502).send({
+          error: 'execution-submission-failed',
+          message: (err as Error).message,
         });
       }
     });

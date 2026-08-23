@@ -9,6 +9,7 @@ import type {
   AgentProviderConfig,
   AgentProviderConfigRepository,
   AgentProviderConfigRecord,
+  ExecutionProviderInfo,
 } from '@modules/agents/index.js';
 import type { Queue } from '@platform/index.js';
 import { generateExecutionId } from '@platform/ids.js';
@@ -28,6 +29,9 @@ export interface AgentProviderRegistryService {
     model: string,
     projectId?: string,
   ): Promise<boolean>;
+  /** WORK-027: execution capability surface (native readiness + external UI). */
+  getExecutionProviders(projectId?: string): Promise<ExecutionProviderInfo[]>;
+  isExternalProviderSupported(provider: string, projectId?: string): Promise<boolean>;
 }
 
 export interface AgentRouteDeps {
@@ -144,6 +148,33 @@ export async function agentRoutes(app: FastifyInstance, deps: AgentRouteDeps): P
           projectId,
         });
         const providers = await deps.agentProviderRegistryService!.getProviders(
+          projectId,
+        );
+        return reply.code(200).send({ providers });
+      });
+    });
+
+    // WORK-027: GET /agents/execution-providers — execution capability list
+    // (native API readiness + external UI availability per provider).
+    // Readiness metadata only — never secrets. Safe for frontend display.
+    app.get('/agents/execution-providers', async (req, reply) => {
+      return runAuthed(req, async () => {
+        await requireUser(req, reply);
+        const providers = await deps.agentProviderRegistryService!.getExecutionProviders();
+        return reply.code(200).send({ providers });
+      });
+    });
+
+    // WORK-027: GET /projects/:projectId/agents/execution-providers —
+    // project-scoped execution capability list (project.read).
+    app.get('/projects/:projectId/agents/execution-providers', async (req, reply) => {
+      return runAuthed(req, async () => {
+        const { projectId } = req.params as { projectId: string };
+        await requireProjectAuthorization(req, reply, deps, {
+          permission: 'project.read',
+          projectId,
+        });
+        const providers = await deps.agentProviderRegistryService!.getExecutionProviders(
           projectId,
         );
         return reply.code(200).send({ providers });

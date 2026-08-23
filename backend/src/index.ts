@@ -172,9 +172,20 @@ async function main(): Promise<void> {
                 : {}),
               // WORK-026 (PR #29 fix #1): AgentProviderRegistryService — used by
               // the start-implementation route to validate provider/model + resolve
-              // platform defaults.
+              // platform defaults. WORK-027: also powers the execution-capability
+              // surface (native readiness + external UI availability).
               ...(app.deps.agentProviderRegistryService
                 ? { agentProviderRegistryService: app.deps.agentProviderRegistryService }
+                : {}),
+              // WORK-027: ExecutionTaskService + ExecutionService — the
+              // provider-independent execution boundary behind
+              // POST /work-items/:workItemId/execution. Production MUST wire
+              // these (the route returns 503 otherwise).
+              ...(app.deps.executionTaskService
+                ? { executionTaskService: app.deps.executionTaskService }
+                : {}),
+              ...(app.deps.executionService
+                ? { executionService: app.deps.executionService }
                 : {}),
             },
           }
@@ -225,6 +236,33 @@ async function main(): Promise<void> {
               githubAdapter: app.deps.githubAdapter,
               projectGitHubRepositoryRepository: app.deps.projectGitHubRepositoryRepository,
               githubInstallationRepository: app.deps.githubInstallationRepository,
+            },
+          }
+        : {}),
+      // WORK-027: /execution routes — the secure external-handoff + event
+      // ingestion boundary. Wired when the execution repositories + services
+      // are present (DB-only composition). PR #30 review fix #1: the list
+      // route resolves WorkItem → project for authorization, so the work-item
+      // + architecture repositories are required; PR #30 fix #2 adds the
+      // scoped callback-token service.
+      ...(app.deps.authorizationService &&
+      app.deps.workItemRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.executionRecordRepository &&
+      app.deps.executionHandoffService &&
+      app.deps.executionCallbackService &&
+      app.deps.executionEventIngestionService
+        ? {
+            execution: {
+              authorizationService: app.deps.authorizationService,
+              workItemRepository: app.deps.workItemRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              executionRecordRepository: app.deps.executionRecordRepository,
+              executionHandoffService: app.deps.executionHandoffService,
+              executionCallbackService: app.deps.executionCallbackService,
+              executionEventIngestionService: app.deps.executionEventIngestionService,
             },
           }
         : {}),
