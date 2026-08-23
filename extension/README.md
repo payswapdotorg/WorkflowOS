@@ -164,4 +164,4 @@ routes).
 | `activeTab` | Future prompt injection into the ACTIVE provider tab (WORK-029). |
 | `scripting` | `chrome.scripting.executeScript` for prompt injection (WORK-029). |
 | Host: WorkflowOS origin | Content-script handoff bridge + API calls (redeem/events). |
-| Host: `z.ai`, `chatgpt.com`, `claude.ai` | Provider detection + (WORK-029+) adapters on those pages only. |
+| Host: `*.z.ai` (covers the actual `chat.z.ai` chat application), `*.chatgpt.com`, `*.claude.ai` | Provider detection + (WORK-029+) adapters on those pages (+ subdomains) only — mirroring the detector's domain recognition exactly. |

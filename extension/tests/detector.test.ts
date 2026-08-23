@@ -19,6 +19,18 @@ describe('provider detection (§11) — generic, no automation', () => {
     expect(detectProvider(new URL('https://app.z.ai/x')).providerId).toBe('zai');
   });
 
+  it('recognizes the ACTUAL Z.ai chat application domain (PR #31 fix: chat.z.ai)', () => {
+    // The Z.ai chat app is served at https://chat.z.ai — the detector must
+    // recognize it, and (verified by the static architecture check) the
+    // manifest host permissions + content-script matches must cover it.
+    const detection = detectProvider(new URL('https://chat.z.ai/chat/some-conversation-id'));
+    expect(detection).toMatchObject({
+      providerId: 'zai',
+      supported: true,
+      adapterAvailable: false,
+    });
+  });
+
   it('marks unknown domains unsupported', () => {
     const result = detectProvider(new URL('https://example.com/'));
     expect(result).toEqual({ providerId: null, supported: false, adapterAvailable: false });

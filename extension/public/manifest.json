@@ -19,9 +19,9 @@
   "host_permissions": [
     "http://localhost:5173/*",
     "http://127.0.0.1:5173/*",
-    "https://z.ai/*",
-    "https://chatgpt.com/*",
-    "https://claude.ai/*"
+    "https://*.z.ai/*",
+    "https://*.chatgpt.com/*",
+    "https://*.claude.ai/*"
   ],
   "content_scripts": [
     {
@@ -30,7 +30,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://z.ai/*", "https://chatgpt.com/*", "https://claude.ai/*"],
+      "matches": ["https://*.z.ai/*", "https://*.chatgpt.com/*", "https://*.claude.ai/*"],
       "js": ["content/provider-detect.js"],
       "run_at": "document_idle"
     }

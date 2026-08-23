@@ -4665,12 +4665,91 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     const hosts = manifest.host_permissions.join(' ');
     expect(hosts, 'no <all_urls> host permission').not.toContain('<all_urls>');
     // Host permissions are limited to the WorkflowOS dev/test origin + the
-    // supported provider domains.
+    // supported provider domains (apex + subdomains — the least-privileged
+    // wildcard form mirroring the detector's recognition rules).
     for (const host of manifest.host_permissions) {
       expect(host).toMatch(
-        /^https:\/\/(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):5173\/\*$/,
+        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):5173\/\*$/,
       );
     }
+  });
+
+  it('PR #31 fix: manifest covers the actual Z.ai chat domain + stays consistent with the detector', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
+    ) as {
+      host_permissions: string[];
+      content_scripts: { matches: string[]; js: string[] }[];
+    };
+    const hostPermissions = manifest.host_permissions;
+    const providerDetectMatches =
+      manifest.content_scripts.find((cs) => cs.js.some((j) => j.includes('provider-detect')))
+        ?.matches ?? [];
+
+    /**
+     * Chrome host-pattern matcher (subset sufficient for these patterns):
+     * `https://*.domain/*` covers the domain itself AND any subdomain
+     * (exactly mirroring the detector's hostname === domain ||
+     * hostname.endsWith('.' + domain) recognition); an exact host pattern
+     * covers only that host.
+     */
+    function hostPatternCovers(pattern: string, url: URL): boolean {
+      const m = pattern.match(/^(\*|https?):\/\/([^/]+)\//);
+      if (!m || !m[1] || !m[2]) return false;
+      const scheme = m[1];
+      const patternHost = m[2];
+      if (scheme !== '*' && url.protocol.replace(':', '') !== scheme) return false;
+      const host = url.hostname.toLowerCase();
+      if (patternHost.startsWith('*.')) {
+        const base = patternHost.slice(2).toLowerCase();
+        return host === base || host.endsWith('.' + base);
+      }
+      return host === patternHost.toLowerCase();
+    }
+
+    // --- The actual Z.ai chat application must be covered BOTH as a host
+    //     permission AND as a provider-detect content-script match. Detector
+    //     recognition alone is not enough — without the host permission the
+    //     content script cannot run on the real chat domain.
+    const chatUrl = new URL('https://chat.z.ai/chat/abc123');
+    expect(
+      hostPermissions.some((p) => hostPatternCovers(p, chatUrl)),
+      'host_permissions must cover https://chat.z.ai (the actual Z.ai chat app)',
+    ).toBe(true);
+    expect(
+      providerDetectMatches.some((p) => hostPatternCovers(p, chatUrl)),
+      'provider-detect content-script matches must cover https://chat.z.ai',
+    ).toBe(true);
+
+    // --- Detector ↔ manifest consistency: every domain the detector
+    //     recognizes (apex + ANY subdomain) must be covered by the manifest.
+    //     Otherwise the detector can claim 'supported' where the extension
+    //     cannot run at all — the exact PR #31 finding.
+    const detectorSrc = readFileSync(join(EXT_SRC, 'providers', 'detector.ts'), 'utf8');
+    const domains = [
+      ...detectorSrc.matchAll(/providerId: '([a-z]+)', domain: '([a-z.]+)'/g),
+    ].map((m) => m[2]!);
+    expect(domains, 'detector should declare provider domains').toEqual(
+      expect.arrayContaining(['z.ai', 'chatgpt.com', 'claude.ai']),
+    );
+    for (const domain of domains) {
+      for (const host of [domain, `chat.${domain}`, `app.${domain}`]) {
+        const url = new URL(`https://${host}/`);
+        expect(
+          hostPermissions.some((p) => hostPatternCovers(p, url)),
+          `host_permissions must cover https://${host}/ (detector recognizes it)`,
+        ).toBe(true);
+        expect(
+          providerDetectMatches.some((p) => hostPatternCovers(p, url)),
+          `provider-detect matches must cover https://${host}/ (detector recognizes it)`,
+        ).toBe(true);
+      }
+    }
+
+    // Least privilege: the old apex-only pattern (the PR #31 finding) must
+    // NOT be the z.ai grant.
+    expect(hostPermissions, 'z.ai grant must be the wildcard form').toContain('https://*.z.ai/*');
+    expect(hostPermissions).not.toContain('https://z.ai/*');
   });
 
   it('WORK-028: CSP hygiene — no eval / new Function / innerHTML anywhere in the extension', () => {

@@ -27,6 +27,10 @@ the user's own provider session — with WorkflowOS retaining every authority
 4. (Enterprise) distribute the packed `.crx`/`.zip` via your browser
    management tooling; the unpacked flow above is the developer path.
 
+> Note: the Z.ai chat application is served at `https://chat.z.ai` — the
+> manifest grants `https://*.z.ai/*` (domain + subdomains) so detection and
+> the future Z.ai adapter (WORK-029) work on the real chat domain.
+
 ## Usage
 
 1. In WorkflowOS, open a Work Item in `ready` / `changes_requested`.
