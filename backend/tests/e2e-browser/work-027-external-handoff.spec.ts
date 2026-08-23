@@ -432,7 +432,9 @@ test.describe('WORKFLOWOS — WORK-027 External Execution Handoff Browser E2E', 
     // 4. Choose EXTERNAL + Z.ai.
     // ---------------------------------------------------------------
     await dialog.getByLabel('External execution').check();
-    // The provider select defaults to the first external-capable entry (Z.ai).
+    // WORK-028: 'fake' is also external-capable (test-mode catalog entry), so
+    // the select may retain it — this test exercises the Z.ai flow explicitly.
+    await dialog.locator('#execution-provider').selectOption('zai');
     await expect(dialog.locator('#execution-provider')).toHaveValue('zai');
 
     // ---------------------------------------------------------------

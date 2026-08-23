@@ -414,14 +414,32 @@ export interface RedeemedExecutionPackage {
   readonly package: ExternalExecutionPackage;
 }
 /**
+ * WORK-028: result of a COMPANION redemption (token-only, no API key). The
+ * extension receives the execution record + the full external package; the
+ * ROUTE additionally issues the scoped callback credential.
+ */
+export interface CompanionRedeemedHandoff {
+  readonly record: ExecutionRecord;
+  readonly status: ExecutionState;
+  readonly pkg: ExternalExecutionPackage;
+}
+
+/**
  * Handoff boundary: issues + redeems one-time, short-lived, project-scoped
  * tokens that gate ExternalExecutionPackage retrieval. Redeeming consumes the
  * token (replay-protected) and requires the CALLER to be authorized for the
  * execution's project — a stolen token alone is never sufficient.
+ *
+ * WORK-028: redeemByToken is the COMPANION path — authentication by the
+ * one-time token ALONE (the extension holds no WorkflowOS API key). The
+ * hash → handoff → record lookup scopes the redemption to exactly one
+ * execution; one-time consumption semantics are identical.
  */
 export interface ExecutionHandoffService {
   issue(executionId: string): Promise<IssuedExecutionHandoff>;
   redeem(executionId: string, rawToken: string): Promise<RedeemedExecutionPackage>;
+  /** WORK-028: one-time token-only companion redemption. */
+  redeemByToken(rawToken: string): Promise<CompanionRedeemedHandoff>;
 }
 
 /** Typed ingestion failure — the route maps `code` to an HTTP status. */

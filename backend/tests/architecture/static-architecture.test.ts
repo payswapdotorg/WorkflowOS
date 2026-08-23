@@ -4460,6 +4460,335 @@ describe('WORK-027 invariants — execution provider abstraction', () => {
   });
 });
 
+
+// ===========================================================================
+// WORK-028 invariants — WorkflowOS Companion browser extension boundaries.
+//
+// The extension is an ISOLATED Manifest V3 Chromium extension under
+// extension/ (own package.json/tsconfig/build; NOT part of the frontend SPA)
+// that bridges WorkflowOS external executions to the user's AI platform
+// session. Enforced:
+//   - separation from the SPA + backend;
+//   - no secrets / no API key usage (x-api-key, Bearer);
+//   - exactly TWO WorkflowOS endpoints (companion/redeem + execution events);
+//   - no DB/workflow/verification/review logic, no authority outcomes;
+//   - callback token never persisted to localStorage/storage.local;
+//   - no provider DOM automation (no selectors in providers/; no zai/chatgpt/
+//     claude adapter files; names allow-listed to detector + registry);
+//   - typed message protocol + provider-neutral registry;
+//   - minimal manifest permissions;
+//   - CSP hygiene (no eval/new Function/innerHTML).
+// ===========================================================================
+
+describe('WORK-028 invariants — Companion extension boundaries', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const EXT_ROOT = join(REPO_ROOT, 'extension');
+  const EXT_SRC = join(EXT_ROOT, 'src');
+  const FRONTEND_SRC = join(REPO_ROOT, 'frontend', 'src');
+
+  function walkExtTs(dir: string): string[] {
+    const files: string[] = [];
+    if (!existsSync(dir)) return files;
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) files.push(...walkExtTs(full));
+      else if (entry.endsWith('.ts') || entry.endsWith('.tsx') || entry.endsWith('.html')) {
+        files.push(full);
+      }
+    }
+    return files;
+  }
+
+  function strip(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  }
+
+  it('WORK-028: extension exists as an independent project (separate from the SPA)', () => {
+    expect(existsSync(join(EXT_ROOT, 'package.json')), 'extension/package.json').toBe(true);
+    expect(existsSync(join(EXT_ROOT, 'tsconfig.json')), 'extension/tsconfig.json').toBe(true);
+    expect(existsSync(join(EXT_ROOT, 'build.mjs')), 'extension/build.mjs').toBe(true);
+    expect(existsSync(join(EXT_ROOT, 'public', 'manifest.json')), 'manifest').toBe(true);
+    // The SPA does not bundle or reference the extension; the extension does
+    // not live under frontend/.
+    expect(existsSync(join(FRONTEND_SRC, 'extension'))).toBe(false);
+    for (const file of walkTs(FRONTEND_SRC)) {
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(REPO_ROOT, file)} must not import extension code`).not.toMatch(
+        /from ['"]\.\.\/\.\.\/extension|from ['"]@extension\//,
+      );
+    }
+  });
+
+  it('WORK-028: extension never imports backend or frontend modules', () => {
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${rel} must not import @modules/@platform/@api`).not.toMatch(
+        /@modules\/|@platform\/|@api\//,
+      );
+      expect(src, `${rel} must not reach into the frontend SPA`).not.toMatch(
+        /\.\.\/\.\.\/frontend|frontend\/src/,
+      );
+    }
+  });
+
+  it('WORK-028: extension contains no secrets and never uses the WorkflowOS API key', () => {
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not send x-api-key`).not.toContain("'x-api-key'");
+      expect(code, `${rel} must not send x-api-key (double quotes)`).not.toContain('"x-api-key"');
+      expect(code, `${rel} must not use Bearer auth`).not.toMatch(/Authorization['"]?\s*:/);
+      expect(code, `${rel} must not assign literal secrets`).not.toMatch(
+        /(?:api[_-]?key|apikey|secret|password|webhook[_-]?secret)\s*[:=]\s*['"][^'"]{8,}/i,
+      );
+    }
+  });
+
+  it('WORK-028: extension calls exactly TWO WorkflowOS endpoints (redeem + events)', () => {
+    const allowed = /\/api\/(companion\/redeem|execution\/\$\{[^}]+\}\/events)/;
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      for (const m of code.matchAll(/['"`](\/api\/[^'"`\n]+)['"`]/g)) {
+        expect(m[1], `${rel} references forbidden WorkflowOS path ${m[1]}`).toMatch(
+          /\/api\/(companion\/redeem|execution\/)/,
+        );
+      }
+      void allowed;
+    }
+    const clientSrc = readFileSync(join(EXT_SRC, 'workflowos', 'client.ts'), 'utf8');
+    expect(clientSrc).toContain('/api/companion/redeem');
+    expect(clientSrc).toMatch(/\/api\/execution\/\$\{session\.executionId\}\/events/);
+  });
+
+  it('WORK-028: extension has no DB / workflow / verification / review authority logic', () => {
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not reference WorkflowOS tables`).not.toMatch(/wfos_[a-z_]+/);
+      expect(code, `${rel} must not contain SQL`).not.toMatch(/SELECT |INSERT INTO |UPDATE |DELETE FROM /i);
+      expect(code, `${rel} must not call workflow transitions`).not.toMatch(
+        /workflow\/transitions|request-merge|advance-to-verified|begin-verification/,
+      );
+      expect(code, `${rel} must not touch verification/reviews`).not.toMatch(
+        /verification-runs|\/reviews|begin-architect-review/,
+      );
+      expect(code, `${rel} must never claim authoritative outcomes`).not.toMatch(
+        /['"](PASS|APPROVED|MERGED|VERIFIED)['"]\s*[:,}]/,
+      );
+    }
+  });
+
+  it('WORK-028: callback token is never persisted (no localStorage, no storage.local)', () => {
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not use localStorage`).not.toMatch(/localStorage/);
+      expect(code, `${rel} must not use disk-synced storage.local`).not.toMatch(/storage\.local/);
+    }
+  });
+
+  it('WORK-028: no provider DOM automation in WORK-028 (selectors stay out of providers/)', () => {
+    for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not use DOM selectors`).not.toMatch(
+        /querySelector|getElementById|getElementsBy/,
+      );
+      expect(code, `${rel} must not inject HTML`).not.toMatch(/innerHTML|insertAdjacentHTML/);
+    }
+  });
+
+  it('WORK-028: zai/chatgpt/claude literals exist ONLY in detector + registry metadata', () => {
+    const allowList = ['detector.ts', 'registry.ts'];
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_SRC, file).replaceAll('\\', '/');
+      const code = strip(readFileSync(file, 'utf8'));
+      if (allowList.some((a) => rel.endsWith(a))) continue;
+      expect(
+        code,
+        `${rel} must not hard-code provider names`,
+      ).not.toMatch(/['"`](zai|chatgpt|claude)['"`]/i);
+    }
+    // And no provider-specific adapter FILES exist yet.
+    for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
+      const name = relative(EXT_SRC, file).replaceAll('\\', '/').toLowerCase();
+      expect(name, 'no z.ai adapter files in WORK-028').not.toMatch(/zai/);
+      expect(name, 'no chatgpt adapter files in WORK-028').not.toMatch(/chatgpt/);
+      expect(name, 'no claude adapter files in WORK-028').not.toMatch(/claude/);
+    }
+  });
+
+  it('WORK-028: message protocol is a typed discriminated union', () => {
+    const src = readFileSync(join(EXT_SRC, 'shared', 'messages.ts'), 'utf8');
+    expect(src).toMatch(/export type CompanionMessage =/);
+    expect(src).toMatch(/\| WorkflowOsHandoffMessage/);
+    for (const t of [
+      'WORKFLOWOS_HANDOFF', 'PROVIDER_DETECTED', 'START_EXECUTION', 'STOP_EXECUTION',
+      'EXECUTION_PROGRESS', 'EXECUTION_COMPLETED', 'EXECUTION_FAILED',
+      'EXECUTION_BLOCKED', 'OPEN_PROVIDER',
+    ]) {
+      expect(src).toContain(`'${t}'`);
+    }
+    // Every envelope has type + executionId + timestamp + payload.
+    expect(src).toMatch(/readonly type: T;/);
+    expect(src).toMatch(/readonly executionId: string \| null;/);
+    expect(src).toMatch(/readonly timestamp: number;/);
+    expect(src).toMatch(/readonly payload: P;/);
+  });
+
+  it('WORK-028: provider adapter registry is provider-neutral (placeholders only)', () => {
+    const src = readFileSync(join(EXT_SRC, 'providers', 'registry.ts'), 'utf8');
+    const code = strip(src);
+    expect(code).not.toMatch(/querySelector|innerHTML/);
+    // The only registered adapter is the deterministic fake.
+    expect(code).toMatch(/register\(fakeProviderAdapter\)/);
+    expect(code).not.toMatch(/register\(zaiAdapter\)/);
+    expect(code).not.toMatch(/register\(chatgptAdapter\)/);
+    expect(code).not.toMatch(/register\(claudeAdapter\)/);
+  });
+
+  it('WORK-028: manifest permissions are minimal (documented set only)', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
+    ) as {
+      permissions: string[];
+      host_permissions: string[];
+      content_scripts?: { matches: string[] }[];
+    };
+    expect(manifest.permissions.sort()).toEqual(['activeTab', 'scripting', 'storage']);
+    const forbidden = ['tabs', 'webRequest', 'cookies', 'history', 'downloads'];
+    for (const perm of manifest.permissions) {
+      expect(forbidden, `permission ${perm} must be justified`).not.toContain(perm);
+    }
+    const hosts = manifest.host_permissions.join(' ');
+    expect(hosts, 'no <all_urls> host permission').not.toContain('<all_urls>');
+    // Host permissions are limited to the WorkflowOS dev/test origin + the
+    // supported provider domains (apex + subdomains — the least-privileged
+    // wildcard form mirroring the detector's recognition rules).
+    for (const host of manifest.host_permissions) {
+      expect(host).toMatch(
+        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):5173\/\*$/,
+      );
+    }
+  });
+
+  it('PR #31 fix: manifest covers the actual Z.ai chat domain + stays consistent with the detector', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
+    ) as {
+      host_permissions: string[];
+      content_scripts: { matches: string[]; js: string[] }[];
+    };
+    const hostPermissions = manifest.host_permissions;
+    const providerDetectMatches =
+      manifest.content_scripts.find((cs) => cs.js.some((j) => j.includes('provider-detect')))
+        ?.matches ?? [];
+
+    /**
+     * Chrome host-pattern matcher (subset sufficient for these patterns):
+     * `https://*.domain/*` covers the domain itself AND any subdomain
+     * (exactly mirroring the detector's hostname === domain ||
+     * hostname.endsWith('.' + domain) recognition); an exact host pattern
+     * covers only that host.
+     */
+    function hostPatternCovers(pattern: string, url: URL): boolean {
+      const m = pattern.match(/^(\*|https?):\/\/([^/]+)\//);
+      if (!m || !m[1] || !m[2]) return false;
+      const scheme = m[1];
+      const patternHost = m[2];
+      if (scheme !== '*' && url.protocol.replace(':', '') !== scheme) return false;
+      const host = url.hostname.toLowerCase();
+      if (patternHost.startsWith('*.')) {
+        const base = patternHost.slice(2).toLowerCase();
+        return host === base || host.endsWith('.' + base);
+      }
+      return host === patternHost.toLowerCase();
+    }
+
+    // --- The actual Z.ai chat application must be covered BOTH as a host
+    //     permission AND as a provider-detect content-script match. Detector
+    //     recognition alone is not enough — without the host permission the
+    //     content script cannot run on the real chat domain.
+    const chatUrl = new URL('https://chat.z.ai/chat/abc123');
+    expect(
+      hostPermissions.some((p) => hostPatternCovers(p, chatUrl)),
+      'host_permissions must cover https://chat.z.ai (the actual Z.ai chat app)',
+    ).toBe(true);
+    expect(
+      providerDetectMatches.some((p) => hostPatternCovers(p, chatUrl)),
+      'provider-detect content-script matches must cover https://chat.z.ai',
+    ).toBe(true);
+
+    // --- Detector ↔ manifest consistency: every domain the detector
+    //     recognizes (apex + ANY subdomain) must be covered by the manifest.
+    //     Otherwise the detector can claim 'supported' where the extension
+    //     cannot run at all — the exact PR #31 finding.
+    const detectorSrc = readFileSync(join(EXT_SRC, 'providers', 'detector.ts'), 'utf8');
+    const domains = [
+      ...detectorSrc.matchAll(/providerId: '([a-z]+)', domain: '([a-z.]+)'/g),
+    ].map((m) => m[2]!);
+    expect(domains, 'detector should declare provider domains').toEqual(
+      expect.arrayContaining(['z.ai', 'chatgpt.com', 'claude.ai']),
+    );
+    for (const domain of domains) {
+      for (const host of [domain, `chat.${domain}`, `app.${domain}`]) {
+        const url = new URL(`https://${host}/`);
+        expect(
+          hostPermissions.some((p) => hostPatternCovers(p, url)),
+          `host_permissions must cover https://${host}/ (detector recognizes it)`,
+        ).toBe(true);
+        expect(
+          providerDetectMatches.some((p) => hostPatternCovers(p, url)),
+          `provider-detect matches must cover https://${host}/ (detector recognizes it)`,
+        ).toBe(true);
+      }
+    }
+
+    // Least privilege: the old apex-only pattern (the PR #31 finding) must
+    // NOT be the z.ai grant.
+    expect(hostPermissions, 'z.ai grant must be the wildcard form').toContain('https://*.z.ai/*');
+    expect(hostPermissions).not.toContain('https://z.ai/*');
+  });
+
+  it('WORK-028: CSP hygiene — no eval / new Function / innerHTML anywhere in the extension', () => {
+    for (const file of walkExtTs(EXT_SRC)) {
+      const rel = relative(EXT_ROOT, file);
+      const code = strip(readFileSync(file, 'utf8'));
+      expect(code, `${rel} must not eval`).not.toMatch(/\beval\s*\(/);
+      expect(code, `${rel} must not use new Function`).not.toMatch(/new Function\s*\(/);
+      expect(code, `${rel} must not assign innerHTML`).not.toMatch(/innerHTML\s*=/);
+    }
+  });
+
+  it('WORK-028: companion redeem route is token-only (no API-key authorization) + one-time', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'companion.route.ts'),
+      'utf8',
+    );
+    expect(routeSrc).toMatch(/app\.post\('\/companion\/redeem'/);
+    expect(routeSrc).toMatch(/x-handoff-token/);
+    // The route must NOT require an API key — the one-time token IS the authority.
+    expect(strip(routeSrc)).not.toMatch(/requireProjectAuthorization|requireUser/);
+    // Redemption consumes the one-time token (single-use semantics).
+    const svcSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'execution-handoff-service.ts'),
+      'utf8',
+    );
+    expect(svcSrc).toMatch(/redeemByToken/);
+    expect(svcSrc).toMatch(/COMPANION_HANDOFF_REDEEMED/);
+  });
+
+  it('WORK-028: the fake provider is the catalog test-mode entry (mirrors fake adapters)', () => {
+    const src = readFileSync(
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'agent-provider-registry.types.ts'),
+      'utf8',
+    );
+    expect(src).toMatch(/\{ name: 'Fake \(test\)', provider: 'fake' \}/);
+  });
+});
+
 // ===========================================================================
 // PRODUCTION READINESS invariants.
 //
