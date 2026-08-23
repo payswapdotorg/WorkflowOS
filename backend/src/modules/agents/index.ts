@@ -15,6 +15,16 @@ export type {
   AgentTestReport, AgentBlockerReport, AgentError, AgentGateway, AgentRun,
   AgentRunRepository,
 } from './internal/agent.types.js';
+// WORK-026: Agent Provider Registry — provider-independent readiness surface
+// (mirrors the /llm ProviderRegistry pattern). Used by routes that need to
+// list configured agent providers / validate (provider, model) combinations
+// without exposing secret values.
+export type {
+  AgentProviderConfig,
+  AgentProviderRegistry,
+  AgentProviderConfigRepository,
+  AgentProviderConfigRecord,
+} from './internal/agent-provider-registry.types.js';
 
 export interface AgentsModuleApi {}
 

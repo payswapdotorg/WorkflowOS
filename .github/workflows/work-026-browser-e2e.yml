@@ -1,0 +1,84 @@
+# WORK-026 Browser E2E CI for WorkflowOS.
+#
+# Runs the Playwright browser-level E2E test that proves the full WORK-026
+# Project Runtime Provisioning + Autonomous Implementation loop through the
+# real browser UI:
+#
+#   login → create project → POST /github/link → POST /runtime/connect →
+#   POST /architect/converse + /architect/apply → freeze architecture →
+#   POST /work-items/:id/start-implementation (PR #29 fix #1: invokes the
+#   AgentGateway, returns 201 with agentRunId) →
+#   CI evidence + verification →
+#   POST /reviews (REQUEST_CHANGES) →
+#   correction cycle: POST /work-items/:id/start-implementation (revision=2,
+#   kind='correction') →
+#   POST /reviews (APPROVE) →
+#   POST /work-items/:id/workflow/request-merge + submit-pr-merged →
+#   POST /work-items/:id/workflow/advance-to-verified →
+#   WorkItemPage renders the final `verified` state.
+#
+# Determinism: the test wires FakeLlmAdapter + FakeAgentAdapter +
+# FakeGitHubAdapter + FakeDeploymentProvider — no real GitHub/Vercel/OpenAI
+# calls. Backend is Fastify + pglite + InMemoryQueue + WorkerHost. Frontend is
+# the real Vite SPA served by Playwright's webServer.
+#
+# On failure, the Playwright HTML report is uploaded as a CI artifact.
+name: work-026-browser-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: work026-browser-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: work-026 autonomous loop browser E2E
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install backend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install frontend dependencies (for Playwright webServer)
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers (chromium)
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run WORK-026 autonomous loop browser E2E test
+        # The test starts the Fastify backend on 127.0.0.1:3001 (the dev-proxy
+        # target) + the Vite dev server on :5173 (Playwright webServer) +
+        # pglite (real PostgreSQL compiled to WASM) + InMemoryQueue +
+        # WorkerHost. No external services required.
+        run: bunx playwright test tests/e2e-browser/work-026-autonomous.spec.ts
+
+      - name: Upload Playwright HTML report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-work-026-report
+          path: backend/playwright-report/
+          retention-days: 7

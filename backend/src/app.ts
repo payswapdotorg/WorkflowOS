@@ -131,6 +131,35 @@ import type { GitHubAdapter, GitHubInstallationRepository } from '@modules/githu
 import type { WebhookEventRepository } from '@modules/github/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 import { DefaultWorkItemCompletionService } from './modules/work-items/internal/pg-work-item-repository.js';
+// WORK-026: /runtime module — provider-independent deployment / preview boundary.
+import {
+  PgRuntimeIntegrationRepository,
+  PgDeploymentRepository,
+} from './modules/runtime/internal/pg-runtime-repository.js';
+import { DefaultDeploymentService } from './modules/runtime/internal/deployment-service.js';
+import { FakeDeploymentProvider } from './modules/runtime/internal/fake-deployment-provider.js';
+import { VercelDeploymentProvider } from './modules/runtime/internal/vercel-deployment-provider.js';
+import { DefaultRuntimeStatusService } from './modules/runtime/internal/runtime-status-service.js';
+import type {
+  DeploymentService,
+  RuntimeIntegrationRepository,
+  DeploymentRepository,
+  RuntimeStatusService,
+} from '@modules/runtime/index.js';
+// WORK-026: /github repository provisioning extensions.
+import { PgProjectGitHubRepositoryRepository } from './modules/github/internal/pg-project-github-repository-repository.js';
+import type { ProjectGitHubRepositoryRepository } from '@modules/github/index.js';
+// WORK-026: /work-items ImplementationContext.
+import { PgImplementationContextRepository } from './modules/work-items/internal/pg-implementation-context-repository.js';
+import { DefaultImplementationContextBuilder } from './modules/work-items/internal/implementation-context-builder.js';
+import { DefaultStartImplementationService } from './modules/work-items/internal/start-implementation-service.js';
+import type { StartImplementationService } from './api/routes/workflow.route.js';
+import type { ImplementationContextBuilder } from '@modules/work-items/index.js';
+// WORK-026: /agents provider registry.
+import { PgAgentProviderConfigRepository } from './modules/agents/internal/pg-agent-provider-config-repository.js';
+import { DefaultAgentProviderRegistryService } from './modules/agents/internal/agent-provider-registry-service.js';
+import { DefaultAgentProviderRegistry } from './platform/default-agent-provider-registry.js';
+import type { AgentProviderConfigRepository } from '@modules/agents/index.js';
 
 /**
  * Application composition root.
@@ -247,6 +276,28 @@ export interface AppDeps {
   githubInstallationRepository?: GitHubInstallationRepository;
   /** WORK-002/008: secret store (for API keys + webhook secrets). */
   secretStore?: SecretStore;
+  // --- WORK-026 (SUB-F): /runtime + /github provisioning + /work-items
+  // ImplementationContext + /agents provider registry composition-root wiring. ---
+  /** WORK-026: provider-independent deployment service (Vercel + fake). Present when DB configured. */
+  deploymentService?: DeploymentService;
+  /** WORK-026: aggregated runtime status (GitHub + Vercel + Architect + Agent). Present when DB configured. */
+  runtimeStatusService?: RuntimeStatusService;
+  /** WORK-026: lower-level integration repository (for list/create/remove route ops).
+   *  Constructed alongside the deployment service; same Pg instance. */
+  runtimeIntegrationRepository?: RuntimeIntegrationRepository;
+  /** WORK-026: lower-level deployment repository (for list-across-integrations route op).
+   *  Constructed alongside the deployment service; same Pg instance. */
+  deploymentRepository?: DeploymentRepository;
+  /** WORK-026: GitHub project↔repo provisioning link repository. Present when DB configured. */
+  projectGitHubRepositoryRepository?: ProjectGitHubRepositoryRepository;
+  /** WORK-026: builds + persists ImplementationContext revisions for autonomous implementation. Present when DB configured. */
+  implementationContextBuilder?: ImplementationContextBuilder;
+  /** WORK-026 (PR #29 fix #1): submits the persisted ImplementationContext to the AgentGateway. PRODUCTION MUST WIRE THIS. */
+  startImplementationService?: StartImplementationService;
+  /** WORK-026: per-project agent provider config repository. Present when DB configured. */
+  agentProviderConfigRepository?: AgentProviderConfigRepository;
+  /** WORK-026: composes platform + per-project agent provider registry. Present when DB configured. */
+  agentProviderRegistryService?: DefaultAgentProviderRegistryService;
 }
 
 export interface BuildAppOptions {
@@ -412,6 +463,16 @@ export async function buildApp(
   let webhookProcessingService: WebhookProcessingService | undefined;
   let webhookEventRepository: WebhookEventRepository | undefined;
   let githubInstallationRepository: GitHubInstallationRepository | undefined;
+  // --- WORK-026 (SUB-F): new service variables. ---
+  let deploymentService: DeploymentService | undefined;
+  let runtimeStatusService: RuntimeStatusService | undefined;
+  let runtimeIntegrationRepository: RuntimeIntegrationRepository | undefined;
+  let deploymentRepository: DeploymentRepository | undefined;
+  let projectGitHubRepositoryRepository: ProjectGitHubRepositoryRepository | undefined;
+  let implementationContextBuilder: ImplementationContextBuilder | undefined;
+  let startImplementationService: StartImplementationService | undefined;
+  let agentProviderConfigRepository: AgentProviderConfigRepository | undefined;
+  let agentProviderRegistryService: DefaultAgentProviderRegistryService | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
@@ -566,6 +627,224 @@ export async function buildApp(
       projectAccessRepo,
     );
     apiKeyProvisioner = new ApiKeyCredentialProvisioner(database);
+
+    // -----------------------------------------------------------------------
+    // WORK-026 (SUB-F): composition-root wiring for /runtime, /github
+    // provisioning, /work-items ImplementationContextBuilder, and /agents
+    // provider registry. All services are constructed ONLY when a database is
+    // present (their state lives in PostgreSQL). External-provider activation
+    // (Vercel API token, GitHub App creds) is OPTIONAL — services still
+    // construct when env vars are absent; the runtime status resolver + the
+    // adapter health() probe report 'not-configured' so the API can surface
+    // the gap to operators without throwing.
+    // -----------------------------------------------------------------------
+
+    // --- /runtime module: deployment provider boundary (SUB-B). ---
+    runtimeIntegrationRepository = new PgRuntimeIntegrationRepository(database);
+    deploymentRepository = new PgDeploymentRepository(database);
+    deploymentService = new DefaultDeploymentService(
+      runtimeIntegrationRepository,
+      deploymentRepository,
+      logger,
+    );
+    // Always register the fake provider so dev/test parity is preserved (the
+    // /runtime/providers route surfaces 'test-mode' for it).
+    deploymentService.registerProvider(new FakeDeploymentProvider());
+    if (process.env.VERCEL_API_TOKEN) {
+      deploymentService.registerProvider(
+        new VercelDeploymentProvider({
+          apiToken: process.env.VERCEL_API_TOKEN,
+          teamId: process.env.VERCEL_TEAM_ID,
+        }),
+      );
+      logger.info('app.runtime.vercel', { configured: true });
+    } else {
+      logger.warn('app.runtime.no_vercel', {
+        reason: 'VERCEL_API_TOKEN not set; runtime deployments surface not-configured',
+      });
+    }
+
+    // --- /github module: project↔GitHub repository provisioning (SUB-C). ---
+    projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(database);
+
+    // --- /work-items module: ImplementationContextBuilder (SUB-D). ---
+    // The builder consumes the 10 repository deps + 4 optional callback
+    // resolvers wired here to avoid a hard module cycle between /work-items,
+    // /github, /agents, and /reviews. Each resolver is a thin closure over
+    // existing AppDeps services. The builder issues NO SQL of its own (SUB-D
+    // omitted the `db: DatabaseClient` constructor arg — see SUB-D deviation
+    // note in the worklog).
+    const implementationContextRepository =
+      new PgImplementationContextRepository(database);
+
+    const repositoryResolver = async (projectId: string) => {
+      const r = await projectGitHubRepositoryRepository!.findByProject(projectId);
+      return r
+        ? {
+            owner: r.owner,
+            repository: r.repository,
+            defaultBranch: r.defaultBranch,
+          }
+        : null;
+    };
+
+    const pullRequestResolver = async (workItemId: string) => {
+      // Use the canonical "active PR" lookup (one active PR per work item —
+      // enforced by the partial unique index on wfos_pull_request_associations).
+      // Parse the canonical 'github:owner/repo#<num>' externalPrId format to
+      // extract the PR number; null when the format doesn't match (defensive).
+      const pr = await pullRequestAssociationRepository!.findActiveForWorkItem(workItemId);
+      if (!pr) return null;
+      const match = pr.externalPrId.match(/^github:([^/]+)\/([^#]+)#(\d+)$/);
+      const num = match ? Number.parseInt(match[3]!, 10) : 0;
+      return {
+        number: Number.isFinite(num) ? num : 0,
+        url: pr.externalPrId,
+        headSha: pr.headCommit ?? '',
+      };
+    };
+
+    const agentRunResolver = async (workItemId: string) => {
+      const runs = await agentRunRepository!.findByWorkItem(workItemId);
+      return runs.map((r) => {
+        // `configuration: Record<string, unknown>` carries the agent model name
+        // under the conventional `model` key (set by the route + orchestrator).
+        const modelRaw = (r.configuration as Record<string, unknown> | null)?.model;
+        return {
+          executionId: r.executionId,
+          provider: r.provider,
+          model: typeof modelRaw === 'string' ? modelRaw : '',
+          status: r.status,
+          commitRef: r.commitRef,
+          pullRequestRef: r.pullRequestRef,
+          createdAt: r.createdAt.toISOString(),
+        };
+      });
+    };
+
+    const reviewResolver = async (workItemId: string) => {
+      const reviews = await reviewService!.listReviewsForWorkItem(workItemId);
+      const finalized = reviews.filter(
+        (r) => r.status === 'completed' && r.outcome !== null,
+      );
+      return Promise.all(
+        finalized.map(async (r) => {
+          const findings = await reviewService!.listFindingsForReview(r.id);
+          return {
+            reviewId: r.id,
+            verdict: r.outcome as string,
+            summary: r.summary ?? '',
+            findings: findings.map((f) => f.description),
+            createdAt: r.createdAt.toISOString(),
+          };
+        }),
+      );
+    };
+
+    implementationContextBuilder = new DefaultImplementationContextBuilder(
+      workItemRepository,
+      workOrderRepository,
+      workItemRequirementRepository,
+      workItemCriterionRepository,
+      workItemDependencyRepository,
+      requirementRepository,
+      acceptanceCriterionRepository,
+      architectureVersionRepository,
+      architectureRepository,
+      implementationContextRepository,
+      repositoryResolver,
+      pullRequestResolver,
+      agentRunResolver,
+      reviewResolver,
+    );
+
+    // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1). ---
+    // Wires the persisted ImplementationContext to the AgentGateway. In
+    // production, this service MUST be wired — there is NO production no-op
+    // path that returns success without an AgentRun. The route returns 503
+    // if this service is absent.
+    startImplementationService = new DefaultStartImplementationService({
+      agentGateway: agentGateway!,
+      agentRunRepository: agentRunRepository!,
+      workItemRepository,
+      workOrderRepository,
+      contextRepository: implementationContextRepository,
+      logger,
+    });
+
+    // --- /agents module: provider registry (SUB-E). ---
+    // `DefaultAgentProviderRegistry` lives in the platform layer (mirrors the
+    // /llm ProviderRegistry pattern). It is NOT exported through the platform
+    // barrel — imported directly from its file (precedent: DefaultProviderRegistry
+    // import on app.ts line ~117).
+    agentProviderConfigRepository = new PgAgentProviderConfigRepository(database);
+    const agentProviderRegistry = new DefaultAgentProviderRegistry(secretStore);
+    agentProviderRegistryService = new DefaultAgentProviderRegistryService(
+      agentProviderRegistry,
+      agentProviderConfigRepository,
+      secretStore,
+    );
+
+    // --- /runtime module: DefaultRuntimeStatusService (SUB-B). ---
+    // Aggregates GitHub + Vercel + Architect + Agent status for a project.
+    // The resolvers are closures over existing services; each catches its own
+    // errors (the DefaultRuntimeStatusService wraps them in try/catch and
+    // degrades to 'error' or 'not-configured' per ProjectRuntimeStatus shape).
+    runtimeStatusService = new DefaultRuntimeStatusService(
+      {
+        resolveGithub: async (projectId) => {
+          const r = await projectGitHubRepositoryRepository!.findByProject(projectId);
+          return {
+            status: r ? 'connected' : 'not-configured',
+            owner: r?.owner,
+            repository: r?.repository,
+            defaultBranch: r?.defaultBranch ?? null,
+          };
+        },
+        resolveVercel: async (projectId) => {
+          const dep = await deploymentService!.getLatestDeployment(projectId);
+          const integ = await runtimeIntegrationRepository!.findByProjectAndProvider(
+            projectId,
+            'vercel',
+          );
+          return {
+            status: integ ? 'connected' : 'not-configured',
+            projectId: integ?.projectExternalId,
+            previewUrl: dep?.previewUrl ?? null,
+            latestDeployment: dep,
+          };
+        },
+        resolveArchitect: async (_projectId) => {
+          const providers = conversationalArchitectService!.getProviders();
+          return {
+            status: providers.some((p) => p.status === 'ready')
+              ? 'connected'
+              : 'not-configured',
+            providers: providers.map((p) => ({
+              name: p.name,
+              provider: p.provider,
+              model: p.model,
+              status: p.status,
+            })),
+          };
+        },
+        resolveAgent: async (_projectId) => {
+          const providers = agentProviderRegistry.getProviders();
+          return {
+            status: providers.some((p) => p.status === 'ready')
+              ? 'connected'
+              : 'not-configured',
+            providers: providers.map((p) => ({
+              name: p.name,
+              provider: p.provider,
+              model: p.model,
+              status: p.status,
+            })),
+          };
+        },
+      },
+      logger,
+    );
   }
 
   // Build handler registry AFTER database wiring so database-dependent
@@ -640,6 +919,17 @@ export async function buildApp(
       githubAdapter,
       githubInstallationRepository,
       secretStore,
+      // WORK-026 (SUB-F): new runtime + provisioning + implementation-context +
+      // agent-registry deps.
+      deploymentService,
+      runtimeStatusService,
+      runtimeIntegrationRepository,
+      deploymentRepository,
+      projectGitHubRepositoryRepository,
+      implementationContextBuilder,
+      startImplementationService,
+      agentProviderConfigRepository,
+      agentProviderRegistryService,
     },
     start: async () => {
       if (options.startWorker !== false) {

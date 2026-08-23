@@ -159,6 +159,72 @@ async function main(): Promise<void> {
               workflowEngine: app.deps.workflowEngine,
               // WORK-017/018: orchestrator (convergence loop). Present when Redis is available.
               ...(app.deps.orchestrator ? { orchestrator: app.deps.orchestrator } : {}),
+              // WORK-026 (SUB-F): ImplementationContextBuilder for the
+              // POST /work-items/:workItemId/start-implementation route.
+              ...(app.deps.implementationContextBuilder
+                ? { implementationContextBuilder: app.deps.implementationContextBuilder }
+                : {}),
+              // WORK-026 (PR #29 fix #1): StartImplementationService — submits
+              // the persisted ImplementationContext to the AgentGateway. In
+              // production, this MUST be wired (no production no-op path).
+              ...(app.deps.startImplementationService
+                ? { startImplementationService: app.deps.startImplementationService }
+                : {}),
+              // WORK-026 (PR #29 fix #1): AgentProviderRegistryService — used by
+              // the start-implementation route to validate provider/model + resolve
+              // platform defaults.
+              ...(app.deps.agentProviderRegistryService
+                ? { agentProviderRegistryService: app.deps.agentProviderRegistryService }
+                : {}),
+            },
+          }
+        : {}),
+      // WORK-026 (SUB-F): /runtime routes — provider-independent deployment
+      // + runtime status boundary. Wired when the deployment service + runtime
+      // status service + the lower-level repositories are all present (DB-only).
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.deploymentService &&
+      app.deps.runtimeStatusService &&
+      app.deps.runtimeIntegrationRepository &&
+      app.deps.deploymentRepository
+        ? {
+            runtime: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              deploymentService: app.deps.deploymentService,
+              runtimeStatusService: app.deps.runtimeStatusService,
+              runtimeIntegrationRepository: app.deps.runtimeIntegrationRepository,
+              deploymentRepository: app.deps.deploymentRepository,
+              // WORK-026 (PR #29 fix #2): expose the GitHub repo association
+              // resolver so the /runtime/connect route can auto-link the
+              // GitHub repo to the Vercel project.
+              ...(app.deps.projectGitHubRepositoryRepository
+                ? {
+                    projectGitHubRepositoryResolver: (async (projectId: string) => {
+                      const r = await app.deps.projectGitHubRepositoryRepository!.findByProject(projectId);
+                      return r ? { owner: r.owner, repository: r.repository, defaultBranch: r.defaultBranch } : null;
+                    }),
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      // WORK-026 (SUB-F): /github provisioning routes — create/link a GitHub
+      // repo for a project. Wired when the github adapter + installation
+      // repository + project link repository are all present.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.githubAdapter &&
+      app.deps.githubInstallationRepository &&
+      app.deps.projectGitHubRepositoryRepository
+        ? {
+            githubProvisioning: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              githubAdapter: app.deps.githubAdapter,
+              projectGitHubRepositoryRepository: app.deps.projectGitHubRepositoryRepository,
+              githubInstallationRepository: app.deps.githubInstallationRepository,
             },
           }
         : {}),
@@ -224,6 +290,16 @@ async function main(): Promise<void> {
               agentGateway: app.deps.agentGateway,
               agentRunRepository: app.deps.agentRunRepository,
               queue: app.deps.queue,
+              // WORK-026 (SUB-F): agent provider registry routes. The 3 new
+              // endpoints (GET /agents/providers, GET /projects/:id/agents/providers,
+              // POST /projects/:id/agents/providers) are conditionally
+              // registered inside agentRoutes() based on these deps.
+              ...(app.deps.agentProviderRegistryService
+                ? { agentProviderRegistryService: app.deps.agentProviderRegistryService }
+                : {}),
+              ...(app.deps.agentProviderConfigRepository
+                ? { agentProviderConfigRepository: app.deps.agentProviderConfigRepository }
+                : {}),
             },
           }
         : {}),

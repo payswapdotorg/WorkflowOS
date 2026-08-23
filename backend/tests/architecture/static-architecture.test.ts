@@ -132,9 +132,11 @@ function resolveSpecifier(importer: string, specifier: string): string | undefin
 }
 
 describe('PLAT-AC-01 — frozen modules exist as explicit boundaries', () => {
-  it('FROZEN_MODULE_NAMES covers exactly the 16 frozen backend modules', () => {
-    expect(FROZEN_MODULE_NAMES).toHaveLength(16);
-    expect(new Set(FROZEN_MODULE_NAMES).size).toBe(16);
+  it('FROZEN_MODULE_NAMES covers exactly the 17 frozen backend modules', () => {
+    // WORK-026 added /runtime as the 17th module (provider-independent
+    // deployment boundary). The spec's original 16 modules remain frozen.
+    expect(FROZEN_MODULE_NAMES).toHaveLength(17);
+    expect(new Set(FROZEN_MODULE_NAMES).size).toBe(17);
     for (const name of FROZEN_MODULE_NAMES) {
       expect(name.startsWith('/')).toBe(true);
     }
@@ -1365,6 +1367,12 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       'PgWorkItemCriterionRepository',
       'PgWorkOrderRepository',
       'PgWorkItemDependencyRepository',
+      // WORK-026: ImplementationContext snapshot consumed by the
+      // autonomous-implementation entry point (start-implementation route).
+      'ImplementationContext',
+      'ImplementationContextContent',
+      'ImplementationContextRepository',
+      'ImplementationContextBuilder',
     ]);
     const exported: string[] = [];
     for (const m of wiIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -3320,6 +3328,734 @@ describe('WORK-024 invariants -- E2E lifecycle boundaries', () => {
     expect(existsSync(e2eYml), 'e2e.yml workflow not found').toBe(true);
     const src = readFileSync(e2eYml, 'utf8');
     expect(src).toMatch(/lifecycle\.integration/);
+  });
+});
+
+// ===========================================================================
+// WORK-026 invariants — project runtime + autonomous implementation boundaries.
+//
+// Static checks that enforce the WORK-026 architectural invariants:
+//   - /runtime is the sole deployment/preview authority (no other module
+//     calls Vercel; /runtime domain layer never imports an HTTP client SDK);
+//   - /github remains the sole GitHub SDK caller (no other module imports
+//     @octokit/*; the new provisioning extensions do not call the GitHub API
+//     from the persistence/types layer);
+//   - /work-items owns the ImplementationContextBuilder (no other module
+//     instantiates it; the builder uses callback resolvers — never calls the
+//     agent/github/vercel adapters directly);
+//   - /agents owns agent execution (routes delegate to AgentGateway; the
+//     start-implementation route delegates to StartImplementationService);
+//   - /workflows owns workflow state transitions (the start-implementation
+//     route must NOT call workflowEngine.transition — only the existing
+//     /workflow/transitions endpoint may, once);
+//   - /verification + /reviews remain the sole SQL authors of their tables
+//     (no route file queries wfos_verification_runs / wfos_reviews directly);
+//   - frontend never holds provider secrets, defines a workflow state
+//     machine, opens a DB/GitHub/Vercel client directly;
+//   - no module duplicates the Work Order / Agent authority;
+//   - the composition root (app.ts + index.ts) wires the full WORK-026
+//     service stack + the runtime + githubProvisioning route groups.
+// ===========================================================================
+
+describe('WORK-026 invariants — project runtime + autonomous implementation boundaries', () => {
+  const SRC = join(BACKEND_ROOT, 'src');
+  const ROUTES_DIR = join(SRC, 'api', 'routes');
+  const FRONTEND_SRC_DIR = join(BACKEND_ROOT, '..', 'frontend', 'src');
+
+  /** Strip line + block comments so TODO/NOTE text does not trip regex checks. */
+  function stripComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  // -------------------------------------------------------------------------
+  // 1. /runtime module does not import from other modules internal/
+  // -------------------------------------------------------------------------
+  it('/runtime module does not import from other modules internal/', () => {
+    const runtimeDir = join(MODULES_DIR, 'runtime');
+    if (!existsSync(runtimeDir)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(runtimeDir)) {
+      for (const specifier of extractSpecifiers(file)) {
+        const resolved = resolveSpecifier(file, specifier);
+        if (!resolved) continue;
+        const targetModule = moduleOf(resolved);
+        if (!targetModule || targetModule === 'runtime') continue;
+        if (isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${targetModule}/internal; ` +
+              `use the module's index.ts public interface instead)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. /runtime does not import Vercel SDK / HTTP client in domain layer
+  //    (only vercel-deployment-provider.ts adapter may use the built-in fetch)
+  // -------------------------------------------------------------------------
+  it('/runtime does not import Vercel SDK / HTTP client in domain layer (only the adapter uses built-in fetch)', () => {
+    const runtimeInternalDir = join(MODULES_DIR, 'runtime', 'internal');
+    if (!existsSync(runtimeInternalDir)) return;
+    // Forbidden HTTP client packages — the vercel-deployment-provider.ts adapter
+    // uses Node 24's built-in global fetch, which requires NO import.
+    const FORBIDDEN_HTTP_RE = /^(?:@vercel\/.+|undici|node-fetch|axios|got|got\/.+)$/;
+    const violations: string[] = [];
+    for (const file of walkTs(runtimeInternalDir)) {
+      const base = file.split(sep).pop()!;
+      // Only the Vercel adapter file may use a Vercel SDK / fetch.
+      if (base === 'vercel-deployment-provider.ts') continue;
+      for (const spec of extractSpecifiers(file)) {
+        if (FORBIDDEN_HTTP_RE.test(spec)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports HTTP client "${spec}" — ` +
+              `only vercel-deployment-provider.ts may use the built-in fetch against api.vercel.com`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. /runtime barrel exposes only runtime-domain contracts
+  // -------------------------------------------------------------------------
+  it('/runtime barrel exposes only runtime-domain contracts', () => {
+    const runtimeIndex = readFileSync(join(MODULES_DIR, 'runtime', 'index.ts'), 'utf8');
+    const allowed = new Set([
+      // Domain types (SUB-B)
+      'DeploymentStatus',
+      'RuntimeIntegration',
+      'Deployment',
+      'CreateProjectDeploymentInput',
+      'LinkRepositoryInput',
+      'GetDeploymentInput',
+      'DeploymentProvider',
+      'RuntimeIntegrationRepository',
+      'DeploymentRepository',
+      'DeploymentService',
+      'ProjectRuntimeStatus',
+      'RuntimeStatusService',
+      // Module contract (SUB-B)
+      'RuntimeModuleApi',
+      'runtimeModule',
+    ]);
+    const exported: string[] = [];
+    for (const m of runtimeIndex.matchAll(/export\s+type\s*\{([^}]+)\}/g)) {
+      for (const part of m[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) exported.push(trimmed);
+      }
+    }
+    for (const m of runtimeIndex.matchAll(/export\s+(?:const|class|function|interface)\s+(\w+)/g)) {
+      exported.push(m[1]!);
+    }
+    const unexpected = exported.filter((n) => !allowed.has(n));
+    expect(unexpected, `/runtime exports unexpected names: ${unexpected.join(', ')}`).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. GitHub provider code remains in /github (no other module imports @octokit/*)
+  // -------------------------------------------------------------------------
+  it('GitHub provider code remains in /github (no other module imports @octokit/*)', () => {
+    const GITHUB_PACKAGES = new Set(['@octokit/rest', '@octokit/graphql', '@octokit/webhooks']);
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const mod = moduleOf(file);
+      // /github owns the GitHub SDK; every other module is forbidden from
+      // importing it. (/runtime talks to deployment providers via the
+      // DeploymentProvider abstraction, not GitHub — it never needs @octokit.)
+      if (mod === 'github') continue;
+      for (const spec of extractSpecifiers(file)) {
+        const pkg = spec.startsWith('@')
+          ? spec.split('/', 2).slice(0, 2).join('/')
+          : spec.split('/')[0]!;
+        if (GITHUB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports GitHub SDK "${spec}" — ` +
+              `GitHub integration is /github's authority; consume the provider-independent ` +
+              `GitHubAdapter / ProjectGitHubRepositoryRepository contracts via @modules/github/index.js instead`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. /github provisioning extensions do not call GitHub SDK from domain layer
+  //    (only the GitHub adapter files may do GitHub API work)
+  // -------------------------------------------------------------------------
+  it('/github provisioning extensions do not call GitHub SDK from domain layer', () => {
+    // The two provisioning-domain files (types + persistence) MUST NOT import
+    // @octokit/* or call fetch('https://api.github.com'). Only the adapter
+    // files (DefaultGitHubAdapter in pg-github-repository.ts + FakeGitHubAdapter
+    // in fake-github-adapter.ts) may perform GitHub API work.
+    const GITHUB_SDK_RE = /@octokit\/(?:rest|graphql|webhooks)/;
+    const GITHUB_API_FETCH_RE = /fetch\s*\(\s*['"`][^'"`]*api\.github\.com/;
+    const violations: string[] = [];
+    const domainFiles = [
+      join(MODULES_DIR, 'github', 'internal', 'project-github-repository.types.ts'),
+      join(MODULES_DIR, 'github', 'internal', 'pg-project-github-repository-repository.ts'),
+    ];
+    for (const file of domainFiles) {
+      if (!existsSync(file)) continue;
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      for (const spec of extractSpecifiers(file)) {
+        if (GITHUB_SDK_RE.test(spec)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports @octokit/* — ` +
+              `only the GitHub adapter (DefaultGitHubAdapter / FakeGitHubAdapter) may import the GitHub SDK`,
+          );
+        }
+      }
+      if (GITHUB_API_FETCH_RE.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} calls fetch('https://api.github.com') directly — ` +
+            `only the GitHub adapter may call the GitHub API`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Agent execution uses AgentGateway (no route constructs/calls an agent
+  //    adapter directly; start-implementation delegates to StartImplementationService)
+  // -------------------------------------------------------------------------
+  it('agent execution uses AgentGateway (routes delegate; start-implementation uses StartImplementationService)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(ROUTES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      // No route file may construct an agent provider adapter directly.
+      if (/\bnew\s+\w*AgentAdapter\s*\(/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} constructs an AgentAdapter — ` +
+            `routes must enqueue through AgentGateway`,
+        );
+      }
+      // No route file may call agentAdapter.run() directly.
+      if (/\bagentAdapter\.run\s*\(/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} calls agentAdapter.run() directly — ` +
+            `routes must enqueue through AgentGateway`,
+        );
+      }
+    }
+    // The start-implementation route (workflow.route.ts) MUST declare + delegate
+    // to a StartImplementationService seam (which itself delegates to AgentGateway).
+    const workflowRoute = join(ROUTES_DIR, 'workflow.route.ts');
+    expect(existsSync(workflowRoute), 'workflow.route.ts must exist').toBe(true);
+    if (existsSync(workflowRoute)) {
+      const src = readFileSync(workflowRoute, 'utf8');
+      expect(
+        src,
+        'workflow.route.ts must declare the StartImplementationService seam',
+      ).toMatch(/StartImplementationService/);
+      expect(
+        src,
+        'workflow.route.ts must register the start-implementation route',
+      ).toMatch(/\/work-items\/:workItemId\/start-implementation/);
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. Architect uses ArchitectService (no route constructs an LLM adapter)
+  // -------------------------------------------------------------------------
+  it('architect uses ArchitectService (no route constructs an LLM adapter / gateway)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(ROUTES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      // No route file may construct an LLM adapter / gateway / OpenAI client.
+      if (/\bnew\s+\w*(?:LlmAdapter|OpenAiCompatibleLlmAdapter|LlmGateway)\s*\(/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} constructs an LLM adapter / gateway — ` +
+            `routes must delegate to the injected LlmGateway / ArchitectService`,
+        );
+      }
+    }
+    // The architect route MUST delegate via architectService.execute(...)
+    // (the existing pattern from WORK-014).
+    const architectRoute = join(ROUTES_DIR, 'architect.route.ts');
+    expect(existsSync(architectRoute), 'architect.route.ts must exist').toBe(true);
+    if (existsSync(architectRoute)) {
+      const src = readFileSync(architectRoute, 'utf8');
+      expect(src, 'architect.route.ts must call architectService.execute').toMatch(
+        /architectService\.execute\s*\(/,
+      );
+      const codeOnly = stripComments(src);
+      expect(
+        codeOnly,
+        'architect.route.ts must NOT construct an LlmGateway',
+      ).not.toMatch(/\bnew\s+\w*LlmGateway\s*\(/);
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. workflow transitions use WorkflowOrchestrator (start-implementation
+  //    route must NOT mutate workflow state directly)
+  // -------------------------------------------------------------------------
+  it('workflow transitions use WorkflowOrchestrator (start-implementation route does not call workflowEngine.transition)', () => {
+    const workflowRoute = join(ROUTES_DIR, 'workflow.route.ts');
+    expect(existsSync(workflowRoute), 'workflow.route.ts must exist').toBe(true);
+    if (!existsSync(workflowRoute)) return;
+    const src = readFileSync(workflowRoute, 'utf8');
+    const codeOnly = stripComments(src);
+    // The EXISTING POST /work-items/:workItemId/workflow/transitions endpoint
+    // is the low-level admin transition tool — it calls workflowEngine.transition
+    // exactly ONCE. Any additional call (e.g. from the start-implementation
+    // route) would be a violation: start-implementation must delegate state
+    // changes to the orchestrator (initiateConvergence / handleInitiate).
+    const transitionCalls = codeOnly.match(/\bworkflowEngine\.transition\s*\(/g) ?? [];
+    expect(
+      transitionCalls.length,
+      `workflow.route.ts must invoke workflowEngine.transition at most once ` +
+        `(the /workflow/transitions endpoint). Found ${transitionCalls.length} — ` +
+        `the start-implementation route must NOT mutate workflow state directly; ` +
+        `delegate to WorkflowOrchestrator.initiateConvergence() instead.`,
+    ).toBeLessThanOrEqual(1);
+    // The start-implementation route MUST exist + delegate via the builder +
+    // (optional) startImplementationService.
+    expect(src, 'workflow.route.ts must register the start-implementation route').toMatch(
+      /\/work-items\/:workItemId\/start-implementation/,
+    );
+    expect(src, 'start-implementation must build via implementationContextBuilder').toMatch(
+      /implementationContextBuilder\.build\s*\(/,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. verification uses VerificationService (no route queries wfos_verification_runs)
+  // -------------------------------------------------------------------------
+  it('verification uses VerificationService (no route file queries wfos_verification_runs directly)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(ROUTES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (
+        /\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_verification_runs\b/i.test(
+          codeOnly,
+        )
+      ) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} queries wfos_verification_runs directly — ` +
+            `routes must delegate to VerificationService`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. review uses ReviewService (no route queries wfos_reviews)
+  // -------------------------------------------------------------------------
+  it('review uses ReviewService (no route file queries wfos_reviews directly)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(ROUTES_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (
+        /\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|UPSERT\s+INTO|MERGE\s+INTO)\s+wfos_reviews\b/i.test(
+          codeOnly,
+        )
+      ) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} queries wfos_reviews directly — ` +
+            `routes must delegate to ReviewService`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 11. frontend has no provider secrets (no process.env.<X>_API_KEY / _SECRET / _TOKEN)
+  // -------------------------------------------------------------------------
+  it('frontend has no provider secrets (no process.env.*_API_KEY / *_SECRET / *_TOKEN reads)', () => {
+    if (!existsSync(FRONTEND_SRC_DIR)) return;
+    const violations: string[] = [];
+    // Match: process.env.<UPPER_NAME>_(API_KEY|API_TOKEN|SECRET|PASSWORD|PRIVATE_KEY|TOKEN)
+    const SECRET_ENV_RE =
+      /\bprocess\.env\.[A-Z_]*(?:API_KEY|API_TOKEN|SECRET|PASSWORD|PRIVATE_KEY|TOKEN)\b/;
+    for (const file of walkTs(FRONTEND_SRC_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (SECRET_ENV_RE.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} reads a provider secret from process.env — ` +
+            `secrets must stay backend-only (SEC-001)`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 12. frontend has no workflow state machine (extends WORK-022 check)
+  // -------------------------------------------------------------------------
+  it('frontend has no workflow state machine (no transition map / stateMachine declaration)', () => {
+    if (!existsSync(FRONTEND_SRC_DIR)) return;
+    const violations: string[] = [];
+    // WORK-022 already covers LEGAL_TRANSITIONS/workflowGraph/transitionMap/legalTransitions.
+    // WORK-026 extends to also catch state-machine declarations: transition:{},
+    // nextState:, stateMachine:.
+    const STATE_MACHINE_RE =
+      /\bLEGAL_TRANSITIONS\b|\bworkflowGraph\b|\btransitionMap\b|\blegalTransitions\b|\btransition\s*:\s*\{|nextState\s*:|stateMachine\s*:/;
+    for (const file of walkTs(FRONTEND_SRC_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (STATE_MACHINE_RE.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} defines a workflow state machine — ` +
+            `only /workflows may own canonical workflow transitions`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 13. no direct DB access from frontend (no pg / ioredis / pglite / raw SQL)
+  // -------------------------------------------------------------------------
+  it('no direct DB access from frontend (no pg / ioredis / pglite / raw SQL)', () => {
+    if (!existsSync(FRONTEND_SRC_DIR)) return;
+    const DB_PACKAGES = new Set([
+      'pg',
+      'ioredis',
+      '@electric-sql/pglite',
+      'postgres',
+      'pg-promise',
+      'drizzle-orm',
+      '@prisma/client',
+    ]);
+    const violations: string[] = [];
+    for (const file of walkTs(FRONTEND_SRC_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      for (const spec of extractSpecifiers(file)) {
+        const pkg = spec.startsWith('@')
+          ? spec.split('/', 2).slice(0, 2).join('/')
+          : spec.split('/')[0]!;
+        if (DB_PACKAGES.has(pkg)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports DB client "${spec}" — ` +
+              `frontend must go through backend HTTP routes`,
+          );
+        }
+      }
+      if (/\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+\w+/i.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} issues a raw SQL statement — ` +
+            `frontend must go through backend HTTP routes`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 14. no direct GitHub API from frontend (no api.github.com fetch / @octokit import)
+  // -------------------------------------------------------------------------
+  it('no direct GitHub API from frontend (no api.github.com fetch / @octokit import)', () => {
+    if (!existsSync(FRONTEND_SRC_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(FRONTEND_SRC_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      // Direct fetch to api.github.com (with a github URL as the first arg).
+      if (/fetch\s*\(\s*['"`][^'"`]*api\.github\.com/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} calls api.github.com directly — ` +
+            `must go through backend /github routes`,
+        );
+      }
+      for (const spec of extractSpecifiers(file)) {
+        if (/^@octokit\//.test(spec)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports @octokit/* SDK — ` +
+              `must go through backend /github routes`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 15. no direct Vercel API from frontend (no api.vercel.com fetch / @vercel / VERCEL_API_TOKEN)
+  // -------------------------------------------------------------------------
+  it('no direct Vercel API from frontend (no api.vercel.com fetch / @vercel import / VERCEL_API_TOKEN)', () => {
+    if (!existsSync(FRONTEND_SRC_DIR)) return;
+    const violations: string[] = [];
+    for (const file of walkTs(FRONTEND_SRC_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      if (/fetch\s*\(\s*['"`][^'"`]*api\.vercel\.com/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} calls api.vercel.com directly — ` +
+            `must go through backend /runtime routes`,
+        );
+      }
+      if (/\bVERCEL_API_TOKEN\b/.test(codeOnly)) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} references VERCEL_API_TOKEN — ` +
+            `Vercel credentials must stay backend-only (SEC-001)`,
+        );
+      }
+      for (const spec of extractSpecifiers(file)) {
+        if (/^@vercel\//.test(spec)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, file)} imports @vercel/* SDK — ` +
+              `must go through backend /runtime routes`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 16. no duplicate Work Order authority (only /work-items declares WorkOrderRepository)
+  // -------------------------------------------------------------------------
+  it('no duplicate Work Order authority (only /work-items declares a WorkOrderRepository)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const mod = moduleOf(file);
+      if (mod === 'work-items') continue;
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      const declaresRepo =
+        /\bclass\s+\w*(?:WorkOrder)\w*Repository\b/.test(codeOnly) ||
+        /\binterface\s+\w*(?:WorkOrder)\w*Repository\b/.test(codeOnly);
+      if (declaresRepo) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares a WorkOrder*Repository — ` +
+            `/work-items is the sole Work Order persistence authority`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 17. no duplicate Agent authority (only /agents declares AgentGateway / AgentRun*Repository)
+  // -------------------------------------------------------------------------
+  it('no duplicate Agent authority (only /agents declares AgentGateway / AgentRun*Repository)', () => {
+    const violations: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const mod = moduleOf(file);
+      if (mod === 'agents') continue;
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = stripComments(src);
+      const declaresGateway =
+        /\bclass\s+\w*AgentGateway\w*\b/.test(codeOnly) ||
+        /\binterface\s+\w*AgentGateway\w*\b/.test(codeOnly);
+      const declaresRepo =
+        /\bclass\s+\w*AgentRun\w*Repository\b/.test(codeOnly) ||
+        /\binterface\s+\w*AgentRun\w*Repository\b/.test(codeOnly);
+      if (declaresGateway || declaresRepo) {
+        violations.push(
+          `${relative(BACKEND_ROOT, file)} declares an AgentGateway / AgentRun*Repository — ` +
+            `/agents is the sole agent-execution authority`,
+        );
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 18. ImplementationContextBuilder does not call agent/github/vercel directly
+  //     (uses callback resolvers — no internal imports of those modules)
+  // -------------------------------------------------------------------------
+  it('ImplementationContextBuilder does not call agent / github / vercel directly (uses callback resolvers)', () => {
+    const builderFile = join(
+      MODULES_DIR,
+      'work-items',
+      'internal',
+      'implementation-context-builder.ts',
+    );
+    expect(existsSync(builderFile), 'implementation-context-builder.ts must exist').toBe(true);
+    if (!existsSync(builderFile)) return;
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT import from /agents, /github, or /runtime internal/ — the
+    // builder resolves runtime data via injected callback resolvers (avoids a
+    // module cycle: /work-items → /agents → /work-items).
+    for (const spec of extractSpecifiers(builderFile)) {
+      expect(
+        spec,
+        `${relative(BACKEND_ROOT, builderFile)} must not import from /agents internal (use callback resolvers)`,
+      ).not.toMatch(/@modules\/agents\/internal\//);
+      expect(
+        spec,
+        `${relative(BACKEND_ROOT, builderFile)} must not import from /github internal (use callback resolvers)`,
+      ).not.toMatch(/@modules\/github\/internal\//);
+      expect(
+        spec,
+        `${relative(BACKEND_ROOT, builderFile)} must not import from /runtime internal (use callback resolvers)`,
+      ).not.toMatch(/@modules\/runtime\/internal\//);
+    }
+    // Must NOT directly invoke the agent gateway / GitHub adapter / deployment service.
+    expect(codeOnly).not.toMatch(/agentGateway\.execute\s*\(/);
+    expect(codeOnly).not.toMatch(
+      /githubAdapter\.(?:createRepository|createBranch|createPullRequest|mergePullRequest)\s*\(/,
+    );
+    expect(codeOnly).not.toMatch(/deploymentService\.provisionProject\s*\(/);
+    expect(codeOnly).not.toMatch(
+      /fetch\s*\(\s*['"`]https:\/\/(?:api\.github\.com|api\.vercel\.com|api\.openai\.com)/,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 19. Production readiness: app.ts wires the full WORK-026 service stack
+  // -------------------------------------------------------------------------
+  it('production readiness: app.ts constructs the full WORK-026 service stack', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    // The 11 WORK-026 services (SUB-B/C/D/E/F) that the composition root MUST
+    // construct. (VercelDeploymentProvider is optional — wired only when
+    // VERCEL_API_TOKEN env is set — so it is NOT in this list.)
+    const REQUIRED_SERVICES = [
+      'PgRuntimeIntegrationRepository',
+      'PgDeploymentRepository',
+      'DefaultDeploymentService',
+      'FakeDeploymentProvider',
+      'PgProjectGitHubRepositoryRepository',
+      'PgImplementationContextRepository',
+      'DefaultImplementationContextBuilder',
+      'DefaultStartImplementationService',
+      'PgAgentProviderConfigRepository',
+      'DefaultAgentProviderRegistry',
+      'DefaultAgentProviderRegistryService',
+      'DefaultRuntimeStatusService',
+    ];
+    const missing: string[] = [];
+    for (const svc of REQUIRED_SERVICES) {
+      if (!appSrc.includes(svc)) {
+        missing.push(svc);
+      }
+    }
+    expect(
+      missing,
+      `app.ts is missing WORK-026 service construction: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 20. index.ts passes WORK-026 route deps (runtime + githubProvisioning) to buildServer
+  // -------------------------------------------------------------------------
+  it('production readiness: index.ts passes runtime + githubProvisioning route deps to buildServer', () => {
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    // The buildServer call must include both new WORK-026 route groups.
+    expect(indexSrc, 'index.ts must wire the runtime route group').toMatch(/runtime\s*:/);
+    expect(
+      indexSrc,
+      'index.ts must wire the githubProvisioning route group',
+    ).toMatch(/githubProvisioning\s*:/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #1: Start Implementation MUST actually invoke AgentGateway.
+  //
+  // The start-implementation route must NOT return success without an
+  // AgentRun. The StartImplementationService must be wired in production
+  // (app.ts) + passed to buildServer (index.ts). The route must return 503
+  // (NOT 201) when the service is absent.
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #1: app.ts wires DefaultStartImplementationService', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultStartImplementationService/);
+    expect(appSrc).toMatch(/startImplementationService\s*=\s*new\s+DefaultStartImplementationService/);
+  });
+
+  it('PR #29 fix #1: index.ts passes startImplementationService to buildServer', () => {
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/startImplementationService/);
+  });
+
+  it('PR #29 fix #1: start-implementation route returns 503 when service is absent (NOT 201)', () => {
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8');
+    // The route must check for the service + return 503 'service-unavailable'.
+    expect(routeSrc).toMatch(/startImplementationService/);
+    expect(routeSrc).toMatch(/503/);
+    expect(routeSrc).toMatch(/service-unavailable/);
+    // The route must NOT have a fallback that returns 201 without an agentRunId.
+    // Extract the start-implementation route body + verify it doesn't contain
+    // a bare `return reply.code(201)` that doesn't include agentRunId.
+    const routeSection = routeSrc.match(/app\.post\('\/work-items\/:workItemId\/start-implementation'[\s\S]*?\n  \}\);/);
+    expect(routeSection, 'expected start-implementation route').not.toBeNull();
+    // The 201 response MUST include agentRunId (not optional).
+    expect(routeSection![0]).toMatch(/agentRunId:\s*submission\.agentRunId/);
+  });
+
+  it('PR #29 fix #1: DefaultStartImplementationService calls AgentGateway.execute', () => {
+    const svcFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'start-implementation-service.ts');
+    const src = readFileSync(svcFile, 'utf8');
+    const codeOnly = stripComments(src);
+    expect(codeOnly).toMatch(/agentGateway\.execute\s*\(/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #2: Vercel Connect must actually invoke the provider.
+  //
+  // The POST /runtime/connect route must call DeploymentService.provisionProject()
+  // or linkRepository() — NOT just persist a manual external ID. The route
+  // must return 503 when the provider is not configured (NO fake connected state).
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #2: runtime route exposes POST /runtime/connect that invokes the provider', () => {
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'runtime.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/app\.post\('\/projects\/:projectId\/runtime\/connect'/);
+    // The route must call deploymentService.provisionProject or linkRepository.
+    expect(routeSrc).toMatch(/deploymentService\.provisionProject\s*\(/);
+    expect(routeSrc).toMatch(/deploymentService\.linkRepository\s*\(/);
+    // The route must check provider health + return 503 when not configured.
+    expect(routeSrc).toMatch(/provider-not-configured/);
+    expect(routeSrc).toMatch(/health\(\)/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #29 fix #4: ImplementationContextBuilder must fail loudly on missing refs.
+  //
+  // The builder must NOT use the `if (!X) continue` silent-skip pattern for
+  // requirements, criteria, or dependency targets. It must throw.
+  // -------------------------------------------------------------------------
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing requirement (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!requirement) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!requirement\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-requirement-missing/);
+  });
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing dependency target (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!target) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!target\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-dependency-missing/);
+  });
+
+  it('PR #29 fix #4: ImplementationContextBuilder throws on missing criterion (no silent skip)', () => {
+    const builderFile = join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'implementation-context-builder.ts');
+    const src = readFileSync(builderFile, 'utf8');
+    const codeOnly = stripComments(src);
+    // Must NOT use the `if (!crit) continue` silent-skip pattern.
+    expect(codeOnly).not.toMatch(/if\s*\(!crit\)\s*continue/);
+    // MUST throw with a descriptive error.
+    expect(codeOnly).toMatch(/implementation-context-criterion-missing/);
   });
 });
 

@@ -9,6 +9,16 @@ import type {
   GitHubRepositoryInfo,
   GitHubPullRequestInfo,
 } from './github.types.js';
+import type {
+  CreateBranchInput,
+  CreateBranchResult,
+  CreatePullRequestInput,
+  CreatePullRequestResult,
+  CreateRepositoryInput,
+  CreateRepositoryResult,
+  GetBranchInput,
+  GetBranchResult,
+} from './project-github-repository.types.js';
 
 // ===========================================================================
 // Webhook event repository
@@ -216,6 +226,37 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
     // In tests, a FakeGitHubAdapter overrides this with deterministic behavior.
     void input;
     throw new Error('mergePullRequest: live GitHub API calls not implemented — use a FakeGitHubAdapter for tests');
+  }
+
+  // --- WORK-026: repository provisioning extensions ---
+
+  async createRepository(_input: CreateRepositoryInput): Promise<CreateRepositoryResult> {
+    // Live GitHub REST write call. Production wiring (GITHUB_APP_PRIVATE_KEY
+    // + GITHUB_APP_ID + installation token minting via fetch) is a follow-on
+    // step. Until then, the write surface throws a deterministic error so
+    // callers can distinguish "not configured" from a runtime failure.
+    throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  async createBranch(_input: CreateBranchInput): Promise<CreateBranchResult> {
+    throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  async createPullRequest(_input: CreatePullRequestInput): Promise<CreatePullRequestResult> {
+    throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  async getBranch(_input: GetBranchInput): Promise<GetBranchResult> {
+    throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  async health(): Promise<'connected' | 'not-configured' | 'error' | 'test-mode'> {
+    // No credentials are wired into the production adapter yet — production
+    // wiring (GITHUB_APP_PRIVATE_KEY + GITHUB_APP_ID + GITHUB_INSTALLATION_ID)
+    // is a follow-on WORK-026 step. Until then, the adapter reports
+    // 'not-configured' so the runtime status endpoint surfaces the gap
+    // without throwing.
+    return 'not-configured';
   }
 }
 
