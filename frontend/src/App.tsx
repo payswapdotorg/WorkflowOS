@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import ProjectListPage from './pages/ProjectListPage';
 import ProjectOverviewPage from './pages/ProjectOverviewPage';
 import ArchitecturePage from './pages/ArchitecturePage';
+import ArchitectPage from './pages/ArchitectPage';
 import RequirementsPage from './pages/RequirementsPage';
 import WorkItemsPage from './pages/WorkItemsPage';
 import WorkItemPage from './pages/WorkItemPage';
@@ -31,6 +32,14 @@ export default function App() {
         element={
           <AppShell>
             <ProjectOverviewPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/projects/:projectId/architect"
+        element={
+          <AppShell>
+            <ArchitectPage />
           </AppShell>
         }
       />
