@@ -1,7 +1,7 @@
 import { LoadingState } from '@/components/domain/loading-state';
 import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,9 +9,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { StatusBadge } from '@/components/domain/status-badge';
 import { architecture, requirements, type Requirement, type AcceptanceCriterion } from '@/api/client';
-import { Plus } from 'lucide-react';
+import { Plus, ArrowRight } from 'lucide-react';
 export default function RequirementsPage() {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [criteria, setCriteria] = useState<Record<string, AcceptanceCriterion[]>>({});
   const [versionId, setVersionId] = useState<string | null>(null);
@@ -73,6 +74,16 @@ export default function RequirementsPage() {
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {/* Create Work Item CTA — only when requirements exist */}
+      {reqs.length > 0 && projectId && (
+        <div className="flex justify-end border-t pt-4">
+          <Button onClick={() => navigate(`/projects/${projectId}/work-items`)}>
+            Create Work Item
+            <ArrowRight className="ml-1 h-4 w-4" />
+          </Button>
         </div>
       )}
     </div>
