@@ -19,6 +19,10 @@ import { DefaultExecutionPromptBuilder } from '../../../src/modules/work-items/i
 import { DefaultExecutionTaskService } from '../../../src/modules/work-items/internal/execution-task-service.js';
 import { DefaultWorkflowEngine } from '../../../src/modules/workflows/internal/workflow-engine.js';
 import { DefaultReviewService } from '../../../src/modules/reviews/internal/review-service.js';
+import { DefaultVerificationService } from '../../../src/modules/verification/internal/verification-service.js';
+import { PgCiEvidenceIngestionRepository } from '../../../src/modules/github/internal/pg-ci-evidence-repository.js';
+import { DefaultCiEvidenceIngestionService } from '../../../src/modules/github/internal/ci-evidence-ingestion-service.js';
+import { PgGitHubInstallationRepository } from '../../../src/modules/github/internal/pg-github-repository.js';
 import { DefaultAgentGateway, FakeAgentAdapter } from '../../../src/modules/agents/internal/agent-gateway.js';
 import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-agent-repository.js';
 import { PgAgentProviderConfigRepository } from '../../../src/modules/agents/internal/pg-agent-provider-config-repository.js';
@@ -28,7 +32,9 @@ import {
   PgExecutionRecordRepository,
   PgExecutionEventRepository,
   PgExecutionHandoffRepository,
+  PgExecutionCallbackRepository,
 } from '../../../src/modules/agents/internal/pg-execution-repository.js';
+import { DefaultExecutionCallbackService } from '../../../src/modules/agents/internal/execution-callback-service.js';
 import { NativeExecutionProvider } from '../../../src/modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
 import { DefaultExecutionService } from '../../../src/modules/agents/internal/execution-service.js';
@@ -189,6 +195,16 @@ describe('WORK-027 — execution handoff security + tenant isolation', () => {
       handoffTtlMs: 15 * 60 * 1000,
       now: clock,
     });
+    // PR #30 review fix #2: callback TTL 10min < package TTL 60min so tests
+    // can distinguish token expiry from execution-window expiry.
+    const executionCallbackService = new DefaultExecutionCallbackService({
+      executionRecordRepository: executionRecordRepo,
+      callbackRepository: new PgExecutionCallbackRepository(stack.db.client),
+      auditService,
+      logger: stack.db.logger,
+      callbackTtlMs: 10 * 60 * 1000,
+      now: clock,
+    });
     const executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository: executionRecordRepo,
       eventRepository: new PgExecutionEventRepository(stack.db.client),
@@ -224,10 +240,49 @@ describe('WORK-027 — execution handoff security + tenant isolation', () => {
         executionService,
         agentProviderRegistryService,
       },
+      // PR #30 review fix #2: registered so the callback-token scoping tests
+      // can prove workflow/verification/review routes reject it (401 — the
+      // scoped token is consumed by NO route other than the events route).
+      verification: {
+        authorizationService: stack.authorizationService,
+        architectureRepository: stack.architectureRepository,
+        architectureVersionRepository: stack.architectureVersionRepository,
+        workItemRepository: stack.workItemRepository,
+        requirementRepository: stack.requirementRepository,
+        acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
+        verificationService: new DefaultVerificationService(
+          stack.db.client,
+          stack.requirementRepository,
+          stack.acceptanceCriterionRepository,
+          stack.architectureVersionRepository,
+          stack.workItemRepository,
+          stack.workItemRequirementRepository,
+          stack.workItemCriterionRepository,
+          new PgCiEvidenceIngestionRepository(stack.db.client),
+          stack.objectStore,
+          stack.db.logger,
+        ),
+        ciEvidenceIngestionService: new DefaultCiEvidenceIngestionService(
+          new PgCiEvidenceIngestionRepository(stack.db.client),
+          new PgGitHubInstallationRepository(stack.db.client),
+          stack.db.logger,
+        ),
+      },
+      reviews: {
+        authorizationService: stack.authorizationService,
+        architectureRepository: stack.architectureRepository,
+        architectureVersionRepository: stack.architectureVersionRepository,
+        workItemRepository: stack.workItemRepository,
+        reviewService,
+      },
       execution: {
         authorizationService: stack.authorizationService,
+        workItemRepository: stack.workItemRepository,
+        architectureRepository: stack.architectureRepository,
+        architectureVersionRepository: stack.architectureVersionRepository,
         executionRecordRepository: executionRecordRepo,
         executionHandoffService,
+        executionCallbackService,
         executionEventIngestionService,
       },
     });
@@ -498,6 +553,290 @@ describe('WORK-027 — execution handoff security + tenant isolation', () => {
     });
     expect(handoff.statusCode).toBe(409);
     expect((handoff.json() as { error: string }).error).toBe('not-external-execution');
+  });
+
+
+  // ------------------------------------------------------------------
+  // PR #30 review fix #1: execution LIST authorization (empty-list oracle).
+  // Authorization resolves WorkItem → ArchitectureVersion → Architecture →
+  // Project and runs BEFORE any execution query — even with zero executions.
+  // ------------------------------------------------------------------
+
+  it('execution list: cross-tenant Work Item with ZERO executions → 403 (no existence oracle)', async () => {
+    // Work item in Project B (created by user B).
+    const wiB = await stack.workItemRepository.create({
+      architectureVersionId: versionB.id,
+      workItemId: 'W27SEC-EMPTY-B',
+      title: 'W27SEC-EMPTY-B',
+      objective: 'Empty B',
+      scope: 'Empty B',
+    });
+    // User A lists B's work item → 403 EVEN THOUGH zero executions exist.
+    const res = await server.inject({
+      method: 'GET',
+      url: `/work-items/${wiB.id}/executions`,
+      headers: { 'x-api-key': KEY_A },
+    });
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error: string }).error).toBe('forbidden');
+  });
+
+  it('execution list: same-tenant Work Item with ZERO executions → 200 []', async () => {
+    const wi = await stack.workItemRepository.create({
+      architectureVersionId: versionA.id,
+      workItemId: 'W27SEC-EMPTY-A',
+      title: 'W27SEC-EMPTY-A',
+      objective: 'Empty A',
+      scope: 'Empty A',
+    });
+    const res = await server.inject({
+      method: 'GET',
+      url: `/work-items/${wi.id}/executions`,
+      headers: { 'x-api-key': KEY_A },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { executions: unknown[] }).executions).toEqual([]);
+  });
+
+  it('execution list: same-tenant Work Item WITH executions → 200 with data', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-LIST-WITH-DATA');
+    await createExternalExecution(KEY_A, wi.id, 'list-with-data');
+    const res = await server.inject({
+      method: 'GET',
+      url: `/work-items/${wi.id}/executions`,
+      headers: { 'x-api-key': KEY_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const { executions } = res.json() as { executions: Array<{ mode: string; status: string }> };
+    expect(executions.length).toBe(1);
+    expect(executions[0]!.mode).toBe('external');
+  });
+
+  it('execution list: unknown Work Item → 404 (still authorized shape)', async () => {
+    const res = await server.inject({
+      method: 'GET',
+      url: `/work-items/00000000-0000-0000-0000-000000000000/executions`,
+      headers: { 'x-api-key': KEY_A },
+    });
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { error: string }).error).toBe('work-item-not-found');
+  });
+
+  // ------------------------------------------------------------------
+  // PR #30 review fix #2: scoped execution CALLBACK credentials.
+  // ------------------------------------------------------------------
+
+  async function prepareExternalSession(executionId: string) {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/handoff`,
+      headers: { 'x-api-key': KEY_A },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json() as {
+      handoffToken: string;
+      callbackToken: string;
+      callbackExpiresAt: string;
+    };
+  }
+
+  it('prepare issues BOTH the one-time handoff token AND a scoped callback token', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-ISSUE');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-issue');
+    const prepared = await prepareExternalSession(executionId);
+    expect(prepared.handoffToken).toMatch(/^wfht_[0-9a-f]+$/);
+    expect(prepared.callbackToken).toMatch(/^wfct_[0-9a-f]+$/);
+    expect(new Date(prepared.callbackExpiresAt).getTime()).toBeGreaterThan(clockNow);
+    // The prepare response is the ONLY place the raw callback token appears.
+    // (The package itself contains no token — proven by the package scan test.)
+  });
+
+  it('callback token: posting events with x-callback-token (NO API key) succeeds and is multi-use', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-LIFECYCLE');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-lifecycle');
+    const { callbackToken } = await prepareExternalSession(executionId);
+
+    // started — callback token ONLY (no x-api-key header at all).
+    const started = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-callback-token': callbackToken, 'content-type': 'application/json' },
+      payload: { eventType: 'started', externalSessionRef: 'zai-session-cb' },
+    });
+    expect(started.statusCode).toBe(202);
+    expect((started.json() as { status: string }).status).toBe('running');
+
+    // progress — SAME token (multi-use by design; per-event idempotency via key).
+    const progress = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-callback-token': callbackToken, 'content-type': 'application/json' },
+      payload: { eventType: 'progress', output: 'halfway' },
+    });
+    expect(progress.statusCode).toBe(202);
+
+    // completed — SAME token, reports observations (never authority).
+    const completed = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-callback-token': callbackToken, 'content-type': 'application/json' },
+      payload: { eventType: 'completed', commitRef: 'def456' },
+    });
+    expect(completed.statusCode).toBe(202);
+    expect((completed.json() as { status: string }).status).toBe('completed');
+
+    const record = await executionRecordRepo.findByExecutionId(executionId);
+    expect(record!.externalSessionRef).toBe('zai-session-cb');
+  });
+
+  it('callback token: WRONG execution → 403 (scoped to exactly one execution)', async () => {
+    const wiA = await createReadyWorkItemA('W27SEC-CB-SCOPE-A');
+    const wiB = await createReadyWorkItemA('W27SEC-CB-SCOPE-B');
+    const executionA = await createExternalExecution(KEY_A, wiA.id, 'cb-scope-a');
+    const executionB = await createExternalExecution(KEY_A, wiB.id, 'cb-scope-b');
+    const { callbackToken: tokenB } = await prepareExternalSession(executionB);
+
+    // B's callback token used against A's events route → 403.
+    const res = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionA}/events`,
+      headers: { 'x-callback-token': tokenB, 'content-type': 'application/json' },
+      payload: { eventType: 'started' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error: string }).error).toBe('callback-token-invalid');
+  });
+
+  it('callback token: expired → 410 (token TTL shorter than execution window)', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-EXPIRED');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-expired');
+    const { callbackToken } = await prepareExternalSession(executionId);
+
+    // Callback TTL is 10min; package window is 60min. Advance 11min → the
+    // TOKEN is expired but the execution is still alive.
+    clockNow += 11 * 60 * 1000;
+
+    const res = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-callback-token': callbackToken, 'content-type': 'application/json' },
+      payload: { eventType: 'started' },
+    });
+    expect(res.statusCode).toBe(410);
+    expect((res.json() as { error: string }).error).toBe('callback-token-expired');
+  });
+
+  it('callback token: malformed → 403; a valid API key does NOT rescue an invalid callback header', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-MALFORMED');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-malformed');
+
+    const malformed = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-callback-token': 'garbage', 'content-type': 'application/json' },
+      payload: { eventType: 'started' },
+    });
+    expect(malformed.statusCode).toBe(403);
+    expect((malformed.json() as { error: string }).error).toBe('callback-token-invalid');
+
+    // Present-but-invalid callback token is rejected even WITH a valid API
+    // key — the header is the credential when present, never a bonus.
+    const withKey = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: {
+        'x-callback-token': 'garbage',
+        'x-api-key': KEY_A,
+        'content-type': 'application/json',
+      },
+      payload: { eventType: 'started' },
+    });
+    expect(withKey.statusCode).toBe(403);
+  });
+
+  it('callback token CANNOT be used on workflow / verification / review / package routes (scoped to events only)', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-SCOPE-ROUTES');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-scope-routes');
+    const { callbackToken } = await prepareExternalSession(executionId);
+    // The work item exists and user A owns it — but these calls present ONLY
+    // the scoped callback token (no API key), so they must 401.
+    const onlyCallback = {
+      'x-callback-token': callbackToken,
+      'content-type': 'application/json',
+    } as const;
+
+    // Workflow transition (would mutate workflow state).
+    const transition = await server.inject({
+      method: 'POST',
+      url: `/work-items/${wi.id}/workflow/transitions`,
+      headers: onlyCallback,
+      payload: { toState: 'ready' },
+    });
+    expect(transition.statusCode).toBe(401);
+
+    // Workflow begin-verification (would create verification state).
+    const verify = await server.inject({
+      method: 'POST',
+      url: `/work-items/${wi.id}/workflow/begin-verification`,
+      headers: onlyCallback,
+      payload: {},
+    });
+    expect(verify.statusCode).toBe(401);
+
+    // Verification route (would mutate verification state).
+    const verRun = await server.inject({
+      method: 'POST',
+      url: `/work-items/${wi.id}/verification-runs`,
+      headers: onlyCallback,
+      payload: {},
+    });
+    expect(verRun.statusCode).toBe(401);
+
+    // Review route (would create review state).
+    const review = await server.inject({
+      method: 'POST',
+      url: `/work-items/${wi.id}/reviews`,
+      headers: onlyCallback,
+      payload: { source: 'architect' },
+    });
+    expect(review.statusCode).toBe(401);
+
+    // Package redemption (handoff-token gated; callback token is worthless).
+    const pkg = await server.inject({
+      method: 'GET',
+      url: `/execution/${executionId}/package`,
+      headers: { 'x-callback-token': callbackToken },
+    });
+    expect(pkg.statusCode).toBe(401);
+
+    // Execution metadata read.
+    const meta = await server.inject({
+      method: 'GET',
+      url: `/execution/${executionId}`,
+      headers: { 'x-callback-token': callbackToken },
+    });
+    expect(meta.statusCode).toBe(401);
+
+    // Execution list (project read).
+    const list = await server.inject({
+      method: 'GET',
+      url: `/work-items/${wi.id}/executions`,
+      headers: { 'x-callback-token': callbackToken },
+    });
+    expect(list.statusCode).toBe(401);
+  });
+
+  it('API-key path (project.write) still works on the events route', async () => {
+    const wi = await createReadyWorkItemA('W27SEC-CB-APIKEY');
+    const executionId = await createExternalExecution(KEY_A, wi.id, 'cb-apikey');
+    const res = await server.inject({
+      method: 'POST',
+      url: `/execution/${executionId}/events`,
+      headers: { 'x-api-key': KEY_A, 'content-type': 'application/json' },
+      payload: { eventType: 'started' },
+    });
+    expect(res.statusCode).toBe(202);
+    expect((res.json() as { status: string }).status).toBe('running');
   });
 
   it('project B user cannot route project A work item executions through their own project context', async () => {

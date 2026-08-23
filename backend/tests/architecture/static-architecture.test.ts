@@ -3952,6 +3952,9 @@ describe('WORK-026 invariants — project runtime + autonomous implementation bo
       'DefaultExecutionEventIngestionService',
       'DefaultExecutionPromptBuilder',
       'DefaultExecutionTaskService',
+      // PR #30 review fix #2: scoped callback credentials.
+      'PgExecutionCallbackRepository',
+      'DefaultExecutionCallbackService',
     ];
     const missing: string[] = [];
     for (const svc of REQUIRED_SERVICES) {
@@ -4109,6 +4112,8 @@ describe('WORK-027 invariants — execution provider abstraction', () => {
     'execution-service.ts',
     'execution-handoff-service.ts',
     'execution-event-ingestion-service.ts',
+    // PR #30 review fix #2: scoped event-ingestion callback credentials.
+    'execution-callback-service.ts',
   ] as const;
 
   /** Strip block + line comments so checks match CODE, not prose in comments. */
@@ -4365,6 +4370,93 @@ describe('WORK-027 invariants — execution provider abstraction', () => {
     expect(indexSrc).toMatch(/execution:\s*\{/);
     expect(indexSrc).toMatch(/executionTaskService/);
     expect(indexSrc).toMatch(/executionService/);
+  });
+
+  // --- PR #30 review fix #1: execution list authorization ---
+
+  it('PR #30 fix #1: execution list route authorizes BEFORE querying (no empty-list oracle)', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution.route.ts'),
+      'utf8',
+    );
+    const section = routeSrc.match(
+      /app\.get\('\/work-items\/:workItemId\/executions'[\s\S]*?\n  \}\);/,
+    );
+    expect(section, 'executions list route').not.toBeNull();
+    const body = section![0];
+    // The established chain resolution must happen BEFORE authorization,
+    // which must happen BEFORE the execution query.
+    const resolveIdx = body.indexOf('resolveProjectForWorkItem');
+    const authzIdx = body.indexOf('requireProjectAuthorization');
+    const queryIdx = body.indexOf('listForWorkItem');
+    expect(resolveIdx, 'list route must resolve the project').toBeGreaterThan(-1);
+    expect(authzIdx, 'list route must authorize').toBeGreaterThan(-1);
+    expect(queryIdx, 'list route must query executions').toBeGreaterThan(-1);
+    expect(resolveIdx, 'resolve → authorize order').toBeLessThan(authzIdx);
+    expect(authzIdx, 'authorize → query order').toBeLessThan(queryIdx);
+    // The pre-fix bug: auth only ran when records.length > 0.
+    expect(body, 'no conditional auth on non-empty results').not.toMatch(
+      /records\.length > 0[\s\S]*requireProjectAuthorization/,
+    );
+  });
+
+  // --- PR #30 review fix #2: scoped execution callback credentials ---
+
+  it('PR #30 fix #2: callback tokens are hashed, short-lived, and scoped to exactly one execution', () => {
+    const svc = readAgentsExecutionFile('execution-callback-service.ts');
+    expect(svc).toMatch(/createHash\('sha256'\)/);
+    expect(svc).toMatch(/wfct_/);
+    expect(svc).toMatch(/callbackTtlMs/);
+    expect(svc).toMatch(/callback-token-invalid/);
+    expect(svc).toMatch(/callback-token-expired/);
+    // Scope: the token's executionRecordId must match the addressed execution.
+    const codeOnly = stripComments(svc);
+    expect(codeOnly).toMatch(/callback\.executionRecordId !== record\.id/);
+    // The Pg repository must NOT store a raw token column.
+    const repo = readAgentsExecutionFile('pg-execution-repository.ts');
+    expect(repo).not.toMatch(/raw_token/);
+  });
+
+  it('PR #30 fix #2: ONLY the events route accepts x-callback-token', () => {
+    const apiDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    for (const file of walkTs(apiDir)) {
+      const rel = relative(BACKEND_ROOT, file);
+      const src = readFileSync(file, 'utf8');
+      if (rel.endsWith('execution.route.ts')) {
+        // Within execution.route.ts the header may appear ONLY in the events
+        // handler — never in the package/handoff/list/get handlers.
+        const eventsSection = src.match(
+          /app\.post\('\/execution\/:executionId\/events'[\s\S]*?\n  \}\);\n\}/,
+        );
+        expect(eventsSection, 'events route').not.toBeNull();
+        expect(eventsSection![0]).toContain('x-callback-token');
+        const beforeEvents = src.slice(0, src.indexOf("app.post('/execution/:executionId/events'"));
+        expect(
+          stripComments(beforeEvents),
+          'no x-callback-token outside the events route',
+        ).not.toContain('x-callback-token');
+        continue;
+      }
+      expect(src, `${rel} must not read x-callback-token`).not.toContain('x-callback-token');
+    }
+  });
+
+  it('PR #30 fix #2: the external package returnCallback points at the scoped callback token, never an API key', () => {
+    const src = readAgentsExecutionFile('external-execution-provider.ts');
+    expect(src).toContain("auth: 'x-callback-token'");
+    // The old instruction (use the WorkflowOS API key) must be gone.
+    expect(src).not.toContain('with the WorkflowOS API key');
+    // The package itself never embeds a token value.
+    const codeOnly = stripComments(src);
+    expect(codeOnly).not.toMatch(/wfct_|wfht_/);
+  });
+
+  it('PR #30 fix #2: app.ts + index.ts wire the callback service into the execution route group', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/PgExecutionCallbackRepository/);
+    expect(appSrc).toMatch(/DefaultExecutionCallbackService/);
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/executionCallbackService/);
   });
 });
 

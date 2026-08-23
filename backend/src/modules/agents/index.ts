@@ -50,6 +50,12 @@ export type {
   IssuedExecutionHandoff,
   RedeemedExecutionPackage,
   ExecutionHandoffService,
+  // WORK-027 (PR #30 review fix #2): scoped execution callback credentials.
+  ExecutionCallbackRecord,
+  ExecutionCallbackRepository,
+  IssuedExecutionCallback,
+  ValidatedExecutionCallback,
+  ExecutionCallbackService,
   IngestExecutionEventInput,
   IngestedExecutionEvent,
   ExecutionEventIngestionService,

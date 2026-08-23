@@ -241,16 +241,27 @@ async function main(): Promise<void> {
         : {}),
       // WORK-027: /execution routes — the secure external-handoff + event
       // ingestion boundary. Wired when the execution repositories + services
-      // are present (DB-only composition).
+      // are present (DB-only composition). PR #30 review fix #1: the list
+      // route resolves WorkItem → project for authorization, so the work-item
+      // + architecture repositories are required; PR #30 fix #2 adds the
+      // scoped callback-token service.
       ...(app.deps.authorizationService &&
+      app.deps.workItemRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
       app.deps.executionRecordRepository &&
       app.deps.executionHandoffService &&
+      app.deps.executionCallbackService &&
       app.deps.executionEventIngestionService
         ? {
             execution: {
               authorizationService: app.deps.authorizationService,
+              workItemRepository: app.deps.workItemRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
               executionRecordRepository: app.deps.executionRecordRepository,
               executionHandoffService: app.deps.executionHandoffService,
+              executionCallbackService: app.deps.executionCallbackService,
               executionEventIngestionService: app.deps.executionEventIngestionService,
             },
           }

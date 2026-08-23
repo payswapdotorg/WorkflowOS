@@ -95,11 +95,15 @@ export class ExternalExecutionProvider implements ExecutionProvider {
       returnCallback: {
         eventsPath: `/execution/${task.executionId}/events`,
         eventTypes: ['started', 'progress', 'completed', 'failed'],
+        auth: 'x-callback-token',
         note:
-          'POST JSON events to this path with the WorkflowOS API key. Events ' +
-          'update ONLY the execution record — WorkflowOS observes authoritative ' +
-          'GitHub/CI/verification/review state through its own boundaries. ' +
-          'External execution can never declare MERGED/VERIFIED/PASS/APPROVED.',
+          'POST JSON events to this path with the scoped x-callback-token ' +
+          'header issued when the session was prepared (NOT a WorkflowOS API ' +
+          'key). The callback token is scoped to THIS execution and to event ' +
+          'ingestion only. Events update ONLY the execution record — ' +
+          'WorkflowOS observes authoritative GitHub/CI/verification/review ' +
+          'state through its own boundaries. External execution can never ' +
+          'declare MERGED/VERIFIED/PASS/APPROVED.',
       },
       expiration: expiresAt.toISOString(),
     };

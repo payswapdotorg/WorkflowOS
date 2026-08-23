@@ -38,7 +38,8 @@ import { PgImplementationContextRepository } from '../../src/modules/work-items/
 import { DefaultImplementationContextBuilder } from '../../src/modules/work-items/internal/implementation-context-builder.js';
 import { DefaultStartImplementationService } from '../../src/modules/work-items/internal/start-implementation-service.js';
 // WORK-027: execution provider abstraction internals.
-import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository } from '../../src/modules/agents/internal/pg-execution-repository.js';
+import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository, PgExecutionCallbackRepository } from '../../src/modules/agents/internal/pg-execution-repository.js';
+import { DefaultExecutionCallbackService } from '../../src/modules/agents/internal/execution-callback-service.js';
 import { NativeExecutionProvider } from '../../src/modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from '../../src/modules/agents/internal/external-execution-provider.js';
 import { DefaultExecutionService } from '../../src/modules/agents/internal/execution-service.js';
@@ -158,6 +159,13 @@ test.beforeAll(async () => {
     auditService,
     logger,
   });
+  // PR #30 review fix #2: scoped event-ingestion callback credentials.
+  const executionCallbackService = new DefaultExecutionCallbackService({
+    executionRecordRepository: executionRecordRepo,
+    callbackRepository: new PgExecutionCallbackRepository(stack.db.client),
+    auditService,
+    logger,
+  });
   const executionEventIngestionService = new DefaultExecutionEventIngestionService({
     executionRecordRepository: executionRecordRepo,
     eventRepository: new PgExecutionEventRepository(stack.db.client),
@@ -248,8 +256,12 @@ test.beforeAll(async () => {
     },
     execution: {
       authorizationService: stack.authorizationService,
+      workItemRepository: stack.workItemRepository,
+      architectureRepository: stack.architectureRepository,
+      architectureVersionRepository: stack.architectureVersionRepository,
       executionRecordRepository: executionRecordRepo,
       executionHandoffService,
+      executionCallbackService,
       executionEventIngestionService,
     },
   });

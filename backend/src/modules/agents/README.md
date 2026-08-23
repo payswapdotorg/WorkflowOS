@@ -28,6 +28,16 @@ execution modes — the mode is an implementation detail):
 - `internal/execution-handoff-service.ts` — `DefaultExecutionHandoffService`:
   issues + redeems ONE-TIME, short-lived, project-scoped handoff tokens
   (SHA-256 hashed at rest; lazy execution expiry with `EXECUTION_EXPIRED`).
+- `internal/execution-callback-service.ts` (PR #30 review fix #2) —
+  `DefaultExecutionCallbackService`: issues + validates SCOPED event-ingestion
+  callback credentials (`wfct_` prefix, SHA-256 hashed at rest, short-lived,
+  capped at the execution handoff window). Scoped to EXACTLY ONE execution and
+  to event ingestion ONLY — only `POST /execution/:id/events` reads
+  `x-callback-token`, so the token grants no other capability (no project
+  reads, no package reads, no workflow/verification/review mutation). Multi-use
+  by design (started → progress → completed); per-event idempotency is enforced
+  via `idempotencyKey`. The Companion extension never needs the user's
+  WorkflowOS API key.
 - `internal/execution-event-ingestion-service.ts` — external result ingestion
   (`started|progress|completed|failed`): updates ONLY the execution record.
   It NEVER mutates workflow/verification/review state, and native executions

@@ -43,7 +43,9 @@ import {
   PgExecutionRecordRepository,
   PgExecutionEventRepository,
   PgExecutionHandoffRepository,
+  PgExecutionCallbackRepository,
 } from '../../../src/modules/agents/internal/pg-execution-repository.js';
+import { DefaultExecutionCallbackService } from '../../../src/modules/agents/internal/execution-callback-service.js';
 import { NativeExecutionProvider } from '../../../src/modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
 import { DefaultExecutionService } from '../../../src/modules/agents/internal/execution-service.js';
@@ -189,6 +191,16 @@ describe('WORK-027 — execution provider abstraction', () => {
       handoffTtlMs: 15 * 60 * 1000,
       now: clock,
     });
+    // PR #30 review fix #2: callback TTL 10min < package TTL 60min so tests
+    // can distinguish token expiry from execution-window expiry.
+    const executionCallbackService = new DefaultExecutionCallbackService({
+      executionRecordRepository: executionRecordRepo,
+      callbackRepository: new PgExecutionCallbackRepository(stack.db.client),
+      auditService,
+      logger: stack.db.logger,
+      callbackTtlMs: 10 * 60 * 1000,
+      now: clock,
+    });
     const executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository: executionRecordRepo,
       eventRepository: executionEventRepo,
@@ -244,8 +256,12 @@ describe('WORK-027 — execution provider abstraction', () => {
       },
       execution: {
         authorizationService: stack.authorizationService,
+        workItemRepository: stack.workItemRepository,
+        architectureRepository: stack.architectureRepository,
+        architectureVersionRepository: stack.architectureVersionRepository,
         executionRecordRepository: executionRecordRepo,
         executionHandoffService,
+        executionCallbackService,
         executionEventIngestionService,
       },
     });

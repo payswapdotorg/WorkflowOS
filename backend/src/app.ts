@@ -161,18 +161,20 @@ import { DefaultAgentProviderRegistryService } from './modules/agents/internal/a
 import { DefaultAgentProviderRegistry } from './platform/default-agent-provider-registry.js';
 import type { AgentProviderConfigRepository } from '@modules/agents/index.js';
 // WORK-027: execution provider abstraction (/agents + /work-items).
-import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository } from './modules/agents/internal/pg-execution-repository.js';
+import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository, PgExecutionCallbackRepository } from './modules/agents/internal/pg-execution-repository.js';
 import { NativeExecutionProvider } from './modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from './modules/agents/internal/external-execution-provider.js';
 import { DefaultExecutionService } from './modules/agents/internal/execution-service.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
+import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
   ExecutionService,
   ExecutionRecordRepository,
   ExecutionHandoffService,
+  ExecutionCallbackService,
   ExecutionEventIngestionService,
 } from '@modules/agents/index.js';
 import type { ExecutionTaskService } from '@modules/work-items/index.js';
@@ -324,6 +326,8 @@ export interface AppDeps {
   executionService?: ExecutionService;
   /** WORK-027: one-time, short-lived handoff token boundary for external packages. */
   executionHandoffService?: ExecutionHandoffService;
+  /** WORK-027 (PR #30 fix #2): scoped event-ingestion callback token boundary. */
+  executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
 }
@@ -506,6 +510,7 @@ export async function buildApp(
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
+  let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
@@ -836,6 +841,15 @@ export async function buildApp(
       auditService,
       logger,
     });
+    // PR #30 review fix #2: scoped event-ingestion callback credentials —
+    // the ONLY credential the Companion extension needs (no API key).
+    const executionCallbackRepository = new PgExecutionCallbackRepository(database);
+    executionCallbackService = new DefaultExecutionCallbackService({
+      executionRecordRepository,
+      callbackRepository: executionCallbackRepository,
+      auditService,
+      logger,
+    });
     executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository,
       eventRepository: executionEventRepository,
@@ -1018,6 +1032,7 @@ export async function buildApp(
       executionTaskService,
       executionService,
       executionHandoffService,
+      executionCallbackService,
       executionEventIngestionService,
     },
     start: async () => {

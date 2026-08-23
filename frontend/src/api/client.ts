@@ -1333,15 +1333,26 @@ export interface ExternalExecutionPackageView {
   returnCallback: {
     eventsPath: string;
     eventTypes: string[];
+    auth: string;
     note: string;
   };
   expiration: string;
 }
 
+/**
+ * PR #30 review fix #2: preparing an external session issues BOTH (a) the
+ * ONE-TIME package handoff token and (b) a scoped event-ingestion callback
+ * token — the ONLY credential the future Companion extension needs. It never
+ * holds or obtains the user's general WorkflowOS API key. Both raw tokens are
+ * returned here exactly once (hashes are stored server-side) and must live in
+ * memory only.
+ */
 export interface IssuedHandoff {
   executionId: string;
   handoffToken: string;
   expiresAt: string;
+  callbackToken: string;
+  callbackExpiresAt: string;
 }
 
 export const execution = {

@@ -188,6 +188,8 @@ export interface ExternalExecutionPackage {
   readonly returnCallback: {
     readonly eventsPath: string;
     readonly eventTypes: readonly string[];
+    /** Credential mechanism: the scoped callback token header (NOT an API key). */
+    readonly auth: string;
     readonly note: string;
   };
   /** ISO-8601 instant after which the package is no longer redeemable. */
@@ -309,6 +311,77 @@ export interface ExecutionHandoffRepository {
   consume(id: string, consumedAt: Date): Promise<ExecutionHandoffRecord | null>;
 }
 
+// ---------------------------------------------------------------------
+// WORK-027 (PR #30 review fix #2): scoped execution CALLBACK credentials.
+//
+// The future Companion extension reports execution events with a CALLBACK
+// TOKEN — never the user's general WorkflowOS API key. Callback tokens are
+// scoped to exactly ONE execution + event ingestion ONLY, short-lived,
+// hashed at rest, multi-use (started→progress→completed are distinct
+// events; per-event idempotency is enforced via idempotencyKey), and are
+// consumed by NO route other than POST /execution/:id/events.
+// ---------------------------------------------------------------------
+
+/** Persisted callback credential row (hash only — never the raw token). */
+export interface ExecutionCallbackRecord {
+  readonly id: string;
+  readonly executionRecordId: string;
+  readonly tokenHash: string;
+  readonly expiresAt: Date;
+  readonly createdAt: Date;
+}
+
+export interface ExecutionCallbackRepository {
+  create(input: {
+    executionRecordId: string;
+    tokenHash: string;
+    expiresAt: Date;
+  }): Promise<ExecutionCallbackRecord>;
+  findLatestByHash(tokenHash: string): Promise<ExecutionCallbackRecord | null>;
+}
+
+/** Typed callback failure — the route maps `code` to an HTTP status. */
+export class ExecutionCallbackError extends Error {
+  constructor(
+    message: string,
+    readonly code:
+      | 'execution-not-found'
+      | 'not-external-execution'
+      | 'invalid-execution-state'
+      | 'callback-token-invalid'
+      | 'callback-token-expired'
+      | 'execution-expired',
+  ) {
+    super(message);
+    this.name = 'ExecutionCallbackError';
+  }
+}
+
+/** Issued callback credential: the RAW token is returned at preparation time only. */
+export interface IssuedExecutionCallback {
+  readonly executionId: string;
+  readonly callbackToken: string;
+  readonly expiresAt: Date;
+}
+
+/** A validated callback credential (scoped to exactly one execution). */
+export interface ValidatedExecutionCallback {
+  readonly executionId: string;
+  readonly executionRecordId: string;
+}
+
+/**
+ * Scoped execution callback boundary. Issues + validates the event-ingestion
+ * credential for exactly one external execution. This is the ONLY credential
+ * the Companion extension needs — it grants NO other capability (no project
+ * reads, no package reads, no workflow/verification/review mutation, no
+ * arbitrary project.write operations).
+ */
+export interface ExecutionCallbackService {
+  issue(executionId: string): Promise<IssuedExecutionCallback>;
+  validate(executionId: string, rawToken: string): Promise<ValidatedExecutionCallback>;
+}
+
 /** Typed handoff failure — the route maps `code` to an HTTP status. */
 export class ExecutionHandoffError extends Error {
   constructor(
@@ -340,7 +413,6 @@ export interface RedeemedExecutionPackage {
   readonly status: ExecutionState;
   readonly package: ExternalExecutionPackage;
 }
-
 /**
  * Handoff boundary: issues + redeems one-time, short-lived, project-scoped
  * tokens that gate ExternalExecutionPackage retrieval. Redeeming consumes the

@@ -27,6 +27,8 @@ import type {
   ExternalExecutionPackage,
   ExecutionState,
   ExecutionMode,
+  ExecutionCallbackRecord,
+  ExecutionCallbackRepository,
 } from './execution.types.js';
 
 const RECORD_COLUMNS = `
@@ -326,5 +328,57 @@ export class PgExecutionHandoffRepository implements ExecutionHandoffRepository 
       [id, consumedAt],
     );
     return result.rows[0] ? rowToHandoff(result.rows[0]) : null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WORK-027 (PR #30 review fix #2): scoped execution callback credentials.
+// ---------------------------------------------------------------------------
+
+interface CallbackRow {
+  id: string;
+  execution_record_id: string;
+  token_hash: string;
+  expires_at: Date;
+  created_at: Date;
+}
+
+function rowToCallback(row: CallbackRow): ExecutionCallbackRecord {
+  return {
+    id: row.id,
+    executionRecordId: row.execution_record_id,
+    tokenHash: row.token_hash,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+  };
+}
+
+export class PgExecutionCallbackRepository implements ExecutionCallbackRepository {
+  constructor(private readonly db: DatabaseClient) {}
+
+  async create(input: {
+    executionRecordId: string;
+    tokenHash: string;
+    expiresAt: Date;
+  }): Promise<ExecutionCallbackRecord> {
+    const result = await this.db.query<CallbackRow>(
+      `INSERT INTO wfos_execution_callbacks
+         (execution_record_id, token_hash, expires_at)
+       VALUES ($1, $2, $3)
+       RETURNING id, execution_record_id, token_hash, expires_at, created_at`,
+      [input.executionRecordId, input.tokenHash, input.expiresAt],
+    );
+    return rowToCallback(result.rows[0]!);
+  }
+
+  async findLatestByHash(tokenHash: string): Promise<ExecutionCallbackRecord | null> {
+    const result = await this.db.query<CallbackRow>(
+      `SELECT id, execution_record_id, token_hash, expires_at, created_at
+       FROM wfos_execution_callbacks
+       WHERE token_hash = $1
+       ORDER BY created_at DESC LIMIT 1`,
+      [tokenHash],
+    );
+    return result.rows[0] ? rowToCallback(result.rows[0]) : null;
   }
 }

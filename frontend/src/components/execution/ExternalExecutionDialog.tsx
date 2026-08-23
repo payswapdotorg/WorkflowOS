@@ -34,7 +34,14 @@ export interface ExternalExecutionDialogProps {
 type Stage =
   | { phase: 'prepared' }
   | { phase: 'busy'; action: string }
-  | { phase: 'package'; pkg: ExternalExecutionPackageView; status: string }
+  | {
+      phase: 'package';
+      pkg: ExternalExecutionPackageView;
+      status: string;
+      /** PR #30 fix #2: scoped event-ingestion credential (memory only). */
+      callbackToken: string;
+      callbackExpiresAt: string;
+    }
   | { phase: 'error'; message: string };
 
 export function ExternalExecutionDialog({
@@ -59,7 +66,15 @@ export function ExternalExecutionDialog({
       const issued = await execution.prepareHandoff(ex.executionId);
       // Redeem immediately (one-time) — the UI shows the package contents.
       const redeemed = await execution.getPackage(ex.executionId, issued.handoffToken);
-      setStage({ phase: 'package', pkg: redeemed.package, status: redeemed.status });
+      // PR #30 review fix #2: the prepare response also carries the scoped
+      // callback credential for event ingestion (never a WorkflowOS API key).
+      setStage({
+        phase: 'package',
+        pkg: redeemed.package,
+        status: redeemed.status,
+        callbackToken: issued.callbackToken,
+        callbackExpiresAt: issued.callbackExpiresAt,
+      });
       onStatusChange?.();
     } catch (err) {
       setStage({ phase: 'error', message: (err as Error).message });
@@ -155,7 +170,21 @@ export function ExternalExecutionDialog({
                 <span className="text-xs text-muted-foreground">Return callback</span>
                 <p className="font-mono text-xs">{stage.pkg.returnCallback.eventsPath}</p>
                 <p className="text-xs text-muted-foreground">
-                  events: {stage.pkg.returnCallback.eventTypes.join(' | ')}
+                  events: {stage.pkg.returnCallback.eventTypes.join(' | ')} · auth:{' '}
+                  {stage.pkg.returnCallback.auth}
+                </p>
+              </div>
+              <div>
+                <span className="text-xs text-muted-foreground">
+                  Callback credential (scoped to this execution's events only — never a
+                  WorkflowOS API key)
+                </span>
+                <p className="break-all rounded-md border bg-muted/40 p-2 font-mono text-xs">
+                  {stage.callbackToken}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  expires {new Date(stage.callbackExpiresAt).toLocaleString()} · single
+                  execution · event ingestion only · kept in memory only
                 </p>
               </div>
               <div>
