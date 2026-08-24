@@ -91,6 +91,21 @@ export interface BenchmarkRepository {
   getTrial(id: string): Promise<BenchmarkTrial | null>;
   listTrials(experimentId: string, opts?: { limit?: number; offset?: number }): Promise<{ trials: BenchmarkTrial[]; total: number }>;
   listTrialsByExperiment(experimentId: string): Promise<BenchmarkTrial[]>;
+  /**
+   * PR #35 review fix v2 / Blocker A: find every trial pointing at a given
+   * executionId. Used by `advanceTrialsForExecution(executionId)` — the
+   * event-driven re-advance path wired off the ExecutionEventIngestion
+   * `onExecutionTerminal` hook. Returns ALL matching trials across all
+   * experiments (an executionId is globally unique).
+   */
+  listTrialsByExecutionId(executionId: string): Promise<BenchmarkTrial[]>;
+  /**
+   * PR #35 review fix v2 / Blocker B: find every trial pointing at a given
+   * cloned workItemId. Used by `advanceTrialsForWorkItem(workItemId)` — the
+   * event-driven re-advance path wired off the WorkflowEngine `onTransition`
+   * hook when the work item reaches `verified` or a terminal failure state.
+   */
+  listTrialsByWorkItem(workItemId: string): Promise<BenchmarkTrial[]>;
   updateTrial(id: string, patch: BenchmarkTrialPatch): Promise<BenchmarkTrial | null>;
   countByCell(experimentId: string): Promise<{ provider: string; mode: 'native' | 'external'; count: number }[]>;
 
@@ -272,40 +287,84 @@ export interface BenchmarkTrialOrchestrator {
   /**
    * Run a single trial's setup + submission. Returns the trial in the
    * state the orchestrator reached:
-   *   - native mode    → 'completed' or 'failed' (synchronous).
+   *   - native mode    → 'running' (execution done, awaiting delivery phase —
+   *     the workflow engine drives the cloned work item through
+   *     pr_open → verifying → approved → merged → verified). If native
+   *     execution itself failed, 'failed' (terminal immediately — no
+   *     delivery for a failed execution).
    *   - external mode  → 'running' (handoff_ready — the companion + provider
-   *     adapter drive the rest; completion is observed asynchronously).
-   *   - infrastructure failure → 'failed'.
+   *     adapter drive the rest; completion is observed asynchronously via
+   *     the ExecutionEventIngestionService `onExecutionTerminal` hook, which
+   *     re-enqueues `benchmark.trial` for the trial).
+   *   - infrastructure failure → 'failed' (terminal immediately).
    *
-   * This method does NOT block on external completion. The
-   * {@link BenchmarkTrialRunner.runTrialJob} entrypoint drives the full
-   * lifecycle (including external completion polling + metric collection).
+   * PR #35 review fix v2 (Blocker A + Blocker B): this method NEVER blocks
+   * on external execution + NEVER marks a trial `completed` at submit time.
+   * Completion is observed only when the authoritative workflow state for
+   * the trial's cloned work item reaches `verified` (terminal success) or a
+   * terminal failure state (verification_failed / implementation_blocked).
+   * The {@link BenchmarkTrialRunner.runTrialJob} entrypoint drives the full
+   * lifecycle: orchestrator (queued → running) → execution phase → delivery
+   * phase, each phase event-driven (no bounded poll, no hardcoded timeout).
    */
   runTrial(trial: BenchmarkTrial): Promise<BenchmarkTrial>;
 }
 
 /**
- * PR #35 review fix #4: the benchmark trial lifecycle is EVENT-DRIVEN +
- * ASYNCHRONOUS. `startExperiment()` enqueues a `benchmark.trial` job per
- * queued trial and returns immediately (experiment 'running'). The
- * WorkerHost picks up each job and calls `runTrialJob(trialId)`, which:
+ * PR #35 review fix v2 (Blocker A + Blocker B): the benchmark trial
+ * lifecycle is FULLY EVENT-DRIVEN + ASYNCHRONOUS. `startExperiment()`
+ * enqueues a `benchmark.trial` job per queued trial and returns immediately
+ * (experiment 'running'). The WorkerHost picks up each job and calls
+ * `runTrialJob(trialId)`, which is a NON-BLOCKING, RE-ENTRANT state machine:
  *
- *   1. Runs the trial orchestrator (clone, branch, submit).
- *   2. For native: the trial is terminal → collect metrics.
- *      For external: poll the execution record until terminal
- *      (completed/failed/expired) → collect metrics.
- *   3. Marks the trial terminal (completed/failed).
- *   4. Checks experiment completion — if ALL trials are terminal,
- *      validates integrity + marks the experiment 'completed' +
- *      audits BENCHMARK_COMPLETED.
+ *   - trial.status == 'queued'   → run the orchestrator (sets trial
+ *     'running' + executionId; native submission that returns 'failed'
+ *     sets trial 'failed' terminal immediately). Re-check experiment
+ *     completion; return.
+ *   - trial.status == 'running'  → EXECUTION PHASE: for external mode,
+ *     read the authoritative execution record. If the record is not yet
+ *     terminal, RETURN (the trial will be re-advanced when the
+ *     ExecutionEventIngestionService `onExecutionTerminal` hook fires for
+ *     this executionId). If the record is terminal-failed, mark the trial
+ *     'failed' (engineering). If the record is terminal-completed, enter
+ *     the DELIVERY PHASE. For native mode, the execution outcome is
+ *     'completed' (orchestrator already submitted synchronously — if submit
+ *     had failed, the trial would be 'failed' terminal, not 'running').
+ *   - DELIVERY PHASE: read workflowEngine.getState(workItemId). If
+ *     'verified' → trial 'completed' + finalize (metrics+audit). If
+ *     'verification_failed' or 'implementation_blocked' → trial 'failed'
+ *     (engineering). Otherwise → RETURN (the trial will be re-advanced
+ *     when the WorkflowEngine `onTransition` hook fires for this workItemId
+ *     on a terminal transition).
  *
- * An experiment is NEVER 'completed' while any trial is still
- * 'running'/'handoff_ready'. This is the core correctness invariant
- * the review fix #4 enforces.
+ * NO bounded poll. NO hardcoded timeout. NO `externalTimeoutMs`. An
+ * experiment is NEVER marked 'completed' while ANY trial is still
+ * 'running'/'queued' (delivery-complete is the authority, NOT
+ * execution-complete).
  */
 export interface BenchmarkTrialRunner {
-  /** Advance a single trial to terminal state + check experiment completion. */
+  /** Advance a single trial through the next phase; finalize when terminal. */
   runTrialJob(trialId: string): Promise<void>;
+  /**
+   * PR #35 review fix v2 / Blocker A: re-advance every trial pointing at
+   * the given executionId. Called by the
+   * `ExecutionEventIngestionService.onExecutionTerminal` composition hook
+   * (wired in app.ts) when an external execution reaches a terminal state
+   * (completed / failed). Each matching trial is re-enqueued onto the
+   * `benchmark.trial` queue; the worker then re-enters `runTrialJob` and
+   * advances the trial through the delivery phase.
+   */
+  advanceTrialsForExecution(executionId: string): Promise<void>;
+  /**
+   * PR #35 review fix v2 / Blocker B: re-advance every trial pointing at
+   * the given cloned workItemId. Called by the
+   * `WorkflowEngine.onTransition` composition hook (wired in app.ts) when
+   * the work item reaches `verified` or a terminal failure state
+   * (`verification_failed` / `implementation_blocked`). Each matching
+   * trial is re-enqueued onto the `benchmark.trial` queue; the worker then
+   * re-enters `runTrialJob` and finalizes the trial.
+   */
+  advanceTrialsForWorkItem(workItemId: string): Promise<void>;
 }
 
 /** Exports experiment results as JSON or CSV (§40). */
@@ -333,15 +392,25 @@ export interface DefaultBenchmarkServiceDeps {
   readonly authorizationService: AuthorizationService;
   /** PR #35 review fix #4: background queue for async `benchmark.trial` jobs. */
   readonly queue: Queue;
-  /** PR #35 review fix #4: polls external execution records until terminal. */
+  /**
+   * PR #35 review fix v2 / Blocker A: authoritative execution record lookup
+   * — used by `runTrialJob`'s EXECUTION PHASE to read whether an external
+   * execution has reached a terminal state. NO bounded poll: if the record
+   * is non-terminal, the trial stays 'running' + the
+   * `onExecutionTerminal` composition hook (wired in app.ts) re-advances
+   * the trial when the ingestion service observes the terminal event.
+   */
   readonly executionRecordRepository: ExecutionRecordRepository;
   /**
-   * PR #35 review fix #4: max wall-clock ms to wait for an external execution
-   * to reach a terminal state (completed/failed/expired). Defaults to 30000.
-   * The job handler polls every 25ms; when the deadline elapses, the trial
-   * is marked failed (infrastructure, 'external-execution-timeout').
+   * PR #35 review fix v2 / Blocker B: authoritative workflow state lookup —
+   * used by `runTrialJob`'s DELIVERY PHASE to read whether the trial's
+   * cloned work item has reached `verified` (terminal success) or a
+   * terminal failure state. NO bounded poll: if the work item is still
+   * delivering, the trial stays 'running' + the `onTransition` composition
+   * hook (wired in app.ts) re-advances the trial when the workflow engine
+   * observes the terminal transition.
    */
-  readonly externalTimeoutMs?: number;
+  readonly workflowEngine: WorkflowEngine;
 }
 
 export type {

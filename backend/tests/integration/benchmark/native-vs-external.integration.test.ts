@@ -63,6 +63,7 @@ import { DefaultReviewService } from '../../../src/modules/reviews/internal/revi
 import { DefaultAuthorizationService } from '../../../src/modules/auth/internal/authorization-service.js';
 import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
 import type { BenchmarkService } from '../../../src/benchmark/index.js';
+import type { WorkflowEngine } from '../../../src/modules/workflows/index.js';
 
 describe('WORK-032 — native vs external execution benchmark', () => {
   let stack: TestAuthStack;
@@ -71,6 +72,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
   let queue: InMemoryQueue;
   let worker: WorkerHost;
   let executionEventIngestionService: DefaultExecutionEventIngestionService;
+  let workflowEngine: WorkflowEngine;
 
   const API_KEY = 'raw-key-benchmark-a';
   const SECRET_REF = 'WFOS_TEST_KEY_BENCHMARK_A';
@@ -131,9 +133,8 @@ describe('WORK-032 — native vs external execution benchmark', () => {
     });
     const integrityService = new DefaultBenchmarkIntegrityService({ repository: benchmarkRepository, logger: logger as never });
 
-    const workflowEngine = new DefaultWorkflowEngine(db, logger);
+    workflowEngine = new DefaultWorkflowEngine(db, logger);
     const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
-
     const verificationService = {
       listRunsForWorkItem: async () => [],
       listEvidenceForRun: async () => [],
@@ -246,7 +247,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       authorizationService,
       queue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine,
     });
     const handlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
@@ -339,9 +340,12 @@ describe('WORK-032 — native vs external execution benchmark', () => {
     });
 
     // Start the experiment + wait for the async trial lifecycle to complete
-    // (PR #35 review fix #4: startExperiment enqueues benchmark.trial jobs +
-    // returns immediately; the WorkerHost drives each trial to terminal).
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    // (PR #35 review fix v2: startExperiment enqueues benchmark.trial jobs +
+    // returns immediately; the WorkerHost drives each trial through the
+    // orchestrator → execution → delivery phases. driveExternalCompletions
+    // simulates the Companion for external trials; driveDeliveryLifecycle
+    // drives the workflow to `verified` for ALL trials (native + external).)
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const exp = await benchmarkService.getExperiment(experiment.id);
     expect(exp?.status).toBe('completed');
 
@@ -387,7 +391,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       ],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     expect(trials.length).toBeGreaterThanOrEqual(2);
 
@@ -413,7 +417,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
 
     const json = await benchmarkService.exportExperiment(experiment.id, 'json');
     expect(json.contentType).toBe('application/json');
@@ -444,7 +448,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
 
     const recommendation = await benchmarkService.recommend(experiment.id);
     expect(recommendation).not.toBeNull();

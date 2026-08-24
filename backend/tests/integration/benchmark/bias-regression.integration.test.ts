@@ -48,6 +48,7 @@ import { DefaultReviewService } from '../../../src/modules/reviews/internal/revi
 import { DefaultAuthorizationService } from '../../../src/modules/auth/internal/authorization-service.js';
 import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
 import type { BenchmarkService } from '../../../src/benchmark/index.js';
+import type { WorkflowEngine } from '../../../src/modules/workflows/index.js';
 
 describe('WORK-032 §39 — bias regression tests', () => {
   let stack: TestAuthStack;
@@ -56,6 +57,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
   let queue: InMemoryQueue;
   let worker: WorkerHost;
   let executionEventIngestionService: DefaultExecutionEventIngestionService;
+  let workflowEngine: WorkflowEngine;
 
   const API_KEY = 'raw-key-bias-a';
   const SECRET_REF = 'WFOS_TEST_KEY_BIAS_A';
@@ -90,7 +92,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       projectGitHubRepositoryRepository, githubAdapter, logger,
     });
     const integrityService = new DefaultBenchmarkIntegrityService({ repository: benchmarkRepository, logger });
-    const workflowEngine = new DefaultWorkflowEngine(db, logger);
+    workflowEngine = new DefaultWorkflowEngine(db, logger);
     const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
     const verificationService = { listRunsForWorkItem: async () => [], listEvidenceForRun: async () => [], listMappingsForRun: async () => [] } as never;
     const ciEvidenceIngestionRepository = new PgCiEvidenceIngestionRepository(db);
@@ -138,7 +140,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       trialOrchestrator, exportService, recommendationService, auditService, authorizationService,
       queue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine,
     });
     const handlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
@@ -193,7 +195,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       ],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     // §27: all trials share the snapshot's promptDigest.
     for (const t of trials) {
@@ -215,7 +217,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       ],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     // §28: all trials share the snapshot's baselineCommit.
     for (const t of trials) {
@@ -241,7 +243,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     const trial = trials[0]!;
     // The trial completed successfully (deterministic provider). To test the
@@ -271,7 +273,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       trials: [{ provider: 'fake', mode: 'external', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     const trial = trials[0]!;
     // External trials may require human intervention. The orchestrator records
@@ -297,7 +299,7 @@ describe('WORK-032 §39 — bias regression tests', () => {
       ],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id, { workflowEngine, queue });
     const { trials } = await benchmarkService.listTrials(experiment.id);
     expect(trials.length).toBeGreaterThanOrEqual(2);
     // §6/§7: each trial has its OWN cloned work item (independent workflow

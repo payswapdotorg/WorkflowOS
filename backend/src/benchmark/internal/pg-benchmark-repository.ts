@@ -388,6 +388,34 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows.map(toTrial);
   }
 
+  /**
+   * PR #35 review fix v2 / Blocker A: find every trial pointing at a given
+   * external executionId (called by `advanceTrialsForExecution` off the
+   * `onExecutionTerminal` composition hook). executionId is globally
+   * unique → at most a handful of trials match (typically one).
+   */
+  async listTrialsByExecutionId(executionId: string): Promise<BenchmarkTrial[]> {
+    const { rows } = await this.db.query<Row>(
+      `SELECT * FROM wfos_benchmark_trials WHERE execution_id = $1`,
+      [executionId],
+    );
+    return rows.map(toTrial);
+  }
+
+  /**
+   * PR #35 review fix v2 / Blocker B: find every trial pointing at a given
+   * cloned workItemId (called by `advanceTrialsForWorkItem` off the
+   * `onTransition` composition hook). workItemId is the trial's CLONE — a
+   * fresh work item per trial → at most one trial matches.
+   */
+  async listTrialsByWorkItem(workItemId: string): Promise<BenchmarkTrial[]> {
+    const { rows } = await this.db.query<Row>(
+      `SELECT * FROM wfos_benchmark_trials WHERE work_item_id = $1`,
+      [workItemId],
+    );
+    return rows.map(toTrial);
+  }
+
   async updateTrial(id: string, patch: BenchmarkTrialPatch): Promise<BenchmarkTrial | null> {
     const sets: string[] = [];
     const params: unknown[] = [id];

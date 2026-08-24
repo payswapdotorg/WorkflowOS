@@ -362,13 +362,6 @@ export interface BuildAppOptions {
   workerOptions?: WorkerHostOptions;
   /** Whether to start the worker host. The `api` role does not start it. */
   startWorker?: boolean;
-  /**
-   * PR #35 review fix #4: max wall-clock ms the benchmark trial job handler
-   * waits for an external execution to reach a terminal state. Defaults to
-   * 30000 (30s) in the service. Tests override this to a small value so
-   * timeout failures are fast.
-   */
-  benchmarkExternalTimeoutMs?: number;
 }
 
 export interface AppHandle {
@@ -576,11 +569,28 @@ export async function buildApp(
     // WORK-020: wire the workflow engine with the audit emitter so
     // production workflow transitions emit audit events. Without this,
     // transitions can execute without audit (issue 1 from PR #19 review).
+    // PR #35 review fix v2 / Blocker B: also wire an `onTransition`
+    // composition hook so the benchmark service can re-advance any trial
+    // awaiting the work item's terminal transition (verified /
+    // verification_failed / implementation_blocked). The hook is a
+    // forward-reference closure over the `benchmarkService` binding — by
+    // the time any transition fires (after buildApp returns), the
+    // benchmark service has been constructed + the binding is assigned.
+    // The hook is best-effort (wrapped in try/catch + log) so a callback
+    // failure NEVER breaks the core transition.
     const depService = new DefaultWorkItemDependencyService(database);
     workflowEngine = new DefaultWorkflowEngine(
       database, logger,
       (wiId: string) => depService.canBeginImplementation(wiId),
       auditService, // WorkflowAuditEmitter — workflow transitions emit audit events
+      async (workItemId, _from, to) => {
+        if (
+          benchmarkService &&
+          (to === 'verified' || to === 'verification_failed' || to === 'implementation_blocked')
+        ) {
+          await benchmarkService.advanceTrialsForWorkItem(workItemId);
+        }
+      },
     );
     // WORK-021: wire the notification service + register the
     // notification.send worker handler so production can deliver
@@ -877,11 +887,25 @@ export async function buildApp(
       auditService,
       logger,
     });
+    // PR #35 review fix v2 / Blocker A: wire the `onExecutionTerminal`
+    // composition hook so the benchmark service can re-advance any trial
+    // awaiting an external execution's terminal state (completed / failed).
+    // Forward-reference closure over `benchmarkService` — by the time any
+    // terminal ingestion event fires (after buildApp returns), the
+    // benchmark service has been constructed + the binding is assigned.
+    // The hook is best-effort (wrapped in try/catch + log inside the
+    // ingestion service) so a callback failure NEVER breaks the core
+    // ingestion operation.
     executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository,
       eventRepository: executionEventRepository,
       auditService,
       logger,
+      onExecutionTerminal: async (execId, _state) => {
+        if (benchmarkService) {
+          await benchmarkService.advanceTrialsForExecution(execId);
+        }
+      },
     });
 
     // --- WORK-032: Native vs External Execution Benchmark. ---
@@ -956,14 +980,21 @@ export async function buildApp(
       recommendationService: benchmarkRecommendationService,
       auditService: auditService!,
       authorizationService: authorizationService!,
-      // PR #35 review fix #4: async trial lifecycle. `startExperiment()`
-      // enqueues `benchmark.trial` jobs onto this queue + returns
-      // immediately; the WorkerHost picks them up + calls
-      // `runTrialJob(trialId)`. The executionRecordRepository is polled
-      // to observe external execution completion.
+      // PR #35 review fix v2 (Blocker A + Blocker B): the benchmark trial
+      // lifecycle is FULLY EVENT-DRIVEN + ASYNCHRONOUS.
+      // `startExperiment()` enqueues `benchmark.trial` jobs onto this queue
+      // + returns immediately; the WorkerHost picks them up + calls
+      // `runTrialJob(trialId)`. The trial is re-advanced by:
+      //   - onExecutionTerminal hook (wired above on the ingestion
+      //     service) → advanceTrialsForExecution(executionId) when an
+      //     external execution reaches a terminal state.
+      //   - onTransition hook (wired above on the workflow engine) →
+      //     advanceTrialsForWorkItem(workItemId) when the cloned work
+      //     item reaches `verified` or a terminal failure state.
+      // NO bounded poll. NO `externalTimeoutMs`.
       queue,
       executionRecordRepository: executionRecordRepository!,
-      externalTimeoutMs: options.benchmarkExternalTimeoutMs,
+      workflowEngine: workflowEngine!,
     });
 
     // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1,

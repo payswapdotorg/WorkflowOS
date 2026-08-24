@@ -326,6 +326,26 @@ export interface BenchmarkService {
   listSnapshots(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ snapshots: BenchmarkTaskSnapshot[]; total: number }>;
   /** Get a snapshot by id. */
   getSnapshot(snapshotId: string): Promise<BenchmarkTaskSnapshot | null>;
+  /**
+   * PR #35 review fix v2 / Blocker A: re-advance every trial pointing at
+   * the given external executionId. The composition root (app.ts) wires
+   * this as the `onExecutionTerminal` callback on
+   * `DefaultExecutionEventIngestionService` so that, when an external
+   * execution reaches a terminal state (completed / failed), the matching
+   * trials are re-enqueued onto `benchmark.trial` and the worker
+   * re-enters `runTrialJob` to drive the delivery phase. NO bounded poll.
+   */
+  advanceTrialsForExecution(executionId: string): Promise<void>;
+  /**
+   * PR #35 review fix v2 / Blocker B: re-advance every trial pointing at
+   * the given cloned workItemId. The composition root (app.ts) wires this
+   * as the `onTransition` callback on `DefaultWorkflowEngine` so that,
+   * when the work item reaches `verified` or a terminal failure state
+   * (`verification_failed` / `implementation_blocked`), the matching
+   * trials are re-enqueued onto `benchmark.trial` and the worker
+   * re-enters `runTrialJob` to finalize the trial. NO bounded poll.
+   */
+  advanceTrialsForWorkItem(workItemId: string): Promise<void>;
 }
 
 /** A snapshot preview (§44) — shows the canonical prompt + digest before freezing. */

@@ -30,8 +30,10 @@
  *      the existing workflow orchestrator + GitHub webhooks in production, or
  *      by a deterministic lifecycle driver in CI (§37/§38).
  *   9. Record the executionId / agentRunId / externalSessionRef on the trial.
- *  10. Mark the trial 'running' (external handoff) or 'completed'/'failed'
- *      (native synchronous).
+ *  10. Mark the trial 'running' (BOTH native + external — execution done,
+ *      awaiting delivery phase). If the native execution itself FAILED at
+ *      submit time, mark the trial 'failed' terminal immediately (there is
+ *      no delivery to await for a failed execution).
  *
  * Cross-trial contamination (§7): each trial gets its own cloned work item +
  * own branch. One trial's code/prompt changes/conversation/review findings
@@ -192,31 +194,42 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
       // loudly. Never submit execution without the isolated branch (the
       // agent would push to an unprotected/shared branch, violating §6 +
       // corrupting cross-trial isolation).
+      //
+      // PR #35 review fix v2 / Blocker C: a snapshot can outlive its
+      // project↔GitHub repository link (the link row may be removed after
+      // the snapshot was frozen). When `repoLink` is null/undefined, branch
+      // creation is IMPOSSIBLE → fail CLOSED. Never silently skip branch
+      // creation + proceed to submit (that would push to NO isolated
+      // branch, violating §6 + corrupting cross-trial state).
       const repoLink = await this.deps.projectGitHubRepositoryRepository.findByProject(snapshot.projectId);
-      if (repoLink) {
-        try {
-          await this.deps.githubAdapter.createBranch({
-            owner: repoLink.owner,
-            repository: repoLink.repository,
-            branchName: trial.trialBranch,
-            fromSha: trial.baselineCommit,
-            installationId: repoLink.installationId,
-          });
-        } catch (err) {
-          this.deps.logger.error('benchmark-trial-branch-create-failed', {
-            trialId: trial.id, branch: trial.trialBranch, error: (err as Error).message,
-          });
-          const failed = await this.deps.repository.updateTrial(trial.id, {
-            workItemId: cloned.id,
-            workOrderId: newOrder.id,
-            status: 'failed',
-            failureKind: 'infrastructure',
-            failureReason: `branch-creation-failed: branch=${trial.trialBranch} error=${(err as Error).message}`,
-            completedAt: new Date(),
-          });
-          if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
-          return failed;
-        }
+      if (!repoLink) {
+        this.deps.logger.error('benchmark-trial-repository-link-missing', {
+          trialId: trial.id, projectId: snapshot.projectId,
+        });
+        return this.failTrial(trial.id, 'infrastructure', 'repository-link-missing');
+      }
+      try {
+        await this.deps.githubAdapter.createBranch({
+          owner: repoLink.owner,
+          repository: repoLink.repository,
+          branchName: trial.trialBranch,
+          fromSha: trial.baselineCommit,
+          installationId: repoLink.installationId,
+        });
+      } catch (err) {
+        this.deps.logger.error('benchmark-trial-branch-create-failed', {
+          trialId: trial.id, branch: trial.trialBranch, error: (err as Error).message,
+        });
+        const failed = await this.deps.repository.updateTrial(trial.id, {
+          workItemId: cloned.id,
+          workOrderId: newOrder.id,
+          status: 'failed',
+          failureKind: 'infrastructure',
+          failureReason: `branch-creation-failed: branch=${trial.trialBranch} error=${(err as Error).message}`,
+          completedAt: new Date(),
+        });
+        if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
+        return failed;
       }
 
       // 7. Build the ExecutionTask (fresh ImplementationContext from the clone).
@@ -276,17 +289,32 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
         executionId: result.executionId,
       };
       if (trial.executionMode === 'native') {
-        // Native: execution completes synchronously; capture agentRunId.
+        // PR #35 review fix v2 / Blocker B: native execution completes
+        // synchronously inside `executionService.submit` — the AgentRun +
+        // commit are persisted by the time `submit` returns. HOWEVER, the
+        // trial does NOT mark itself `completed` here. The benchmark
+        // measures COMPLETED SOFTWARE (PR → CI → Verification → Review →
+        // Merge → VERIFIED), NOT completed execution. The orchestrator
+        // records the linkage + sets status='running' (execution done,
+        // awaiting the delivery phase). The trial is finalized to
+        // 'completed' ONLY when `workflowEngine.getState(workItemId)`
+        // returns `verified` — driven by the WorkflowEngine
+        // `onTransition` composition hook (event-driven, no polling).
+        //
+        // Exception: if the native execution itself FAILED (the provider
+        // returned `result.status === 'failed'`), the trial is terminal
+        // 'failed' immediately — there is no delivery to await for a
+        // failed execution.
         basePatch.agentRunId = agentRun?.id ?? null;
-        if (result.status === 'completed') {
-          basePatch.status = 'completed';
-          basePatch.completedAt = now;
-        } else if (result.status === 'failed') {
+        if (result.status === 'failed') {
           basePatch.status = 'failed';
           basePatch.failureKind = 'engineering';
           basePatch.failureReason = 'native-execution-failed';
           basePatch.completedAt = now;
         } else {
+          // 'completed' OR any non-terminal ExecutionState → trial
+          // 'running' (awaiting delivery). The job handler will read the
+          // authoritative execution record / workflow state to advance.
           basePatch.status = 'running';
         }
         // §18 native mode metadata.

@@ -50,7 +50,7 @@ import {
   DeterministicExternalBenchmarkProvider,
   createBenchmarkTrialJobHandler,
 } from '../../src/benchmark/index.js';
-import { driveExternalCompletions, awaitExperimentCompleted } from '../integration/benchmark/benchmark-async-helpers.js';
+import { driveExternalCompletions, driveDeliveryLifecycle, awaitExperimentCompleted } from '../integration/benchmark/benchmark-async-helpers.js';
 import type { FastifyInstance } from 'fastify';
 
 let stack: TestAuthStack;
@@ -59,6 +59,7 @@ let queue: InMemoryQueue;
 let worker: WorkerHost;
 let benchmarkService: DefaultBenchmarkService;
 let executionEventIngestionService: DefaultExecutionEventIngestionService;
+let workflowEngine: DefaultWorkflowEngine;
 let benchProjectId: string;
 let benchWorkItemId: string;
 
@@ -110,7 +111,20 @@ test.beforeAll(async () => {
   // Wire services.
   const auditService = new DefaultAuditService(db, logger);
   const authorizationService = new DefaultAuthorizationService(stack.membershipRepository, stack.rolePermissionRepository, stack.projectRepository, stack.projectAccessRepository);
-  const workflowEngine = new DefaultWorkflowEngine(db, logger);
+  // PR #35 review fix v2 / Blocker B: wire the workflow engine WITH the
+  // `onTransition` callback so the benchmark service is auto-re-advanced
+  // when a work item reaches `verified` or a terminal failure state. The
+  // callback is a forward-reference closure over `benchmarkService` (which
+  // is constructed below). By the time any transition fires (after
+  // `buildApp` returns), the binding is assigned.
+  workflowEngine = new DefaultWorkflowEngine(db, logger, undefined, undefined, async (workItemId, _from, to) => {
+    if (
+      benchmarkService &&
+      (to === 'verified' || to === 'verification_failed' || to === 'implementation_blocked')
+    ) {
+      await benchmarkService.advanceTrialsForWorkItem(workItemId);
+    }
+  });
   const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
   // PR #35 review fix: use a minimal verification stub — the benchmark
   // metric collector only reads listRunsForWorkItem / listEvidenceForRun /
@@ -158,10 +172,17 @@ test.beforeAll(async () => {
   const executionService = new DefaultExecutionService({ executionRecordRepository, providers: [detNative, detExternal], auditService, logger });
   // PR #35 review fix #4: the execution-event ingestion boundary — the test
   // simulates the Companion reporting external completion through this
-  // authoritative boundary (the worker's runTrialJob polls the execution
-  // record this updates).
+  // authoritative boundary. PR #35 review fix v2 / Blocker A: wire the
+  // `onExecutionTerminal` callback so the benchmark service is
+  // auto-re-advanced when an external execution reaches a terminal state.
+  // Forward-reference closure over `benchmarkService` (constructed below).
   executionEventIngestionService = new DefaultExecutionEventIngestionService({
     executionRecordRepository, eventRepository: executionEventRepository, auditService, logger,
+    onExecutionTerminal: async (execId, _state) => {
+      if (benchmarkService) {
+        await benchmarkService.advanceTrialsForExecution(execId);
+      }
+    },
   });
   const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
     repository: benchRepo, executionService, executionTaskService, agentRunRepository,
@@ -178,7 +199,7 @@ test.beforeAll(async () => {
     trialOrchestrator, exportService, recommendationService, auditService, authorizationService,
     queue,
     executionRecordRepository,
-    externalTimeoutMs: 30_000,
+    workflowEngine,
   });
   const handlers = buildHandlerRegistry([
     createBenchmarkTrialJobHandler(benchmarkService, logger),
@@ -250,14 +271,19 @@ test('WORK-032 benchmark end-to-end through the real browser UI', async ({ page 
   expect(experimentRes.experiment).toBeTruthy();
   const experimentId = experimentRes.experiment.id;
 
-  // 2. Start the experiment (async — PR #35 review fix #4 made
+  // 2. Start the experiment (async — PR #35 review fix v2 made
   // startExperiment enqueue benchmark.trial jobs + return immediately).
   // Drive the external trial's completion through the authoritative
-  // execution-event-ingestion boundary (simulates the Companion), then
-  // wait for the experiment to reach 'completed' (only when ALL trials
-  // are terminal).
+  // execution-event-ingestion boundary (simulates the Companion). The
+  // `onExecutionTerminal` callback (wired in beforeAll) auto-re-advances
+  // the trial to the delivery phase. Drive the delivery lifecycle for
+  // ALL trials (native + external) to `verified` (the `onTransition`
+  // callback auto-re-advances each trial; the manual re-enqueue in
+  // `driveDeliveryLifecycle` is idempotent). Then wait for the experiment
+  // to reach 'completed'.
   await api(`/benchmarks/${experimentId}/start`, 'POST');
   await driveExternalCompletions(benchmarkService, executionEventIngestionService, experimentId);
+  await driveDeliveryLifecycle(benchmarkService, workflowEngine, queue, experimentId);
   await awaitExperimentCompleted(benchmarkService, experimentId);
   const expFinal = await benchmarkService.getExperiment(experimentId);
   expect(expFinal?.status).toBe('completed');

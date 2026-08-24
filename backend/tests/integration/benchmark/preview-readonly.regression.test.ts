@@ -222,7 +222,7 @@ describe('PR #35 fix #1 — snapshot preview is read-only', () => {
       authorizationService,
       queue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine,
     });
     const handlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),

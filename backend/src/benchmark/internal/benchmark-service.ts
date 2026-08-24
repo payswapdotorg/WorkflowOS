@@ -39,7 +39,6 @@ import type {
   DefaultBenchmarkServiceDeps,
   BenchmarkTrialRunner,
 } from './benchmark.types.js';
-import type { ExecutionState } from '@modules/agents/index.js';
 import {
   BENCHMARK_HARNESS_VERSION,
   BENCHMARK_SCORING_VERSION,
@@ -216,11 +215,15 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   /**
-   * PR #35 review fix #4: the WorkerHost calls this for each `benchmark.trial`
-   * job. Advances a single trial to terminal state, collects metrics, and
-   * checks experiment completion. The experiment is marked 'completed' ONLY
-   * when EVERY trial is terminal — never while an external trial is still
-   * 'handoff_ready'/'running'.
+   * PR #35 review fix v2 (Blocker A + Blocker B): the WorkerHost calls this
+   * for each `benchmark.trial` job. NON-BLOCKING, RE-ENTRANT state machine
+   * that advances a single trial through the orchestrator → execution →
+   * delivery phases, then finalizes (collect metrics + audit + check
+   * experiment completion). The trial is re-advanced by event-driven
+   * composition hooks (`onExecutionTerminal` on the ingestion service +
+   * `onTransition` on the workflow engine — both wired in app.ts), NOT by
+   * bounded polling. There is NO `externalTimeoutMs` and NO
+   * `awaitExternalCompletion` poll.
    */
   async runTrialJob(trialId: string): Promise<void> {
     const trial = await this.deps.repository.getTrial(trialId);
@@ -228,68 +231,224 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       this.deps.logger.warn('benchmark.trial.trial-not-found', { trialId });
       return;
     }
-    // Only queued trials should be processed. A trial already running/
-    // completed/failed/unavailable is a no-op (the worker may redeliver).
-    if (trial.status !== 'queued') {
-      this.deps.logger.info('benchmark.trial.skipped-non-queued', { trialId, status: trial.status });
-      // Still re-check experiment completion in case this was a redelivery
-      // after the last trial already finalized.
+
+    // Terminal trials: re-check experiment completion (redelivery after the
+    // last trial finalized) + return. No further advancement.
+    if (
+      trial.status === 'completed' ||
+      trial.status === 'failed' ||
+      trial.status === 'unavailable'
+    ) {
+      this.deps.logger.info('benchmark.trial.skipped-terminal', {
+        trialId, status: trial.status,
+      });
       await this.checkExperimentCompletion(trial.experimentId);
       return;
     }
 
-    let current = trial;
-    try {
-      // 1. Run the orchestrator (clone, branch, submit).
-      current = await this.deps.trialOrchestrator.runTrial(trial);
-
-      // 2. For external mode, the orchestrator sets the trial to 'running'
-      //    (handoff_ready). Poll the execution record until terminal
-      //    (completed/failed/expired). The companion + provider adapter
-      //    drive the external completion; we observe it through the
-      //    authoritative execution record.
-      if (current.status === 'running' && trial.executionMode === 'external' && current.executionId) {
-        const finalState = await this.awaitExternalCompletion(current.executionId);
-        // Reload the trial (the orchestrator set it to running with executionId).
-        current = (await this.deps.repository.getTrial(trialId)) ?? current;
-        if (finalState === 'completed') {
-          current = (await this.deps.repository.updateTrial(trialId, {
-            status: 'completed',
-            completedAt: new Date(),
-          })) ?? current;
-        } else {
-          current = (await this.deps.repository.updateTrial(trialId, {
-            status: 'failed',
-            failureKind: finalState === 'expired' ? 'infrastructure' : 'engineering',
-            failureReason: `external-execution-${finalState}`,
-            completedAt: new Date(),
-          })) ?? current;
-        }
-      } else if (current.status === 'running' && trial.executionMode === 'native') {
-        // Native: the orchestrator should have set completed/failed. If it
-        // returned 'running' for native, treat as an infrastructure failure.
-        current = (await this.deps.repository.updateTrial(trialId, {
-          status: 'failed',
-          failureKind: 'infrastructure',
-          failureReason: 'native-execution-did-not-complete',
-          completedAt: new Date(),
-        })) ?? current;
+    // --- QUEUED → run the orchestrator (clone, branch, submit). ---
+    // The orchestrator sets the trial to 'running' (with executionId +
+    // workItemId). For native execution that itself FAILED at submit time,
+    // the orchestrator sets the trial 'failed' terminal immediately. Either
+    // way, this is NOT a blocking step — the orchestrator returns as soon
+    // as setup + submission is done.
+    if (trial.status === 'queued') {
+      try {
+        await this.deps.trialOrchestrator.runTrial(trial);
+      } catch (err) {
+        // Unexpected error during orchestration — fail the trial.
+        this.deps.logger.error('benchmark.trial.orchestration-failed', {
+          trialId, error: (err as Error).message,
+        });
+        await this.failTrialFromError(trial, err as Error);
+        return;
       }
-    } catch (err) {
-      // Unexpected error during orchestration — fail the trial.
-      this.deps.logger.error('benchmark.trial.orchestration-failed', {
-        trialId, error: (err as Error).message,
-      });
-      current = (await this.deps.repository.updateTrial(trialId, {
-        status: 'failed',
-        failureKind: 'infrastructure',
-        failureReason: (err as Error).message,
-        completedAt: new Date(),
-      })) ?? trial;
+      await this.checkExperimentCompletion(trial.experimentId);
+      return;
     }
 
-    // 3. Collect metrics from authoritative state (only after the trial
-    //    reached a terminal outcome — never while external is still running).
+    // --- RUNNING → EXECUTION PHASE → DELIVERY PHASE. ---
+    if (trial.status !== 'running') {
+      // Defensive: unknown status — log + skip.
+      this.deps.logger.warn('benchmark.trial.unknown-status', {
+        trialId, status: trial.status,
+      });
+      return;
+    }
+
+    // EXECUTION PHASE: determine whether the execution is terminal.
+    let executionOutcome: 'completed' | 'failed' | 'expired' | 'cancelled' | undefined;
+    if (trial.executionMode === 'external' && trial.executionId) {
+      const record = await this.deps.executionRecordRepository.findByExecutionId(trial.executionId);
+      if (!record) {
+        // The execution record vanished (shouldn't happen — it was created
+        // by executionService.submit at orchestrator time). Fail the trial
+        // (infrastructure) — but DO NOT block; finalize + return.
+        await this.finalizeTrial(trial, {
+          status: 'failed',
+          failureKind: 'infrastructure',
+          failureReason: 'execution-record-not-found',
+        });
+        return;
+      }
+      const status = record.status;
+      if (
+        status === 'completed' ||
+        status === 'failed' ||
+        status === 'expired' ||
+        status === 'cancelled'
+      ) {
+        executionOutcome = status;
+      } else {
+        // Non-terminal: the trial stays 'running' + waits for the
+        // `onExecutionTerminal` composition hook to re-enqueue
+        // `benchmark.trial` when the ingestion service observes a terminal
+        // event for this executionId. NO bounded poll.
+        return;
+      }
+    } else if (trial.executionMode === 'native') {
+      // Native execution is synchronous; the orchestrator already ran
+      // submit. If submit had failed, the trial would be 'failed' terminal
+      // (set by the orchestrator), so we would NOT reach this branch. The
+      // execution outcome for a 'running' native trial is 'completed'.
+      executionOutcome = 'completed';
+    } else {
+      // Defensive: trial has no executionId + isn't native. Shouldn't
+      // happen — leave the trial 'running' (a redelivery will re-enter).
+      return;
+    }
+
+    // If the execution failed → trial FAILED (engineering). Finalize +
+    // return (NO delivery phase for a failed execution).
+    if (executionOutcome !== 'completed') {
+      await this.finalizeTrial(trial, {
+        status: 'failed',
+        failureKind: 'engineering',
+        failureReason: `external-execution-${executionOutcome}`,
+      });
+      return;
+    }
+
+    // DELIVERY PHASE: read the authoritative workflow state for the
+    // trial's cloned work item. `verified` (terminal success) → trial
+    // 'completed'. Terminal failure states → trial 'failed' (engineering).
+    // Anything else → return (the `onTransition` composition hook will
+    // re-advance when the work item reaches a terminal state).
+    if (!trial.workItemId) {
+      // Defensive: trial has no cloned work item (shouldn't happen — the
+      // orchestrator set it). Fail the trial (infrastructure).
+      await this.finalizeTrial(trial, {
+        status: 'failed',
+        failureKind: 'infrastructure',
+        failureReason: 'trial-missing-work-item',
+      });
+      return;
+    }
+    const wf = await this.deps.workflowEngine.getState(trial.workItemId);
+    if (!wf) {
+      // Defensive: no workflow execution row (shouldn't happen — the
+      // orchestrator created one). Leave the trial 'running'; the
+      // `onTransition` hook (or a redelivery) will re-advance.
+      return;
+    }
+    if (wf.currentState === 'verified') {
+      await this.finalizeTrial(trial, { status: 'completed' });
+      return;
+    }
+    if (
+      wf.currentState === 'verification_failed' ||
+      wf.currentState === 'implementation_blocked'
+    ) {
+      await this.finalizeTrial(trial, {
+        status: 'failed',
+        failureKind: 'engineering',
+        failureReason: `delivery-${wf.currentState}`,
+      });
+      return;
+    }
+    // Still delivering (pr_open → verifying → architect_review → approved
+    // → merged, etc.). Wait for the `onTransition` composition hook.
+    return;
+  }
+
+  /**
+   * PR #35 review fix v2 / Blocker A: re-advance every trial pointing at
+   * the given external executionId. Wired in app.ts as the
+   * `onExecutionTerminal` callback on `DefaultExecutionEventIngestionService`
+   * — fires when an external execution reaches a terminal state
+   * (completed / failed). Each matching trial is re-enqueued onto the
+   * `benchmark.trial` queue; the worker re-enters `runTrialJob` and
+   * advances the trial through the delivery phase.
+   */
+  async advanceTrialsForExecution(executionId: string): Promise<void> {
+    const trials = await this.deps.repository.listTrialsByExecutionId(executionId);
+    if (trials.length === 0) return;
+    this.deps.logger.info('benchmark.trial.advance-for-execution', {
+      executionId, trialCount: trials.length,
+    });
+    for (const t of trials) {
+      // Only re-advance trials that are still 'running' (skip terminal —
+      // they would no-op anyway + skip queued — the orchestrator hasn't
+      // run yet).
+      if (t.status === 'running') {
+        await this.deps.queue.enqueue('benchmark.trial', { trialId: t.id });
+      }
+    }
+  }
+
+  /**
+   * PR #35 review fix v2 / Blocker B: re-advance every trial pointing at
+   * the given cloned workItemId. Wired in app.ts as the `onTransition`
+   * callback on `DefaultWorkflowEngine` — fires when the work item
+   * reaches `verified` or a terminal failure state
+   * (`verification_failed` / `implementation_blocked`). Each matching
+   * trial is re-enqueued onto the `benchmark.trial` queue; the worker
+   * re-enters `runTrialJob` and finalizes the trial.
+   */
+  async advanceTrialsForWorkItem(workItemId: string): Promise<void> {
+    const trials = await this.deps.repository.listTrialsByWorkItem(workItemId);
+    if (trials.length === 0) return;
+    this.deps.logger.info('benchmark.trial.advance-for-work-item', {
+      workItemId, trialCount: trials.length,
+    });
+    for (const t of trials) {
+      if (t.status === 'running') {
+        await this.deps.queue.enqueue('benchmark.trial', { trialId: t.id });
+      }
+    }
+  }
+
+  /**
+   * Finalize a trial: set terminal status (with failure fields when
+   * applicable), collect metrics from authoritative state, audit the
+   * outcome, + check experiment completion. Called ONLY from the
+   * EXECUTION-FAILED / DELIVERY-PHASE paths of `runTrialJob`. Trials that
+   * reached terminal state at orchestrator time (failed branch creation,
+   * failed native submit, etc.) re-enter `runTrialJob`, hit the early
+   * terminal-return path, + skip this method (the orchestrator already
+   * finalized the row).
+   */
+  private async finalizeTrial(
+    trial: BenchmarkTrial,
+    outcome:
+      | { status: 'completed' }
+      | { status: 'failed'; failureKind: 'infrastructure' | 'engineering' | 'configuration'; failureReason: string },
+  ): Promise<void> {
+    const now = new Date();
+    const patch: Parameters<typeof this.deps.repository.updateTrial>[1] =
+      outcome.status === 'completed'
+        ? { status: 'completed', completedAt: now }
+        : {
+            status: 'failed',
+            failureKind: outcome.failureKind,
+            failureReason: outcome.failureReason,
+            completedAt: now,
+          };
+    const updated = await this.deps.repository.updateTrial(trial.id, patch);
+    const current = updated ?? trial;
+
+    // Collect metrics from authoritative state (only after the trial reached
+    // a terminal outcome — never while still running).
     try {
       const metrics = await this.deps.metricCollector.collect(current);
       await this.deps.repository.upsertMetrics(metrics);
@@ -299,11 +458,11 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       }
     } catch (err) {
       this.deps.logger.warn('benchmark.trial.metrics-collection-failed', {
-        trialId, error: (err as Error).message,
+        trialId: trial.id, error: (err as Error).message,
       });
     }
 
-    // 4. Audit the trial outcome.
+    // Audit the trial outcome.
     await this.deps.auditService.write({
       projectId: trial.projectId,
       eventType: current.status === 'completed' ? 'TRIAL_COMPLETED' : 'TRIAL_FAILED',
@@ -314,34 +473,42 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       metadata: { status: current.status, provider: trial.provider, mode: trial.executionMode },
     });
 
-    // 5. Check experiment completion — marks the experiment 'completed' ONLY
-    //    when every trial is terminal.
+    // Check experiment completion — marks the experiment 'completed' ONLY
+    // when every trial is terminal.
     await this.checkExperimentCompletion(trial.experimentId);
   }
 
   /**
-   * Poll the execution record until it reaches a terminal state
-   * (completed/failed/expired/cancelled). Returns the terminal state, or
-   * 'expired' if the deadline elapses (timeout).
+   * Finalize a trial as 'failed' (infrastructure) from an unexpected
+   * orchestration error. Used by the QUEUED → orchestrator path when
+   * `trialOrchestrator.runTrial` throws (the orchestrator's own catch
+   * already handles its internal failures + persists a 'failed' row, but
+   * a defensive outer catch is required for unexpected throw-paths).
    */
-  private async awaitExternalCompletion(executionId: string): Promise<ExecutionState> {
-    const timeoutMs = this.deps.externalTimeoutMs ?? 30_000;
-    const pollIntervalMs = 25;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const record = await this.deps.executionRecordRepository.findByExecutionId(executionId);
-      if (!record) return 'failed';
-      if (
-        record.status === 'completed' ||
-        record.status === 'failed' ||
-        record.status === 'expired' ||
-        record.status === 'cancelled'
-      ) {
-        return record.status;
-      }
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+  private async failTrialFromError(trial: BenchmarkTrial, err: Error): Promise<void> {
+    const updated = await this.deps.repository.updateTrial(trial.id, {
+      status: 'failed',
+      failureKind: 'infrastructure',
+      failureReason: err.message,
+      completedAt: new Date(),
+    });
+    const current = updated ?? trial;
+    try {
+      const metrics = await this.deps.metricCollector.collect(current);
+      await this.deps.repository.upsertMetrics(metrics);
+    } catch {
+      // Swallow — best-effort metrics on an error path.
     }
-    return 'expired';
+    await this.deps.auditService.write({
+      projectId: trial.projectId,
+      eventType: 'TRIAL_FAILED',
+      actor: 'benchmark-orchestrator',
+      source: 'benchmark-service',
+      resourceType: 'benchmark_trial',
+      resourceId: trial.id,
+      metadata: { status: 'failed', reason: err.message },
+    });
+    await this.checkExperimentCompletion(trial.experimentId);
   }
 
   /**

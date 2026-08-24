@@ -342,7 +342,7 @@ describe('PR #35 fix #2 — compare authorization across tenants', () => {
       authorizationService,
       queue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine,
     });
     const handlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),

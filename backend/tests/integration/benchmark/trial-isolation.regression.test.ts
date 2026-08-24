@@ -87,6 +87,7 @@ import type {
   GetBranchInput,
   GetBranchResult,
 } from '../../../src/modules/github/internal/project-github-repository.types.js';
+import type { WorkflowEngine } from '../../../src/modules/workflows/index.js';
 
 /**
  * Configurable wrapper around FakeGitHubAdapter. Tests toggle
@@ -155,6 +156,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
   let executionEventIngestionService: DefaultExecutionEventIngestionService;
   let githubAdapter: ConfigurableGitHubAdapter;
   let countingExecutionService: CountingExecutionService;
+  let workflowEngine: WorkflowEngine;
 
   const API_KEY = 'raw-key-trial-isolation-a';
   const SECRET_REF = 'WFOS_TEST_KEY_TRIAL_ISOLATION_A';
@@ -209,7 +211,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       logger: logger as never,
     });
     const integrityService = new DefaultBenchmarkIntegrityService({ repository: benchmarkRepository, logger: logger as never });
-    const workflowEngine = new DefaultWorkflowEngine(db, logger);
+    workflowEngine = new DefaultWorkflowEngine(db, logger);
     const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
     const verificationService = {
       listRunsForWorkItem: async () => [],
@@ -308,7 +310,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       authorizationService,
       queue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine,
     });
     const handlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
@@ -441,7 +443,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       githubAdapter,
       logger: logger as never,
     });
-    const workflowEngine = new DefaultWorkflowEngine(db, logger);
+    const localWorkflowEngine = new DefaultWorkflowEngine(db, logger);
     const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
     const verificationService = {
       listRunsForWorkItem: async () => [],
@@ -452,7 +454,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
     const agentRunRepository = new PgAgentRunRepository(db);
     const metricCollector = new DefaultBenchmarkMetricCollector({
       repository: benchmarkRepository,
-      workflowEngine,
+      workflowEngine: localWorkflowEngine,
       verificationService,
       reviewService,
       pullRequestAssociationRepository: stack.pullRequestAssociationRepository,
@@ -496,7 +498,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       workItemCriterionRepository: stack.workItemCriterionRepository,
       // Orchestrator uses the throwing wrapper for replication.
       workItemDependencyRepository: throwingDepRepo as never,
-      workflowEngine,
+      workflowEngine: localWorkflowEngine,
       projectGitHubRepositoryRepository,
       githubAdapter,
       logger: logger as never,
@@ -525,7 +527,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       authorizationService,
       queue: localQueue,
       executionRecordRepository,
-      externalTimeoutMs: 30_000,
+      workflowEngine: localWorkflowEngine,
     });
     const localHandlers = buildHandlerRegistry([
       createBenchmarkTrialJobHandler(localBenchmarkService as never, logger as never),
@@ -547,7 +549,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
         trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
         createdBy: fixture.userId,
       });
-      await startAndAwaitExperiment(localBenchmarkService, executionEventIngestionService, experiment.id);
+      await startAndAwaitExperiment(localBenchmarkService, executionEventIngestionService, experiment.id, { workflowEngine: localWorkflowEngine, queue: localQueue });
 
       const { trials } = await localBenchmarkService.listTrials(experiment.id);
       expect(trials).toHaveLength(1);
@@ -599,7 +601,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment1.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment1.id, { workflowEngine, queue });
     const trials1 = (await benchmarkService.listTrials(experiment1.id)).trials;
     expect(trials1[0]!.status).toBe('failed');
     expect(trials1[0]!.failureReason).toContain('branch-creation-failed');
@@ -619,7 +621,7 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment2.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment2.id, { workflowEngine, queue });
     const trials2 = (await benchmarkService.listTrials(experiment2.id)).trials;
     expect(trials2[0]!.status).toBe('completed');
     expect(trials2[0]!.failureReason).toBeNull();
