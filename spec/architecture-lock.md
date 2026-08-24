@@ -76,3 +76,49 @@ The `/llm` module provides architect/LLM capabilities. The `/reviews` module own
 - Credentials and secrets are not ordinary application data.
 - Provider-specific LLM and agent behavior remains behind their gateways.
 - GitHub-specific behavior remains inside `/github`.
+
+## Forward-Evolution Invariants for the Next Architecture Version
+
+The following rules are accepted development direction for future architecture versions. They do not retroactively change the canonical v1.0 workflow above.
+
+### Unified lifecycle
+
+- WorkflowOS supports three project lifecycle modes: `BUILD`, `CONTINUE`, and `MAINTAIN`.
+- These modes use the same Work Item → Work Order → Execution → Verification → Review machinery.
+- A project created outside WorkflowOS may be onboarded and subsequently governed by the same lifecycle.
+
+### Native and external execution parity
+
+- `native` and `external` execution are first-class execution modes for all lifecycle types.
+- No lifecycle mode may be restricted to one execution mode by architecture design.
+- A logical execution may hand off between native and external execution without creating a second Work Item or workflow state machine.
+- Handoffs preserve authoritative context, execution identity, evidence, and auditability.
+
+### Model capability preservation
+
+- WorkflowOS must never deliberately reduce an eligible provider/model's native capabilities merely to equalize benchmark results.
+- Benchmarking must preserve observed performance differences.
+- Hard constraints such as authorization, subscription availability, quotas, privacy, security, provider capability, and project policy are eligibility filters, not quality penalties.
+
+### Execution selection
+
+- Execution selection must distinguish capability, eligibility, and performance.
+- Benchmark evidence may rank eligible candidates but cannot override hard constraints.
+- User and project preferences may influence selection after hard constraints are satisfied.
+
+### Existing-project truth model
+
+- Onboarding an existing repository must distinguish `observed`, `inferred`, `confirmed`, and `proposed` project knowledge.
+- WorkflowOS must not represent reconstructed/inferred architecture as historical authoritative fact without confirmation.
+
+### Continuous development and maintenance
+
+- Maintenance work, security work, dependency updates, compatibility fixes, architecture drift, technical debt, and operational regressions are governed Work Items.
+- No separate maintenance workflow engine may be introduced.
+- Proactive maintenance signals must enter the existing Work Item → Work Order → Execution pipeline.
+
+### Benchmark integrity
+
+- Comparative trials must use the same architecture, requirements, acceptance criteria, Work Order, implementation context, prompt digest, repository baseline, and verification requirements.
+- Benchmark systems must not suppress a better-performing provider to make another provider appear equivalent.
+- Results must expose the underlying measurements as well as any derived score.
