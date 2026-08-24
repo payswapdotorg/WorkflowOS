@@ -64,3 +64,122 @@ The main convergence point is the workflow engine, which consumes contracts from
 - Workflow state authority remains in `/workflows`.
 - Verification semantics remain in `/verification`.
 - GitHub-specific behavior remains in `/github`.
+
+## 4. IMPLEMENTED AUTONOMOUS EXECUTION EXTENSIONS
+
+The following work items extend the original frozen lifecycle without changing its authority model:
+
+WORK-024 → WORK-025
+WORK-025 → WORK-026
+WORK-026 → WORK-027
+WORK-027 → WORK-028
+WORK-028 → WORK-029
+WORK-029 → WORK-030
+WORK-030 → WORK-031
+
+```text
+WORK-025 Autonomous architecture/workspace
+        ↓
+WORK-026 Runtime + implementation context + provider configuration
+        ↓
+WORK-027 Native/external execution abstraction
+        ↓
+WORK-028 Companion extension
+        ↓
+WORK-029 Z.ai external adapter
+        ↓
+WORK-030 ChatGPT/Codex external adapter
+        ↓
+WORK-031 Claude Code external adapter
+```
+
+## 5. NEXT ROADMAP DEPENDENCIES
+
+### Evidence and execution policy
+
+WORK-031 → WORK-032
+WORK-032 → WORK-033
+
+`WORK-032` provides benchmark evidence. `WORK-033` defines fair benchmark modes and execution policy without suppressing provider capabilities.
+
+### Execution substrate
+
+WORK-033 → WORK-034
+WORK-034 → WORK-035
+WORK-035 → WORK-036
+WORK-036 → WORK-037
+
+```text
+WORK-034 Persistent Agent Sessions
+        ↓
+WORK-035 Workspace + Git Worktrees
+        ↓
+WORK-036 Tool Runtime
+        ↓
+WORK-037 Agent Policy + Permissions
+```
+
+### Existing-project understanding
+
+WORK-035 + WORK-036 + WORK-037 → WORK-038
+WORK-038 → WORK-039
+
+`WORK-038` establishes an explicit Project Baseline for repositories not originally created by WorkflowOS. `WORK-039` builds persistent repository/context intelligence from that baseline.
+
+### Continuous development and maintenance
+
+WORK-039 + WORK-032 → WORK-040
+WORK-039 + WORK-040 → WORK-041
+
+```text
+WORK-040 Continuous Development Planner
+WORK-041 Maintenance + Project Health Engine
+```
+
+Both feed governed Work Items rather than creating parallel workflow engines.
+
+### Cross-mode execution and adaptive routing
+
+WORK-034 + WORK-027 → WORK-042
+WORK-033 + WORK-037 + WORK-042 → WORK-043
+WORK-032 + WORK-033 + WORK-043 → WORK-044
+
+```text
+WORK-042 Cross-Mode Handoff
+        ↓
+WORK-043 Execution Eligibility + Constraints
+        ↓
+WORK-044 Adaptive Execution Router
+```
+
+Eligibility is evaluated before benchmark ranking. Subscription plans, quota, privacy, policy, capability, and availability are hard constraints; benchmark quality is a ranking signal only among eligible candidates.
+
+### Multi-agent intelligence
+
+WORK-034 + WORK-036 + WORK-044 → WORK-045
+WORK-045 + WORK-035 + WORK-037 → WORK-046
+WORK-032 + WORK-044 + WORK-046 → WORK-047
+
+```text
+WORK-045 Agent Roles
+        ↓
+WORK-046 Multi-Agent Delegation
+        ↓
+WORK-047 Agent Intelligence
+```
+
+Agent Intelligence may recommend roles/providers/models/modes from historical evidence, but must not override hard constraints or authoritative workflow/verification/review boundaries.
+
+### Product experience
+
+WORK-040 + WORK-041 + WORK-042 + WORK-044 → WORK-048
+WORK-041 + WORK-048 → WORK-049
+WORK-042 + WORK-043 + WORK-048 → WORK-050
+
+```text
+WORK-048 Developer Workbench
+WORK-049 Project Health + Maintenance UX
+WORK-050 Unified Execution UX
+```
+
+The UX layer is a consumer of the same authoritative execution/workflow contracts and must not introduce frontend-owned workflow state.
