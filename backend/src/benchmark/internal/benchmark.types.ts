@@ -85,6 +85,17 @@ export interface BenchmarkRepository {
   getExperiment(id: string): Promise<BenchmarkExperiment | null>;
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
+  /**
+   * PR #35 follow-up (idempotency): ATOMIC experiment-completion claim.
+   * Compare-and-swap: `UPDATE wfos_benchmark_experiments SET status='completed',
+   * completed_at=COALESCE(completed_at, NOW()) WHERE id=$1 AND status='running'
+   * RETURNING *`. Only the worker that wins (returns a row) may run integrity
+   * validation + write the BENCHMARK_COMPLETED audit event. The loser (null)
+   * skips — exactly-once experiment finalization (closes the duplicate
+   * BENCHMARK_COMPLETED audit + duplicate integrity-validation race that
+   * mirrors the trial-finalization race).
+   */
+  claimExperimentCompletion(id: string): Promise<BenchmarkExperiment | null>;
 
   // Trials (§5, §6)
   createTrial(input: BenchmarkTrialInsert): Promise<BenchmarkTrial>;
@@ -108,6 +119,104 @@ export interface BenchmarkRepository {
   listTrialsByWorkItem(workItemId: string): Promise<BenchmarkTrial[]>;
   updateTrial(id: string, patch: BenchmarkTrialPatch): Promise<BenchmarkTrial | null>;
   countByCell(experimentId: string): Promise<{ provider: string; mode: 'native' | 'external'; count: number }[]>;
+  /**
+   * PR #35 follow-up (idempotency): ATOMIC CLAIM of a queued trial by an
+   * orchestrator worker. Performs a compare-and-swap:
+   *
+   *   UPDATE wfos_benchmark_trials
+   *   SET status='running', lifecycle_phase='starting',
+   *       started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+   *   WHERE id = $1 AND lifecycle_phase = 'queued'
+   *   RETURNING *;
+   *
+   * Returns the claimed row ONLY for the worker that won the race. Returns
+   * `null` when another worker already claimed the trial (lifecycle_phase is
+   * no longer 'queued') OR the trial does not exist. The LOSER MUST NOT
+   * perform any orchestration side effects — the trial is already being
+   * advanced by the winner.
+   *
+   * This closes the `queued → running` claim race identified in the PR #35
+   * follow-up review: two deliveries of the same `benchmark.trial` job can
+   * no longer both observe `queued` and both proceed to clone / branch /
+   * submit.
+   */
+  claimTrialForSetup(id: string): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `starting → execution_wait` OR
+   * `starting → delivery_wait` transition, performed by the orchestrator
+   * worker that won the `claimTrialForSetup` race. Carries the linkage fields
+   * (workItemId, workOrderId, implementationContextId, executionId, etc.)
+   * that the orchestrator computed during setup.
+   *
+   * The `toPhase` is:
+   *   - 'execution_wait' — external mode: the orchestrator submitted, the
+   *     execution is handoff_ready, awaiting the `onExecutionTerminal`
+   *     ingestion hook.
+   *   - 'delivery_wait'  — native mode: the orchestrator submitted + the
+   *     synchronous execution terminal-completed; awaiting the workflow
+   *     `onTransition` hook.
+   *
+   * Guarded: `WHERE id=$1 AND lifecycle_phase='starting'`. Returns null if
+   * the trial is no longer `starting` (e.g. a concurrent terminal failure
+   * raced ahead — the orchestrator's linkage update is discarded, which is
+   * correct: the trial is already terminal).
+   */
+  advanceFromStarting(
+    id: string,
+    toPhase: 'execution_wait' | 'delivery_wait',
+    patch: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `execution_wait → delivery_wait`
+   * transition (external mode only). Performed by `runTrialJob` when the
+   * authoritative execution record is terminal-completed. Guarded:
+   * `WHERE id=$1 AND lifecycle_phase='execution_wait'`. Returns null if the
+   * trial is no longer `execution_wait` (already advanced by a concurrent
+   * delivery, or already terminal).
+   */
+  advanceToDeliveryWait(id: string): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): ATOMIC TERMINAL CLAIM. Performs a
+   * compare-and-swap from a non-terminal phase (`execution_wait` or
+   * `delivery_wait`) to a terminal phase (`completed` or `failed`).
+   *
+   * Returns the claimed row ONLY for the worker that won the terminal race.
+   * Returns `null` when the trial was already terminal (another worker
+   * finalized it) OR the trial is not in the expected `fromPhase`. The LOSER
+   * MUST NOT collect metrics / insert findings / write audit — those side
+   * effects are exactly-once by construction.
+   *
+   * This closes the `running → terminal` finalization race identified in the
+   * PR #35 follow-up review: two terminal-advancement jobs can no longer
+   * both finalize the same trial and both collect metrics + insert findings
+   * + write audit events.
+   */
+  claimTerminal(
+    id: string,
+    fromPhase: 'execution_wait' | 'delivery_wait',
+    outcome:
+      | { status: 'completed' }
+      | { status: 'failed'; failureKind: string; failureReason: string },
+  ): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `starting → failed` transition,
+   * performed by the orchestrator worker that won the setup claim when setup
+   * itself fails (dependency replication failure, branch creation failure,
+   * digest mismatch, native submit failure). Guarded:
+   * `WHERE id=$1 AND lifecycle_phase='starting'`. Returns null if the trial
+   * is no longer `starting` (already terminalized by a concurrent path —
+   * the failure update is discarded, which is correct). The optional patch
+   * carries whatever linkage / metadata the orchestrator had computed
+   * before the failure (workItemId / workOrderId / implementationContextId /
+   * executionId / agentRunId / mode metadata) — folded into the same atomic
+   * statement so the failed row is self-describing for forensics.
+   */
+  failFromStarting(
+    id: string,
+    failureKind: string,
+    failureReason: string,
+    patch?: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null>;
 
   // Metrics (§10)
   upsertMetrics(metrics: BenchmarkTrialMetricsInsert): Promise<BenchmarkTrialMetrics>;
@@ -174,6 +283,15 @@ export interface BenchmarkTrialInsert {
 
 export interface BenchmarkTrialPatch {
   readonly status?: BenchmarkTrial['status'];
+  /**
+   * PR #35 follow-up (idempotency): the explicit phase the application layer
+   * transitions the trial to. Mutated ONLY through the atomic claim methods
+   * (`claimTrialForSetup`, `advanceFromStarting`, `advanceToDeliveryWait`,
+   * `claimTerminal`, `failFromStarting`) so that every transition is a
+   * compare-and-swap. The generic `updateTrial` does NOT set this field
+   * (it is reserved for the atomic paths).
+   */
+  readonly lifecyclePhase?: BenchmarkTrial['lifecyclePhase'];
   readonly workItemId?: string | null;
   readonly executionId?: string | null;
   readonly agentRunId?: string | null;

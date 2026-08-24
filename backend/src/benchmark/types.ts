@@ -164,6 +164,20 @@ export interface BenchmarkTrial {
   readonly completedAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+  /**
+   * PR #35 follow-up (idempotency): the EXPLICIT, persisted phase lifecycle.
+   * Each transition is a compare-and-swap owned by the benchmark application
+   * layer so that duplicate `benchmark.trial` job delivery observes an
+   * already-claimed / already-advanced phase + produces NO side effects:
+   *
+   *   queued → starting → execution_wait → delivery_wait → completed | failed
+   *
+   * The `status` column is preserved for backward compat (UIs, recommendation
+   * cell statistics, the §30 failure_kind taxonomy). `lifecyclePhase` is the
+   * STRICTER companion the application layer uses for concurrency control.
+   * The two are updated together in the same statement.
+   */
+  readonly lifecyclePhase: BenchmarkTrialLifecyclePhase;
 }
 
 export type BenchmarkTrialStatus =
@@ -172,6 +186,37 @@ export type BenchmarkTrialStatus =
   | 'completed'
   | 'failed'
   | 'unavailable';
+
+/**
+ * PR #35 follow-up (idempotency): the explicit benchmark trial phase lifecycle.
+ * Every transition is an atomic compare-and-swap (WHERE id=$1 AND
+ * lifecycle_phase=$expected) so duplicate job delivery cannot duplicate side
+ * effects.
+ *
+ *   queued         — not yet claimed by an orchestrator worker.
+ *   starting       — an orchestrator worker has CLAIMED the trial (atomic
+ *                    queued→starting) and is performing clone / branch /
+ *                    submit. A duplicate delivery observes `starting` + NO-OPS
+ *                    (it must NOT re-run orchestration, NOT finalize the
+ *                    trial — the claiming worker is still mid-setup).
+ *   execution_wait — the orchestrator submitted (external: awaiting the
+ *                    `onExecutionTerminal` ingestion hook to report a
+ *                    terminal execution record; native never enters this
+ *                    phase — its execution is synchronous-completed, so the
+ *                    orchestrator advances starting→delivery_wait directly).
+ *   delivery_wait  — execution terminal-completed; awaiting the workflow
+ *                    engine `onTransition` hook to report `verified` (or a
+ *                    terminal failure state) for the cloned work item.
+ *   completed      — terminal success (workflow `verified`).
+ *   failed         — terminal failure (any failure_kind).
+ */
+export type BenchmarkTrialLifecyclePhase =
+  | 'queued'
+  | 'starting'
+  | 'execution_wait'
+  | 'delivery_wait'
+  | 'completed'
+  | 'failed';
 
 export type BenchmarkFailureKind = 'infrastructure' | 'engineering' | 'configuration';
 

@@ -5868,4 +5868,157 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     walk(join(FRONTEND_ROOT, 'src'));
     expect(violations, violations.join('\n')).toEqual([]);
   });
+
+  // ==========================================================================
+  // PR #35 follow-up (idempotency): the benchmark trial lifecycle MUST be
+  // exactly-once under duplicate job delivery + concurrent workers. The
+  // claim (queued→running) + finalization (running→terminal) transitions
+  // are atomic compare-and-swap on the persisted `lifecycle_phase` column.
+  // A duplicate delivery that loses the claim observes null + NO-OPS (never
+  // reruns orchestration / refinalizes). These static checks enforce the
+  // invariant at the source level so a future regression cannot silently
+  // reintroduce the unconditional `UPDATE ... WHERE id=$1` pattern.
+  // ==========================================================================
+
+  it('benchmark trial lifecycle migration 0027 exists (lifecycle_phase column)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    expect(existsSync(migrationPath), '0027_benchmark_trial_lifecycle_phase.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS lifecycle_phase/);
+    expect(src).toMatch(/CHECK \(lifecycle_phase IN/);
+    // The explicit phase set: queued → starting → execution_wait →
+    // delivery_wait → completed | failed.
+    expect(src).toMatch(/'queued'/);
+    expect(src).toMatch(/'starting'/);
+    expect(src).toMatch(/'execution_wait'/);
+    expect(src).toMatch(/'delivery_wait'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'failed'/);
+  });
+
+  it('benchmark migration 0027 MECHANICALLY ENFORCES the status↔lifecycle_phase invariant (NOT a dual-state model)', () => {
+    // The review explicitly warned: "The dual-state model is dangerous unless
+    // there is a mechanically enforced invariant between the two." Application-
+    // layer sync alone is insufficient — a future raw UPDATE touching only one
+    // column could silently introduce a divergent row (e.g.
+    // status='running', lifecycle_phase='completed') that the concurrency
+    // model does not know how to route. The DB itself MUST reject such rows.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    // The CHECK constraint exists + is named (so a grep can find it + so
+    // drop/replace is explicit).
+    expect(src).toMatch(/wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/CHECK \(/);
+    // The 6 canonical pairs the review specified. Every allowed (phase,
+    // status) combination must appear so the constraint is total — a row
+    // with any other pairing is physically rejected.
+    expect(src).toMatch(/lifecycle_phase = 'queued'\s+AND status = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'starting'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'completed'\s+AND status = 'completed'/);
+    expect(src).toMatch(/lifecycle_phase = 'failed'\s+AND status IN \('failed','unavailable'\)/);
+    // CRITICAL ORDERING: the CHECK constraint MUST be added AFTER the
+    // backfill UPDATEs. Otherwise the ADD would reject the pre-backfill
+    // divergent rows (status='running' with the default lifecycle_phase=
+    // 'queued'). Verify the constraint text appears after the last backfill
+    // UPDATE for 'unavailable' → 'failed'.
+    const backfillIdx = src.indexOf("status IN ('failed', 'unavailable') AND lifecycle_phase = 'queued'");
+    const constraintIdx = src.indexOf('ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant');
+    expect(backfillIdx, 'unavailable backfill UPDATE must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK constraint must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK must come AFTER the backfill (else ADD rejects pre-backfill rows)').toBeGreaterThan(backfillIdx);
+  });
+
+  it('benchmark trial claim is ATOMIC (claimTrialForSetup: queued→starting compare-and-swap)', () => {
+    // The orchestrator's runTrial MUST claim via claimTrialForSetup (atomic
+    // WHERE lifecycle_phase='queued' RETURNING *), NOT via an unconditional
+    // updateTrial. A lost claim returns null + the orchestrator MUST NO-OP
+    // (no clone / branch / submit).
+    const orchestratorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-trial-orchestrator.ts'), 'utf8');
+    expect(orchestratorSrc).toMatch(/claimTrialForSetup/);
+    expect(orchestratorSrc).toMatch(/claim-lost/);
+    // The orchestrator must NOT use an unconditional updateTrial for the
+    // initial claim (the old `UPDATE ... SET status='running' WHERE id=$1`
+    // pattern that caused the claim race).
+    expect(orchestratorSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'running'/);
+
+    // The repository's claimTrialForSetup MUST guard on lifecycle_phase='queued'.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    expect(repoSrc).toMatch(/claimTrialForSetup/);
+    // The atomic compare-and-swap: WHERE id=$1 AND lifecycle_phase='queued'.
+    const claimFn = repoSrc.match(/async claimTrialForSetup[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTrialForSetup must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = 'queued'/);
+    expect(claimFn![0]).toMatch(/lifecycle_phase = 'starting'/);
+  });
+
+  it('benchmark trial finalization is ATOMIC (claimTerminal: execution_wait|delivery_wait→completed|failed compare-and-swap)', () => {
+    // The service's finalizeTrial MUST use claimTerminal (atomic
+    // WHERE lifecycle_phase=$fromPhase RETURNING *). A lost claim returns
+    // null + the service MUST skip metrics / findings / audit (exactly-once
+    // side effects).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/claimTerminal/);
+    expect(serviceSrc).toMatch(/finalize-lost-race/);
+    // finalizeTrial must NOT use an unconditional updateTrial for the
+    // terminal transition (the old pattern that caused the finalize race).
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'completed'/);
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'failed'/);
+
+    // The repository's claimTerminal MUST guard on lifecycle_phase=$fromPhase.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const claimFn = repoSrc.match(/async claimTerminal[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTerminal must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = \$2/);
+  });
+
+  it('benchmark experiment completion is ATOMIC (claimExperimentCompletion: running→completed compare-and-swap)', () => {
+    // The experiment-completion transition (checkExperimentCompletion) MUST
+    // use claimExperimentCompletion (atomic WHERE status='running' RETURNING
+    // *). Only the winner runs integrity validation + writes the
+    // BENCHMARK_COMPLETED audit event (exactly-once experiment finalization).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/claimExperimentCompletion/);
+    // checkExperimentCompletion must NOT use an unconditional
+    // updateExperimentStatus(experimentId, 'completed', ...) (the old
+    // pattern that caused the duplicate BENCHMARK_COMPLETED audit race).
+    expect(serviceSrc).not.toMatch(/updateExperimentStatus\(experimentId,\s*'completed'/);
+
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const claimFn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND status = 'running'/);
+  });
+
+  it('benchmark trial runTrialJob routes by lifecycle_phase (NOT coarse status)', () => {
+    // The state machine MUST route by the explicit persisted phase so a
+    // duplicate delivery observes the already-advanced phase + no-ops. The
+    // 'starting' phase is the critical guard: a redelivery arriving while
+    // the orchestrator is mid-setup observes 'starting' + returns (it does
+    // NOT read executionId=null + finalize the active trial as
+    // 'execution-record-not-found').
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/trial\.lifecyclePhase/);
+    expect(serviceSrc).toMatch(/phase === 'starting'/);
+    expect(serviceSrc).toMatch(/phase === 'execution_wait'/);
+    expect(serviceSrc).toMatch(/phase === 'delivery_wait'/);
+    expect(serviceSrc).toMatch(/skipped-starting/);
+    // The old coarse `trial.status === 'running'` routing (which caused the
+    // mid-orchestration clobber race) must NOT be the primary router.
+    expect(serviceSrc).not.toMatch(/if \(trial\.status === 'running'\)/);
+  });
+
+  it('benchmark trial idempotency regression tests exist', () => {
+    // The duplicate-delivery + concurrent-worker regression tests MUST
+    // exist (the review required them before any merge).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'trial-idempotency.regression.test.ts');
+    expect(existsSync(testPath), 'trial-idempotency.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/duplicate runTrialJob on a QUEUED trial claims exactly once/);
+    expect(src).toMatch(/concurrent finalization on a DELIVERY_WAIT trial finalizes exactly once/);
+    expect(src).toMatch(/claimTrialForSetup compare-and-swap: exactly one winner/);
+    expect(src).toMatch(/mid-orchestration redelivery NO-OPS on the starting phase/);
+  });
 });
