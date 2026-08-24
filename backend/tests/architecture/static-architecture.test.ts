@@ -803,6 +803,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     //   - `export const xxxModule: ModuleContract & ... = { ... }` (the marker)
     //   - `export default`
     // Any `export { ConcreteClass } from '...'` (value re-export) is forbidden.
+    //
+    // WORK-033 exception: pure-data catalog constants (display + validation
+    // metadata only — no credentials, URLs, or DOM automation) MAY be exposed
+    // via the barrel so application-layer orchestrators (e.g. src/execution-policy)
+    // can compose provider metadata without inventing a second catalog. The
+    // allowlist enumerates these known pure-data catalogs.
+    const PURE_DATA_CATALOG_EXPORTS = new Set<string>([
+      'EXTERNAL_UI_CATALOG', // @modules/agents — display + validation metadata
+    ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
       const dir = moduleDir(name);
@@ -817,6 +826,7 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
         for (const n of names) {
           // The local binding (after `as`) is what matters.
           const localName = n.includes(' as ') ? n.split(' as ')[1]!.trim() : n;
+          if (PURE_DATA_CATALOG_EXPORTS.has(localName)) continue;
           violations.push(
             `src/modules/${dir}/index.ts value-exports "${localName}" — ` +
               `module barrels must expose only types/interfaces; concrete impls ` +
@@ -6836,5 +6846,340 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
     // ...and injected into the WorkerHost options (the boot sweep).
     expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
+  });
+});
+
+// ============================================================================
+// WORK-033 — Execution Policy & Fair Benchmarking architecture checks
+// (§21 fairness, §9 immutability, §22 append-only, §27 server-side actor)
+// ============================================================================
+// The execution-policy domain lives at src/execution-policy/ (application-layer
+// orchestrator OUTSIDE src/modules/, mirroring the §34 benchmark pattern). It
+// CONSUMES the 17 frozen domain modules via their public barrels. It NEVER
+// mutates workflow state, NEVER stores credentials, NEVER invents provider
+// capabilities, NEVER instantiates another ExecutionService. These checks
+// prove the boundary is intact (§1, §21, §34).
+// ============================================================================
+
+describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
+  const EXEC_POLICY_DIR = join(BACKEND_ROOT, 'src', 'execution-policy');
+  const EXEC_POLICY_INTERNAL = join(EXEC_POLICY_DIR, 'internal');
+  const MIGRATION_PATH = join(
+    BACKEND_ROOT,
+    'src',
+    'platform',
+    'postgres',
+    'migrations',
+    '0026_execution_policy.sql',
+  );
+
+  /** Strip line + block comments so TODO/NOTE text does not trip regex checks. */
+  function stripComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  // Strip SQL line comments (-- ...) and block comments for migration scans.
+  function stripSqlComments(src: string): string {
+    return src.replace(/--[^\n]*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readExecPolicyFiles(): { path: string; src: string }[] {
+    if (!existsSync(EXEC_POLICY_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(EXEC_POLICY_DIR);
+    return out;
+  }
+
+  // --- (a) execution-policy domain exists at src/execution-policy/ (with
+  //     index.ts + types.ts + internal/) --------------------------------------
+
+  it('execution policy domain exists at src/execution-policy/ with index.ts + types.ts + internal/', () => {
+    expect(existsSync(EXEC_POLICY_DIR), 'src/execution-policy/ must exist').toBe(true);
+    expect(existsSync(join(EXEC_POLICY_DIR, 'index.ts')), 'src/execution-policy/index.ts must exist').toBe(true);
+    expect(existsSync(join(EXEC_POLICY_DIR, 'types.ts')), 'src/execution-policy/types.ts must exist').toBe(true);
+    expect(existsSync(EXEC_POLICY_INTERNAL), 'src/execution-policy/internal/ must exist').toBe(true);
+  });
+
+  // --- (b) execution-policy is NOT a frozen module ---------------------------
+
+  it('execution-policy is NOT a frozen module (no dir under src/modules/; not in 17-module list)', () => {
+    // It must NOT appear under src/modules/ (it is an application-layer
+    // orchestrator, mirroring the §34 benchmark pattern — NOT the 18th module).
+    expect(existsSync(join(MODULES_DIR, 'execution-policy'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'execution-policy must not be in FROZEN_MODULE_NAMES').not.toContain('/execution-policy');
+    expect(FROZEN_MODULE_NAMES).toHaveLength(17);
+  });
+
+  // --- (c) execution-policy never imports any module's /internal/ ----------
+
+  it('execution-policy never imports any module internal/ (must use @modules/* public barrels)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      for (const specifier of extractSpecifiers(f.path)) {
+        const resolved = resolveSpecifier(f.path, specifier);
+        if (!resolved) continue;
+        // Forbidden: importing into src/modules/<m>/internal/ — must use the
+        // module's index.ts public barrel instead.
+        if (moduleOf(resolved) && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, f.path)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${moduleOf(resolved)}/internal; ` +
+              `use the module's index.ts public interface instead)`,
+          );
+        }
+        // Forbidden: importing the benchmark domain's internal/ — must use the
+        // public barrel `../benchmark/index.js` (§34 boundary).
+        if (specifier.includes('../benchmark/internal/') || specifier.includes('/benchmark/internal/')) {
+          violations.push(
+            `${relative(BACKEND_ROOT, f.path)} imports "${specifier}" -> ` +
+              `benchmark/internal (forbidden — must use ../../benchmark/index.js public barrel)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (d) execution-policy never stores credentials -------------------------
+
+  it('execution-policy never stores credentials (no secret/token/key/cookie columns in migration 0026)', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    const stripped = stripSqlComments(migrationSrc);
+    const violations: string[] = [];
+    for (const line of stripped.split('\n')) {
+      const trimmed = line.trim().toLowerCase();
+      if (trimmed === '') continue;
+      if (
+        /(?:^|\s)(?:secret|password|api_key|apikey|credential|private_key|cookie|access_token|refresh_token|callback_token|handoff_token)\b/.test(
+          trimmed,
+        )
+      ) {
+        // `notes` is allowed (free-text annotation column — not a credential).
+        if (trimmed.includes('notes') && !trimmed.includes('token')) continue;
+        violations.push(`credential-like column: ${trimmed}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (e) execution-policy never mutates workflow state ---------------------
+
+  it('execution-policy never mutates workflow state (no INSERT INTO wfos_workflow_* / no toState=merged|verified|approved)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/INSERT\s+INTO\s+wfos_workflow_executions/i.test(codeOnly)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_executions (forbidden — /workflows authority)`);
+      }
+      if (/INSERT\s+INTO\s+wfos_workflow_transitions/i.test(codeOnly)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_transitions (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]merged['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'merged' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]verified['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'verified' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]approved['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'approved' (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (f) execution-policy never creates another ExecutionService ---------
+
+  it('execution-policy never instantiates another ExecutionService (may import the TYPE; must NOT construct)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/\bnew\s+DefaultExecutionService\b/.test(codeOnly)) {
+        violations.push(`${f.path}: new DefaultExecutionService (forbidden — submit via the existing ExecutionService through the route layer)`);
+      }
+      if (/\bextends\s+\w*ExecutionService\b/.test(codeOnly)) {
+        violations.push(`${f.path}: extends *ExecutionService (forbidden — never subclass the execution service)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (g) execution-policy composes existing provider metadata ------------
+
+  it('execution-policy composes existing provider metadata (no second provider catalog)', () => {
+    const normalizerSrc = readFileSync(
+      join(EXEC_POLICY_INTERNAL, 'provider-capability-normalizer.ts'),
+      'utf8',
+    );
+    // Must reference ExecutionProviderInfo (the @modules/agents source of truth).
+    expect(normalizerSrc).toMatch(/ExecutionProviderInfo/);
+    // Must NOT declare a new provider catalog constant.
+    const codeOnly = stripComments(normalizerSrc);
+    expect(codeOnly, 'provider-capability-normalizer.ts must not declare a new catalog constant').not.toMatch(
+      /\bconst\s+[A-Z_]*CATALOG\b/,
+    );
+
+    // The agents barrel re-exports the WORK-033 surface-capability types so the
+    // execution-policy layer can compose them WITHOUT inventing capabilities.
+    const agentsBarrelSrc = readFileSync(
+      join(MODULES_DIR, 'agents', 'index.ts'),
+      'utf8',
+    );
+    expect(agentsBarrelSrc).toMatch(/EXTERNAL_UI_CATALOG/);
+    expect(agentsBarrelSrc).toMatch(/ProviderSurfaceCapabilities/);
+    expect(agentsBarrelSrc).toMatch(/SurfaceReadiness/);
+    expect(agentsBarrelSrc).toMatch(/ProviderSurfaceKind/);
+  });
+
+  // --- (h) execution-policy recommendation is evidence-backed --------------
+
+  it('execution-policy recommendation is evidence-backed (references historicalPerformance / observedQuality)', () => {
+    const recSrc = readFileSync(
+      join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'),
+      'utf8',
+    );
+    // The recommendation engine MUST consume historical evidence (§14) — never
+    // declare a winner string without evidence.
+    expect(recSrc).toMatch(/historicalPerformance/);
+    expect(recSrc).toMatch(/observedQuality/);
+    // The Why explanation must NOT be a bare "AI chose this" string — it must
+    // be structured (RecommendationReason with dimension + satisfied + detail).
+    expect(recSrc).toMatch(/RecommendationReason/);
+    expect(recSrc).toMatch(/dimension:/);
+    expect(recSrc).toMatch(/satisfied:/);
+    expect(recSrc).not.toMatch(/['"]AI chose this['"]/);
+  });
+
+  // --- (h2) §21 fairness integrity — BenchmarkMode + ToolPolicy shape ------
+
+  it('§21 fairness integrity — BenchmarkMode has both maximum_capability + controlled_comparison; ToolPolicy has noArtificialCaps', () => {
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    // BenchmarkMode MUST declare both literals (§8 — fairness depends on the
+    // distinction; maximum-capability mode vs. controlled-comparison mode).
+    expect(typesSrc).toMatch(/'maximum_capability'/);
+    expect(typesSrc).toMatch(/'controlled_comparison'/);
+    // ToolPolicy MUST include noArtificialCaps (§21 — the explicit fairness
+    // invariant: NEVER artificially cap a provider's tools solely for fairness).
+    expect(typesSrc).toMatch(/noArtificialCaps/);
+    expect(typesSrc).toMatch(/maximumCapability/);
+    expect(typesSrc).toMatch(/toolClassFixed/);
+    // DEFAULT_TOOL_POLICY must default to maximum-capability mode (no caps).
+    expect(typesSrc).toMatch(/DEFAULT_TOOL_POLICY/);
+    expect(typesSrc).toMatch(/maximumCapability:\s*true/);
+    expect(typesSrc).toMatch(/noArtificialCaps:\s*true/);
+  });
+
+  // --- (i) execution-policy route is wired ---------------------------------
+
+  it('execution-policy route is wired in server.ts + index.ts', () => {
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverSrc).toMatch(/executionPolicyRoutes/);
+    expect(serverSrc).toMatch(/ExecutionPolicyRouteDeps/);
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/executionPolicy:/);
+  });
+
+  // --- (j) execution-policy service is constructed in app.ts ----------------
+
+  it('execution-policy service is constructed in app.ts', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultExecutionPolicyService/);
+    expect(appSrc).toMatch(/PgExecutionPolicyRepository/);
+    expect(appSrc).toMatch(/executionPolicyService/);
+  });
+
+  // --- (k) migration 0026 + test-database truncates -------------------------
+
+  it('migration 0026 exists + test-database truncates execution-policy tables', () => {
+    expect(existsSync(MIGRATION_PATH), '0026_execution_policy.sql must exist').toBe(true);
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_policy_decisions/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_policies/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_preferences/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_provider_access_profiles/);
+  });
+
+  // --- (l) §9 policy immutability ------------------------------------------
+
+  it('§9 policy immutability — migration 0026 has frozen reject trigger + policy_version column + touch trigger', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    // policy_version column (monotonically increasing; bumped on every UPDATE).
+    expect(migrationSrc).toMatch(/policy_version\s+INTEGER\s+NOT\s+NULL/);
+    // wfos_execution_policy_touch — bumps policy_version + updated_at.
+    expect(migrationSrc).toMatch(/wfos_execution_policy_touch/);
+    expect(migrationSrc).toMatch(/BEFORE INSERT OR UPDATE ON wfos_execution_policies/);
+    // wfos_reject_frozen_execution_policy — rejects UPDATE on frozen policies.
+    expect(migrationSrc).toMatch(/wfos_reject_frozen_execution_policy/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE ON wfos_execution_policies/);
+  });
+
+  // --- (m) §22 decisions append-only ----------------------------------------
+
+  it('§22 decisions append-only — migration 0026 has wfos_execution_policy_decision_immutable trigger (BEFORE UPDATE + BEFORE DELETE)', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    expect(migrationSrc).toMatch(/wfos_execution_policy_decision_immutable/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE ON wfos_execution_policy_decisions/);
+    expect(migrationSrc).toMatch(/BEFORE DELETE ON wfos_execution_policy_decisions/);
+  });
+
+  // --- (n) §27 server-side actor -------------------------------------------
+
+  it('§27 server-side actor — route calls requireProjectAuthorization; does NOT read actor/createdBy/userId from req.body', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'),
+      'utf8',
+    );
+    // Every authorized route must call requireProjectAuthorization (the actor
+    // is derived server-side from the authenticated user — §27, PR #35 fix #5).
+    expect(routeSrc).toMatch(/requireProjectAuthorization/);
+    // Must NEVER read actor / createdBy / userId from the request body.
+    const codeOnly = stripComments(routeSrc);
+    expect(codeOnly, 'route must not read body.actor').not.toMatch(/body\.actor/);
+    expect(codeOnly, 'route must not read body.createdBy').not.toMatch(/body\.createdBy/);
+    expect(codeOnly, 'route must not read body.userId').not.toMatch(/body\.userId/);
+  });
+
+  // --- (o) execution-policy never imports provider SDKs ---------------------
+
+  it('execution-policy never imports provider SDKs or env secrets (no @octokit/openai/anthropic/zai-sdk; no process.env *_API_KEY/_SECRET/_TOKEN)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/from\s+['"]@octokit/.test(codeOnly)) {
+        violations.push(`${f.path}: imports @octokit (forbidden — use @modules/github)`);
+      }
+      if (/from\s+['"]openai['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: imports openai (forbidden — use @modules/llm)`);
+      }
+      if (/from\s+['"]anthropic['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: imports anthropic (forbidden — use @modules/agents)`);
+      }
+      if (/\bzai-sdk\b/.test(codeOnly)) {
+        violations.push(`${f.path}: imports zai-sdk (forbidden — provider SDKs are not for the policy layer)`);
+      }
+      if (/process\.env\.[A-Z_]*_API_KEY\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_API_KEY (forbidden — never reads secrets)`);
+      }
+      if (/process\.env\.[A-Z_]*_SECRET\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_SECRET (forbidden — never reads secrets)`);
+      }
+      if (/process\.env\.[A-Z_]*_TOKEN\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_TOKEN (forbidden — never reads secrets)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
   });
 });

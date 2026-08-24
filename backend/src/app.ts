@@ -187,6 +187,21 @@ import {
 } from './benchmark/index.js';
 import type { BenchmarkService, BenchmarkTrialRunner } from './benchmark/index.js';
 import type { OutboxRelay } from '@platform/index.js';
+// WORK-033: Execution Policy & Fair Benchmarking — application-layer
+// orchestrator at src/execution-policy/ (outside src/modules/ — mirrors the
+// §34 benchmark pattern: CONSUMES the 17 frozen modules via their public
+// barrels; NEVER mutates workflow state; NEVER stores credentials; NEVER
+// invents provider capabilities — composes ExecutionProviderInfo +
+// EXTERNAL_UI_CATALOG from @modules/agents).
+import {
+  DefaultExecutionPolicyService,
+  DefaultExecutionEligibilityService,
+  DefaultExecutionRecommendationService,
+  DefaultExecutionTaskProfileBuilder,
+  DefaultBenchmarkEvidenceProvider,
+  PgExecutionPolicyRepository,
+} from './execution-policy/index.js';
+import type { ExecutionPolicyService } from './execution-policy/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -352,6 +367,10 @@ export interface AppDeps {
   /** WORK-032: Native vs External Execution Benchmark service. Present when
    *  DB + execution + workflow + verification + review are configured. */
   benchmarkService?: BenchmarkService;
+  /** WORK-033: Execution Policy & Fair Benchmarking service. Present when
+   *  DB + execution + benchmark + agent-provider-registry are configured.
+   *  Advisory only — never bypasses ExecutionService.submit() (§34). */
+  executionPolicyService?: ExecutionPolicyService;
 }
 
 export interface BuildAppOptions {
@@ -537,6 +556,7 @@ export async function buildApp(
   // the boot sweep (once per process start) is what makes an orphaned
   // outbox autonomously recoverable after total process death.
   let benchmarkStartDeliveryRelay: OutboxRelay | undefined;
+  let executionPolicyService: ExecutionPolicyService | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -1040,6 +1060,34 @@ export async function buildApp(
       secretStore,
     );
 
+    // --- WORK-033: Execution Policy & Fair Benchmarking (application-layer
+    //     orchestrator at src/execution-policy/). Constructed AFTER the
+    //     benchmark service (evidence provider consumes the benchmark
+    //     repository) + the agent-provider-registry service (capability
+    //     source of truth). Advisory only — the caller (route layer) still
+    //     submits via ExecutionService.submit(); this layer never bypasses
+    //     it (§34). NEVER stores credentials; NEVER invents capabilities.
+    const executionPolicyRepository = new PgExecutionPolicyRepository(database);
+    const executionEvidenceProvider = new DefaultBenchmarkEvidenceProvider({
+      benchmarkRepository: benchmarkRepository,
+    });
+    const executionTaskProfileBuilder = new DefaultExecutionTaskProfileBuilder({
+      workItemRepository: workItemRepository!,
+      workOrderRepository: workOrderRepository!,
+      implementationContextRepository: implementationContextRepository!,
+      logger,
+    });
+    executionPolicyService = new DefaultExecutionPolicyService({
+      db: database,
+      logger,
+      repository: executionPolicyRepository,
+      eligibilityService: new DefaultExecutionEligibilityService(),
+      recommendationService: new DefaultExecutionRecommendationService(),
+      taskProfileBuilder: executionTaskProfileBuilder,
+      agentProviderRegistry: agentProviderRegistryService,
+      benchmarkEvidenceProvider: executionEvidenceProvider,
+    });
+
     // --- /runtime module: DefaultRuntimeStatusService (SUB-B). ---
     // Aggregates GitHub + Vercel + Architect + Agent status for a project.
     // The resolvers are closures over existing services; each catches its own
@@ -1212,6 +1260,9 @@ export async function buildApp(
       executionEventIngestionService,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
+      // WORK-033: execution-policy service (present when DB + benchmark +
+      // agent-provider-registry configured). Advisory only (§34).
+      executionPolicyService,
     },
     start: async () => {
       if (options.startWorker !== false) {

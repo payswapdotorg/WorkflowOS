@@ -25,7 +25,17 @@ export type {
   AgentProviderConfigRepository,
   AgentProviderConfigRecord,
   ExecutionProviderInfo,
+  // WORK-033: surface capability types re-exported so the execution-policy
+  // application-layer orchestrator (src/execution-policy/) can compose a
+  // ProviderCapabilityProfile from existing metadata WITHOUT inventing a
+  // second provider catalog (§6 — no invented capabilities).
+  ProviderSurfaceCapabilities,
+  ProviderSurfaceKind,
+  SurfaceReadiness,
+  // WORK-033: the external-UI provider catalog (display + validation metadata
+  // only — no credentials/URLs/DOM). Re-exported for the policy layer to read.
 } from './internal/agent-provider-registry.types.js';
+export { EXTERNAL_UI_CATALOG } from './internal/agent-provider-registry.types.js';
 // WORK-027: Execution provider abstraction — the provider-independent boundary
 // for executing a Work Order either NATIVELY (via the existing AgentGateway)
 // or EXTERNALLY (via a secure, one-time, short-lived handoff package for the
