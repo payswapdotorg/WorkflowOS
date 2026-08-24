@@ -38,7 +38,12 @@ import type {
   AgentProviderConfigRecord,
   ExecutionProviderInfo,
 } from './agent-provider-registry.types.js';
-import { EXTERNAL_UI_CATALOG } from './agent-provider-registry.types.js';
+import { EXTERNAL_UI_CATALOG, type ProviderSurfaceCapabilities } from './agent-provider-registry.types.js';
+
+/** Catalog surface capabilities for a provider (undefined → not cataloged). */
+export function catalogCapabilities(provider: string): ProviderSurfaceCapabilities | undefined {
+  return EXTERNAL_UI_CATALOG.find((c) => c.provider === provider)?.capabilities;
+}
 
 export class DefaultAgentProviderRegistryService {
   constructor(
@@ -178,6 +183,7 @@ export class DefaultAgentProviderRegistryService {
         model: native?.model ?? 'default',
         nativeApi: native ? 'ready' : 'not-configured',
         externalUi: 'available' as const,
+        capabilities: entry.capabilities,
       };
     });
 

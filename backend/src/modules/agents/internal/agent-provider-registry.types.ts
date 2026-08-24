@@ -136,6 +136,44 @@ export interface ExecutionProviderInfo {
   readonly nativeApi: 'ready' | 'not-configured';
   /** External UI availability — catalog providers are always 'available'. */
   readonly externalUi: 'available' | 'not-supported';
+  /**
+   * WORK-030 (PR #33 review): surface capabilities — distinguishes
+   * conversational Chat from the coding-agent surface (Codex) and declares
+   * which surface implementation Work Orders must use. Readiness may be
+   * 'unverified' (exists per provider docs, not live-verified); the
+   * Companion verifies the actual page surface at runtime.
+   */
+  readonly capabilities?: ProviderSurfaceCapabilities;
+}
+
+/**
+ * WORK-030 (PR #33 review): provider SURFACE capabilities. The current
+ * ChatGPT product distinguishes Chat (conversational), Work, and Codex (the
+ * dedicated coding environment for repositories/tests/engineering changes).
+ * WorkflowOS implementation Work Orders must execute on the provider's
+ * CODING surface where the provider model requires it — a conversational
+ * chat accepting the prompt is NOT implementation execution.
+ *
+ * Readiness semantics:
+ *   'ready'        — verified usable for its surface kind
+ *   'unverified'   — exists per provider documentation but NOT verified
+ *                    from a live signed-in session (fixture-only proof is
+ *                    deliberately insufficient); the Companion verifies the
+ *                    actual page surface at runtime and blocks otherwise
+ *   'not-available'— known absent for this provider
+ */
+export type ProviderSurfaceKind = 'conversational-chat' | 'coding-agent';
+export type SurfaceReadiness = 'ready' | 'unverified' | 'not-available';
+
+export interface ProviderSurfaceCapabilities {
+  readonly conversationalChat: SurfaceReadiness;
+  readonly codingAgent: SurfaceReadiness;
+  /**
+   * The surface implementation Work Orders MUST use for this provider. The
+   * Companion's implementation flow targets exactly this surface and never
+   * silently falls back to the other one.
+   */
+  readonly implementationSurface: ProviderSurfaceKind;
 }
 
 /**
@@ -148,12 +186,55 @@ export interface ExecutionProviderInfo {
  * WORK-028: 'fake' is the deterministic TEST-MODE external provider — the
  * Companion extension's built-in fake provider adapter claims it (mirrors
  * the FakeGitHubAdapter / FakeDeploymentProvider precedent: always
- * registered so dev/test/CI parity is preserved). Real provider adapters
- * (Z.ai = WORK-029, ChatGPT = WORK-030, Claude = WORK-031) are pending.
+ * registered so dev/test/CI parity is preserved).
+ *
+ * WORK-030 (PR #33 review): each entry declares SURFACE capabilities.
+ * Z.ai's implementation surface remains 'conversational-chat' (the
+ * WORK-029-reviewed design; ZCode detected but not automated). ChatGPT's
+ * implementation surface is 'coding-agent' (Codex at chatgpt.com/codex) —
+ * 'unverified' until a live signed-in verification pass; the Companion
+ * detects the actual surface at runtime and BLOCKS rather than falling back
+ * to conversational Chat. Claude is a WORK-031 placeholder.
  */
-export const EXTERNAL_UI_CATALOG: readonly { name: string; provider: string }[] = [
-  { name: 'Z.ai', provider: 'zai' },
-  { name: 'ChatGPT', provider: 'chatgpt' },
-  { name: 'Claude', provider: 'claude' },
-  { name: 'Fake (test)', provider: 'fake' },
+export const EXTERNAL_UI_CATALOG: readonly {
+  name: string;
+  provider: string;
+  capabilities: ProviderSurfaceCapabilities;
+}[] = [
+  {
+    name: 'Z.ai',
+    provider: 'zai',
+    capabilities: {
+      conversationalChat: 'ready',
+      codingAgent: 'unverified',
+      implementationSurface: 'conversational-chat',
+    },
+  },
+  {
+    name: 'ChatGPT',
+    provider: 'chatgpt',
+    capabilities: {
+      conversationalChat: 'ready',
+      codingAgent: 'unverified',
+      implementationSurface: 'coding-agent',
+    },
+  },
+  {
+    name: 'Claude',
+    provider: 'claude',
+    capabilities: {
+      conversationalChat: 'unverified',
+      codingAgent: 'unverified',
+      implementationSurface: 'coding-agent',
+    },
+  },
+  {
+    name: 'Fake (test)',
+    provider: 'fake',
+    capabilities: {
+      conversationalChat: 'ready',
+      codingAgent: 'ready',
+      implementationSurface: 'conversational-chat',
+    },
+  },
 ];

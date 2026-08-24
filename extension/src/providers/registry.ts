@@ -2,12 +2,12 @@
  * WorkflowOS Companion — ExternalProviderAdapterRegistry (§26).
  *
  * WORK-028 shipped the deterministic FAKE adapter (extension-page based, no
- * DOM automation). WORK-029 adds the REAL Z.ai web-product adapter; ChatGPT
- * (WORK-030) and Claude (WORK-031) remain placeholder metadata. This file
- * stays provider-neutral: no selectors, no provider-specific logic — the
- * import + register calls are the entire provider surface here.
+ * DOM automation). WORK-029 added the REAL Z.ai adapter; WORK-030 adds the
+ * REAL ChatGPT adapter; Claude (WORK-031) remains placeholder metadata. This
+ * file stays provider-neutral: no selectors, no provider-specific logic —
+ * the import + register calls are the entire provider surface here.
  */
-import type { ExternalProviderAdapter } from './types.js';
+import type { ExternalProviderAdapter, ProviderSurfaceCapabilities } from './types.js';
 
 /** Capability metadata row (concrete — never null providerId). */
 export interface ProviderInfo {
@@ -15,10 +15,14 @@ export interface ProviderInfo {
   readonly displayName: string;
   readonly supported: boolean;
   readonly adapterAvailable: boolean;
+  /** WORK-030 (PR #33 review): surface capabilities when the adapter declares them. */
+  readonly surfaces?: ProviderSurfaceCapabilities;
 }
 import { fakeProviderAdapter } from './fake/fake-provider-adapter.js';
 // WORK-029: the REAL Z.ai adapter (chat.z.ai, user's existing session).
 import { zaiProviderAdapter } from './zai/zai-provider-adapter.js';
+// WORK-030: the REAL ChatGPT adapter (chatgpt.com, user's existing session).
+import { chatgptProviderAdapter } from './chatgpt/chatgpt-provider-adapter.js';
 
 /** Placeholder metadata for providers whose adapters ship in later work items. */
 export interface PendingProvider {
@@ -28,8 +32,7 @@ export interface PendingProvider {
 }
 
 const PENDING_PROVIDERS: readonly PendingProvider[] = [
-  // WORK-029 shipped the Z.ai adapter — only these remain pending.
-  { providerId: 'chatgpt', displayName: 'ChatGPT', workItem: 'WORK-030' },
+  // WORK-029 shipped Z.ai; WORK-030 shipped ChatGPT — only Claude remains.
   { providerId: 'claude', displayName: 'Claude', workItem: 'WORK-031' },
 ];
 
@@ -41,6 +44,8 @@ export class ExternalProviderAdapterRegistry {
     this.register(fakeProviderAdapter);
     // WORK-029: the real Z.ai web-product adapter (chat.z.ai).
     this.register(zaiProviderAdapter);
+    // WORK-030: the real ChatGPT web-product adapter (chatgpt.com).
+    this.register(chatgptProviderAdapter);
   }
 
   register(adapter: ExternalProviderAdapter): void {
@@ -58,6 +63,7 @@ export class ExternalProviderAdapterRegistry {
       displayName: a.displayName,
       supported: true,
       adapterAvailable: true,
+      surfaces: a.describeSurfaces?.(),
     }));
     const pending = PENDING_PROVIDERS.map((p) => ({
       providerId: p.providerId,

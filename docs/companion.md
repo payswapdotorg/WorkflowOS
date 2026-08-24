@@ -45,6 +45,26 @@ the user's own provider session — with WorkflowOS retaining every authority
 4. Watch status on the Work Item page (Executions card) or in the
    Companion popup.
 
+### ChatGPT (WORK-030)
+
+The real ChatGPT adapter drives the **Codex coding environment at
+`https://chatgpt.com/codex`** — not conversational Chat. You must be **signed
+in to ChatGPT in the same browser** (the adapter uses your existing session;
+it never asks for or stores ChatGPT credentials or API keys). Flow: the
+Companion opens the chatgpt.com root (a fresh composer — never an existing
+conversation), verifies the WorkflowOS prompt digest, injects the prompt
+exactly once into the contenteditable composer (ProseMirror-safe path with
+normalized read-back verification), sends it, and observes progress using the
+product's own streaming indicator (`stop-button`) plus transcript stability.
+Repository/branch/commit/PR/test mentions in ChatGPT output are forwarded as
+**observations only** — WorkflowOS observes authoritative GitHub/CI/
+verification/review state independently. Blocked states surface with
+human-readable reasons in the popup (sign-in required, session unavailable,
+confirmation required, UI changed). Model/mode surfaces are detected but
+never auto-selected or substituted. The confidence-graded observed contract +
+selector strategy + troubleshooting live in
+`extension/src/providers/chatgpt/README.md`.
+
 ### Z.ai (WORK-029)
 
 The real Z.ai adapter drives `https://chat.z.ai` — you must be **signed in to

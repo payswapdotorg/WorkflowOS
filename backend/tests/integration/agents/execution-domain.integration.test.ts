@@ -813,6 +813,37 @@ describe('WORK-027 — execution provider abstraction', () => {
     expect(fake).toMatchObject({ nativeApi: 'ready', externalUi: 'available' });
   });
 
+  // WORK-030 (PR #33 review): surface capabilities — implementation Work
+  // Orders must run on the provider's CODING surface where required.
+  it('execution providers expose surface capabilities (conversational-chat vs coding-agent)', async () => {
+    const res = await server.inject({
+      method: 'GET',
+      url: '/agents/execution-providers',
+      headers: { 'x-api-key': API_KEY },
+    });
+    expect(res.statusCode).toBe(200);
+    const providers = (res.json() as { providers: Array<{ provider: string; capabilities?: unknown }> }).providers;
+    const zai = providers.find((p) => p.provider === 'zai');
+    expect(zai?.capabilities).toEqual({
+      conversationalChat: 'ready',
+      codingAgent: 'unverified',
+      implementationSurface: 'conversational-chat',
+    });
+    const chatgpt = providers.find((p) => p.provider === 'chatgpt');
+    expect(chatgpt?.capabilities).toEqual({
+      conversationalChat: 'ready',
+      // 'unverified' until a live signed-in verification pass — fixture-only
+      // proof is deliberately insufficient (PR #33 review).
+      codingAgent: 'unverified',
+      implementationSurface: 'coding-agent',
+    });
+    const fakeProvider = providers.find((p) => p.provider === 'fake');
+    expect(
+      (fakeProvider?.capabilities as { implementationSurface?: string } | undefined)
+        ?.implementationSurface,
+    ).toBe('conversational-chat');
+  });
+
   // ------------------------------------------------------------------
   // 7. Listing + audit
   // ------------------------------------------------------------------

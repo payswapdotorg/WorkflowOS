@@ -43,9 +43,10 @@ export function detectProvider(
   return {
     providerId: match.providerId,
     supported: true,
-    // WORK-029 shipped the Z.ai adapter; ChatGPT/Claude remain pending
-    // (WORK-030/031). The registry remains the capability source of truth.
-    adapterAvailable: match.providerId === 'zai',
+    // WORK-029 shipped the Z.ai adapter; WORK-030 shipped the ChatGPT
+    // adapter; Claude remains pending (WORK-031). The registry remains the
+    // capability source of truth.
+    adapterAvailable: ['zai', 'chatgpt'].includes(match.providerId),
   };
 }
 

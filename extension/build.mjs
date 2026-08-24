@@ -34,6 +34,8 @@ const entries = [
   { in: join(root, 'src/content/provider-detect.ts'), out: 'content/provider-detect' },
   // WORK-029: the Z.ai page bridge (thin; Z.ai logic lives in providers/zai).
   { in: join(root, 'src/content/zai-bridge.ts'), out: 'content/zai-bridge' },
+  // WORK-030: the ChatGPT page bridge (thin; logic in providers/chatgpt).
+  { in: join(root, 'src/content/chatgpt-bridge.ts'), out: 'content/chatgpt-bridge' },
   { in: join(root, 'src/ui/popup/popup.ts'), out: 'ui/popup/popup' },
   { in: join(root, 'src/ui/fake-provider/page.ts'), out: 'ui/fake-provider/page' },
 ];

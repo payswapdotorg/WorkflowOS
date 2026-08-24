@@ -4,12 +4,13 @@ import { providerRegistry } from '../src/providers/registry.js';
 
 describe('provider detection (§11) — generic, no automation', () => {
   it('recognizes supported provider domains', () => {
-    // WORK-029: the Z.ai adapter shipped — adapterAvailable is now true.
+    // WORK-029 shipped Z.ai; WORK-030 shipped ChatGPT — Claude (WORK-031)
+    // remains pending.
     expect(detectProvider(new URL('https://z.ai/chat'))).toMatchObject({
       providerId: 'zai', supported: true, adapterAvailable: true,
     });
     expect(detectProvider(new URL('https://chatgpt.com/c/abc'))).toMatchObject({
-      providerId: 'chatgpt', supported: true, adapterAvailable: false,
+      providerId: 'chatgpt', supported: true, adapterAvailable: true,
     });
     expect(detectProvider(new URL('https://claude.ai/chat/123'))).toMatchObject({
       providerId: 'claude', supported: true, adapterAvailable: false,
@@ -50,26 +51,38 @@ describe('provider detection (§11) — generic, no automation', () => {
   });
 });
 
-describe('adapter registry (§26) — WORK-028 fake + WORK-029 Z.ai; chatgpt/claude pending', () => {
-  it('registers the fake adapter AND the real Z.ai adapter (WORK-029)', () => {
+describe('adapter registry (§26) — fake + Z.ai (029) + ChatGPT (030); claude pending', () => {
+  it('registers the fake, Z.ai, and ChatGPT adapters', () => {
     expect(providerRegistry.get('fake')).not.toBeNull();
     expect(providerRegistry.get('zai')).not.toBeNull();
-    expect(providerRegistry.get('chatgpt')).toBeNull();
+    expect(providerRegistry.get('chatgpt')).not.toBeNull();
     expect(providerRegistry.get('claude')).toBeNull();
   });
 
-  it('surfaces Z.ai as adapter-ready; chatgpt/claude remain placeholders', () => {
+  it('surfaces Z.ai + ChatGPT as adapter-ready; claude remains a placeholder', () => {
     const providers = providerRegistry.listProviders();
-    const zai = providers.find((p) => p.providerId === 'zai');
-    expect(zai).toEqual({
+    expect(providers.find((p) => p.providerId === 'zai')).toEqual({
       providerId: 'zai',
       displayName: 'Z.ai',
       supported: true,
       adapterAvailable: true,
     });
+    expect(providers.find((p) => p.providerId === 'chatgpt')).toEqual({
+      providerId: 'chatgpt',
+      displayName: 'ChatGPT',
+      supported: true,
+      adapterAvailable: true,
+      // PR #33 review: implementation surface is the coding agent (Codex);
+      // readiness stays 'unverified' pending live verification.
+      surfaces: {
+        conversationalChat: 'ready',
+        codingAgent: 'unverified',
+        implementationSurface: 'coding-agent',
+      },
+    });
     const meta = providerRegistry.pendingProviders;
     expect(meta.find((m) => m.providerId === 'zai')).toBeUndefined(); // shipped
-    expect(meta.find((m) => m.providerId === 'chatgpt')?.workItem).toBe('WORK-030');
+    expect(meta.find((m) => m.providerId === 'chatgpt')).toBeUndefined(); // shipped
     expect(meta.find((m) => m.providerId === 'claude')?.workItem).toBe('WORK-031');
   });
 

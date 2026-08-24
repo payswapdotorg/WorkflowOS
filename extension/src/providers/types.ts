@@ -8,6 +8,31 @@
  * (extension-page based — no DOM scraping at all).
  */
 
+// --- WORK-030 (PR #33 review): provider SURFACE capability model -----------
+//
+// The ChatGPT product distinguishes Chat (conversational), Work, and Codex
+// (the coding environment). WorkflowOS implementation Work Orders must run
+// on the provider's CODING surface where the provider model requires it —
+// a conversational chat accepting the prompt is NOT implementation
+// execution, and the adapter never silently falls back between surfaces.
+
+export type ProviderSurfaceKind = 'conversational-chat' | 'coding-agent';
+export type SurfaceReadiness = 'ready' | 'unverified' | 'not-available';
+
+export interface ProviderSurfaceCapabilities {
+  readonly conversationalChat: SurfaceReadiness;
+  readonly codingAgent: SurfaceReadiness;
+  /** The surface implementation Work Orders MUST use for this provider. */
+  readonly implementationSurface: ProviderSurfaceKind;
+}
+
+/** A detected page surface (confidence-gated like every DOM decision). */
+export interface DetectedSurface {
+  readonly surface: 'conversational-chat' | 'coding-agent' | 'work' | 'unknown';
+  readonly confidence: 'high' | 'medium' | 'none';
+  readonly via: string;
+}
+
 /** One observation from a provider page (always untrusted data). */
 export interface ProviderObservation {
   readonly kind: 'progress' | 'completed' | 'failed' | 'blocked' | 'note';
@@ -77,6 +102,13 @@ export interface ExternalProviderAdapter {
   collectObservations(session: AdapterSession): Promise<ProviderObservation[]>;
   /** Stop observing / close provider resources for the session. */
   stop(session: AdapterSession, runtime: AdapterRuntime): Promise<void>;
+  /**
+   * WORK-030 (PR #33 review): declare this provider's surface capabilities
+   * (conversational vs coding-agent + which surface implementation uses).
+   * Optional + additive — adapters predating the surface model report the
+   * registry's catalog defaults.
+   */
+  describeSurfaces?(): ProviderSurfaceCapabilities;
 }
 
 export interface ProviderDetection {
