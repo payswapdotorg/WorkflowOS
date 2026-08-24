@@ -97,17 +97,17 @@ describe('ChatgptProviderAdapter (background side)', () => {
     );
   });
 
-  it('is registered; Z.ai + fake untouched; Claude still pending (§24/§34)', () => {
+  it('is registered; Z.ai + Claude + fake all present and preserved (§29)', () => {
     expect(providerRegistry.get('chatgpt')).toBeInstanceOf(ChatgptProviderAdapter);
     expect(providerRegistry.get('zai')).toBeInstanceOf(ZaiProviderAdapter); // preserved
     expect(providerRegistry.get('fake')).not.toBeNull(); // preserved
-    expect(providerRegistry.get('claude')).toBeNull(); // WORK-031
+    expect(providerRegistry.get('claude')).not.toBeNull(); // WORK-031 shipped
     expect(detectProvider(new URL('https://chatgpt.com/c/x')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chat.z.ai/')).adapterAvailable).toBe(true);
-    expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(false);
+    expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(true);
   });
 
-  it('registry lists chatgpt with display name + surface capabilities; claude remains placeholder-only', () => {
+  it('registry lists chatgpt with display name + surface capabilities; all adapters shipped', () => {
     const providers = providerRegistry.listProviders();
     expect(providers.find((p) => p.providerId === 'chatgpt')).toEqual({
       providerId: 'chatgpt',
@@ -120,7 +120,7 @@ describe('ChatgptProviderAdapter (background side)', () => {
         implementationSurface: 'coding-agent',
       },
     });
-    expect(providerRegistry.pendingProviders.map((p) => p.providerId)).toEqual(['claude']);
+    expect(providerRegistry.pendingProviders).toEqual([]); // Claude shipped (WORK-031)
   });
 
   it('describeSurfaces(): implementation surface is coding-agent; coding stays unverified (no fixture-only readiness)', () => {
@@ -228,12 +228,9 @@ describe('WORK-030 §33 — security regressions', () => {
     expect(code).not.toMatch(/prompt-textarea|send-button|data-testid/);
   });
 
-  it('no Claude automation exists anywhere (§36)', () => {
-    // No claude adapter directory/bridge/fixture (registry pending metadata
-    // + detector domain list are the only sanctioned mentions — checked by
-    // the static architecture suite).
-    expect(existsSyncSafe(join(EXT_SRC, 'providers', 'claude'))).toBe(false);
-    expect(existsSyncSafe(join(EXT_SRC, 'content', 'claude-bridge.ts'))).toBe(false);
+  it('Claude automation now exists as its OWN adapter (WORK-031 shipped)', () => {
+    expect(existsSyncSafe(join(EXT_SRC, 'providers', 'claude', 'claude-provider-adapter.ts'))).toBe(true);
+    expect(existsSyncSafe(join(EXT_SRC, 'content', 'claude-bridge.ts'))).toBe(true);
   });
 });
 

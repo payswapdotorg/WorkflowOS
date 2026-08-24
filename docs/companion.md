@@ -45,6 +45,31 @@ the user's own provider session — with WorkflowOS retaining every authority
 4. Watch status on the Work Item page (Executions card) or in the
    Companion popup.
 
+### Claude (WORK-031)
+
+The real Claude adapter drives the **Claude Code on the web** coding surface at
+`https://claude.com/code` (PR #34: canonical CURRENT host — Anthropic material
+now identifies `claude.com/code` as the Claude Code entry point; `claude.ai`
+redirects to `claude.com`, so the extension grants host permissions to BOTH
+domains and the bridge content script runs on both; the adapter opens
+`claude.com/code` directly to avoid a redirect hop and ensure the content
+script — granted permission on `claude.com` — actually runs on the page the
+prompt lands on) — not conversational Chat. You must be **signed in
+to Claude in the same browser** (the adapter uses your existing session; it
+never asks for or stores Claude credentials or API keys). Flow: the Companion
+opens the claude.com/code root (a fresh task composer — never an existing
+conversation), verifies the WorkflowOS prompt digest, injects the prompt
+exactly once into the ProseMirror contenteditable composer (with
+normalized read-back), sends it, and observes progress using the product's
+own streaming indicator (`button[aria-label*="Stop"]`) plus transcript
+stability. Repository/branch/commit/PR/test mentions in Claude output are
+forwarded as **observations only** — WorkflowOS observes authoritative
+GitHub/CI/verification/review state independently. Blocked states surface with
+human-readable reasons in the popup (sign-in required, session unavailable,
+confirmation required, UI changed). Model/mode surfaces are detected but
+never auto-selected or substituted. The observed UI contract + selector
+strategy + troubleshooting live in `extension/src/providers/claude/README.md`.
+
 ### ChatGPT (WORK-030)
 
 The real ChatGPT adapter drives the **Codex coding environment at

@@ -2,7 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'build.mjs', 'tests/zai/fixture/**', 'tests/chatgpt/fixture/**'] },
+  { ignores: ['dist/**', 'build.mjs', 'tests/zai/fixture/**', 'tests/chatgpt/fixture/**', 'tests/claude/fixture/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

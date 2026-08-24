@@ -837,6 +837,12 @@ describe('WORK-027 — execution provider abstraction', () => {
       codingAgent: 'unverified',
       implementationSurface: 'coding-agent',
     });
+    const claude = providers.find((p) => p.provider === 'claude');
+    expect(claude?.capabilities).toEqual({
+      conversationalChat: 'ready',
+      codingAgent: 'unverified', // WORK-031: live verification pending
+      implementationSurface: 'coding-agent',
+    });
     const fakeProvider = providers.find((p) => p.provider === 'fake');
     expect(
       (fakeProvider?.capabilities as { implementationSurface?: string } | undefined)

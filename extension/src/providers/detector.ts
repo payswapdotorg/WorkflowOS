@@ -10,10 +10,24 @@ import type { ProviderDetection } from './types.js';
 /**
  * Supported provider domains. The fake provider is an extension-internal
  * page (chrome-extension:// origin) — the deterministic test-mode provider.
+ *
+ * PR #34 fix (WORK-031): Anthropic's canonical Claude Code on the web host
+ * is now `claude.com/code` (live inspection observed claude.ai → claude.com
+ * redirect). The detector recognizes BOTH domains so:
+ *   - `claude.com` = canonical CURRENT Claude host (where the content script
+ *     MUST run after the redirect).
+ *   - `claude.ai` = legacy/redirect host (still matched for the brief
+ *     pre-redirect page load + any user bookmarks/old sessions).
+ * Both domains resolve to providerId 'claude'; the manifest grants
+ * host_permissions to BOTH (https://*.claude.com/* AND https://*.claude.ai/*)
+ * so the content script has permission on the post-redirect canonical host
+ * (the PR #34 finding: detector-only recognition on claude.ai would let the
+ * extension claim 'supported' where it cannot actually run after redirect).
  */
 const PROVIDER_DOMAINS: readonly { providerId: string; domain: string }[] = [
   { providerId: 'zai', domain: 'z.ai' },
   { providerId: 'chatgpt', domain: 'chatgpt.com' },
+  { providerId: 'claude', domain: 'claude.com' },
   { providerId: 'claude', domain: 'claude.ai' },
 ];
 
@@ -43,14 +57,15 @@ export function detectProvider(
   return {
     providerId: match.providerId,
     supported: true,
-    // WORK-029 shipped the Z.ai adapter; WORK-030 shipped the ChatGPT
-    // adapter; Claude remains pending (WORK-031). The registry remains the
-    // capability source of truth.
-    adapterAvailable: ['zai', 'chatgpt'].includes(match.providerId),
+    // WORK-029/030/031 shipped the Z.ai, ChatGPT, and Claude adapters. The
+    // registry remains the capability source of truth.
+    adapterAvailable: ['zai', 'chatgpt', 'claude'].includes(match.providerId),
   };
 }
 
 /** All supported provider ids (for the popup's provider list). */
 export function supportedProviderIds(): string[] {
-  return [...PROVIDER_DOMAINS.map((p) => p.providerId), 'fake'];
+  // De-duplicate provider ids — a provider with multiple recognized domains
+  // (e.g. Claude: claude.com + claude.ai) appears once.
+  return [...new Set(PROVIDER_DOMAINS.map((p) => p.providerId)), 'fake'];
 }

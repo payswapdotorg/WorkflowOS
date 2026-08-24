@@ -17,7 +17,7 @@ WorkflowOS
   → WorkflowOS observes authoritative GitHub/CI/verification/review state
 ```
 
-## Status (WORK-030)
+## Status (WORK-031)
 
 - ✅ Provider-neutral extension architecture (background service worker, thin
   content scripts, popup, message protocol, provider adapter registry).
@@ -70,15 +70,17 @@ Chromium context and drive the real backend + SPA:
 ```bash
 cd extension && bun run build
 cd ../backend
-# WORK-028 fake loop + WORK-029 Z.ai + WORK-030 ChatGPT fixture loops:
+# WORK-028 fake + WORK-029 Z.ai + WORK-030 ChatGPT + WORK-031 Claude
+# fixture loops:
 bunx playwright test --config playwright-extension.config.ts
 ```
 
-The WORK-029/030 specs start their own local fixture servers (127.0.0.1:3777
-Z.ai, 127.0.0.1:3778 ChatGPT) reproducing the OBSERVED provider DOMs — no
-live accounts needed. See each provider README for the observed contract, the
-optional live smoke test plans (`ZAI_LIVE_E2E=true` / `CHATGPT_LIVE_E2E=true`,
-not shipped enabled), and how to diagnose provider UI changes.
+The WORK-029/030/031 specs start their own local fixture servers
+(127.0.0.1:3777 Z.ai, 127.0.0.1:3778 ChatGPT, 127.0.0.1:3779 Claude)
+reproducing the OBSERVED provider DOMs — no live accounts needed. See each
+provider README for the observed contract, the optional live smoke test plans
+(`ZAI_LIVE_E2E=true` / `CHATGPT_LIVE_E2E=true` / `CLAUDE_LIVE_E2E=true`, not
+shipped enabled), and how to diagnose provider UI changes.
 
 ## Architecture
 
@@ -93,7 +95,10 @@ extension/
     providers/                provider-neutral adapter contract, detector,
                               registry, fake/ (deterministic test adapter),
                               zai/ (REAL chat.z.ai adapter), chatgpt/
-                              (REAL chatgpt.com adapter) — each with
+                              (REAL chatgpt.com/codex adapter), claude/
+                              (REAL claude.com/code adapter — canonical
+                              current host; claude.ai legacy/redirect host
+                              also matched — PR #34) — each with
                               selectors + page runtime + observed-contract
                               README
     background/               MV3 service worker: sessions, handoff
@@ -126,13 +131,9 @@ envelope carries `type`, `executionId`, `timestamp`, `payload`.
 are registered in `ExternalProviderAdapterRegistry`.
 
 Registered today: the **fake** adapter (deterministic test mode), the
-**Z.ai** adapter (WORK-029), and the **ChatGPT** adapter (WORK-030) — all
-provider DOM knowledge isolated under `src/providers/<id>/` (see each
-README). Claude remains placeholder metadata until WORK-031.
-
-**WORK-031 integration point:** mirror the existing layout —
-`providers/claude/` with selectors + page runtime + observed-contract README,
-register the adapter, and add a `claude-bridge` manifest entry.
+**Z.ai** adapter (WORK-029), the **ChatGPT** adapter (WORK-030), and the
+**Claude** adapter (WORK-031) — all provider DOM knowledge isolated under
+`src/providers/<id>/` (see each README). No pending adapters remain.
 
 ## Security model
 
@@ -188,4 +189,4 @@ routes).
 | `activeTab` | Future prompt injection into the ACTIVE provider tab (WORK-029). |
 | `scripting` | `chrome.scripting.executeScript` for prompt injection (WORK-029). |
 | Host: WorkflowOS origin | Content-script handoff bridge + API calls (redeem/events). |
-| Host: `*.z.ai` (covers the actual `chat.z.ai` chat application), `*.chatgpt.com`, `*.claude.ai` | Provider detection + (WORK-029+) adapters on those pages (+ subdomains) only — mirroring the detector's domain recognition exactly. |
+| Host: `*.z.ai` (covers the actual `chat.z.ai` chat application), `*.chatgpt.com`, `*.claude.com` (canonical CURRENT Claude host), `*.claude.ai` (legacy/redirect host) | Provider detection + (WORK-029+) adapters on those pages (+ subdomains) only — mirroring the detector's domain recognition exactly. PR #34: Claude's canonical host is now `claude.com` (`claude.ai` redirects there); both are granted so the bridge attaches before AND after the redirect. |

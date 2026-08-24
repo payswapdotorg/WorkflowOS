@@ -98,13 +98,13 @@ describe('ZaiProviderAdapter (background side)', () => {
     );
   });
 
-  it('is registered with Z.ai available; ChatGPT shipped (WORK-030); Claude pending', () => {
+  it('is registered with Z.ai available; ChatGPT (030) + Claude (031) shipped', () => {
     expect(providerRegistry.get('zai')).toBeInstanceOf(ZaiProviderAdapter);
     expect(providerRegistry.get('chatgpt')).not.toBeNull(); // WORK-030
-    expect(providerRegistry.get('claude')).toBeNull(); // WORK-031
+    expect(providerRegistry.get('claude')).not.toBeNull(); // WORK-031
     expect(detectProvider(new URL('https://chat.z.ai/')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chatgpt.com/')).adapterAvailable).toBe(true);
-    expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(false);
+    expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(true);
   });
 });
 
