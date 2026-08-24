@@ -7433,6 +7433,15 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     // policy row (no separate check-then-insert window).
     expect(body).toMatch(/WITH current_policy AS \(/);
     expect(body).toMatch(/SELECT policy_version, frozen, default_benchmark_mode\s+FROM wfos_execution_policies/);
+    // THE ROW LOCK (the follow-up review's finding): a plain SELECT reads
+    // the STATEMENT-START snapshot, so a concurrent policy UPDATE
+    // committing mid-statement could leave the decision persisted against
+    // the OLD version. The current_policy read MUST take FOR UPDATE — the
+    // locked read blocks on an in-flight concurrent UPDATE and then
+    // re-fetches the NEWEST committed row (READ COMMITTED locked-read
+    // semantics), serializing the decision boundary against every policy
+    // writer.
+    expect(body).toMatch(/WHERE project_id = \$2\s+FOR UPDATE/);
     // The version predicate (stale snapshot → no insert).
     expect(body).toMatch(/WHERE cp\.policy_version = \$14/);
     // The frozen/mode predicate (frozen + differing effective mode → no
@@ -7473,5 +7482,17 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     // The race is genuinely simulated MID-recommendation (the mutating
     // task-profile hook runs after the policy read + before the insert).
     expect(testSrc).toMatch(/buildRacingService/);
+    // The follow-up review required the regression to exercise the ACTUAL
+    // lock contention/interleaving — a real second connection holding the
+    // policy row lock with an in-flight uncommitted UPDATE while the
+    // guarded insert BLOCKS (proof of contention: 'still-blocked'), then
+    // COMMIT → the newest row rejects the stale snapshot; ROLLBACK → the
+    // original row accepts. On pglite (single-session) the closest
+    // analogue runs (the in-flight update visible at the decision
+    // boundary).
+    expect(testSrc).toMatch(/decision boundary serializes against the policy writer \(FOR UPDATE row lock\)/);
+    expect(testSrc).toMatch(/holds the row lock → the guarded decision insert WAITS/);
+    expect(testSrc).toMatch(/'still-blocked'/);
+    expect(testSrc).toMatch(/ROLLED BACK → the \(previously blocked\) insert unblocks against the ORIGINAL row/);
   });
 });

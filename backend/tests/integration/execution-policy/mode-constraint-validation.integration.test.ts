@@ -460,4 +460,227 @@ describe('PR #37 review fix — atomic decision snapshot validation (TOCTOU elim
     expect(await countDecisions(project.id)).toBe(1);
   });
 });
+
+// ============================================================================
+// PR #37 review follow-up — the decision CTE must SERIALIZIZE against the
+// policy writer. A plain SELECT in the current_policy CTE reads the
+// STATEMENT-START snapshot: a concurrent policy UPDATE that commits while
+// the decision statement is executing could leave the decision persisted
+// against the OLD policy version. The fix: the current_policy read takes
+// FOR UPDATE — the locked read BLOCKS on an in-flight concurrent policy
+// UPDATE and, once it commits, READ COMMITTED locked-read semantics return
+// the NEWEST committed row (so the version predicate rejects the stale
+// snapshot); conversely, if the decision wins the lock, the concurrent
+// policy writer waits until the decision commits (a valid serialization).
+//
+// The regression exercises the ACTUAL lock contention on real PostgreSQL
+// (two independent connections: one holds the policy row lock with an
+// in-flight uncommitted UPDATE while the guarded decision insert blocks on
+// it). On pglite (single-session — cross-connection contention is
+// impossible by construction) the closest analogue runs: an in-flight
+// uncommitted UPDATE visible at the decision boundary (the same observable
+// the lock guarantees cross-transaction).
+// ============================================================================
+
+describe('PR #37 review fix — decision boundary serializes against the policy writer (FOR UPDATE row lock)', () => {
+  const isRealPg = (process.env.WORKFLOWOS_DATABASE_URL ?? '').startsWith('postgres');
+
+  async function countDecisions(projectId: string): Promise<number> {
+    const res = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_execution_policy_decisions WHERE project_id = $1`,
+      [projectId],
+    );
+    return Number(res.rows[0]?.c ?? 0);
+  }
+
+  async function lockContentionWorkItemId(): Promise<string> {
+    // A real work item (the decisions table has a UUID FK to wfos_work_items).
+    const project = await stack.projectRepository.create({ organizationId, name: 'Lock Fixture Project' });
+    const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'Lock Arch' });
+    const version = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: '# Lock' });
+    const workItem = await stack.workItemRepository.create({
+      architectureVersionId: version.id,
+      workItemId: `WORK-LOCK-${Date.now()}`,
+      title: 'lock fixture', objective: 'fixture', scope: 'src/x.ts', outOfScope: 'none',
+      metadata: { baseCommit: 'lock-baseline-commit-0000000000000000001' },
+    });
+    return workItem.id;
+  }
+
+  function decisionRowFixture(policyVersion: number): DecisionRowShape {
+    return {
+      policyVersion,
+      benchmarkMode: 'maximum_capability',
+      taskProfile: {},
+      eligibleCandidates: [],
+      excludedCandidates: [],
+      recommendedCandidate: null,
+      whyExplanation: 'lock-contention fixture',
+      scores: {},
+      benchmarkEvidence: {},
+    };
+  }
+
+  it('concurrent in-flight policy UPDATE holds the row lock → the guarded decision insert WAITS → after COMMIT it validates against the NEW version and rejects (null)', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'Lock Contention Commit Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+    expect((await repository.getProjectPolicy(project.id))?.policyVersion).toBe(1);
+    // Resolve the (FK-valid) work item BEFORE opening any raw transaction —
+    // repository helpers like projectRepository.create internally use
+    // db.transaction(), whose COMMIT would commit a raw outer transaction.
+    const lockWorkItemId = await lockContentionWorkItemId();
+
+    if (isRealPg) {
+      // --- the REAL cross-connection interleaving (CI / real postgres) ---
+      const { Client: PgClient } = await import('pg');
+      // The test schema (buildTestDatabase creates a unique per-call schema
+      // scoped via search_path — a second connection must join it).
+      const schemaRow = await stack.db.client.query<{ s: string }>('SELECT current_schema() AS s');
+      const schema = schemaRow.rows[0]!.s;
+      const writer = new PgClient(process.env.WORKFLOWOS_DATABASE_URL);
+      await writer.connect();
+      try {
+        await writer.query(`SET search_path TO ${schema}, public`);
+        // The concurrent policy writer: an in-flight UNCOMMITTED update
+        // (version bumps to 2 via the touch trigger) holding the row lock.
+        await writer.query('BEGIN');
+        await writer.query(
+          `UPDATE wfos_execution_policies SET external_execution_allowed = false WHERE project_id = $1`,
+          [project.id],
+        );
+        // The guarded decision insert on the MAIN connection (a different
+        // session) — with FOR UPDATE it must BLOCK on the writer's row lock.
+        const insertPromise = repository.insertDecision(
+          organizationId, project.id, lockWorkItemId, userId,
+          decisionRowFixture(1),
+          { snapshotPolicyVersion: 1 },
+        );
+        // PROOF OF CONTENTION: while the writer holds the lock, the insert
+        // must still be pending after a generous margin (a plain-snapshot
+        // read would have resolved immediately against the OLD version —
+        // the pre-fix bug).
+        const outcome = await Promise.race([
+          insertPromise.then(() => 'resolved'),
+          new Promise<'still-blocked'>((r) => setTimeout(() => r('still-blocked'), 500)),
+        ]);
+        expect(outcome).toBe('still-blocked');
+
+        // The writer COMMITS → the locked read unblocks, re-fetches the
+        // NEWEST committed row (v2), and the version predicate rejects the
+        // stale snapshot → no insert.
+        await writer.query('COMMIT');
+        const decision = await insertPromise;
+        expect(decision).toBeNull();
+        expect(await countDecisions(project.id)).toBe(0);
+        expect((await repository.getProjectPolicy(project.id))?.policyVersion).toBe(2);
+      } finally {
+        await writer.end();
+      }
+    } else {
+      // --- the pglite single-session analogue: an in-flight uncommitted
+      // UPDATE on the SAME session is visible at the decision boundary
+      // (the locked read returns the LIVE row, not a stale snapshot) ---
+      await stack.db.client.query('BEGIN');
+      try {
+        await stack.db.client.query(
+          `UPDATE wfos_execution_policies SET external_execution_allowed = false WHERE project_id = $1`,
+          [project.id],
+        );
+        const decision = await repository.insertDecision(
+          organizationId, project.id, lockWorkItemId, userId,
+          decisionRowFixture(1),
+          { snapshotPolicyVersion: 1 },
+        );
+        // The decision boundary sees the LIVE row (v2 — the in-flight
+        // update) → the version predicate rejects the stale snapshot.
+        expect(decision).toBeNull();
+      } finally {
+        await stack.db.client.query('ROLLBACK');
+      }
+      expect(await countDecisions(project.id)).toBe(0);
+      expect((await repository.getProjectPolicy(project.id))?.policyVersion).toBe(1);
+    }
+  });
+
+  it('concurrent in-flight policy UPDATE ROLLED BACK → the (previously blocked) insert unblocks against the ORIGINAL row and persists', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'Lock Contention Rollback Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+    const lockWorkItemId = await lockContentionWorkItemId();
+
+    if (isRealPg) {
+      const { Client: PgClient } = await import('pg');
+      const schemaRow = await stack.db.client.query<{ s: string }>('SELECT current_schema() AS s');
+      const schema = schemaRow.rows[0]!.s;
+      const writer = new PgClient(process.env.WORKFLOWOS_DATABASE_URL);
+      await writer.connect();
+      try {
+        await writer.query(`SET search_path TO ${schema}, public`);
+        await writer.query('BEGIN');
+        await writer.query(
+          `UPDATE wfos_execution_policies SET external_execution_allowed = false WHERE project_id = $1`,
+          [project.id],
+        );
+        const insertPromise = repository.insertDecision(
+          organizationId, project.id, lockWorkItemId, userId,
+          decisionRowFixture(1),
+          { snapshotPolicyVersion: 1 },
+        );
+        const outcome = await Promise.race([
+          insertPromise.then(() => 'resolved'),
+          new Promise<'still-blocked'>((r) => setTimeout(() => r('still-blocked'), 500)),
+        ]);
+        expect(outcome).toBe('still-blocked');
+
+        // ROLLBACK → the row reverts to v1 → the locked read returns the
+        // ORIGINAL row → the version predicate passes → the decision
+        // persists against the still-authoritative v1.
+        await writer.query('ROLLBACK');
+        const decision = await insertPromise;
+        expect(decision).not.toBeNull();
+        expect(decision?.policyVersion).toBe(1);
+        expect(await countDecisions(project.id)).toBe(1);
+      } finally {
+        await writer.end();
+      }
+    } else {
+      await stack.db.client.query('BEGIN');
+      try {
+        await stack.db.client.query(
+          `UPDATE wfos_execution_policies SET external_execution_allowed = false WHERE project_id = $1`,
+          [project.id],
+        );
+        const decision = await repository.insertDecision(
+          organizationId, project.id, lockWorkItemId, userId,
+          decisionRowFixture(1),
+          { snapshotPolicyVersion: 1 },
+        );
+        expect(decision).toBeNull();
+      } finally {
+        await stack.db.client.query('ROLLBACK');
+      }
+      // After the rollback the original row (v1) is authoritative again →
+      // the insert succeeds.
+      const decision = await repository.insertDecision(
+        organizationId, project.id, lockWorkItemId, userId,
+        decisionRowFixture(1),
+        { snapshotPolicyVersion: 1 },
+      );
+      expect(decision).not.toBeNull();
+      expect(decision?.policyVersion).toBe(1);
+    }
+  });
+});
+
+/** Minimal local alias for the DecisionRow shape used by the fixtures above. */
+interface DecisionRowShape {
+  policyVersion: number;
+  benchmarkMode: string;
+  taskProfile: unknown;
+  eligibleCandidates: unknown;
+  excludedCandidates: unknown;
+  recommendedCandidate: unknown;
+  whyExplanation: string;
+  scores: Record<string, number>;
+  benchmarkEvidence: unknown;
+}
 });

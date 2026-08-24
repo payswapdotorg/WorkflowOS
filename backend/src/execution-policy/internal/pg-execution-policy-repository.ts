@@ -241,16 +241,33 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
     requestedBy: string | null, row: DecisionRow,
     guard: DecisionSnapshotGuard,
   ): Promise<ExecutionPolicyDecisionRecord | null> {
-    // PR #37 review fix (TOCTOU): the decision write is an ATOMIC SNAPSHOT
-    // VALIDATION. One statement (a CTE) checks the CURRENT authoritative
-    // policy row at insert time and inserts ONLY when the snapshot the
+    // PR #37 review fix (TOCTOU + snapshot staleness): the decision write is
+    // an ATOMIC SNAPSHOT VALIDATION with a ROW LOCK at the decision
+    // boundary. ONE statement (a CTE) reads the CURRENT authoritative
+    // policy row FOR UPDATE and inserts ONLY when the snapshot the
     // recommendation was computed from is still exact:
     //
-    //   current_policy = the project's policy row as of NOW
+    //   current_policy = the project's policy row as of NOW (FOR UPDATE)
     //   inserted       = the decision INSERT ... SELECT FROM current_policy
     //                    WHERE current_policy.policy_version = snapshot version
     //                      AND (current_policy.frozen = false
     //                           OR effective mode = current_policy.default mode)
+    //
+    // WHY FOR UPDATE (the follow-up review's finding): a plain SELECT in
+    // the CTE reads the STATEMENT-START snapshot, so a concurrent policy
+    // UPDATE that commits while this statement is executing could leave the
+    // decision persisted against the OLD policy version — the check and
+    // the insert were not serialized against the policy writer. With
+    // FOR UPDATE the locked read SERIALIZES against any concurrent policy
+    // writer (the touch/reject-frozen triggers' UPDATE, a policy PATCH, a
+    // benchmark-start freeze):
+    //   * an in-flight concurrent UPDATE holds the row lock → this read
+    //     WAITS → once it commits, READ COMMITTED locked-read semantics
+    //     return the NEWEST committed row → the version predicate rejects
+    //     the stale snapshot → no insert;
+    //   * if this statement wins the lock, the concurrent UPDATE waits
+    //     until this statement commits → the decision happened-before the
+    //     policy change in the serialization order.
     //
     // The two guard clauses eliminate the reviewer's race windows:
     //   * a policy MUTATION (any UPDATE — including the §9 freeze, which
@@ -264,16 +281,16 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
     //     change ever made freezing version-neutral).
     //
     // Invariant enforced: every PERSISTED decision corresponds to one exact,
-    // currently authoritative policy version — the decision can never claim
-    // a stale policyVersion (or a mode that was valid only before a
-    // concurrent freeze). A missing policy row (deleted mid-recommendation)
-    // also yields no insert. Statement atomicity means there is no window
-    // between the check and the insert.
+    // currently authoritative policy version — where "currently" is
+    // linearized by the row lock at the decision boundary. A missing policy
+    // row (deleted mid-recommendation) also yields no insert. Statement
+    // atomicity means there is no window between the check and the insert.
     const res = await this.db.query<DecisionRowDb>(
       `WITH current_policy AS (
          SELECT policy_version, frozen, default_benchmark_mode
            FROM wfos_execution_policies
           WHERE project_id = $2
+            FOR UPDATE
        ), inserted AS (
          INSERT INTO wfos_execution_policy_decisions
            (organization_id, project_id, work_item_id, requested_by,
