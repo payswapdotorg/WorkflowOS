@@ -36,6 +36,7 @@ export type {
   CreateBenchmarkExperimentInput,
   BenchmarkTrial,
   BenchmarkTrialStatus,
+  BenchmarkTrialLifecyclePhase,
   BenchmarkFailureKind,
   BenchmarkTrialMetrics,
   BenchmarkReviewFinding,

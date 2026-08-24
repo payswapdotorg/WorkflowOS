@@ -21,6 +21,7 @@ import type {
   BenchmarkIntegrityRecord,
   BenchmarkExperimentStatus,
   BenchmarkTrialStatus,
+  BenchmarkTrialLifecyclePhase,
 } from '../types.js';
 import type {
   BenchmarkRepository,
@@ -76,6 +77,13 @@ function toExperiment(r: Row): BenchmarkExperiment {
     createdAt: r.created_at instanceof Date ? r.created_at : new Date(String(r.created_at)),
     startedAt: r.started_at === null || r.started_at === undefined ? null : (r.started_at instanceof Date ? r.started_at : new Date(String(r.started_at))),
     completedAt: r.completed_at === null || r.completed_at === undefined ? null : (r.completed_at instanceof Date ? r.completed_at : new Date(String(r.completed_at))),
+    // PR #36 review fix #4 (fencing): the monotonic ownership token for the
+    // `finalizing` reservation. NULL for non-`finalizing` rows + for legacy
+    // pre-0030 `finalizing` rows that were never reclaimed post-0030 (the
+    // recovery CAS sets it via COALESCE(NULL, 0)+1 on the first reclaim).
+    finalizingGeneration: r.finalizing_generation === null || r.finalizing_generation === undefined
+      ? null
+      : Number(r.finalizing_generation),
   };
 }
 
@@ -96,6 +104,13 @@ function toTrial(r: Row): BenchmarkTrial {
     trialBranch: String(r.trial_branch),
     baselineCommit: String(r.baseline_commit),
     promptDigest: String(r.prompt_digest),
+    // PR #35 follow-up (idempotency): persisted phase lifecycle. New rows
+    // default to 'queued' (migration 0027); the backfill maps existing rows.
+    // pg returns the column; pglite may omit it on old rows pre-migration —
+    // fall back to 'queued' so the type stays total.
+    lifecyclePhase: (r.lifecycle_phase === null || r.lifecycle_phase === undefined
+      ? 'queued'
+      : String(r.lifecycle_phase)) as BenchmarkTrialLifecyclePhase,
     workItemId: r.work_item_id === null || r.work_item_id === undefined ? null : String(r.work_item_id),
     executionId: r.execution_id === null || r.execution_id === undefined ? null : String(r.execution_id),
     agentRunId: r.agent_run_id === null || r.agent_run_id === undefined ? null : String(r.agent_run_id),
@@ -326,6 +341,146 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
+  async claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #3 + #4: phase 1 — RESERVATION. Atomic running →
+    // finalizing (NOT running → completed). Only the winner (RETURNING row)
+    // may proceed to integrity validation (phase 2) + the finalization CAS
+    // (phase 3). The loser (null) no-ops. `completed` is NOT set here — it
+    // becomes authoritative only after `finalizeExperimentCompletion`
+    // succeeds (i.e. only after integrity validation passes).
+    //
+    // PR #36 review fix #3 — CRASH-SAFE LEASE: the reservation also sets
+    // `finalizing_lease_expires_at` (a persisted lease). If the winner dies
+    // before finalizing, the lease eventually expires and a recovery worker
+    // can reclaim the reservation via `recoverStaleFinalizingExperiment`.
+    // The expiry is computed in JS + passed as a TIMESTAMPTZ parameter
+    // (driver-portable across pg + pglite — both accept Date objects for
+    // TIMESTAMPTZ columns).
+    //
+    // PR #36 review fix #4 — FENCING GENERATION: the reservation also sets
+    // `finalizing_generation = COALESCE(finalizing_generation, 0) + 1`. The
+    // COALESCE handles legacy pre-0030 rows whose generation is NULL — the
+    // first claim on such a row sets the generation to 1 (COALESCE(NULL, 0)
+    // + 1 = 1). The returned row carries the new `finalizingGeneration`
+    // value; the winner MUST pass it to `finalizeExperimentCompletion` /
+    // `finalizeExperimentInvalidation` so a stale worker holding an OLDER
+    // generation is fenced. Without the generation, the recovery CAS would
+    // reclaim + renew the lease but NOT fence the original worker — the
+    // stale worker could still finalize using stale validation after a
+    // newer worker reclaimed (the fencing hole the reviewer flagged).
+    const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'finalizing',
+             finalizing_lease_expires_at = $2,
+             finalizing_generation = COALESCE(finalizing_generation, 0) + 1
+       WHERE id = $1 AND status = 'running'
+       RETURNING *`,
+      [id, leaseExpiresAt],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #3 + #4: CRASH-SAFE RECOVERY. Atomic CAS that reclaims
+    // a `finalizing` reservation whose lease has expired (the previous
+    // winner is presumed dead). The lease is RENEWED (set to NOW()+ttl) so
+    // the recovering worker has exclusive ownership — if it also dies, the
+    // renewed lease eventually expires and another recovery attempt can
+    // claim it again (forward progress). The winner (RETURNING row)
+    // re-enters the protocol at phase 2 (validation + finalization); the
+    // loser (null) no-ops.
+    //
+    // The guard is `status='finalizing' AND finalizing_lease_expires_at IS
+    // NOT NULL AND finalizing_lease_expires_at < NOW()`. The IS NOT NULL
+    // guard handles legacy `finalizing` rows from migration 0028 (pre-0029)
+    // that have NULL leases — those are left alone by THIS CAS (a separate
+    // legacy path or a manual recovery can reclaim them; they are rare +
+    // the protocol is idempotent). The `< NOW()` guard is the staleness
+    // check — only expired leases are reclaimable, so an active worker is
+    // never preempted mid-validation.
+    //
+    // PR #36 review fix #4 — FENCING GENERATION: the recovery CAS also
+    // INCREMENTS `finalizing_generation = COALESCE(finalizing_generation,
+    // 0) + 1`. The COALESCE handles legacy pre-0030 `finalizing` rows whose
+    // generation is NULL — the first reclaim on such a row sets the
+    // generation to 1 (COALESCE(NULL, 0) + 1 = 1). The returned row carries
+    // the new `finalizingGeneration` value; the recovering worker MUST pass
+    // it to the finalization CAS. The stale worker (the one whose lease
+    // expired) holds the OLD generation + is FENCED: its finalization CAS
+    // rejects because the row's `finalizing_generation` has advanced past
+    // the stale value. This is the EXCLUSIVE-OWNERSHIP invariant the
+    // reviewer required: the recovering worker has exclusive ownership,
+    // NOT shared with a stale ghost.
+    const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET finalizing_lease_expires_at = $2,
+             finalizing_generation = COALESCE(finalizing_generation, 0) + 1
+       WHERE id = $1
+         AND status = 'finalizing'
+         AND finalizing_lease_expires_at IS NOT NULL
+         AND finalizing_lease_expires_at < NOW()
+       RETURNING *`,
+      [id, leaseExpiresAt],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async finalizeExperimentCompletion(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #4: phase 3a — success finalization. Atomic
+    // finalizing → completed (sets completed_at), guarded on the fencing
+    // generation. Called by the reservation winner (the worker that won
+    // `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+    // AFTER integrityService.validate returns valid===true. The
+    // `expectedGeneration` is the `finalizingGeneration` the caller received
+    // from the reservation/recovery CAS. Only this CAS makes `completed`
+    // authoritative.
+    //
+    // The `finalizing_generation = $2` guard is the FENCING invariant: a
+    // stale worker holding an OLD generation cannot finalize after a newer
+    // worker reclaimed + advanced the generation. The stale worker's CAS
+    // rejects (the row's `finalizing_generation` no longer matches the stale
+    // value) — the newer worker retains exclusive ownership.
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'completed',
+             completed_at = COALESCE(completed_at, NOW())
+       WHERE id = $1 AND status = 'finalizing' AND finalizing_generation = $2
+       RETURNING *`,
+      [id, expectedGeneration],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async finalizeExperimentInvalidation(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #4: phase 3b — failure finalization. Atomic
+    // finalizing → invalidated (sets completed_at — the experiment reached
+    // a terminal state, just not a successful one), guarded on the fencing
+    // generation. Called by the reservation winner (the worker that won
+    // `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+    // AFTER integrityService.validate returns valid===false (or throws).
+    // The `expectedGeneration` is the `finalizingGeneration` the caller
+    // received from the reservation/recovery CAS. This is the authoritative
+    // terminal state for a failed integrity check — the experiment reads
+    // `invalidated`, NOT `completed`, so no consumer can read a false
+    // successful completion.
+    //
+    // The `finalizing_generation = $2` guard is the FENCING invariant on the
+    // failure path: a stale ghost cannot invalidate either (it might have
+    // read corrupt data + tried to finalize to invalidated after a newer
+    // worker already reclaimed + re-validated).
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'invalidated',
+             completed_at = COALESCE(completed_at, NOW())
+       WHERE id = $1 AND status = 'finalizing' AND finalizing_generation = $2
+       RETURNING *`,
+      [id, expectedGeneration],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
   // --- Trials (§5, §6) ---
 
   async createTrial(input: BenchmarkTrialInsert): Promise<BenchmarkTrial> {
@@ -422,6 +577,11 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     let i = 2;
     const map: [string, unknown | undefined][] = [
       ['status', patch.status],
+      // PR #35 follow-up (idempotency): the atomic claim methods set
+      // lifecycle_phase through their OWN guarded SQL; the generic
+      // updateTrial passes it through if provided (for the orchestrator's
+      // mid-flight linkage updates that ALSO bump the phase).
+      ['lifecycle_phase', patch.lifecyclePhase],
       ['work_item_id', patch.workItemId],
       ['execution_id', patch.executionId],
       ['agent_run_id', patch.agentRunId],
@@ -456,6 +616,207 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     }
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_trials SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+      params,
+    );
+    return rows[0] ? toTrial(rows[0]) : null;
+  }
+
+  // --- PR #35 follow-up (idempotency): atomic claim / phase transitions ---
+  //
+  // Each method is a COMPARE-AND-SWAP (WHERE id=$1 AND lifecycle_phase=$expected
+  // RETURNING *). Only the worker that receives a RETURNING row may perform
+  // the side effects for that phase. A duplicate delivery that loses the race
+  // receives zero rows + MUST NO-OP. This closes the two races identified in
+  // the PR #35 follow-up review (queued→running claim + running→terminal
+  // finalization) without introducing a second execution engine (§34
+  // invariant preserved — the benchmark still consumes ExecutionService +
+  // reads authoritative workflow/verification/review state).
+
+  async claimTrialForSetup(id: string): Promise<BenchmarkTrial | null> {
+    // Atomic: queued → starting. The `status` column is bumped to 'running'
+    // in the SAME statement so the two stay in sync (status is the
+    // backward-compat high-level field; lifecycle_phase is the stricter
+    // concurrency-control field). `started_at` is set once (COALESCE keeps
+    // the original if a prior partial claim left it set).
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'running',
+             lifecycle_phase = 'starting',
+             started_at = COALESCE(started_at, NOW()),
+             updated_at = NOW()
+       WHERE id = $1 AND lifecycle_phase = 'queued'
+       RETURNING *`,
+      [id],
+    );
+    return rows[0] ? toTrial(rows[0]) : null;
+  }
+
+  async advanceFromStarting(
+    id: string,
+    toPhase: 'execution_wait' | 'delivery_wait',
+    patch: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null> {
+    // Atomic: starting → execution_wait | delivery_wait. Carries the
+    // orchestrator's linkage fields (workItemId, workOrderId,
+    // implementationContextId, executionId, agentRunId, mode metadata).
+    // The `status` column stays 'running' (the high-level field still means
+    // "execution submitted, awaiting delivery" — backward compat for the
+    // recommendation service + UIs).
+    const sets: string[] = [
+      'lifecycle_phase = $2',
+      'status = $3',
+      'updated_at = NOW()',
+    ];
+    const params: unknown[] = [id, toPhase, 'running'];
+    let i = 4;
+    const map: [string, unknown | undefined][] = [
+      ['work_item_id', patch.workItemId],
+      ['execution_id', patch.executionId],
+      ['agent_run_id', patch.agentRunId],
+      ['pull_request_association_id', patch.pullRequestAssociationId],
+      ['work_order_id', patch.workOrderId],
+      ['implementation_context_id', patch.implementationContextId],
+      ['companion_version', patch.companionVersion],
+      ['provider_adapter_version', patch.providerAdapterVersion],
+      ['browser', patch.browser],
+      ['provider_surface', patch.providerSurface],
+      ['external_session_ref', patch.externalSessionRef],
+      ['handoff_issued_at', patch.handoffIssuedAt],
+      ['handoff_redeemed_at', patch.handoffRedeemedAt],
+      ['adapter_version', patch.adapterVersion],
+      ['model_configuration_version', patch.modelConfigurationVersion],
+    ];
+    for (const [col, val] of map) {
+      if (val !== undefined) {
+        sets.push(`${col} = $${i++}`);
+        params.push(val);
+      }
+    }
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_trials SET ${sets.join(', ')}
+       WHERE id = $1 AND lifecycle_phase = 'starting'
+       RETURNING *`,
+      params,
+    );
+    return rows[0] ? toTrial(rows[0]) : null;
+  }
+
+  async advanceToDeliveryWait(id: string): Promise<BenchmarkTrial | null> {
+    // Atomic: execution_wait → delivery_wait. Performed by runTrialJob when
+    // the authoritative execution record is terminal-completed (external
+    // mode). Native mode never enters execution_wait (the orchestrator
+    // advances starting → delivery_wait directly). Status stays 'running'.
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_trials
+         SET lifecycle_phase = 'delivery_wait',
+             updated_at = NOW()
+       WHERE id = $1 AND lifecycle_phase = 'execution_wait'
+       RETURNING *`,
+      [id],
+    );
+    return rows[0] ? toTrial(rows[0]) : null;
+  }
+
+  async claimTerminal(
+    id: string,
+    fromPhase: 'execution_wait' | 'delivery_wait',
+    outcome:
+      | { status: 'completed' }
+      | { status: 'failed'; failureKind: string; failureReason: string },
+  ): Promise<BenchmarkTrial | null> {
+    // ATOMIC TERMINAL CLAIM. Compare-and-swap from a non-terminal phase to a
+    // terminal phase. Only the winner (RETURNING row) may collect metrics +
+    // insert findings + write audit — exactly-once by construction.
+    //
+    // The `status` + `lifecycle_phase` columns are bumped together:
+    //   completed → status='completed', lifecycle_phase='completed'
+    //   failed    → status='failed',    lifecycle_phase='failed'
+    // (The `unavailable` high-level status is preserved for backward compat
+    // by the recommendation service; it is produced by a configuration
+    // pre-flight, not by this terminal claim path.)
+    if (outcome.status === 'completed') {
+      const { rows } = await this.db.query<Row>(
+        `UPDATE wfos_benchmark_trials
+           SET status = 'completed',
+               lifecycle_phase = 'completed',
+               completed_at = COALESCE(completed_at, NOW()),
+               updated_at = NOW()
+         WHERE id = $1 AND lifecycle_phase = $2
+         RETURNING *`,
+        [id, fromPhase],
+      );
+      return rows[0] ? toTrial(rows[0]) : null;
+    }
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'failed',
+             lifecycle_phase = 'failed',
+             failure_kind = $3,
+             failure_reason = $4,
+             completed_at = COALESCE(completed_at, NOW()),
+             updated_at = NOW()
+       WHERE id = $1 AND lifecycle_phase = $2
+       RETURNING *`,
+      [id, fromPhase, outcome.failureKind, outcome.failureReason],
+    );
+    return rows[0] ? toTrial(rows[0]) : null;
+  }
+
+  async failFromStarting(
+    id: string,
+    failureKind: string,
+    failureReason: string,
+    patch?: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null> {
+    // Atomic: starting → failed. Performed by the orchestrator worker that
+    // WON the setup claim when setup itself fails (dependency replication
+    // failure, branch creation failure, digest mismatch, native submit
+    // failure). Only that worker may terminalize from `starting` — a
+    // duplicate delivery that lost the claim observes a non-`starting`
+    // phase + this returns null (no double-failure). The optional patch
+    // carries linkage + mode metadata (workItemId, workOrderId,
+    // implementationContextId, executionId, agentRunId, adapterVersion,
+    // modelConfigurationVersion, companionVersion, etc.) folded into the
+    // same statement for forensic self-description.
+    const sets: string[] = [
+      'status = $2',
+      'lifecycle_phase = $3',
+      'failure_kind = $4',
+      'failure_reason = $5',
+      'completed_at = COALESCE(completed_at, NOW())',
+      'updated_at = NOW()',
+    ];
+    const params: unknown[] = [id, 'failed', 'failed', failureKind, failureReason];
+    let i = 6;
+    const map: [string, unknown | undefined][] = [
+      ['work_item_id', patch?.workItemId],
+      ['work_order_id', patch?.workOrderId],
+      ['implementation_context_id', patch?.implementationContextId],
+      ['execution_id', patch?.executionId],
+      ['agent_run_id', patch?.agentRunId],
+      ['pull_request_association_id', patch?.pullRequestAssociationId],
+      ['companion_version', patch?.companionVersion],
+      ['provider_adapter_version', patch?.providerAdapterVersion],
+      ['browser', patch?.browser],
+      ['provider_surface', patch?.providerSurface],
+      ['external_session_ref', patch?.externalSessionRef],
+      ['handoff_issued_at', patch?.handoffIssuedAt],
+      ['handoff_redeemed_at', patch?.handoffRedeemedAt],
+      ['adapter_version', patch?.adapterVersion],
+      ['model_configuration_version', patch?.modelConfigurationVersion],
+      ['human_intervention_count', patch?.humanInterventionCount],
+      ['intervention_duration_ms', patch?.interventionDurationMs],
+    ];
+    for (const [col, val] of map) {
+      if (val !== undefined) {
+        sets.push(`${col} = $${i++}`);
+        params.push(val);
+      }
+    }
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_trials SET ${sets.join(', ')}
+       WHERE id = $1 AND lifecycle_phase = 'starting'
+       RETURNING *`,
       params,
     );
     return rows[0] ? toTrial(rows[0]) : null;

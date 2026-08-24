@@ -46,6 +46,7 @@ import type { BenchmarkTrial } from '../types.js';
 import type {
   BenchmarkRepository,
   BenchmarkTrialOrchestrator,
+  BenchmarkTrialPatch,
 } from './benchmark.types.js';
 import type {
   ExecutionService,
@@ -84,12 +85,19 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
   constructor(private readonly deps: DefaultBenchmarkTrialOrchestratorDeps) {}
 
   async runTrial(trial: BenchmarkTrial): Promise<BenchmarkTrial> {
-    // Mark the trial running.
-    let current = await this.deps.repository.updateTrial(trial.id, {
-      status: 'running',
-      startedAt: new Date(),
-    });
-    if (!current) throw new Error('benchmark-trial-not-found');
+    // PR #35 follow-up (idempotency): ATOMIC CLAIM queued → starting. Only
+    // the worker that receives a non-null `claimed` row may perform
+    // orchestration side effects (clone / branch / submit). A duplicate
+    // delivery that loses the race observes null + returns the current
+    // trial state WITHOUT side effects — the winner is already advancing
+    // the trial. This closes the `queued → running` claim race identified
+    // in the PR #35 follow-up review.
+    const claimed = await this.deps.repository.claimTrialForSetup(trial.id);
+    if (!claimed) {
+      this.deps.logger.info('benchmark.trial.claim-lost', { trialId: trial.id });
+      const current = await this.deps.repository.getTrial(trial.id);
+      return current ?? trial;
+    }
 
     // 1. Load the snapshot (immutable baseline).
     const snapshot = await this.deps.repository.getSnapshot(trial.benchmarkTaskSnapshotId);
@@ -145,15 +153,12 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
           this.deps.logger.error('benchmark-trial-dependency-replication-failed', {
             trialId: trial.id, clonedWorkItemId: cloned.id, dependsOnId: dep.dependsOnId, error: (err as Error).message,
           });
-          const failed = await this.deps.repository.updateTrial(trial.id, {
-            workItemId: cloned.id,
-            status: 'failed',
-            failureKind: 'infrastructure',
-            failureReason: `dependency-replication-failed: dependsOnId=${dep.dependsOnId} error=${(err as Error).message}`,
-            completedAt: new Date(),
-          });
-          if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
-          return failed;
+          // PR #35 follow-up: atomic starting → failed (only the claim
+          // winner may terminalize from 'starting'). The linkage
+          // (workItemId) is folded into the same statement for forensics.
+          return this.failTrial(trial.id, 'infrastructure',
+            `dependency-replication-failed: dependsOnId=${dep.dependsOnId} error=${(err as Error).message}`,
+            { workItemId: cloned.id });
         }
       }
 
@@ -220,16 +225,10 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
         this.deps.logger.error('benchmark-trial-branch-create-failed', {
           trialId: trial.id, branch: trial.trialBranch, error: (err as Error).message,
         });
-        const failed = await this.deps.repository.updateTrial(trial.id, {
-          workItemId: cloned.id,
-          workOrderId: newOrder.id,
-          status: 'failed',
-          failureKind: 'infrastructure',
-          failureReason: `branch-creation-failed: branch=${trial.trialBranch} error=${(err as Error).message}`,
-          completedAt: new Date(),
-        });
-        if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
-        return failed;
+        // PR #35 follow-up: atomic starting → failed with linkage folded in.
+        return this.failTrial(trial.id, 'infrastructure',
+          `branch-creation-failed: branch=${trial.trialBranch} error=${(err as Error).message}`,
+          { workItemId: cloned.id, workOrderId: newOrder.id });
       }
 
       // 7. Build the ExecutionTask (fresh ImplementationContext from the clone).
@@ -260,79 +259,86 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
       );
       const canonicalDigest = sha256Hex(canonicalPrompt);
       if (canonicalDigest !== snapshot.promptDigest) {
-        await this.deps.repository.updateTrial(trial.id, {
-          workItemId: cloned.id,
-          workOrderId: newOrder.id,
-          implementationContextId: built.implementationContext.id,
-          executionId,
-        });
+        // PR #35 follow-up: atomic starting → failed with full linkage
+        // (the clone + work order + context + executionId were all created
+        // before the digest check; folding them into failFromStarting keeps
+        // the row self-describing for forensics without a second statement).
         return this.failTrial(
           trial.id,
           'infrastructure',
           `prompt-digest-mismatch: snapshot=${snapshot.promptDigest.slice(0, 12)} canonical=${canonicalDigest.slice(0, 12)}`,
+          { workItemId: cloned.id, workOrderId: newOrder.id, implementationContextId: built.implementationContext.id, executionId },
         );
       }
 
       // 9. Submit through the ExecutionService boundary.
       const result = await this.deps.executionService.submit(built.task);
 
-      // 10. Record linkage + mark the trial. Build the patch object once
-      //     (BenchmarkTrialPatch fields are readonly).
+      // 10. ATOMIC phase transition starting → execution_wait | delivery_wait.
+      // The orchestrator submitted through ExecutionService; now it advances
+      // the trial's persisted phase so a duplicate delivery observes the
+      // advanced state + no-ops. The `status` column stays 'running' (the
+      // high-level field still means "execution submitted, awaiting
+      // delivery" — backward compat for the recommendation service + UIs).
+      //
+      //   native non-failed → delivery_wait  (execution synchronous-completed;
+      //     awaiting the workflow `onTransition` hook to report `verified`).
+      //   native failed     → failFromStarting (starting→failed terminal;
+      //     no delivery to await for a failed execution).
+      //   external          → execution_wait (handoff_ready; awaiting the
+      //     `onExecutionTerminal` ingestion hook).
       const agentRun = trial.executionMode === 'native'
         ? await this.deps.agentRunRepository.findByExecutionId(executionId)
         : null;
       const now = new Date();
-      const basePatch: Record<string, unknown> = {
+      const linkage: BenchmarkTrialPatch = {
         workItemId: cloned.id,
         workOrderId: newOrder.id,
         implementationContextId: built.implementationContext.id,
         executionId: result.executionId,
       };
       if (trial.executionMode === 'native') {
-        // PR #35 review fix v2 / Blocker B: native execution completes
-        // synchronously inside `executionService.submit` — the AgentRun +
-        // commit are persisted by the time `submit` returns. HOWEVER, the
-        // trial does NOT mark itself `completed` here. The benchmark
-        // measures COMPLETED SOFTWARE (PR → CI → Verification → Review →
-        // Merge → VERIFIED), NOT completed execution. The orchestrator
-        // records the linkage + sets status='running' (execution done,
-        // awaiting the delivery phase). The trial is finalized to
-        // 'completed' ONLY when `workflowEngine.getState(workItemId)`
-        // returns `verified` — driven by the WorkflowEngine
-        // `onTransition` composition hook (event-driven, no polling).
-        //
-        // Exception: if the native execution itself FAILED (the provider
-        // returned `result.status === 'failed'`), the trial is terminal
-        // 'failed' immediately — there is no delivery to await for a
-        // failed execution.
-        basePatch.agentRunId = agentRun?.id ?? null;
         if (result.status === 'failed') {
-          basePatch.status = 'failed';
-          basePatch.failureKind = 'engineering';
-          basePatch.failureReason = 'native-execution-failed';
-          basePatch.completedAt = now;
-        } else {
-          // 'completed' OR any non-terminal ExecutionState → trial
-          // 'running' (awaiting delivery). The job handler will read the
-          // authoritative execution record / workflow state to advance.
-          basePatch.status = 'running';
+          // Native submit failed → terminal 'failed' immediately (no
+          // delivery to await). Atomic starting → failed with metadata.
+          return this.failTrial(trial.id, 'engineering', 'native-execution-failed', {
+            ...linkage,
+            agentRunId: agentRun?.id ?? null,
+            adapterVersion: 'work-027-v1',
+            modelConfigurationVersion: 'work-027-v1',
+          });
         }
-        // §18 native mode metadata.
-        basePatch.adapterVersion = 'work-027-v1';
-        basePatch.modelConfigurationVersion = 'work-027-v1';
-      } else {
-        // External: status is 'handoff_ready' — the companion extension
-        // drives the rest. The orchestrator marks the trial 'running'.
-        basePatch.status = 'running';
-        basePatch.handoffIssuedAt = now;
-        basePatch.externalSessionRef = null; // populated when the companion reports
-        // §17 external mode metadata.
-        basePatch.companionVersion = 'work-028-v1';
-        basePatch.providerAdapterVersion = 'work-031-v1';
-        basePatch.providerSurface = trial.provider;
+        // Native non-failed → delivery_wait (execution done, awaiting
+        // delivery). Atomic starting → delivery_wait.
+        const advanced = await this.deps.repository.advanceFromStarting(
+          trial.id,
+          'delivery_wait',
+          {
+            ...linkage,
+            agentRunId: agentRun?.id ?? null,
+            adapterVersion: 'work-027-v1',
+            modelConfigurationVersion: 'work-027-v1',
+          },
+        );
+        return advanced ?? claimed;
       }
-      current = await this.deps.repository.updateTrial(trial.id, basePatch as Parameters<typeof this.deps.repository.updateTrial>[1]);
-      return current ?? trial;
+      // External → execution_wait (handoff_ready). Atomic starting →
+      // execution_wait. The `onExecutionTerminal` ingestion hook (wired in
+      // app.ts) re-advances the trial when the companion reports a terminal
+      // execution record.
+      const advanced = await this.deps.repository.advanceFromStarting(
+        trial.id,
+        'execution_wait',
+        {
+          ...linkage,
+          handoffIssuedAt: now,
+          externalSessionRef: null, // populated when the companion reports
+          companionVersion: 'work-028-v1',
+          providerAdapterVersion: 'work-031-v1',
+          providerSurface: trial.provider,
+        },
+      );
+      return advanced ?? claimed;
     } catch (err) {
       this.deps.logger.error('benchmark-trial-orchestration-failed', {
         trialId: trial.id,
@@ -342,19 +348,33 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
     }
   }
 
+  /**
+   * PR #35 follow-up (idempotency): atomic `starting → failed` terminal
+   * transition. Only the worker that WON the `claimTrialForSetup` race may
+   * call this (the trial is in the 'starting' phase). The optional patch
+   * carries whatever linkage / metadata the orchestrator had computed
+   * before the failure — folded into the same atomic statement so the
+   * failed row is self-describing for forensics. Returns the terminal row
+   * when this worker won; returns the current row (already terminal) when
+   * a concurrent path raced ahead — never throws on a lost race (the trial
+   * is genuinely terminal, which is the desired end state).
+   */
   private async failTrial(
     trialId: string,
     failureKind: 'infrastructure' | 'engineering' | 'configuration',
     reason: string,
+    patch?: BenchmarkTrialPatch,
   ): Promise<BenchmarkTrial> {
-    const updated = await this.deps.repository.updateTrial(trialId, {
-      status: 'failed',
-      failureKind,
-      failureReason: reason,
-      completedAt: new Date(),
-    });
-    if (!updated) throw new Error(`benchmark-trial-not-found: ${trialId}`);
-    return updated;
+    const failed = await this.deps.repository.failFromStarting(trialId, failureKind, reason, patch);
+    if (!failed) {
+      // Lost the race to terminalize — a concurrent path already did.
+      // Return the current (terminal) state; this is the desired end state,
+      // not an error. Only throw if the trial genuinely vanished.
+      const current = await this.deps.repository.getTrial(trialId);
+      if (!current) throw new Error(`benchmark-trial-not-found: ${trialId}`);
+      return current;
+    }
+    return failed;
   }
 }
 

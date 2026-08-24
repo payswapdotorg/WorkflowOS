@@ -45,8 +45,27 @@ import {
   buildTrialBranchName,
 } from './benchmark-helpers.js';
 
+/**
+ * PR #36 review fix #3: default TTL (ms) for the `finalizing` reservation
+ * lease. A worker that wins `claimExperimentCompletion` (running →
+ * finalizing) sets `finalizing_lease_expires_at = NOW() + ttl`. If the
+ * worker dies before finalizing, the lease eventually expires and a
+ * recovery worker can reclaim the reservation via
+ * `recoverStaleFinalizingExperiment`. 2 minutes is long enough for
+ * integrity validation + the finalization CAS under normal conditions;
+ * short enough that a crashed worker's reservation is reclaimed within a
+ * tolerable window. The `finalizingLeaseTtlMs` dep overrides this (e.g.
+ * tests may pass a shorter TTL).
+ */
+const DEFAULT_FINALIZING_LEASE_TTL_MS = 120_000;
+
 export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrialRunner {
   constructor(private readonly deps: DefaultBenchmarkServiceDeps) {}
+
+  /** PR #36 review fix #3: the finalizing-lease TTL (dep override or default). */
+  private get finalizingLeaseTtlMs(): number {
+    return this.deps.finalizingLeaseTtlMs ?? DEFAULT_FINALIZING_LEASE_TTL_MS;
+  }
 
   // --- Snapshots (§4) ---
 
@@ -204,7 +223,11 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
     // fix #4).
     const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
     for (const trial of trials) {
-      if (trial.status !== 'queued') continue;
+      // PR #35 follow-up: filter by the explicit phase (queued = not yet
+      // claimed by an orchestrator worker). Equivalent to status='queued'
+      // for freshly created trials, but phase-aware for the rare case of a
+      // re-start after a partial run.
+      if (trial.lifecyclePhase !== 'queued') continue;
       await this.deps.queue.enqueue('benchmark.trial', { trialId: trial.id });
     }
     // If there are no queued trials (defensive: empty experiment), finalize
@@ -232,31 +255,55 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       return;
     }
 
-    // Terminal trials: re-check experiment completion (redelivery after the
+    // PR #35 follow-up (idempotency): route by the EXPLICIT persisted phase
+    // (lifecycle_phase), not the coarse `status`. Each phase has exactly
+    // one advancement path; a duplicate delivery observes the current phase
+    // + either no-ops (terminal / starting) or advances through the same
+    // compare-and-swap (the claim returns null for the loser → no side
+    // effects). This is the "duplicate job → observe already-advanced state
+    // → NO side effects" invariant the review requires.
+    const phase = trial.lifecyclePhase;
+
+    // Terminal phases: re-check experiment completion (redelivery after the
     // last trial finalized) + return. No further advancement.
-    if (
-      trial.status === 'completed' ||
-      trial.status === 'failed' ||
-      trial.status === 'unavailable'
-    ) {
-      this.deps.logger.info('benchmark.trial.skipped-terminal', {
-        trialId, status: trial.status,
-      });
+    if (phase === 'completed' || phase === 'failed') {
+      this.deps.logger.info('benchmark.trial.skipped-terminal', { trialId, phase });
       await this.checkExperimentCompletion(trial.experimentId);
       return;
     }
 
-    // --- QUEUED → run the orchestrator (clone, branch, submit). ---
-    // The orchestrator sets the trial to 'running' (with executionId +
-    // workItemId). For native execution that itself FAILED at submit time,
-    // the orchestrator sets the trial 'failed' terminal immediately. Either
-    // way, this is NOT a blocking step — the orchestrator returns as soon
-    // as setup + submission is done.
-    if (trial.status === 'queued') {
+    // STARTING: another worker has CLAIMED the trial (atomic queued→starting)
+    // + is mid-setup (clone / branch / submit). A duplicate delivery MUST
+    // NOT re-run orchestration (the claim is exclusive — only one worker
+    // won) + MUST NOT finalize (the claiming worker is still setting up;
+    // the trial is not in a wait phase yet). Just return — the claiming
+    // worker will advance to execution_wait/delivery_wait when setup
+    // completes, + the event hooks will re-enqueue.
+    //
+    // This closes the THIRD race (a redelivery arriving while the
+    // orchestrator is still mid-setup would otherwise read `running`,
+    // observe executionId=null, + finalize the active trial as
+    // 'execution-record-not-found'). The `starting` phase makes that
+    // redelivery a no-op.
+    if (phase === 'starting') {
+      this.deps.logger.info('benchmark.trial.skipped-starting', { trialId });
+      return;
+    }
+
+    // QUEUED: the claim has not happened yet. Run the orchestrator — it
+    // atomically claims (queued→starting). If the claim is lost (another
+    // worker won), the orchestrator returns WITHOUT side effects. For
+    // native execution that itself FAILED at submit time, the orchestrator
+    // sets the trial 'failed' terminal immediately (atomic
+    // starting→failed).
+    if (phase === 'queued') {
       try {
         await this.deps.trialOrchestrator.runTrial(trial);
       } catch (err) {
-        // Unexpected error during orchestration — fail the trial.
+        // Unexpected error during orchestration — defensive outer catch
+        // (the orchestrator handles its own internal failures via
+        // failTrial + returns; this only fires for truly unexpected
+        // throws, e.g. a repository DB error).
         this.deps.logger.error('benchmark.trial.orchestration-failed', {
           trialId, error: (err as Error).message,
         });
@@ -267,24 +314,31 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       return;
     }
 
-    // --- RUNNING → EXECUTION PHASE → DELIVERY PHASE. ---
-    if (trial.status !== 'running') {
-      // Defensive: unknown status — log + skip.
-      this.deps.logger.warn('benchmark.trial.unknown-status', {
-        trialId, status: trial.status,
-      });
-      return;
-    }
-
-    // EXECUTION PHASE: determine whether the execution is terminal.
-    let executionOutcome: 'completed' | 'failed' | 'expired' | 'cancelled' | undefined;
-    if (trial.executionMode === 'external' && trial.executionId) {
+    // EXECUTION_WAIT: the orchestrator submitted (external mode) + is
+    // awaiting the `onExecutionTerminal` ingestion hook. Read the
+    // authoritative execution record. If terminal-completed → advance to
+    // delivery_wait (atomic). If terminal-failed → claimTerminal(failed)
+    // (atomic). If non-terminal → return (the hook will re-enqueue). NO
+    // bounded poll.
+    if (phase === 'execution_wait') {
+      // Defensive: execution_wait should only occur for external mode
+      // (native skips to delivery_wait since its execution is
+      // synchronous-completed). A native trial in execution_wait is a
+      // state-machine invariant violation — fail it.
+      if (trial.executionMode !== 'external' || !trial.executionId) {
+        await this.finalizeTrial(trial, 'execution_wait', {
+          status: 'failed',
+          failureKind: 'infrastructure',
+          failureReason: 'execution-wait-without-external-execution',
+        });
+        return;
+      }
       const record = await this.deps.executionRecordRepository.findByExecutionId(trial.executionId);
       if (!record) {
         // The execution record vanished (shouldn't happen — it was created
         // by executionService.submit at orchestrator time). Fail the trial
-        // (infrastructure) — but DO NOT block; finalize + return.
-        await this.finalizeTrial(trial, {
+        // (infrastructure) via the atomic terminal claim.
+        await this.finalizeTrial(trial, 'execution_wait', {
           status: 'failed',
           failureKind: 'infrastructure',
           failureReason: 'execution-record-not-found',
@@ -292,52 +346,60 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
         return;
       }
       const status = record.status;
-      if (
-        status === 'completed' ||
-        status === 'failed' ||
-        status === 'expired' ||
-        status === 'cancelled'
-      ) {
-        executionOutcome = status;
-      } else {
-        // Non-terminal: the trial stays 'running' + waits for the
-        // `onExecutionTerminal` composition hook to re-enqueue
-        // `benchmark.trial` when the ingestion service observes a terminal
-        // event for this executionId. NO bounded poll.
+      if (status === 'completed') {
+        // Atomic execution_wait → delivery_wait. If null, another worker
+        // advanced (or terminalized) — re-check experiment completion.
+        const advanced = await this.deps.repository.advanceToDeliveryWait(trial.id);
+        if (!advanced) {
+          await this.checkExperimentCompletion(trial.experimentId);
+          return;
+        }
+        // Now in delivery_wait — drive the delivery phase with the
+        // advanced row (re-read the authoritative workflow state).
+        await this.driveDeliveryPhase(advanced);
         return;
       }
-    } else if (trial.executionMode === 'native') {
-      // Native execution is synchronous; the orchestrator already ran
-      // submit. If submit had failed, the trial would be 'failed' terminal
-      // (set by the orchestrator), so we would NOT reach this branch. The
-      // execution outcome for a 'running' native trial is 'completed'.
-      executionOutcome = 'completed';
-    } else {
-      // Defensive: trial has no executionId + isn't native. Shouldn't
-      // happen — leave the trial 'running' (a redelivery will re-enter).
+      if (status === 'failed' || status === 'expired' || status === 'cancelled') {
+        await this.finalizeTrial(trial, 'execution_wait', {
+          status: 'failed',
+          failureKind: 'engineering',
+          failureReason: `external-execution-${status}`,
+        });
+        return;
+      }
+      // Non-terminal: stay in execution_wait. The `onExecutionTerminal`
+      // composition hook (wired in app.ts) re-enqueues `benchmark.trial`
+      // when the ingestion service observes a terminal event for this
+      // executionId. NO bounded poll.
       return;
     }
 
-    // If the execution failed → trial FAILED (engineering). Finalize +
-    // return (NO delivery phase for a failed execution).
-    if (executionOutcome !== 'completed') {
-      await this.finalizeTrial(trial, {
-        status: 'failed',
-        failureKind: 'engineering',
-        failureReason: `external-execution-${executionOutcome}`,
-      });
+    // DELIVERY_WAIT: execution terminal-completed; awaiting the workflow
+    // `onTransition` hook to report `verified` (or a terminal failure).
+    if (phase === 'delivery_wait') {
+      await this.driveDeliveryPhase(trial);
       return;
     }
 
-    // DELIVERY PHASE: read the authoritative workflow state for the
-    // trial's cloned work item. `verified` (terminal success) → trial
-    // 'completed'. Terminal failure states → trial 'failed' (engineering).
-    // Anything else → return (the `onTransition` composition hook will
-    // re-advance when the work item reaches a terminal state).
+    // Defensive: unknown phase — log + skip.
+    this.deps.logger.warn('benchmark.trial.unknown-phase', { trialId, phase });
+  }
+
+  /**
+   * PR #35 follow-up (idempotency): drive the DELIVERY PHASE for a trial in
+   * `delivery_wait`. Read the authoritative workflow state for the trial's
+   * cloned work item. `verified` (terminal success) → trial 'completed'
+   * (atomic claimTerminal). Terminal failure states → trial 'failed'
+   * (engineering, atomic claimTerminal). Anything else → return (the
+   * `onTransition` composition hook will re-advance when the work item
+   * reaches a terminal state). NO bounded poll.
+   */
+  private async driveDeliveryPhase(trial: BenchmarkTrial): Promise<void> {
     if (!trial.workItemId) {
       // Defensive: trial has no cloned work item (shouldn't happen — the
-      // orchestrator set it). Fail the trial (infrastructure).
-      await this.finalizeTrial(trial, {
+      // orchestrator set it). Fail the trial (infrastructure) via the
+      // atomic terminal claim.
+      await this.finalizeTrial(trial, 'delivery_wait', {
         status: 'failed',
         failureKind: 'infrastructure',
         failureReason: 'trial-missing-work-item',
@@ -347,19 +409,19 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
     const wf = await this.deps.workflowEngine.getState(trial.workItemId);
     if (!wf) {
       // Defensive: no workflow execution row (shouldn't happen — the
-      // orchestrator created one). Leave the trial 'running'; the
+      // orchestrator created one). Leave the trial in delivery_wait; the
       // `onTransition` hook (or a redelivery) will re-advance.
       return;
     }
     if (wf.currentState === 'verified') {
-      await this.finalizeTrial(trial, { status: 'completed' });
+      await this.finalizeTrial(trial, 'delivery_wait', { status: 'completed' });
       return;
     }
     if (
       wf.currentState === 'verification_failed' ||
       wf.currentState === 'implementation_blocked'
     ) {
-      await this.finalizeTrial(trial, {
+      await this.finalizeTrial(trial, 'delivery_wait', {
         status: 'failed',
         failureKind: 'engineering',
         failureReason: `delivery-${wf.currentState}`,
@@ -419,36 +481,45 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   /**
-   * Finalize a trial: set terminal status (with failure fields when
-   * applicable), collect metrics from authoritative state, audit the
-   * outcome, + check experiment completion. Called ONLY from the
-   * EXECUTION-FAILED / DELIVERY-PHASE paths of `runTrialJob`. Trials that
-   * reached terminal state at orchestrator time (failed branch creation,
-   * failed native submit, etc.) re-enter `runTrialJob`, hit the early
-   * terminal-return path, + skip this method (the orchestrator already
-   * finalized the row).
+   * PR #35 follow-up (idempotency): Finalize a trial via an ATOMIC TERMINAL
+   * CLAIM. Compare-and-swap from a non-terminal phase (execution_wait or
+   * delivery_wait) to a terminal phase (completed/failed). Only the worker
+   * that wins the claim (claimTerminal returns a row) may collect metrics
+   * + insert findings + write audit — exactly-once by construction. The
+   * LOSER (null) MUST skip ALL side effects (another worker already
+   * finalized).
+   *
+   * This closes the `running → terminal` finalization race identified in
+   * the PR #35 follow-up review: two terminal-advancement jobs can no
+   * longer both finalize the same trial and both collect metrics + insert
+   * findings (duplicate rows) + write audit events (duplicate events).
    */
   private async finalizeTrial(
     trial: BenchmarkTrial,
+    fromPhase: 'execution_wait' | 'delivery_wait',
     outcome:
       | { status: 'completed' }
       | { status: 'failed'; failureKind: 'infrastructure' | 'engineering' | 'configuration'; failureReason: string },
   ): Promise<void> {
-    const now = new Date();
-    const patch: Parameters<typeof this.deps.repository.updateTrial>[1] =
-      outcome.status === 'completed'
-        ? { status: 'completed', completedAt: now }
-        : {
-            status: 'failed',
-            failureKind: outcome.failureKind,
-            failureReason: outcome.failureReason,
-            completedAt: now,
-          };
-    const updated = await this.deps.repository.updateTrial(trial.id, patch);
-    const current = updated ?? trial;
+    // ATOMIC TERMINAL CLAIM. Returns the claimed row ONLY for the winner.
+    // null = another worker already finalized (or the trial is not in the
+    // expected fromPhase). The LOSER skips metrics/findings/audit.
+    const claimed = await this.deps.repository.claimTerminal(trial.id, fromPhase, outcome);
+    if (!claimed) {
+      this.deps.logger.info('benchmark.trial.finalize-lost-race', {
+        trialId: trial.id, fromPhase, outcome: outcome.status,
+      });
+      // Still re-check experiment completion (the winner may have been
+      // the last trial; this worker's re-check is idempotent via
+      // claimExperimentCompletion).
+      await this.checkExperimentCompletion(trial.experimentId);
+      return;
+    }
+    const current = claimed;
 
     // Collect metrics from authoritative state (only after the trial reached
-    // a terminal outcome — never while still running).
+    // a terminal outcome — never while still running). EXACTLY-ONCE: only
+    // the terminal-claim winner reaches here.
     try {
       const metrics = await this.deps.metricCollector.collect(current);
       await this.deps.repository.upsertMetrics(metrics);
@@ -462,7 +533,7 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       });
     }
 
-    // Audit the trial outcome.
+    // Audit the trial outcome. EXACTLY-ONCE (only the winner).
     await this.deps.auditService.write({
       projectId: trial.projectId,
       eventType: current.status === 'completed' ? 'TRIAL_COMPLETED' : 'TRIAL_FAILED',
@@ -474,7 +545,7 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
     });
 
     // Check experiment completion — marks the experiment 'completed' ONLY
-    // when every trial is terminal.
+    // when every trial is terminal (atomic experiment claim — see below).
     await this.checkExperimentCompletion(trial.experimentId);
   }
 
@@ -482,19 +553,39 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
    * Finalize a trial as 'failed' (infrastructure) from an unexpected
    * orchestration error. Used by the QUEUED → orchestrator path when
    * `trialOrchestrator.runTrial` throws (the orchestrator's own catch
-   * already handles its internal failures + persists a 'failed' row, but
-   * a defensive outer catch is required for unexpected throw-paths).
+   * already handles its internal failures + persists a 'failed' row via
+   * the atomic `failFromStarting`, but a defensive outer catch is required
+   * for unexpected throw-paths, e.g. a repository DB error).
+   *
+   * PR #35 follow-up (idempotency): phase-aware + atomic. Only terminalizes
+   * if the trial is still in `starting` (the claim succeeded but setup threw
+   * before advancing). If the trial already advanced to
+   * execution_wait/delivery_wait (rare — advance is the last step), do NOT
+   * clobber its phase (the orchestrator's successful setup is preserved; a
+   * redelivery re-advances through the wait phase). The atomic
+   * `failFromStarting` claim ensures exactly-once metrics + audit (only
+   * the winner collects side effects).
    */
   private async failTrialFromError(trial: BenchmarkTrial, err: Error): Promise<void> {
-    const updated = await this.deps.repository.updateTrial(trial.id, {
-      status: 'failed',
-      failureKind: 'infrastructure',
-      failureReason: err.message,
-      completedAt: new Date(),
-    });
-    const current = updated ?? trial;
+    // ATOMIC starting → failed. Returns the claimed row ONLY for the
+    // winner. null = the trial already advanced past `starting` (do NOT
+    // clobber) OR already terminal.
+    const claimed = await this.deps.repository.failFromStarting(
+      trial.id, 'infrastructure', err.message,
+    );
+    if (!claimed) {
+      // Trial already advanced past 'starting' (orchestrator succeeded
+      // setup but threw after — rare) OR already terminal. Do NOT clobber
+      // its phase. Log + re-check experiment completion.
+      this.deps.logger.warn('benchmark.trial.fail-from-error-lost-race', {
+        trialId: trial.id, error: err.message,
+      });
+      await this.checkExperimentCompletion(trial.experimentId);
+      return;
+    }
+    // Won the terminal claim — collect metrics + audit (exactly-once).
     try {
-      const metrics = await this.deps.metricCollector.collect(current);
+      const metrics = await this.deps.metricCollector.collect(claimed);
       await this.deps.repository.upsertMetrics(metrics);
     } catch {
       // Swallow — best-effort metrics on an error path.
@@ -512,34 +603,166 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   /**
-   * Mark the experiment 'completed' + validate integrity + audit
-   * BENCHMARK_COMPLETED — but ONLY when every trial is terminal. If any
-   * trial is still 'queued'/'running', this is a no-op (the worker will
-   * re-check when the last trial finishes).
+   * Two-phase experiment completion protocol (PR #36 review fix #2) with a
+   * crash-safe recovery path (PR #36 review fix #3) + fencing generation
+   * (PR #36 review fix #4):
+   *
+   *   0. RECOVERY (PR #36 review fix #3 + #4): if the experiment is already
+   *      in `finalizing` with a STALE (expired) lease, a previous worker
+   *      won the reservation but died before finalizing. The recovery CAS
+   *      (recoverStaleFinalizingExperiment) reclaims + renews the lease +
+   *      INCREMENTS the fencing generation so the recovering worker re-enters
+   *      the protocol at phase 2 with a NEW generation. The stale worker's
+   *      old generation is FENCED (its finalization CAS rejects). Without
+   *      this, the experiment would be permanently stuck in `finalizing`
+   *      (the durable reservation the reviewer flagged) OR a stale worker
+   *      could finalize after a newer worker reclaimed (the fencing hole
+   *      the reviewer flagged).
+   *   1. RESERVATION (exactly-once CAS): claimExperimentCompletion
+   *      running → finalizing (sets a fresh lease + a fresh generation).
+   *      Only the winner proceeds; the loser (null) no-ops. `completed` is
+   *      NOT made authoritative here. The winner receives the new
+   *      `finalizingGeneration` value + MUST pass it to the finalization CAS.
+   *   2. INTEGRITY VALIDATION (winner only): integrityService.validate.
+   *      Returns BenchmarkIntegrityRecord { valid }. Thrown errors are
+   *      treated as a validation failure (the experiment must not read
+   *      `completed`).
+   *   3. FINALIZATION (CAS, makes the status authoritative, FENCED on the
+   *      generation the caller received):
+   *      valid===true  → finalizeExperimentCompletion (finalizing → completed)
+   *                      + audit BENCHMARK_COMPLETED
+   *      valid===false → finalizeExperimentInvalidation (finalizing → invalidated)
+   *                      + audit BENCHMARK_INVALIDATED
+   *      The `WHERE finalizing_generation = $2` guard fences stale workers
+   *      holding an OLDER generation — they cannot finalize after a newer
+   *      worker reclaimed + advanced the generation.
+   *
+   * This closes the PR #36 review findings: (a) the prior version flipped
+   * the experiment to `completed` BEFORE validation ran, so a failed
+   * integrity check exposed a false successful completion. Now `completed`
+   * is authoritative ONLY after integrity passes. (b) The `finalizing`
+   * reservation is durable + a crashed worker's lease is reclaimable, so
+   * no experiment is permanently stuck. (c) The recovering worker has
+   * EXCLUSIVE ownership — a stale ghost holding an older generation is
+   * fenced + cannot finalize.
+   *
+   * The `finalizing` reservation state is non-terminal, so no concurrent
+   * worker re-enters the protocol while the winner is validating (the
+   * all-terminal guard treats `finalizing` as not-yet-terminal). The
+   * reservation CAS is exclusive (WHERE status='running'), so exactly one
+   * worker wins — exactly-once validation + exactly-once audit. The
+   * recovery CAS is also exclusive (WHERE status='finalizing' AND
+   * lease < NOW()), so exactly one recovery worker wins. The finalization
+   * CAS is fenced (WHERE status='finalizing' AND finalizing_generation=$2),
+   * so a stale worker cannot finalize after a newer reclaim.
+   *
+   * Only called when every trial is terminal. If any trial is still in a
+   * non-terminal phase, this is a no-op (the worker re-checks when the
+   * last trial finishes). The recovery path (phase 0) is also triggered
+   * lazily by `getExperiment` reads when the experiment is stuck in
+   * `finalizing` — NO polling sweep, NO second execution engine (§34
+   * invariant intact).
    */
   private async checkExperimentCompletion(experimentId: string): Promise<void> {
     const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
     if (trials.length === 0) return;
+    // A trial is terminal iff its lifecycle_phase is completed/failed
+    // (covers the `unavailable` high-level status too — it backfills to
+    // lifecycle_phase='failed').
     const allTerminal = trials.every(
-      (t) => t.status === 'completed' || t.status === 'failed' || t.status === 'unavailable',
+      (t) => t.lifecyclePhase === 'completed' || t.lifecyclePhase === 'failed',
     );
     if (!allTerminal) return;
-    // Avoid double-finalization (the worker may call this concurrently for
-    // the last N trials). Re-load the experiment to check its current status.
-    const experiment = await this.deps.repository.getExperiment(experimentId);
-    if (!experiment) return;
-    if (
-      experiment.status === 'completed' ||
-      experiment.status === 'cancelled' ||
-      experiment.status === 'invalidated'
-    ) {
+    // Phase 0 — CRASH-SAFE RECOVERY (PR #36 review fix #3). Try to reclaim
+    // a stale `finalizing` reservation FIRST. If a previous worker won
+    // the reservation (running → finalizing) but died before finalizing,
+    // its lease has expired + this CAS reclaims it (renewing the lease so
+    // the recovering worker has exclusive ownership). If there is no stale
+    // reservation, this returns null + we fall through to the fresh-claim
+    // path. The recovery winner reuses the SAME phase 2 + phase 3 path as a
+    // fresh reservation winner — only the reservation source differs.
+    const recovered = await this.deps.repository.recoverStaleFinalizingExperiment(
+      experimentId, this.finalizingLeaseTtlMs,
+    );
+    // Phase 1 — RESERVATION (exactly-once CAS, fresh path). Only the
+    // winner may run integrity validation + the finalization CAS. The
+    // loser (null) no-ops. Skipped if phase 0 already reclaimed a stale
+    // reservation (`recovered` is non-null).
+    const claimed = recovered ?? await this.deps.repository.claimExperimentCompletion(
+      experimentId, this.finalizingLeaseTtlMs,
+    );
+    if (!claimed) return;
+    // PR #36 review fix #4 — FENCING GENERATION. The reservation (whether
+    // the fresh-claim path OR the recovery path) set `finalizing_generation`
+    // + returned the new value on `claimed.finalizingGeneration`. The winner
+    // MUST pass it to the finalization CAS so a stale worker holding an
+    // OLDER generation is fenced. A null generation means the row was a
+    // legacy pre-0030 `finalizing` row that somehow reached here without
+    // being reclaimed (should not happen — the recovery CAS sets the
+    // generation on the first reclaim via COALESCE(NULL, 0) + 1). Defensive:
+    // log + return WITHOUT finalizing (do NOT finalize without fencing — a
+    // missing generation means we cannot prove exclusive ownership).
+    const expectedGeneration = claimed.finalizingGeneration;
+    if (expectedGeneration === null) {
+      this.deps.logger.error('benchmark.experiment-finalizing-missing-generation', {
+        experimentId,
+        reservationSource: recovered ? 'recovery' : 'fresh-claim',
+      });
       return;
     }
-    await this.deps.integrityService.validate(experimentId);
-    await this.deps.repository.updateExperimentStatus(experimentId, 'completed', { completedAt: new Date() });
+    // Phase 2 — INTEGRITY VALIDATION (winner only). validate() returns a
+    // record with `valid` (it does NOT throw on integrity failure — it
+    // calls invalidateIntegrity internally + returns valid===false). A
+    // thrown error (e.g. snapshot/experiment not found, DB failure) is
+    // treated as a validation failure: the experiment MUST NOT read
+    // `completed`.
+    let valid = false;
+    try {
+      const record = await this.deps.integrityService.validate(experimentId);
+      valid = record.valid;
+    } catch (err) {
+      this.deps.logger.error('benchmark.experiment-integrity-validation-failed', {
+        experimentId, error: (err as Error).message,
+      });
+      valid = false;
+    }
+    // Phase 3 — FINALIZATION (CAS, makes the status authoritative). The
+    // `expectedGeneration` is the fencing token — a stale worker holding
+    // an older generation is fenced by the finalization CAS's
+    // `WHERE finalizing_generation = $2` guard.
+    if (valid) {
+      const finalized = await this.deps.repository.finalizeExperimentCompletion(
+        experimentId, expectedGeneration,
+      );
+      if (!finalized) {
+        // Should not happen (the reservation is exclusive + the
+        // generation matches), but the CAS makes it safe — another worker
+        // already advanced the experiment (e.g. a recovery that fenced us
+        // because our lease expired mid-validation).
+        return;
+      }
+      await this.deps.auditService.write({
+        projectId: claimed.projectId,
+        eventType: 'BENCHMARK_COMPLETED',
+        actor: 'system',
+        source: 'benchmark-service',
+        resourceType: 'benchmark_experiment',
+        resourceId: experimentId,
+        metadata: {},
+      });
+      return;
+    }
+    const invalidated = await this.deps.repository.finalizeExperimentInvalidation(
+      experimentId, expectedGeneration,
+    );
+    if (!invalidated) {
+      // Should not happen; another worker already advanced. No audit (the
+      // winner that advanced wrote it).
+      return;
+    }
     await this.deps.auditService.write({
-      projectId: experiment.projectId,
-      eventType: 'BENCHMARK_COMPLETED',
+      projectId: claimed.projectId,
+      eventType: 'BENCHMARK_INVALIDATED',
       actor: 'system',
       source: 'benchmark-service',
       resourceType: 'benchmark_experiment',
@@ -583,7 +806,32 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   async getExperiment(experimentId: string): Promise<BenchmarkExperiment | null> {
-    return this.deps.repository.getExperiment(experimentId);
+    const experiment = await this.deps.repository.getExperiment(experimentId);
+    if (!experiment) return null;
+    // PR #36 review fix #3: LAZY RECOVERY on read. If the experiment is
+    // stuck in `finalizing` (a previous worker won the reservation but
+    // died before finalizing), trigger checkExperimentCompletion to run
+    // the recovery path (phase 0: recoverStaleFinalizingExperiment). The
+    // recovery CAS guards on `finalizing_lease_expires_at < NOW()`, so an
+    // ACTIVE worker (lease not yet expired) is never preempted — the CAS
+    // returns null + checkExperimentCompletion no-ops. This is the safety
+    // net that ensures no experiment is permanently stuck: the moment
+    // anyone reads a stuck experiment (the natural way to discover it),
+    // it gets recovered. NO polling sweep, NO second execution engine (§34
+    // invariant intact). Best-effort in the read path — a recovery failure
+    // logs + the read returns the stuck `finalizing` row (a visible,
+    // debuggable stuck-state, NOT a false completion).
+    if (experiment.status === 'finalizing') {
+      try {
+        await this.checkExperimentCompletion(experimentId);
+      } catch (err) {
+        this.deps.logger.error('benchmark.experiment-finalizing-recovery-failed', {
+          experimentId, error: (err as Error).message,
+        });
+      }
+      return this.deps.repository.getExperiment(experimentId);
+    }
+    return experiment;
   }
 
   async listTrials(experimentId: string, opts: { limit?: number; offset?: number } = {}): Promise<{ trials: BenchmarkTrial[]; total: number }> {

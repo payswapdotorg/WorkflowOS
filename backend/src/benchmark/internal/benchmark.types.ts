@@ -85,6 +85,135 @@ export interface BenchmarkRepository {
   getExperiment(id: string): Promise<BenchmarkExperiment | null>;
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
+  /**
+   * PR #36 review fix #2 + #3 + #4: ATOMIC experiment-completion RESERVATION
+   * (phase 1 of the two-phase completion protocol). Compare-and-swap:
+   * `UPDATE wfos_benchmark_experiments SET status='finalizing',
+   * finalizing_lease_expires_at = NOW() + ttl,
+   * finalizing_generation = COALESCE(finalizing_generation, 0) + 1 WHERE
+   * id=$1 AND status='running' RETURNING *`.
+   *
+   * Only the worker that wins (returns a row) may proceed to integrity
+   * validation (phase 2). The loser (null) no-ops — exactly-once
+   * validation + audit.
+   *
+   * CRITICAL: this reserves the experiment (`running → finalizing`) but does
+   * NOT make `completed` authoritative. The winner MUST call
+   * `finalizeExperimentCompletion` (validation passed → `finalizing →
+   * completed`) or `finalizeExperimentInvalidation` (validation failed →
+   * `finalizing → invalidated`) AFTER `integrityService.validate` returns,
+   * AND it MUST pass the `finalizingGeneration` it received from this call
+   * (the fencing token — see fix #4 below).
+   *
+   * PR #36 review fix #3 — CRASH-SAFE LEASE: the reservation also sets
+   * `finalizing_lease_expires_at` (a persisted lease). If the winner dies
+   * before finalizing, the lease eventually expires and a recovery worker
+   * can reclaim the reservation via `recoverStaleFinalizingExperiment`
+   * (which re-enters the protocol at phase 2). Without the lease, the
+   * experiment would be permanently stuck in `finalizing` — the durable
+   * reservation the reviewer flagged. The `leaseTtlMs` MUST be long enough
+   * for integrity validation + the finalization CAS under normal
+   * conditions (default 2 minutes — see DefaultBenchmarkService).
+   *
+   * PR #36 review fix #4 — FENCING GENERATION: the reservation also sets
+   * `finalizing_generation` (a monotonic ownership token). The returned
+   * row carries the new `finalizingGeneration` value — the winner MUST
+   * pass it to the finalization CAS. A stale worker holding an OLDER
+   * generation is fenced (the finalization CAS rejects; the row's
+   * `finalizing_generation` no longer matches the stale value). This
+   * closes the fencing hole the reviewer flagged: the prior recovery CAS
+   * reclaimed + renewed the lease but did NOT fence the original worker —
+   * the stale worker could still finalize using stale validation after a
+   * newer worker reclaimed. With the generation, the stale worker's
+   * finalization CAS fails the predicate + the newer worker retains
+   * exclusive ownership.
+   */
+  claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #3 + #4: CRASH-SAFE RECOVERY for the `finalizing`
+   * reservation. Compare-and-swap:
+   * `UPDATE wfos_benchmark_experiments SET finalizing_lease_expires_at =
+   * NOW() + ttl, finalizing_generation = COALESCE(finalizing_generation,
+   * 0) + 1 WHERE id=$1 AND status='finalizing' AND
+   * finalizing_lease_expires_at IS NOT NULL AND
+   * finalizing_lease_expires_at < NOW() RETURNING *`.
+   *
+   * Only the worker that wins (returns a row) may re-enter the protocol at
+   * phase 2 (integrity validation + the finalization CAS). The lease is
+   * RENEWED (set to NOW()+ttl) so the recovering worker has exclusive
+   * ownership — if it ALSO dies before finalizing, the renewed lease
+   * eventually expires and another recovery attempt can claim it again.
+   * Forward progress is preserved.
+   *
+   * The recovery CAS guards on `status='finalizing'` (NOT `running` — the
+   * fresh-claim path owns `running`) AND `finalizing_lease_expires_at <
+   * NOW()` (the previous winner's lease has expired = the previous winner
+   * is presumed dead). This closes the stuck-`finalizing` failure the
+   * reviewer flagged: a crashed worker's reservation is eventually
+   * reclaimable, so no experiment is permanently stuck. The recovery is
+   * triggered lazily on `getExperiment` reads (NO polling sweep, NO second
+   * execution engine — §34 invariant intact).
+   *
+   * PR #36 review fix #4 — FENCING GENERATION: the recovery CAS also
+   * INCREMENTS `finalizing_generation` (COALESCE(NULL, 0) + 1 to handle
+   * legacy pre-0030 `finalizing` rows whose generation is NULL). The
+   * returned row carries the new `finalizingGeneration` value — the
+   * recovering worker MUST pass it to the finalization CAS. A stale worker
+   * (the one whose lease expired) holds the OLD generation + is fenced:
+   * its finalization CAS rejects because the row's `finalizing_generation`
+   * has advanced past the stale value. This is the EXCLUSIVE-OWNERSHIP
+   * invariant the reviewer required: the recovering worker has exclusive
+   * ownership, NOT shared with a stale ghost.
+   */
+  recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #2 + #4: phase 3a — ATOMIC completion FINALIZATION
+   * (success path). Compare-and-swap `finalizing → completed` (sets
+   * completed_at), guarded on `WHERE id=$1 AND status='finalizing' AND
+   * finalizing_generation=$2`. Called by the reservation winner (the worker
+   * that won `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+   * AFTER `integrityService.validate` returns a record with `valid === true`.
+   * The `expectedGeneration` parameter is the `finalizingGeneration` the
+   * caller received from the reservation/recovery CAS — passing it proves
+   * the caller is the CURRENT owner. Only after this CAS does the
+   * `completed` status become authoritative.
+   *
+   * Returns null if (a) the experiment is no longer in `finalizing` (e.g. a
+   * concurrent invalidation already advanced it — should not happen given
+   * the reservation is exclusive, but the CAS makes it safe regardless),
+   * OR (b) the row's `finalizing_generation` does not match the
+   * `expectedGeneration` — a stale worker holding an OLD generation is
+   * FENCED (its finalization CAS fails the predicate). This is the fencing
+   * invariant the PR #36 reviewer required: the recovering worker has
+   * exclusive ownership, NOT shared with a stale ghost.
+   */
+  finalizeExperimentCompletion(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #2 + #4: phase 3b — ATOMIC invalidation FINALIZATION
+   * (failure path). Compare-and-swap `finalizing → invalidated` (sets
+   * completed_at), guarded on `WHERE id=$1 AND status='finalizing' AND
+   * finalizing_generation=$2`. Called by the reservation winner (the worker
+   * that won `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+   * AFTER `integrityService.validate` returns a record with `valid === false`
+   * (or throws — treated as a validation failure). The `expectedGeneration`
+   * parameter is the `finalizingGeneration` the caller received from the
+   * reservation/recovery CAS — passing it proves the caller is the CURRENT
+   * owner. This is the authoritative terminal state for a failed integrity
+   * check: the experiment is `invalidated`, NOT `completed`, so no consumer
+   * can read a false successful completion.
+   *
+   * Returns null if (a) the experiment is no longer in `finalizing`, OR
+   * (b) the row's `finalizing_generation` does not match the
+   * `expectedGeneration` — a stale worker holding an OLD generation is
+   * FENCED. The same fencing invariant as `finalizeExperimentCompletion`
+   * applies on the failure path: a stale ghost cannot invalidate either
+   * (it might have read corrupt data + tried to finalize to invalidated
+   * after a newer worker already reclaimed + re-validated).
+   */
+  finalizeExperimentInvalidation(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null>;
 
   // Trials (§5, §6)
   createTrial(input: BenchmarkTrialInsert): Promise<BenchmarkTrial>;
@@ -108,6 +237,104 @@ export interface BenchmarkRepository {
   listTrialsByWorkItem(workItemId: string): Promise<BenchmarkTrial[]>;
   updateTrial(id: string, patch: BenchmarkTrialPatch): Promise<BenchmarkTrial | null>;
   countByCell(experimentId: string): Promise<{ provider: string; mode: 'native' | 'external'; count: number }[]>;
+  /**
+   * PR #35 follow-up (idempotency): ATOMIC CLAIM of a queued trial by an
+   * orchestrator worker. Performs a compare-and-swap:
+   *
+   *   UPDATE wfos_benchmark_trials
+   *   SET status='running', lifecycle_phase='starting',
+   *       started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+   *   WHERE id = $1 AND lifecycle_phase = 'queued'
+   *   RETURNING *;
+   *
+   * Returns the claimed row ONLY for the worker that won the race. Returns
+   * `null` when another worker already claimed the trial (lifecycle_phase is
+   * no longer 'queued') OR the trial does not exist. The LOSER MUST NOT
+   * perform any orchestration side effects — the trial is already being
+   * advanced by the winner.
+   *
+   * This closes the `queued → running` claim race identified in the PR #35
+   * follow-up review: two deliveries of the same `benchmark.trial` job can
+   * no longer both observe `queued` and both proceed to clone / branch /
+   * submit.
+   */
+  claimTrialForSetup(id: string): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `starting → execution_wait` OR
+   * `starting → delivery_wait` transition, performed by the orchestrator
+   * worker that won the `claimTrialForSetup` race. Carries the linkage fields
+   * (workItemId, workOrderId, implementationContextId, executionId, etc.)
+   * that the orchestrator computed during setup.
+   *
+   * The `toPhase` is:
+   *   - 'execution_wait' — external mode: the orchestrator submitted, the
+   *     execution is handoff_ready, awaiting the `onExecutionTerminal`
+   *     ingestion hook.
+   *   - 'delivery_wait'  — native mode: the orchestrator submitted + the
+   *     synchronous execution terminal-completed; awaiting the workflow
+   *     `onTransition` hook.
+   *
+   * Guarded: `WHERE id=$1 AND lifecycle_phase='starting'`. Returns null if
+   * the trial is no longer `starting` (e.g. a concurrent terminal failure
+   * raced ahead — the orchestrator's linkage update is discarded, which is
+   * correct: the trial is already terminal).
+   */
+  advanceFromStarting(
+    id: string,
+    toPhase: 'execution_wait' | 'delivery_wait',
+    patch: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `execution_wait → delivery_wait`
+   * transition (external mode only). Performed by `runTrialJob` when the
+   * authoritative execution record is terminal-completed. Guarded:
+   * `WHERE id=$1 AND lifecycle_phase='execution_wait'`. Returns null if the
+   * trial is no longer `execution_wait` (already advanced by a concurrent
+   * delivery, or already terminal).
+   */
+  advanceToDeliveryWait(id: string): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): ATOMIC TERMINAL CLAIM. Performs a
+   * compare-and-swap from a non-terminal phase (`execution_wait` or
+   * `delivery_wait`) to a terminal phase (`completed` or `failed`).
+   *
+   * Returns the claimed row ONLY for the worker that won the terminal race.
+   * Returns `null` when the trial was already terminal (another worker
+   * finalized it) OR the trial is not in the expected `fromPhase`. The LOSER
+   * MUST NOT collect metrics / insert findings / write audit — those side
+   * effects are exactly-once by construction.
+   *
+   * This closes the `running → terminal` finalization race identified in the
+   * PR #35 follow-up review: two terminal-advancement jobs can no longer
+   * both finalize the same trial and both collect metrics + insert findings
+   * + write audit events.
+   */
+  claimTerminal(
+    id: string,
+    fromPhase: 'execution_wait' | 'delivery_wait',
+    outcome:
+      | { status: 'completed' }
+      | { status: 'failed'; failureKind: string; failureReason: string },
+  ): Promise<BenchmarkTrial | null>;
+  /**
+   * PR #35 follow-up (idempotency): atomic `starting → failed` transition,
+   * performed by the orchestrator worker that won the setup claim when setup
+   * itself fails (dependency replication failure, branch creation failure,
+   * digest mismatch, native submit failure). Guarded:
+   * `WHERE id=$1 AND lifecycle_phase='starting'`. Returns null if the trial
+   * is no longer `starting` (already terminalized by a concurrent path —
+   * the failure update is discarded, which is correct). The optional patch
+   * carries whatever linkage / metadata the orchestrator had computed
+   * before the failure (workItemId / workOrderId / implementationContextId /
+   * executionId / agentRunId / mode metadata) — folded into the same atomic
+   * statement so the failed row is self-describing for forensics.
+   */
+  failFromStarting(
+    id: string,
+    failureKind: string,
+    failureReason: string,
+    patch?: BenchmarkTrialPatch,
+  ): Promise<BenchmarkTrial | null>;
 
   // Metrics (§10)
   upsertMetrics(metrics: BenchmarkTrialMetricsInsert): Promise<BenchmarkTrialMetrics>;
@@ -174,6 +401,15 @@ export interface BenchmarkTrialInsert {
 
 export interface BenchmarkTrialPatch {
   readonly status?: BenchmarkTrial['status'];
+  /**
+   * PR #35 follow-up (idempotency): the explicit phase the application layer
+   * transitions the trial to. Mutated ONLY through the atomic claim methods
+   * (`claimTrialForSetup`, `advanceFromStarting`, `advanceToDeliveryWait`,
+   * `claimTerminal`, `failFromStarting`) so that every transition is a
+   * compare-and-swap. The generic `updateTrial` does NOT set this field
+   * (it is reserved for the atomic paths).
+   */
+  readonly lifecyclePhase?: BenchmarkTrial['lifecyclePhase'];
   readonly workItemId?: string | null;
   readonly executionId?: string | null;
   readonly agentRunId?: string | null;
@@ -411,6 +647,19 @@ export interface DefaultBenchmarkServiceDeps {
    * observes the terminal transition.
    */
   readonly workflowEngine: WorkflowEngine;
+  /**
+   * PR #36 review fix #3: TTL (ms) for the `finalizing` reservation lease.
+   * A worker that wins `claimExperimentCompletion` (running → finalizing)
+   * sets `finalizing_lease_expires_at = NOW() + ttl`. If the worker dies
+   * before finalizing, the lease eventually expires and a recovery worker
+   * can reclaim the reservation via `recoverStaleFinalizingExperiment`.
+   * Optional — defaults to 120_000 (2 minutes), enough for integrity
+   * validation + the finalization CAS under normal conditions. Tests may
+   * override (e.g. a very short TTL to exercise expiry without waiting);
+   * the recovery regression test manipulates `finalizing_lease_expires_at`
+   * directly via raw SQL instead, so the default is fine for tests.
+   */
+  readonly finalizingLeaseTtlMs?: number;
 }
 
 export type {

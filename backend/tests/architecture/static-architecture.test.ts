@@ -5868,4 +5868,527 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     walk(join(FRONTEND_ROOT, 'src'));
     expect(violations, violations.join('\n')).toEqual([]);
   });
+
+  // ==========================================================================
+  // PR #35 follow-up (idempotency): the benchmark trial lifecycle MUST be
+  // exactly-once under duplicate job delivery + concurrent workers. The
+  // claim (queued→running) + finalization (running→terminal) transitions
+  // are atomic compare-and-swap on the persisted `lifecycle_phase` column.
+  // A duplicate delivery that loses the claim observes null + NO-OPS (never
+  // reruns orchestration / refinalizes). These static checks enforce the
+  // invariant at the source level so a future regression cannot silently
+  // reintroduce the unconditional `UPDATE ... WHERE id=$1` pattern.
+  // ==========================================================================
+
+  it('benchmark trial lifecycle migration 0027 exists (lifecycle_phase column)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    expect(existsSync(migrationPath), '0027_benchmark_trial_lifecycle_phase.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS lifecycle_phase/);
+    expect(src).toMatch(/CHECK \(lifecycle_phase IN/);
+    // The explicit phase set: queued → starting → execution_wait →
+    // delivery_wait → completed | failed.
+    expect(src).toMatch(/'queued'/);
+    expect(src).toMatch(/'starting'/);
+    expect(src).toMatch(/'execution_wait'/);
+    expect(src).toMatch(/'delivery_wait'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'failed'/);
+  });
+
+  it('benchmark migration 0027 MECHANICALLY ENFORCES the status↔lifecycle_phase invariant (NOT a dual-state model)', () => {
+    // The review explicitly warned: "The dual-state model is dangerous unless
+    // there is a mechanically enforced invariant between the two." Application-
+    // layer sync alone is insufficient — a future raw UPDATE touching only one
+    // column could silently introduce a divergent row (e.g.
+    // status='running', lifecycle_phase='completed') that the concurrency
+    // model does not know how to route. The DB itself MUST reject such rows.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    // The CHECK constraint exists + is named (so a grep can find it + so
+    // drop/replace is explicit).
+    expect(src).toMatch(/wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/CHECK \(/);
+    // The 6 canonical pairs the review specified. Every allowed (phase,
+    // status) combination must appear so the constraint is total — a row
+    // with any other pairing is physically rejected.
+    expect(src).toMatch(/lifecycle_phase = 'queued'\s+AND status = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'starting'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'completed'\s+AND status = 'completed'/);
+    expect(src).toMatch(/lifecycle_phase = 'failed'\s+AND status IN \('failed','unavailable'\)/);
+    // CRITICAL ORDERING: the CHECK constraint MUST be added AFTER the
+    // backfill UPDATEs. Otherwise the ADD would reject the pre-backfill
+    // divergent rows (status='running' with the default lifecycle_phase=
+    // 'queued'). Verify the constraint text appears after the last backfill
+    // UPDATE for 'unavailable' → 'failed'.
+    const backfillIdx = src.indexOf("status IN ('failed', 'unavailable') AND lifecycle_phase = 'queued'");
+    const constraintIdx = src.indexOf('ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant');
+    expect(backfillIdx, 'unavailable backfill UPDATE must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK constraint must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK must come AFTER the backfill (else ADD rejects pre-backfill rows)').toBeGreaterThan(backfillIdx);
+  });
+
+  it('benchmark trial claim is ATOMIC (claimTrialForSetup: queued→starting compare-and-swap)', () => {
+    // The orchestrator's runTrial MUST claim via claimTrialForSetup (atomic
+    // WHERE lifecycle_phase='queued' RETURNING *), NOT via an unconditional
+    // updateTrial. A lost claim returns null + the orchestrator MUST NO-OP
+    // (no clone / branch / submit).
+    const orchestratorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-trial-orchestrator.ts'), 'utf8');
+    expect(orchestratorSrc).toMatch(/claimTrialForSetup/);
+    expect(orchestratorSrc).toMatch(/claim-lost/);
+    // The orchestrator must NOT use an unconditional updateTrial for the
+    // initial claim (the old `UPDATE ... SET status='running' WHERE id=$1`
+    // pattern that caused the claim race).
+    expect(orchestratorSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'running'/);
+
+    // The repository's claimTrialForSetup MUST guard on lifecycle_phase='queued'.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    expect(repoSrc).toMatch(/claimTrialForSetup/);
+    // The atomic compare-and-swap: WHERE id=$1 AND lifecycle_phase='queued'.
+    const claimFn = repoSrc.match(/async claimTrialForSetup[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTrialForSetup must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = 'queued'/);
+    expect(claimFn![0]).toMatch(/lifecycle_phase = 'starting'/);
+  });
+
+  it('benchmark trial finalization is ATOMIC (claimTerminal: execution_wait|delivery_wait→completed|failed compare-and-swap)', () => {
+    // The service's finalizeTrial MUST use claimTerminal (atomic
+    // WHERE lifecycle_phase=$fromPhase RETURNING *). A lost claim returns
+    // null + the service MUST skip metrics / findings / audit (exactly-once
+    // side effects).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/claimTerminal/);
+    expect(serviceSrc).toMatch(/finalize-lost-race/);
+    // finalizeTrial must NOT use an unconditional updateTrial for the
+    // terminal transition (the old pattern that caused the finalize race).
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'completed'/);
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'failed'/);
+
+    // The repository's claimTerminal MUST guard on lifecycle_phase=$fromPhase.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const claimFn = repoSrc.match(/async claimTerminal[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTerminal must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = \$2/);
+  });
+
+  it('benchmark experiment completion is a TWO-PHASE protocol (reservation running→finalizing, then finalization after integrity, fenced on generation)', () => {
+    // PR #36 review fix #2 + #4: `claimExperimentCompletion` MUST be a
+    // RESERVATION (running → finalizing), NOT a direct completion.
+    // `completed` must become authoritative ONLY via
+    // `finalizeExperimentCompletion`, called AFTER integrity validation
+    // passes. This closes the false-completion race the reviewer found
+    // (the prior version flipped the experiment to `completed` before
+    // validation ran). The finalization CAS MUST also be FENCED on the
+    // `finalizing_generation` (PR #36 review fix #4) so a stale worker
+    // holding an OLDER generation cannot finalize after a newer worker
+    // reclaimed + advanced the generation.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+
+    // Phase 1 — RESERVATION. claimExperimentCompletion MUST set
+    // status='finalizing' (NOT 'completed') + guard on status='running'
+    // + set the fencing generation (COALESCE(NULL, 0) + 1 to handle legacy
+    // pre-0030 rows whose generation is NULL).
+    const claimFn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND status = 'running'/);
+    expect(claimFn![0]).toMatch(/SET status = 'finalizing'/);
+    expect(claimFn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The reservation MUST NOT set 'completed' (that is the finalization's
+    // job, after integrity passes).
+    expect(claimFn![0]).not.toMatch(/SET status = 'completed'/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization).
+    expect(claimFn![0]).not.toMatch(/completed_at/);
+
+    // Phase 3a — success finalization. finalizeExperimentCompletion MUST
+    // guard on status='finalizing' + the fencing generation + set
+    // status='completed'.
+    const finalizeFn = repoSrc.match(/async finalizeExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(finalizeFn, 'finalizeExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(finalizeFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing' AND finalizing_generation = \$2/);
+    expect(finalizeFn![0]).toMatch(/SET status = 'completed'/);
+
+    // Phase 3b — failure finalization. finalizeExperimentInvalidation MUST
+    // guard on status='finalizing' + the fencing generation + set
+    // status='invalidated'.
+    const invalidateFn = repoSrc.match(/async finalizeExperimentInvalidation[\s\S]*?RETURNING \*/);
+    expect(invalidateFn, 'finalizeExperimentInvalidation must exist + use RETURNING *').not.toBeNull();
+    expect(invalidateFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing' AND finalizing_generation = \$2/);
+    expect(invalidateFn![0]).toMatch(/SET status = 'invalidated'/);
+  });
+
+  it('benchmark checkExperimentCompletion ORDERING: reservation → integrity validation → finalization → audit (NOT completed-then-validate)', () => {
+    // PR #36 review fix #2: the integrity validation MUST run BETWEEN the
+    // reservation + the finalization. The audit MUST run AFTER the
+    // finalization (so BENCHMARK_COMPLETED is only written when the
+    // experiment actually reached `completed`, + BENCHMARK_INVALIDATED is
+    // written on the failure path). This is the ordering the reviewer
+    // required: "the claim must occur before any of those side effects"
+    // (the reservation claims before validation; the finalization claims
+    // before the audit).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    // Match the full method body up to its closing brace at 2-space indent.
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    // Phase 1 — reservation is the FIRST CAS.
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    const validateIdx = body.indexOf('integrityService.validate');
+    const finalizeIdx = body.indexOf('finalizeExperimentCompletion');
+    const invalidateFinIdx = body.indexOf('finalizeExperimentInvalidation');
+    const auditCompletedIdx = body.indexOf("'BENCHMARK_COMPLETED'");
+    const auditInvalidatedIdx = body.indexOf("'BENCHMARK_INVALIDATED'");
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    expect(validateIdx, 'must call integrityService.validate').toBeGreaterThan(-1);
+    expect(finalizeIdx, 'must call finalizeExperimentCompletion').toBeGreaterThan(-1);
+    expect(invalidateFinIdx, 'must call finalizeExperimentInvalidation').toBeGreaterThan(-1);
+    expect(auditCompletedIdx, 'must emit BENCHMARK_COMPLETED').toBeGreaterThan(-1);
+    expect(auditInvalidatedIdx, 'must emit BENCHMARK_INVALIDATED').toBeGreaterThan(-1);
+    // Ordering: reservation BEFORE validation BEFORE finalization BEFORE audit.
+    expect(claimIdx).toBeLessThan(validateIdx);
+    expect(validateIdx).toBeLessThan(finalizeIdx);
+    expect(validateIdx).toBeLessThan(invalidateFinIdx);
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // The success-path audit (BENCHMARK_COMPLETED) must come AFTER the
+    // success finalization; the failure-path audit (BENCHMARK_INVALIDATED)
+    // must come AFTER the failure finalization.
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // A thrown validation error MUST be treated as a failure (caught +
+    // valid=false), NOT propagated (which would leave the experiment stuck
+    // in 'finalizing' with no audit — but at least not a false completion).
+    expect(body).toMatch(/valid = false/);
+  });
+
+  it('benchmark migration 0028 adds the finalizing reservation status to the experiment CHECK (two-phase completion)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0028_benchmark_experiment_completion_protocol.sql');
+    expect(existsSync(migrationPath), '0028_benchmark_experiment_completion_protocol.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/DROP CONSTRAINT IF EXISTS wfos_benchmark_experiments_status_check/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_experiments_status_check/);
+    // The new CHECK must include 'finalizing' (the reservation state) +
+    // preserve all prior statuses.
+    expect(src).toMatch(/'created'/);
+    expect(src).toMatch(/'running'/);
+    expect(src).toMatch(/'paused'/);
+    expect(src).toMatch(/'finalizing'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'cancelled'/);
+    expect(src).toMatch(/'invalidated'/);
+  });
+
+  it('benchmark migration 0027 backfill splits running trials by execution_mode (native→delivery_wait, external→execution_wait)', () => {
+    // PR #36 review fix #1: a native `running` trial is past execution
+    // (native is synchronous-completed) + awaiting delivery, so it MUST
+    // backfill to `delivery_wait`. An external `running` trial is awaiting
+    // external execution completion, so it backfills to `execution_wait`.
+    // The prior single backfill (all running → execution_wait)
+    // misclassified native trials + would cause runTrialJob to re-read a
+    // non-existent execution record + finalize them as
+    // 'execution-record-not-found'.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/execution_mode = 'native'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'/);
+    expect(src).toMatch(/execution_mode = 'external'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'/);
+    // The native backfill MUST set delivery_wait (NOT execution_wait) +
+    // pair it with execution_mode='native' in the same UPDATE statement.
+    // Assert the full SET→WHERE line adjacency directly (capture-group
+    // approaches cross UPDATE statements because [\s\S]*? spans them).
+    expect(src).toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
+    // The external backfill MUST set execution_wait (NOT delivery_wait) +
+    // pair it with execution_mode='external'.
+    expect(src).toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    // The native backfill MUST NOT pair delivery_wait with external, + the
+    // external backfill MUST NOT pair execution_wait with native (the
+    // misclassification the review found).
+    expect(src).not.toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    expect(src).not.toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
+  });
+
+  it('benchmark trial runTrialJob routes by lifecycle_phase (NOT coarse status)', () => {
+    // The state machine MUST route by the explicit persisted phase so a
+    // duplicate delivery observes the already-advanced phase + no-ops. The
+    // 'starting' phase is the critical guard: a redelivery arriving while
+    // the orchestrator is mid-setup observes 'starting' + returns (it does
+    // NOT read executionId=null + finalize the active trial as
+    // 'execution-record-not-found').
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/trial\.lifecyclePhase/);
+    expect(serviceSrc).toMatch(/phase === 'starting'/);
+    expect(serviceSrc).toMatch(/phase === 'execution_wait'/);
+    expect(serviceSrc).toMatch(/phase === 'delivery_wait'/);
+    expect(serviceSrc).toMatch(/skipped-starting/);
+    // The old coarse `trial.status === 'running'` routing (which caused the
+    // mid-orchestration clobber race) must NOT be the primary router.
+    expect(serviceSrc).not.toMatch(/if \(trial\.status === 'running'\)/);
+  });
+
+  it('benchmark trial idempotency regression tests exist', () => {
+    // The duplicate-delivery + concurrent-worker regression tests MUST
+    // exist (the review required them before any merge).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'trial-idempotency.regression.test.ts');
+    expect(existsSync(testPath), 'trial-idempotency.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/duplicate runTrialJob on a QUEUED trial claims exactly once/);
+    expect(src).toMatch(/concurrent finalization on a DELIVERY_WAIT trial finalizes exactly once/);
+    expect(src).toMatch(/claimTrialForSetup compare-and-swap: exactly one winner/);
+    expect(src).toMatch(/mid-orchestration redelivery NO-OPS on the starting phase/);
+    // PR #36 review fix #1: migration 0027 backfill mode-split regression.
+    expect(src).toMatch(/migration 0027 backfill classifies native running/);
+    // PR #36 review fix #2a: integrity failure MUST NOT expose a false
+    // `completed` experiment.
+    expect(src).toMatch(/integrity failure does NOT expose a false completed experiment/);
+    // PR #36 review fix #2b: exactly-once finalization under concurrent
+    // checkExperimentCompletion calls.
+    expect(src).toMatch(/concurrent experiment completion finalizes exactly once/);
+    // PR #36 review fix #3: lost `finalizing` worker recovery — both the
+    // success path (recovered to `completed` + one BENCHMARK_COMPLETED)
+    // + the integrity-failure path (recovered to `invalidated` + one
+    // BENCHMARK_INVALIDATED). The reviewer required a regression test
+    // proving a lost worker can be safely recovered to exactly one
+    // terminal state and exactly one terminal audit event.
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(success path\)/);
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(integrity-failure path\)/);
+    // PR #36 review fix #4 (fencing): the regression suite MUST prove BOTH
+    // (a) the stale-worker fencing scenario (an old generation cannot
+    // finalize after a newer worker reclaims + advances the generation)
+    // AND (b) the normal active-lease non-preemption case (an active
+    // worker is never preempted by concurrent recovery CAS calls). The
+    // reviewer required both scenarios: "The regression suite needs to
+    // prove exactly that scenario, plus the normal active-lease
+    // non-preemption case."
+    expect(src).toMatch(/stale worker holding an old generation CANNOT finalize after a newer worker reclaims the reservation \(fencing\)/);
+    expect(src).toMatch(/active lease is NOT preempted by concurrent recovery CAS calls \(active-lease non-preemption\)/);
+  });
+
+  it('benchmark migration 0029 adds the persisted finalizing lease + stale-reservation index (crash-safe recovery)', () => {
+    // PR #36 review fix #3: the two-phase completion protocol (migration
+    // 0028) introduced a durable `running → finalizing` reservation, but
+    // there was NO recovery path if the worker that won the reservation
+    // DIED before finalizing — the experiment would be permanently stuck
+    // in `finalizing` (claimExperimentCompletion only matches
+    // WHERE status='running'; checkExperimentCompletion is only triggered
+    // when a trial reaches terminal, but all trials were already
+    // terminal). Migration 0029 fixes this by adding a persisted lease
+    // (`finalizing_lease_expires_at`) that the recovery CAS reclaims when
+    // it expires.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0029_benchmark_experiment_finalizing_lease.sql');
+    expect(existsSync(migrationPath), '0029_benchmark_experiment_finalizing_lease.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The column MUST exist (nullable — only set when status='finalizing').
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS finalizing_lease_expires_at TIMESTAMPTZ/);
+    // A partial index scoped to status='finalizing' for the stale-lease
+    // sweep query (keeps the index small — finalizing is transient).
+    expect(src).toMatch(/CREATE INDEX IF NOT EXISTS idx_benchmark_experiments_finalizing_stale/);
+    expect(src).toMatch(/WHERE status = 'finalizing'/);
+  });
+
+  it('benchmark recoverStaleFinalizingExperiment is an atomic CAS guarded on status=finalizing + an expired lease (NOT running) + INCREMENTS the fencing generation', () => {
+    // PR #36 review fix #3 + #4: the recovery CAS MUST (a) guard on
+    // status='finalizing' (NOT 'running' — the fresh-claim path owns
+    // 'running'), (b) guard on finalizing_lease_expires_at < NOW() (the
+    // previous winner's lease has expired = the previous winner is
+    // presumed dead — an active worker is never preempted mid-validation),
+    // (c) RENEW the lease (set finalizing_lease_expires_at = NOW()+ttl) so
+    // the recovering worker has exclusive ownership — if it also dies, the
+    // renewed lease eventually expires and another recovery attempt can
+    // claim it again (forward progress), (d) INCREMENT the fencing
+    // generation (PR #36 review fix #4) so the stale worker (holding the
+    // OLD generation) is FENCED — its finalization CAS rejects because the
+    // row's finalizing_generation has advanced past the stale value, (e) use
+    // RETURNING * so the winner proceeds to phase 2 (validation +
+    // finalization) + the loser no-ops.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async recoverStaleFinalizingExperiment[\s\S]*?RETURNING \*/);
+    expect(fn, 'recoverStaleFinalizingExperiment must exist + use RETURNING *').not.toBeNull();
+    // Guard on status='finalizing' (NOT 'running' — that is the fresh-claim path).
+    expect(fn![0]).toMatch(/status = 'finalizing'/);
+    expect(fn![0]).not.toMatch(/status = 'running'/);
+    // Guard on the expired lease (the previous winner is presumed dead).
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at < NOW\(\)/);
+    // RENEW the lease (forward progress if the recovering worker also dies).
+    expect(fn![0]).toMatch(/SET\s+finalizing_lease_expires_at = \$2/);
+    // PR #36 review fix #4 — INCREMENT the fencing generation. The COALESCE
+    // handles legacy pre-0030 `finalizing` rows whose generation is NULL
+    // (COALESCE(NULL, 0) + 1 = 1 on the first reclaim).
+    expect(fn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The recovery MUST NOT touch `status` (the reservation stays
+    // `finalizing` — only the finalization CASes advance to
+    // completed/invalidated) + MUST NOT touch `completed_at` (no terminal
+    // timestamp until the finalization).
+    expect(fn![0]).not.toMatch(/SET status/);
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark claimExperimentCompletion sets the persisted lease + the fencing generation (NOT just status=finalizing)', () => {
+    // PR #36 review fix #3 + #4: the reservation MUST set
+    // finalizing_lease_expires_at alongside the running → finalizing CAS,
+    // so a crashed worker's reservation is eventually reclaimable by the
+    // recovery CAS. Without the lease, the recovery CAS has nothing to
+    // check for staleness — the experiment would be permanently stuck.
+    // The reservation MUST ALSO set finalizing_generation (the fencing
+    // token) so the winner receives a generation it MUST pass to the
+    // finalization CAS — a stale worker holding an OLDER generation is
+    // fenced.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(fn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    // The reservation sets BOTH status='finalizing' AND the lease.
+    expect(fn![0]).toMatch(/SET status = 'finalizing'/);
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at = \$2/);
+    // PR #36 review fix #4 — the reservation ALSO sets the fencing
+    // generation (COALESCE(NULL, 0) + 1 to handle legacy pre-0030 rows).
+    expect(fn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization — carried over from the PR #36 fix #2 check).
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark checkExperimentCompletion runs RECOVERY BEFORE the fresh reservation (recovery-first ordering)', () => {
+    // PR #36 review fix #3: checkExperimentCompletion MUST try the
+    // recovery CAS (recoverStaleFinalizingExperiment) BEFORE the
+    // fresh-claim CAS (claimExperimentCompletion). If a previous worker
+    // died with a stale lease, the recovery reclaims it; only if there is
+    // no stale reservation does the fresh claim run (which is the normal
+    // path for an experiment still in 'running'). The recovery winner
+    // reuses the SAME phase 2 (validation) + phase 3 (finalization) path
+    // — only the reservation source differs.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    const recoverIdx = body.indexOf('recoverStaleFinalizingExperiment');
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    expect(recoverIdx, 'must call recoverStaleFinalizingExperiment').toBeGreaterThan(-1);
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    // Recovery MUST come before the fresh claim (recovery-first ordering).
+    expect(recoverIdx).toBeLessThan(claimIdx);
+    // The `claimed` variable MUST be the recovery winner OR the fresh-claim
+    // winner (nullish coalescing) — both paths feed the SAME phase 2/3.
+    expect(body).toMatch(/recovered \?\? .*claimExperimentCompletion/);
+  });
+
+  it('benchmark getExperiment triggers lazy recovery on a stale `finalizing` status (NO polling sweep, NO second execution engine)', () => {
+    // PR #36 review fix #3: the recovery trigger is LAZY — on
+    // getExperiment reads, NOT a background polling sweep. This preserves
+    // the §34 invariant (no second execution engine, no bounded poll): the
+    // moment anyone reads a stuck experiment (the natural way to discover
+    // it), the lazy-recovery guard runs checkExperimentCompletion which
+    // runs the recovery CAS. If the lease is NOT stale (an active worker
+    // is mid-validation), the recovery CAS returns null + the read returns
+    // `finalizing` (no preemption). Best-effort — recovery failures are
+    // caught + logged so the read still returns the stuck row (a visible,
+    // debuggable stuck-state, NOT a false completion).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async getExperiment[\s\S]*?\n  \}/);
+    expect(fn, 'getExperiment must exist').not.toBeNull();
+    const body = fn![0];
+    // The lazy-recovery guard MUST check for status === 'finalizing'.
+    expect(body).toMatch(/status === 'finalizing'/);
+    // It MUST call checkExperimentCompletion (the recovery entry point).
+    expect(body).toMatch(/checkExperimentCompletion/);
+    // Recovery failures MUST be caught (best-effort — the read still
+    // returns the stuck row, NOT a thrown error).
+    expect(body).toMatch(/catch/);
+    expect(body).toMatch(/benchmark.experiment-finalizing-recovery-failed/);
+    // It MUST re-read after recovery (so the caller sees the recovered
+    // terminal state, not the stale `finalizing` row).
+    expect(body).toMatch(/getExperiment/);
+  });
+
+  it('benchmark migration 0030 adds the fencing generation column (monotonic ownership token for the finalizing reservation)', () => {
+    // PR #36 review fix #4 (fencing): the recovery CAS (fix #3) renews the
+    // lease but does NOT fence the original worker — the stale worker can
+    // still call the finalization CAS using stale validation after a newer
+    // worker reclaimed. Migration 0030 fixes this by adding the
+    // `finalizing_generation` column (a monotonic ownership token). The
+    // reservation CAS sets it (COALESCE(NULL, 0) + 1), the recovery CAS
+    // increments it, + the finalization CASes require it in their WHERE
+    // clause. A stale worker holding an OLD generation is fenced (its CAS
+    // rejects because the row's generation has advanced).
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0030_benchmark_experiment_finalizing_generation.sql');
+    expect(existsSync(migrationPath), '0030_benchmark_experiment_finalizing_generation.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The column MUST exist (nullable — only meaningful for `finalizing`
+    // rows; NULL for non-`finalizing` rows + for legacy pre-0030
+    // `finalizing` rows that were never reclaimed post-0030).
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS finalizing_generation BIGINT/);
+    // The migration MUST NOT backfill — the column is only meaningful for
+    // `finalizing` rows, + the recovery CAS handles NULL gracefully via
+    // COALESCE(NULL, 0) + 1 = 1 on the first reclaim. A backfill would
+    // imply the column needs a non-NULL starting value for non-`finalizing`
+    // rows, which it does not (the finalization CAS guard
+    // `status='finalizing'` already excludes them).
+    expect(src).not.toMatch(/UPDATE wfos_benchmark_experiments/);
+    // The migration MUST document the fencing invariant (the reviewer
+    // required the diff to be self-explanatory — what + why).
+    expect(src).toMatch(/finalizing_generation/);
+    expect(src).toMatch(/FENCING/);
+  });
+
+  it('benchmark finalizeExperimentCompletion + finalizeExperimentInvalidation REQUIRE the fencing generation in the WHERE clause (stale-worker fencing)', () => {
+    // PR #36 review fix #4 (fencing): the finalization CASes MUST require
+    // the `expectedGeneration` parameter in their WHERE clause
+    // (`WHERE id=$1 AND status='finalizing' AND finalizing_generation=$2`)
+    // so a stale worker holding an OLDER generation cannot finalize after
+    // a newer worker reclaimed + advanced the generation. This is the
+    // exclusive-ownership invariant the reviewer required. (The two-phase
+    // protocol test above already asserts the WHERE clause includes the
+    // generation; this test isolates the FENCING invariant + asserts the
+    // signatures require the generation parameter, so a caller CANNOT
+    // accidentally call finalize without a generation.)
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+
+    // finalizeExperimentCompletion signature MUST require expectedGeneration.
+    const finalizeSig = repoSrc.match(/async finalizeExperimentCompletion\(id: string, expectedGeneration: number\)/);
+    expect(finalizeSig, 'finalizeExperimentCompletion must accept (id, expectedGeneration)').not.toBeNull();
+    // finalizeExperimentInvalidation signature MUST require expectedGeneration.
+    const invalidateSig = repoSrc.match(/async finalizeExperimentInvalidation\(id: string, expectedGeneration: number\)/);
+    expect(invalidateSig, 'finalizeExperimentInvalidation must accept (id, expectedGeneration)').not.toBeNull();
+
+    // Both finalization CASes MUST guard on finalizing_generation = $2.
+    const finalizeFn = repoSrc.match(/async finalizeExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(finalizeFn![0]).toMatch(/AND finalizing_generation = \$2/);
+    const invalidateFn = repoSrc.match(/async finalizeExperimentInvalidation[\s\S]*?RETURNING \*/);
+    expect(invalidateFn![0]).toMatch(/AND finalizing_generation = \$2/);
+
+    // The repository interface (benchmark.types.ts) MUST also require the
+    // generation parameter on both signatures (so callers cannot bypass
+    // the fencing token at the type level).
+    const typesSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark.types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/finalizeExperimentCompletion\(id: string, expectedGeneration: number\)/);
+    expect(typesSrc).toMatch(/finalizeExperimentInvalidation\(id: string, expectedGeneration: number\)/);
+  });
+
+  it('benchmark checkExperimentCompletion passes the claimed generation to the finalization CASes (with a defensive null check)', () => {
+    // PR #36 review fix #4 (fencing): checkExperimentCompletion MUST read
+    // `claimed.finalizingGeneration` (the fencing token the reservation
+    // or recovery CAS returned) + pass it to BOTH finalization CASes. A
+    // null generation (should not happen — every finalizing row post-0030
+    // has a generation set by the reservation/recovery CAS) is treated as
+    // a defensive abort: log + return WITHOUT finalizing (do NOT finalize
+    // without fencing — a missing generation means we cannot prove
+    // exclusive ownership). This is the wiring that makes the fencing
+    // invariant end-to-end: the reservation sets the generation → the
+    // service reads it → the finalization CAS requires it.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    // MUST read claimed.finalizingGeneration into a local variable.
+    expect(body).toMatch(/claimed\.finalizingGeneration/);
+    // MUST defensively abort on null generation (log + return — do NOT
+    // finalize without fencing).
+    expect(body).toMatch(/expectedGeneration === null/);
+    expect(body).toMatch(/benchmark\.experiment-finalizing-missing-generation/);
+    // MUST pass expectedGeneration to BOTH finalization CASes.
+    expect(body).toMatch(/finalizeExperimentCompletion\(\s*experimentId,\s*expectedGeneration/);
+    expect(body).toMatch(/finalizeExperimentInvalidation\(\s*experimentId,\s*expectedGeneration/);
+  });
 });

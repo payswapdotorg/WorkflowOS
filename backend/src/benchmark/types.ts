@@ -90,12 +90,38 @@ export interface BenchmarkExperiment {
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly completedAt: Date | null;
+  /**
+   * PR #36 review fix #4 (fencing): the monotonic ownership token for the
+   * `finalizing` reservation. Set by `claimExperimentCompletion`
+   * (`COALESCE(finalizing_generation, 0) + 1` on the running → finalizing
+   * CAS) + INCREMENTED by `recoverStaleFinalizingExperiment` (on the
+   * expired-lease reclaim). The reservation winner MUST pass its received
+   * generation to `finalizeExperimentCompletion` /
+   * `finalizeExperimentInvalidation` so a stale worker holding an OLD
+   * generation is fenced (the finalization CAS rejects; the row's
+   * `finalizing_generation` no longer matches the stale value).
+   *
+   * `null` for non-`finalizing` rows (the column carries no meaning outside
+   * the reservation state) + for legacy `finalizing` rows from migrations
+   * 0028/0029 (pre-0030) that have never been reclaimed post-0030. The
+   * recovery CAS sets the generation on the first reclaim
+   * (`COALESCE(NULL, 0) + 1 = 1`), so a legacy row is gracefully fenced the
+   * moment it is reclaimed — it does NOT need a backfill.
+   */
+  readonly finalizingGeneration: number | null;
 }
 
 export type BenchmarkExperimentStatus =
   | 'created'
   | 'running'
   | 'paused'
+  // PR #36 review fix #2: the reservation state in the two-phase
+  // completion protocol. `claimExperimentCompletion` CAS-exclusively
+  // transitions running → finalizing (only the winner runs integrity
+  // validation); the winner then CAS-transitions finalizing → completed
+  // (validation passed) | invalidated (validation failed). `completed` is
+  // NOT authoritative until integrity passes.
+  | 'finalizing'
   | 'completed'
   | 'cancelled'
   | 'invalidated';
@@ -164,6 +190,20 @@ export interface BenchmarkTrial {
   readonly completedAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+  /**
+   * PR #35 follow-up (idempotency): the EXPLICIT, persisted phase lifecycle.
+   * Each transition is a compare-and-swap owned by the benchmark application
+   * layer so that duplicate `benchmark.trial` job delivery observes an
+   * already-claimed / already-advanced phase + produces NO side effects:
+   *
+   *   queued → starting → execution_wait → delivery_wait → completed | failed
+   *
+   * The `status` column is preserved for backward compat (UIs, recommendation
+   * cell statistics, the §30 failure_kind taxonomy). `lifecyclePhase` is the
+   * STRICTER companion the application layer uses for concurrency control.
+   * The two are updated together in the same statement.
+   */
+  readonly lifecyclePhase: BenchmarkTrialLifecyclePhase;
 }
 
 export type BenchmarkTrialStatus =
@@ -172,6 +212,37 @@ export type BenchmarkTrialStatus =
   | 'completed'
   | 'failed'
   | 'unavailable';
+
+/**
+ * PR #35 follow-up (idempotency): the explicit benchmark trial phase lifecycle.
+ * Every transition is an atomic compare-and-swap (WHERE id=$1 AND
+ * lifecycle_phase=$expected) so duplicate job delivery cannot duplicate side
+ * effects.
+ *
+ *   queued         — not yet claimed by an orchestrator worker.
+ *   starting       — an orchestrator worker has CLAIMED the trial (atomic
+ *                    queued→starting) and is performing clone / branch /
+ *                    submit. A duplicate delivery observes `starting` + NO-OPS
+ *                    (it must NOT re-run orchestration, NOT finalize the
+ *                    trial — the claiming worker is still mid-setup).
+ *   execution_wait — the orchestrator submitted (external: awaiting the
+ *                    `onExecutionTerminal` ingestion hook to report a
+ *                    terminal execution record; native never enters this
+ *                    phase — its execution is synchronous-completed, so the
+ *                    orchestrator advances starting→delivery_wait directly).
+ *   delivery_wait  — execution terminal-completed; awaiting the workflow
+ *                    engine `onTransition` hook to report `verified` (or a
+ *                    terminal failure state) for the cloned work item.
+ *   completed      — terminal success (workflow `verified`).
+ *   failed         — terminal failure (any failure_kind).
+ */
+export type BenchmarkTrialLifecyclePhase =
+  | 'queued'
+  | 'starting'
+  | 'execution_wait'
+  | 'delivery_wait'
+  | 'completed'
+  | 'failed';
 
 export type BenchmarkFailureKind = 'infrastructure' | 'engineering' | 'configuration';
 
