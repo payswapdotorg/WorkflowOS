@@ -228,12 +228,56 @@ export interface ExecutionSessionRepository {
 
   /** The session's events, ordered by sequence number (ascending). */
   listEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
+
+  // --- WORK-034 (PR #38 review): durable terminal reconciliation ---
+
+  /**
+   * Every PENDING session-terminal obligation (discharged_at IS NULL),
+   * each resolved with its execution's session (null when the execution
+   * has no session — nothing to reconcile for that one). The relay's boot
+   * sweep + the reconciliation job consume this list.
+   */
+  listPendingTerminalObligations(): Promise<readonly PendingSessionTerminal[]>;
+
+  /**
+   * Discharge an obligation: set discharged_at (CAS on discharged_at IS
+   * NULL — idempotent; repeated recovery attempts discharge exactly
+   * once). Returns the updated row, or null when already discharged.
+   */
+  dischargeTerminalObligation(obligationId: string): Promise<SessionTerminalObligation | null>;
 }
 
 /** The atomic transition + event result (the winner's row + the appended event). */
 export interface SessionTransitionResult {
   readonly session: ExecutionSession;
   readonly event: ExecutionSessionEvent;
+}
+
+/**
+ * WORK-034 (PR #38 review correction): a durable session-terminal
+ * obligation — the transactional-outbox record written ATOMICALLY with the
+ * execution record's terminal transition (migration 0035's trigger). The
+ * pending set is the replay work list for the durable reconciliation
+ * (existing Queue/WorkerHost via the generic OutboxRelay); the obligation
+ * is discharged when the session reaches the recorded terminal state.
+ */
+export interface SessionTerminalObligation {
+  readonly id: string;
+  /** The ExecutionRecord's UUID (the session's target). */
+  readonly executionId: string;
+  readonly terminalState: 'completed' | 'failed';
+  readonly dischargedAt: Date | null;
+  readonly createdAt: Date;
+}
+
+/**
+ * The durable session-terminal reconciliation input: an obligation + the
+ * resolved session for the SAME execution (null when the execution has no
+ * session — a legacy execution or one created before WORK-034).
+ */
+export interface PendingSessionTerminal {
+  readonly obligation: SessionTerminalObligation;
+  readonly session: ExecutionSession | null;
 }
 
 /**
@@ -287,14 +331,45 @@ export interface ExecutionSessionService {
   interruptSession(sessionId: string, expectedVersion: number): Promise<SessionTransitionResult | null>;
   /** CAS interrupted → running + the resumed event. Null on CAS loss (exactly one concurrent winner). */
   resumeSession(sessionId: string, expectedVersion: number): Promise<SessionTransitionResult | null>;
-  /** CAS running → completed + the completed event. Idempotent for terminal sessions; null when the execution has no session. */
+  /**
+   * CAS running → completed + the completed event. Idempotent for terminal
+   * sessions; null when the execution has no session. DURABLE (PR #38
+   * review): the obligation row is written atomically with the execution
+   * record's terminal transition (migration 0035's trigger), and this call
+   * ALSO enqueues the reconcile relay job (the claim-time durable
+   * delivery) — so a crash before/inside the session write is recovered by
+   * the relay (job + boot sweep), never leaving
+   * ExecutionRecord=completed with ExecutionSession=running permanently.
+   */
   completeSession(executionId: string): Promise<ExecutionSession | null>;
-  /** CAS running → failed + the failed event. Idempotent for terminal sessions; null when the execution has no session. */
+  /** As completeSession, for the failed outcome (with the failure reason). */
   failSession(executionId: string, reason: string): Promise<ExecutionSession | null>;
   /** The (single) session continuing the logical execution (TEXT executionId). */
   getSessionForExecution(executionId: string): Promise<ExecutionSession | null>;
   /** The session's events, ordered by sequence (the existing append-only store). */
   listSessionEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
+
+  // --- WORK-034 (PR #38 review): durable terminal reconciliation ---
+
+  /**
+   * Reconcile ONE execution's session-terminal obligation (idempotent):
+   * resolve the logical execution id → the record → the session; CAS the
+   * session to the obligation's terminal state (running → completed/failed
+   * + the terminal event); discharge the obligation. Returns the
+   * reconciled session (or null when the execution/session does not
+   * exist). Safe under concurrent + repeated recovery: the CAS has
+   * exactly one winner; an already-terminal session discharges without a
+   * duplicate event; the discharge is a CAS. The relay job handler + the
+   * boot sweep call this — there is NO scheduler.
+   */
+  reconcileTerminalForExecution(executionId: string): Promise<ExecutionSession | null>;
+
+  /**
+   * Reconcile ALL pending obligations (the boot-sweep / job-driven batch
+   * entry). Returns the number of obligations still pending after the
+   * pass (normally 0). One pass, no retry loop.
+   */
+  reconcileAllPendingTerminals(): Promise<number>;
 }
 
 // ============================================================================

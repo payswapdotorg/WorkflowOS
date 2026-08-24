@@ -29,6 +29,8 @@ import type {
   ExecutionSessionEventType,
   ExecutionSessionRepository,
   ExecutionSessionStatus,
+  PendingSessionTerminal,
+  SessionTerminalObligation,
   SessionTransitionResult,
 } from './execution-session.types.js';
 import { EXECUTION_SESSION_TRANSITIONS, ExecutionSessionError } from './execution-session.types.js';
@@ -228,19 +230,40 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
           [id, expectedVersion, next, expectedStatus],
         );
 
-      if (isTerminal) {
-        // Terminal: event first (the row is still non-terminal inside this
-        // transaction — the terminal-event guard passes), then the CAS.
-        const evRes = await appendEvent();
-        const updRes = await casUpdate();
-        if (!updRes.rows[0]) return null; // unreachable under the lock
-        return { session: mapSession(updRes.rows[0]), event: mapEvent(evRes.rows[0]!) };
-      }
-      // Non-terminal: CAS first; the event is appended ONLY by the winner
-      // (a lost CAS writes nothing).
+      // UNIFORM ORDERING (correct on real PostgreSQL AND deterministic on
+      // single-session interleaved drivers): the CAS UPDATE runs FIRST and
+      // the event is appended ONLY when the update returned a row — a CAS
+      // loser writes NOTHING (no event, no state change), so exactly one
+      // winner + exactly one event under any interleaving.
+      //
+      // The terminal-event guard subtlety: the event is appended AFTER the
+      // row is terminal INSIDE this transaction. The guard trigger reads
+      // the CURRENT row state — inside the SAME transaction the UPDATE is
+      // already visible, so the guard would reject. Therefore the terminal
+      // append uses a guard-free INSERT ... SELECT whose WHERE clause
+      // reproduces the CAS predicate against the UPDATED row (a second
+      // concurrent terminal append is impossible: the CAS already
+      // exclusive-won), and the migration's terminal-event trigger remains
+      // the backstop for all OTHER writers (appendEvent on a terminal
+      // session, direct SQL, etc.).
       const updRes = await casUpdate();
       if (!updRes.rows[0]) return null;
-      const evRes = await appendEvent();
+      const evRes = isTerminal
+        ? await tx.query<EventRow>(
+            `INSERT INTO wfos_execution_session_events
+                (session_id, sequence_number, event_type, payload)
+             SELECT $1, COALESCE(MAX(e.sequence_number), 0) + 1, $2, $3::jsonb
+               FROM wfos_execution_session_events e
+              WHERE e.session_id = $1
+                AND EXISTS (
+                  SELECT 1 FROM wfos_execution_sessions s
+                   WHERE s.id = $1 AND s.version = $4 AND s.status = $5
+                )
+             RETURNING ${EVENT_COLUMNS}`,
+            [id, eventType, JSON.stringify(payload ?? {}), expectedVersion + 1, next],
+          )
+        : await appendEvent();
+      if (!evRes.rows[0]) return null; // unreachable (the CAS won above)
       return { session: mapSession(updRes.rows[0]), event: mapEvent(evRes.rows[0]!) };
     });
   }
@@ -361,6 +384,55 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
     );
     return res.rows.map(mapEvent);
   }
+
+  // --- WORK-034 (PR #38 review): durable terminal reconciliation ---
+
+  async listPendingTerminalObligations(): Promise<readonly PendingSessionTerminal[]> {
+    // The replay work list: every obligation whose session has not yet
+    // reached the recorded terminal state, resolved with its execution's
+    // session (LEFT JOIN — executions created before WORK-034, or a record
+    // whose session creation failed, leave the session null; the
+    // reconciliation skips those but the obligation remains auditable...
+    // and still drains when a session is later ensured + the relay runs).
+    const res = await this.db.query<
+      { o_id: string; o_execution_id: string; o_terminal_state: string; o_discharged_at: Date | string | null; o_created_at: Date | string } & Partial<SessionRow>
+    >(
+      `SELECT o.id AS o_id, o.execution_id AS o_execution_id,
+              o.terminal_state AS o_terminal_state,
+              o.discharged_at AS o_discharged_at, o.created_at AS o_created_at,
+              s.id, s.execution_id, s.project_id, s.work_item_id, s.work_order_id,
+              s.status, s.version, s.current_turn, s.created_at, s.updated_at,
+              s.interrupted_at, s.terminal_at
+         FROM wfos_execution_session_terminal_obligations o
+         LEFT JOIN wfos_execution_sessions s ON s.execution_id = o.execution_id
+        WHERE o.discharged_at IS NULL
+        ORDER BY o.created_at, o.id`,
+    );
+    return res.rows.map((r) => ({
+      obligation: {
+        id: String(r.o_id),
+        executionId: String(r.o_execution_id),
+        terminalState: r.o_terminal_state as 'completed' | 'failed',
+        dischargedAt: r.o_discharged_at === null || r.o_discharged_at === undefined ? null : toDate(r.o_discharged_at),
+        createdAt: toDate(r.o_created_at)!,
+      },
+      session: r.id ? mapSession(r as SessionRow) : null,
+    }));
+  }
+
+  async dischargeTerminalObligation(obligationId: string): Promise<SessionTerminalObligation | null> {
+    // Idempotent discharge (CAS on discharged_at IS NULL): repeated
+    // recovery attempts discharge exactly once; later attempts → null.
+    const res = await this.db.query<{ id: string; execution_id: string; terminal_state: string; discharged_at: Date | string | null; created_at: Date | string }>(
+      `UPDATE wfos_execution_session_terminal_obligations
+          SET discharged_at = NOW()
+        WHERE id = $1 AND discharged_at IS NULL
+        RETURNING id, execution_id, terminal_state, discharged_at, created_at`,
+      [obligationId],
+    );
+    const r = res.rows[0];
+    return r ? mapObligation(r) : null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +479,16 @@ function mapSession(r: SessionRow): ExecutionSession {
     updatedAt: toDate(r.updated_at)!,
     interruptedAt: toDate(r.interrupted_at),
     terminalAt: toDate(r.terminal_at),
+  };
+}
+
+function mapObligation(r: { id: string; execution_id: string; terminal_state: string; discharged_at: Date | string | null; created_at: Date | string }): SessionTerminalObligation {
+  return {
+    id: String(r.id),
+    executionId: String(r.execution_id),
+    terminalState: r.terminal_state as 'completed' | 'failed',
+    dischargedAt: r.discharged_at === null || r.discharged_at === undefined ? null : toDate(r.discharged_at),
+    createdAt: toDate(r.created_at)!,
   };
 }
 

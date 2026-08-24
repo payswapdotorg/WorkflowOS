@@ -167,6 +167,10 @@ import { ExternalExecutionProvider } from './modules/agents/internal/external-ex
 import { DefaultExecutionService } from './modules/agents/internal/execution-service.js';
 import { PgExecutionSessionRepository } from './modules/agents/internal/pg-execution-session-repository.js';
 import { DefaultExecutionSessionService } from './modules/agents/internal/execution-session-service.js';
+import {
+  SessionTerminalOutboxRelay,
+  createSessionTerminalRelayJobHandler,
+} from './modules/agents/internal/session-terminal-relay.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
@@ -558,6 +562,12 @@ export async function buildApp(
   // the boot sweep (once per process start) is what makes an orphaned
   // outbox autonomously recoverable after total process death.
   let benchmarkStartDeliveryRelay: OutboxRelay | undefined;
+  // WORK-034 (PR #38 review): the session-terminal outbox relay (declared
+  // at function scope — constructed inside the agents block, consumed by
+  // the WorkerHost boot sweep below).
+  let sessionTerminalRelay: OutboxRelay | undefined;
+  // The session service is also referenced by the handler registry below.
+  let executionSessionServiceRef: { reconcileTerminalForExecution(executionId: string): Promise<unknown> } | undefined;
   let executionPolicyService: ExecutionPolicyService | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
@@ -906,7 +916,20 @@ export async function buildApp(
       sessionRepository: executionSessionRepository,
       executionRecordRepository,
       logger,
+      // PR #38 review (durable terminalization): the claim-time relay-job
+      // enqueue (the obligation row itself is written by migration 0035's
+      // trigger, atomically with the record's terminal transition).
+      queue,
     });
+    // The session-terminal outbox relay (the generic OutboxRelay): the
+    // boot sweep re-enqueues reconcile jobs for every pending obligation.
+    sessionTerminalRelay = new SessionTerminalOutboxRelay({
+      sessionRepository: executionSessionRepository,
+      executionRecordRepository,
+      queue,
+      logger,
+    });
+    executionSessionServiceRef = executionSessionService;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1208,6 +1231,13 @@ export async function buildApp(
     handlerList.push(createBenchmarkTrialJobHandler(benchmarkService, logger));
     handlerList.push(createStartDeliveryRelayJobHandler(benchmarkService, logger));
   }
+  // WORK-034 (PR #38 review): the session-terminal reconcile relay job
+  // handler — the durable recovery for the terminal-session
+  // reconciliation (the fast path remains in the execution service; the
+  // relay job + the boot sweep are the backstop for the crash window).
+  if (executionSessionServiceRef) {
+    handlerList.push(createSessionTerminalRelayJobHandler(executionSessionServiceRef, logger));
+  }
   const handlers = buildHandlerRegistry(handlerList);
   const worker = new WorkerHost(queue, handlers, logger, {
     ...options.workerOptions,
@@ -1215,7 +1245,13 @@ export async function buildApp(
     // every worker-process start re-enqueues relay jobs for ALL
     // incomplete durable start obligations (process-startup recovery,
     // NOT a periodic poll; see platform/worker/outbox-relay.ts).
-    outboxRelays: benchmarkStartDeliveryRelay ? [benchmarkStartDeliveryRelay] : [],
+    outboxRelays: [
+      ...(benchmarkStartDeliveryRelay ? [benchmarkStartDeliveryRelay] : []),
+      // WORK-034 (PR #38 review): the session-terminal obligation boot
+      // sweep — every worker start re-enqueues reconcile jobs for ALL
+      // pending obligations (the durable liveness backstop).
+      ...(sessionTerminalRelay ? [sessionTerminalRelay] : []),
+    ],
   });
 
   const handle: AppHandle = {

@@ -267,15 +267,27 @@ CREATE TRIGGER wfos_execution_session_event_immutable_trigger
   BEFORE UPDATE OR DELETE ON wfos_execution_session_events
   FOR EACH ROW EXECUTE FUNCTION wfos_execution_session_event_immutable();
 
--- TERMINAL sessions accept NO further events. (Terminal events —
--- completed/failed/cancelled — are appended BEFORE the terminal CAS
--- transition; see the repository's documented composition order.)
+-- TERMINAL sessions accept NO further events — with ONE precise exception:
+-- the TERMINAL EVENT ITSELF. A terminal event whose event_type equals the
+-- session's CURRENT terminal status is allowed (the repository's
+-- transitionWithEvent appends the terminal event in the same transaction
+-- as, and keyed to, the CAS transition that terminalized the row — the
+-- (status, version) predicate inside the INSERT guarantees the event
+-- belongs to exactly that transition). Any OTHER event on a terminal
+-- session — a post-terminal observation, direct SQL, a stale append — is
+-- rejected. This keeps the append-only store the single authority for the
+-- session's lifecycle evidence while allowing the atomic
+-- transition+event composition the WORK-034 integration requires.
 CREATE OR REPLACE FUNCTION wfos_execution_session_event_terminal_guard() RETURNS trigger AS $$
 DECLARE
   s TEXT;
+  v INTEGER;
 BEGIN
-  SELECT status INTO s FROM wfos_execution_sessions WHERE id = NEW.session_id;
+  SELECT status, version INTO s, v FROM wfos_execution_sessions WHERE id = NEW.session_id;
   IF s IN ('completed', 'failed', 'cancelled') THEN
+    IF NEW.event_type = s THEN
+      RETURN NEW; -- the terminal event itself (see above)
+    END IF;
     RAISE EXCEPTION
       'execution-session-terminal: session % is terminal (%) — no further events',
       NEW.session_id, s;

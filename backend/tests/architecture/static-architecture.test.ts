@@ -6854,7 +6854,7 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // existing queue...
     expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
     // ...and injected into the WorkerHost options (the boot sweep).
-    expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
+    expect(appSrc).toMatch(/\.\.\.\(benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]\)/);
   });
 });
 
@@ -7789,25 +7789,14 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(fn[0]).toMatch(/COALESCE\(MAX\(e\.sequence_number\), 0\) \+ 1/);
     // Illegal edges are typed errors.
     expect(readFileSync(SESSION_REPO, 'utf8')).toMatch(/execution-session-illegal-transition/);
-    // ORDERING, per transition kind (the code structure, comments stripped):
-    // TERMINAL: event first (the row is still non-terminal inside the tx —
-    // the terminal-event guard passes), then the CAS.
-    const terminalBranch = fn[0].match(/if \(isTerminal\) \{[\s\S]*?\}/)![0];
-    const terminalEvIdx = terminalBranch.indexOf('await appendEvent()');
-    const terminalUpdIdx = terminalBranch.indexOf('await casUpdate()');
-    expect(terminalEvIdx).toBeGreaterThan(-1);
-    expect(terminalUpdIdx).toBeGreaterThan(-1);
-    expect(terminalEvIdx).toBeLessThan(terminalUpdIdx);
-    // NON-TERMINAL: the CAS runs FIRST and the event is appended ONLY when
-    // the update returned a row — a lost CAS writes NOTHING (no duplicate
-    // events even under fully interleaved single-session drivers).
-    const tail = fn[0].slice(fn[0].lastIndexOf('if (isTerminal)'));
-    const nonTerminalUpdIdx = tail.indexOf('const updRes = await casUpdate();');
-    const nonTerminalGuardIdx = tail.indexOf('if (!updRes.rows[0]) return null;');
-    const nonTerminalEvIdx = tail.indexOf('await appendEvent();', nonTerminalGuardIdx);
-    expect(nonTerminalUpdIdx).toBeGreaterThan(-1);
-    expect(nonTerminalGuardIdx).toBeGreaterThan(nonTerminalUpdIdx);
-    expect(nonTerminalEvIdx).toBeGreaterThan(nonTerminalGuardIdx);
+    // ORDERING (PR #38 review — uniform): the CAS UPDATE runs FIRST and
+    // the event is appended ONLY when the update returned a row — a lost
+    // CAS writes NOTHING (no duplicate events under any interleaving).
+    expect(fn[0].match(/await casUpdate\(\)/g)).toHaveLength(1);
+    const updIdx2 = fn[0].indexOf('const updRes = await casUpdate();');
+    const guardIdx2 = fn[0].indexOf('if (!updRes.rows[0]) return null;');
+    expect(updIdx2).toBeGreaterThan(-1);
+    expect(guardIdx2).toBeGreaterThan(updIdx2);
   });
 
   it('the session service contract + implementation exist; the barrel exposes the provider-independent names', () => {
@@ -7839,6 +7828,95 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(src).toMatch(/provider failure produces session FAILURE/);
     expect(src).toMatch(/session identity remains stable across native\/external execution paths/);
     expect(src).toMatch(/retry after interruption does not create duplicate sessions/);
+  });
+
+  it('PR #38 review: session-terminal reconciliation is DURABLE (obligation atomic with the record terminal transition + relay job + boot sweep — no scheduler)', () => {
+    // The blocking durability gap: terminalization was best-effort after
+    // the record became authoritative (catch + log), so a crash left
+    // ExecutionRecord=completed with ExecutionSession=running
+    // PERMANENTLY. The fix (the reviewer's prescribed architecture):
+    //   ExecutionRecord terminal → durable obligation (ATOMIC with the
+    //   record's transition) → existing Queue/WorkerHost → CAS
+    //   session terminalization.
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0035_session_terminal_obligations.sql',
+    );
+    expect(existsSync(migrationPath), '0035_session_terminal_obligations.sql must exist').toBe(true);
+    const m = readFileSync(migrationPath, 'utf8');
+    // The obligation table + the work-list index.
+    expect(m).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_session_terminal_obligations/);
+    expect(m).toMatch(/WHERE discharged_at IS NULL/);
+    // ATOMIC creation: the AFTER UPDATE trigger on the EXECUTIONS table
+    // (the record's terminal transition writes the obligation in the same
+    // statement's transaction — no window).
+    expect(m).toMatch(/AFTER UPDATE ON wfos_executions/);
+    expect(m).toMatch(/NEW\.status IN \('completed', 'failed'\)/);
+    expect(m).toMatch(/ON CONFLICT \(execution_id\) DO NOTHING/);
+    // Append-only intent + at most one obligation per execution.
+    expect(m).toMatch(/UNIQUE \(execution_id\)/);
+    expect(m).toMatch(/session-terminal-obligation-immutable/);
+    // The relay (the existing generic OutboxRelay — NOT a scheduler).
+    const relaySrc = readFileSync(join(AGENTS_INTERNAL, 'session-terminal-relay.ts'), 'utf8');
+    expect(relaySrc).toMatch(/class SessionTerminalOutboxRelay implements OutboxRelay/);
+    expect(relaySrc).toMatch(/'agents\.session-terminal\.reconcile'/);
+    expect(relaySrc).toMatch(/listPendingTerminalObligations/);
+    const relayCode = relaySrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(relayCode).not.toMatch(/setInterval|setTimeout|setImmediate/);
+    // The handler delegates to the idempotent reconciliation (fire-once).
+    expect(relaySrc).toMatch(/reconcileTerminalForExecution/);
+    // The service: durable reconciliation + the claim-time enqueue.
+    const svcSrc = readFileSync(SESSION_SERVICE, 'utf8');
+    expect(svcSrc).toMatch(/reconcileTerminalForExecution/);
+    expect(svcSrc).toMatch(/reconcileAllPendingTerminals/);
+    expect(svcSrc).toMatch(/SESSION_TERMINAL_RELAY_JOB_TYPE/);
+    // The repository contract: the obligation queries + idempotent discharge.
+    const repoTypes = readFileSync(SESSION_TYPES, 'utf8');
+    expect(repoTypes).toMatch(/listPendingTerminalObligations/);
+    expect(repoTypes).toMatch(/dischargeTerminalObligation/);
+    // app.ts: the relay + handler + boot sweep wiring.
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/new SessionTerminalOutboxRelay\(/);
+    expect(appSrc).toMatch(/createSessionTerminalRelayJobHandler\(/);
+    expect(appSrc).toMatch(/\.\.\.\(sessionTerminalRelay \? \[sessionTerminalRelay\] : \[\]\)/);
+    // The regression suite (the five required scenarios).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts');
+    expect(existsSync(testPath)).toBe(true);
+    const t = readFileSync(testPath, 'utf8');
+    expect(t).toMatch(/execution completes \+ the session write fails \(crash window\) → the durable obligation \+ relay recover → session completed/);
+    expect(t).toMatch(/execution fails \+ the session write fails \(crash window\) → recovery → session failed/);
+    expect(t).toMatch(/recovery repeated/);
+    expect(t).toMatch(/concurrent recovery/);
+    expect(t).toMatch(/non-terminal execution → no obligation, no terminal session/);
+  });
+
+  it('PR #38 review: transitionWithEvent uses UNIFORM CAS-FIRST ordering (a loser writes NOTHING — no duplicate terminal events under any interleaving)', () => {
+    const src = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const fn = src.match(/async transitionWithEvent[\s\S]*?\n  \}/)!;
+    // The CAS UPDATE runs FIRST (once — no per-kind branches).
+    expect(fn[0].match(/await casUpdate\(\)/g)).toHaveLength(1);
+    const updIdx = fn[0].indexOf('const updRes = await casUpdate();');
+    const evIdx = fn[0].indexOf('await appendEvent();');
+    const terminalEvIdx = fn[0].indexOf(`isTerminal`);
+    expect(updIdx).toBeGreaterThan(-1);
+    // The guard: the event is appended ONLY when the update returned a row.
+    const guardIdx = fn[0].indexOf('if (!updRes.rows[0]) return null;');
+    expect(guardIdx).toBeGreaterThan(updIdx);
+    expect(evIdx === -1 || evIdx > guardIdx).toBe(true);
+    // The terminal append's WHERE clause re-checks the UPDATED row's
+    // (version, status) — the event is keyed to exactly that transition.
+    expect(fn[0]).toMatch(/AND EXISTS \(\s*SELECT 1 FROM wfos_execution_sessions s\s*WHERE s\.id = \$1 AND s\.version = \$4 AND s\.status = \$5\s*\)/);
+    void terminalEvIdx;
+  });
+
+  it('PR #38 review: the terminal-event guard allows exactly the terminal event itself on a terminal row (the atomic transition+event composition)', () => {
+    const m34 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0034_execution_sessions.sql'), 'utf8');
+    // The refined guard: a terminal event whose event_type EQUALS the
+    // session's terminal status is allowed (the repository appends it in
+    // the same transaction as the CAS that terminalized the row); any
+    // OTHER event on a terminal session is still rejected.
+    expect(m34).toMatch(/IF NEW\.event_type = s THEN/);
+    expect(m34).toMatch(/RETURN NEW; -- the terminal event itself/);
   });
 
   it('app.ts wires the session service into the execution service + the external terminal hook', () => {

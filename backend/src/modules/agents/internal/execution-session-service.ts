@@ -41,16 +41,28 @@ import type {
   ExecutionSessionEventType,
   ExecutionSessionRepository,
   ExecutionSessionService,
+  PendingSessionTerminal,
   SessionTransitionResult,
 } from './execution-session.types.js';
 import { ExecutionSessionError } from './execution-session.types.js';
 import type { ExecutionRecordRepository } from './execution.types.js';
+import { SESSION_TERMINAL_RELAY_JOB_TYPE } from './session-terminal-relay.js';
+import type { Queue } from '@platform/index.js';
 
 export interface DefaultExecutionSessionServiceDeps {
   readonly sessionRepository: ExecutionSessionRepository;
   /** Resolves the logical (TEXT) executionId → the ExecutionRecord. */
   readonly executionRecordRepository: ExecutionRecordRepository;
   readonly logger: Logger;
+  /**
+   * PR #38 review (durable terminalization): the existing durable queue —
+   * completeSession/failSession enqueue the reconcile relay job (the
+   * claim-time durable delivery). The obligation row itself is written by
+   * migration 0035's trigger ATOMICALLY with the record's terminal
+   * transition; the relay job + the WorkerHost boot sweep are the liveness
+   * backstop. OPTIONAL so pure-unit constructions stay queueless.
+   */
+  readonly queue?: Queue;
 }
 
 export class DefaultExecutionSessionService implements ExecutionSessionService {
@@ -144,6 +156,110 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
     return this.deps.sessionRepository.listEvents(sessionId);
   }
 
+  // --- WORK-034 (PR #38 review): durable terminal reconciliation -------
+
+  async reconcileTerminalForExecution(executionId: string): Promise<ExecutionSession | null> {
+    // Idempotent, concurrency-safe reconciliation of ONE execution's
+    // obligation (the relay job handler + per-execution recovery path):
+    //   resolve logical id → record → session;
+    //   if the session is already in the obligation's terminal state →
+    //     just discharge (a repeated recovery never duplicates the event);
+    //   if the session is running → CAS to the terminal state + event,
+    //     then discharge;
+    //   if the session is created/interrupted → leave it (the strict state
+    //     machine forbids terminalizing a paused session; a later resume
+    //     flow owns the outcome) — the obligation stays pending for the
+    //     next pass;
+    //   no record / no session → nothing to reconcile.
+    const record = await this.deps.executionRecordRepository.findByExecutionId(executionId);
+    if (!record) return null;
+    const session = await this.deps.sessionRepository.getSessionByExecutionId(record.id);
+    if (!session) return null;
+
+    // Find the pending obligation for this execution (if any).
+    const pending = await this.deps.sessionRepository.listPendingTerminalObligations();
+    const obligation = pending.find((p) => p.session?.id === session.id);
+    if (!obligation) {
+      // No pending obligation: either already reconciled (discharged) or
+      // the execution never terminalized. Nothing to do.
+      return session;
+    }
+    return this.reconcileObligation(obligation);
+  }
+
+  async reconcileAllPendingTerminals(): Promise<number> {
+    // One pass over the durable work list (the boot sweep / the batch job
+    // entry). NOT a retry loop — anything still pending after the pass
+    // stays durable for the next touch/sweep.
+    const pending = await this.deps.sessionRepository.listPendingTerminalObligations();
+    let stillPending = 0;
+    for (const p of pending) {
+      const result = await this.reconcileObligation(p);
+      if (result === null) stillPending += 1;
+    }
+    return stillPending;
+  }
+
+  /** Reconcile one obligation (returns null when it stays pending). */
+  private async reconcileObligation(p: PendingSessionTerminal): Promise<ExecutionSession | null> {
+    const { obligation, session } = p;
+    if (!session) {
+      // The execution has no session (a legacy execution, or the session
+      // creation failed). Nothing to reconcile — discharge so the work
+      // list drains (the obligation remains the auditable record that the
+      // execution DID terminalize).
+      await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
+      return null;
+    }
+    if (session.status === obligation.terminalState) {
+      // Already reconciled (a repeated recovery / the fast path won the
+      // race): discharge WITHOUT a duplicate terminal event.
+      await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
+      return session;
+    }
+    if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') {
+      // The session is terminal in a DIFFERENT state than the obligation
+      // recorded (e.g. the session was cancelled while the execution
+      // completed). The session is immutable — record the divergence
+      // loudly + discharge (the session's own terminal state stands; the
+      // obligation is not a license to violate terminal immutability).
+      this.deps.logger.warn('execution-session.terminal-obligation-divergence', {
+        obligationId: obligation.id,
+        sessionId: session.id,
+        obligationState: obligation.terminalState,
+        sessionState: session.status,
+      });
+      await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
+      return session;
+    }
+    if (session.status !== 'running') {
+      // created/interrupted: the strict state machine forbids direct
+      // terminalization (a paused session must be resumed first — the
+      // resume flow owns its outcome). Leave the obligation pending.
+      this.deps.logger.warn('execution-session.terminal-obligation-deferred-not-running', {
+        obligationId: obligation.id,
+        sessionId: session.id,
+        status: session.status,
+      });
+      return null;
+    }
+    // running → the obligation's terminal state, atomically (CAS + event),
+    // then discharge. Concurrent reconciliations: the CAS has exactly one
+    // winner; the loser sees null and leaves the discharge to the winner
+    // (a later pass re-checks — already-terminal → discharge, no
+    // duplicate event).
+    const eventType: ExecutionSessionEventType = obligation.terminalState === 'completed' ? 'completed' : 'failed';
+    const transition = await this.deps.sessionRepository.transitionWithEvent(
+      session.id, session.version, 'running', obligation.terminalState, eventType,
+    );
+    if (!transition) {
+      // Lost the CAS to a concurrent reconciler. Leave pending.
+      return null;
+    }
+    await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
+    return transition.session;
+  }
+
   // ------------------------------------------------------------------ private
 
   /**
@@ -162,6 +278,24 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
     next: 'completed' | 'failed',
     payload: Record<string, unknown> = {},
   ): Promise<ExecutionSession | null> {
+    // PR #38 review (durable terminalization): the obligation row was
+    // written ATOMICALLY with the record's terminal transition (migration
+    // 0035's trigger — there is no moment where the record is terminal but
+    // the obligation is missing). Enqueue the reconcile relay job FIRST
+    // (the claim-time durable delivery): even if the process dies before
+    // or during the session CAS below, the durable job + the boot sweep
+    // recover it. Best-effort enqueue (the boot sweep covers a failed
+    // enqueue).
+    if (this.deps.queue) {
+      try {
+        await this.deps.queue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId });
+      } catch (err) {
+        this.deps.logger.error('session-terminal.relay-enqueue-failed', {
+          executionId,
+          error: (err as Error).message,
+        });
+      }
+    }
     const record = await this.deps.executionRecordRepository.findByExecutionId(executionId);
     if (!record) return null;
     const session = await this.deps.sessionRepository.getSessionByExecutionId(record.id);
