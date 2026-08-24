@@ -1904,3 +1904,512 @@ export const benchmarks = {
     return res.blob();
   },
 };
+
+// --- WORK-033: Execution Policy & Fair Benchmarking ---
+//
+// The execution-policy layer is an APPLICATION-LAYER ORCHESTRATOR on the
+// backend (lives at `backend/src/execution-policy/` — mirrors the §34
+// benchmark pattern; it is NOT the 18th frozen module). It produces
+// evidence-backed recommendations, persists project/user policy + preference
+// CRUD, freezes policies when benchmark experiments start, and records
+// append-only decision audit rows.
+//
+// The frontend is a pure consumer (§34): every verdict (eligibility, score,
+// recommendation, "why") is computed backend-side. The frontend never
+// derives canonical workflow states, never stores credentials, and never
+// bypasses ExecutionService.submit — the ExecutionPolicyDialog still calls
+// `execution.start()` with the user-selected {mode, provider, model}; the
+// policy dialog only surfaces the recommendation to INFORM selection.
+//
+// All routes are backend-authorized; the server derives `actor`/`userId`
+// from the authenticated `requireProjectAuthorization` user — the request
+// body never carries actor/userId (PR #35 fix #5 pattern). Date fields are
+// JSON-serialized ISO strings (the existing convention in this module).
+
+/** §6 normalized surface/capability profile (composed from ExecutionProviderInfo). */
+export type CapabilityReadiness = 'supported' | 'ready' | 'unverified' | 'unavailable';
+
+/** §23 normalized provider runtime readiness. */
+export type ProviderAvailability =
+  | 'ready'
+  | 'unverified'
+  | 'unavailable'
+  | 'subscription_blocked'
+  | 'capability_blocked'
+  | 'policy_blocked'
+  | 'configuration_missing';
+
+/** §3 eligibility is a HARD filter — quality never makes an ineligible candidate eligible. */
+export type ExecutionEligibilityStatus =
+  | 'eligible'
+  | 'unavailable'
+  | 'subscription_blocked'
+  | 'capability_blocked'
+  | 'unknown_constrained'
+  | 'policy_blocked'
+  | 'privacy_blocked'
+  | 'project_policy_blocked'
+  | 'configuration_missing'
+  | 'provider_temporarily_unavailable';
+
+/** §4 hard constraint categories that compose the eligibility verdict. */
+export type ExecutionConstraintCategory =
+  | 'capability'
+  | 'user'
+  | 'project'
+  | 'organization'
+  | 'availability'
+  | 'subscription'
+  | 'privacy'
+  | 'evidence';
+
+/** §10 capability requirement kinds feeding the eligibility filter. */
+export type CapabilityRequirement =
+  | 'coding_agent'
+  | 'browser'
+  | 'repository_access'
+  | 'terminal'
+  | 'private_network'
+  | 'native_api'
+  | 'external_ui';
+
+/** §8 benchmark mode — selects which dimension is held fixed vs free. */
+export type BenchmarkMode =
+  | 'maximum_capability'
+  | 'controlled_comparison'
+  | 'cost_constrained'
+  | 'latency_constrained'
+  | 'subscription_constrained'
+  | 'privacy_constrained';
+
+/** §12 privacy level. */
+export type PrivacyLevel = 'standard' | 'private' | 'local_only' | 'regulated';
+
+/** §13/§16 recommendation reason dimension. */
+export type RecommendationDimension =
+  | 'hard_eligibility'
+  | 'user_project_org_policy'
+  | 'required_capability'
+  | 'benchmark_evidence'
+  | 'cost'
+  | 'latency'
+  | 'user_preferences';
+
+/** §24 cost confidence — never fabricated. */
+export type CostConfidence = 'known' | 'estimated' | 'unknown';
+
+/** §9: the policy-status snapshot at evaluation time (mirrors ExecutionEligibilityStatus). */
+export type PolicyStatus = ExecutionEligibilityStatus;
+
+export interface ContextWindow {
+  tokens: number | null;
+  source: 'provider_doc' | 'user_configured' | 'unknown';
+}
+
+export interface ProviderCapabilityProfile {
+  conversational: CapabilityReadiness;
+  codingAgent: CapabilityReadiness;
+  browser: CapabilityReadiness;
+  repositoryAccess: CapabilityReadiness;
+  terminal: CapabilityReadiness;
+  nativeApi: CapabilityReadiness;
+  externalUi: CapabilityReadiness;
+  streaming: CapabilityReadiness;
+  toolUse: CapabilityReadiness;
+  maxContext: ContextWindow;
+  supportedExecutionModes: ExecutionMode[];
+}
+
+/** §5 user-configured subscription capability profile (or 'unknown'). */
+export interface ProviderAccessProfile {
+  provider: string;
+  plan: string | null;
+  codingAgent: CapabilityReadiness;
+  externalUi: CapabilityReadiness;
+  nativeApi: CapabilityReadiness;
+  statusSource: 'verified' | 'user_configured' | 'unknown';
+}
+
+export interface EligibilityBlock {
+  category: ExecutionConstraintCategory;
+  constraint: string;
+  reason: string;
+}
+
+export interface ExecutionEligibilityResult {
+  status: ExecutionEligibilityStatus;
+  eligible: boolean;
+  /** Empty iff eligible. Each reason is human-readable + structured. */
+  blockingReasons: EligibilityBlock[];
+  /** For eligible candidates, the constraints satisfied (transparency). */
+  satisfiedConstraints: string[];
+}
+
+export interface ToolPolicy {
+  /** §10 controlled comparison keeps tool CLASS fixed but persists impl differences. */
+  toolClassFixed: boolean;
+  /** §11 maximum-capability mode — each candidate uses its strongest config. */
+  maximumCapability: boolean;
+  /** §21 NEVER artificially cap a provider's tools solely for fairness. */
+  noArtificialCaps: boolean;
+}
+
+export interface HumanInterventionPolicy {
+  allowed: boolean;
+  /** If false, external strategies that require user confirmation become ineligible (§26). */
+  blockIfRequired: boolean;
+}
+
+/** §9 the immutable-on-freeze benchmark policy snapshot. */
+export interface BenchmarkPolicy {
+  benchmarkMode: BenchmarkMode;
+  maxCostCents: number | null;
+  maxDurationMs: number | null;
+  requiredCapabilities: CapabilityRequirement[];
+  allowedProviders: string[];
+  allowedModes: ExecutionMode[];
+  privacyRequirements: PrivacyConstraints;
+  subscriptionRequirement: SubscriptionConstraints;
+  toolPolicy: ToolPolicy;
+  humanInterventionPolicy: HumanInterventionPolicy;
+  policyVersion: number;
+  /** §9 set true when a benchmark experiment starts; thereafter immutable. */
+  frozen: boolean;
+}
+
+export interface PrivacyConstraints {
+  level: PrivacyLevel;
+  approvedLocations: string[];
+}
+
+export interface SubscriptionConstraints {
+  /** §5 candidates whose subscription capability is 'unknown' default to blocked. */
+  blockUnknownSubscription: boolean;
+  requiredCodingAgentProviders: string[];
+}
+
+/** §10 controlled-comparison dimension display. */
+export interface ControlledComparisonDimensions {
+  sameTask: boolean;
+  sameArchitecture: boolean;
+  sameBaseline: boolean;
+  sameImplementationContext: boolean;
+  sameVerification: boolean;
+  comparableToolClass: boolean;
+  differingSurfaces: boolean;        // native vs external ≠
+  differingContextWindow: boolean;   // provider context ≠
+  differingToolImplementation: boolean; // provider tool impl ≠
+}
+
+export interface CostEstimate {
+  cents: number | null;
+  confidence: CostConfidence;
+  currency: string;
+}
+
+export interface LatencyEstimate {
+  estimatedMs: number | null;
+  confidence: CostConfidence;
+  source: 'historical_observed' | 'estimated' | 'unknown';
+}
+
+/** §14 historical performance evidence (may be insufficient — never treat 1 run as definitive). */
+export interface HistoricalPerformance {
+  sampleSize: number;
+  sufficient: boolean;
+  observedQuality: number | null;
+  ciFirstPassRate: number | null;
+  verificationFirstPassRate: number | null;
+  medianCorrectionCycles: number | null;
+  medianTimeToVerifiedMs: number | null;
+  humanInterventionCount: number | null;
+  /** §22 which (provider, mode) cells backed this (audit trail). */
+  evidenceCells: BenchmarkCellStatistics[];
+}
+
+/** §15 derived task profile feeding eligibility + recommendation. */
+export interface ExecutionTaskProfile {
+  language: string | null;
+  framework: string | null;
+  repositorySize: 'small' | 'medium' | 'large' | 'unknown';
+  complexity: 'low' | 'medium' | 'high' | 'unknown';
+  architectureSensitivity: 'low' | 'medium' | 'high';
+  securitySensitivity: 'low' | 'medium' | 'high';
+  browserRequired: boolean;
+  terminalRequired: boolean;
+  repositoryAccess: boolean;
+  externalExecutionAllowed: boolean;
+  nativeExecutionAllowed: boolean;
+  requiredCapabilities: CapabilityRequirement[];
+  humanInterventionLikely: boolean;
+}
+
+/** §2 a candidate execution strategy under evaluation — metadata only, NEVER carries secrets. */
+export interface ExecutionCandidate {
+  provider: string;
+  name: string;
+  model: string;
+  executionMode: ExecutionMode;
+  capabilities: ProviderCapabilityProfile;
+  accessProfile: ProviderAccessProfile | null;
+  availability: ProviderAvailability;
+  eligibility: ExecutionEligibilityResult;
+  estimatedCost: CostEstimate;
+  estimatedLatency: LatencyEstimate;
+  historicalPerformance: HistoricalPerformance;
+  policyStatus: PolicyStatus;
+  /** §13 normalized recommendation score [0..1]. Eligible candidates only. */
+  recommendationScore: number;
+}
+
+export interface RecommendationReason {
+  dimension: RecommendationDimension;
+  satisfied: boolean;
+  detail: string;
+}
+
+/** §19 "Why?" explanation — structured, never "AI chose this". */
+export interface RecommendationWhy {
+  recommendedCandidateId: string | null;
+  headline: string;
+  reasons: RecommendationReason[];
+  /** §17 eligible candidates the user could select instead. */
+  alternatives: string[];
+}
+
+/** §16 the recommendation response returned by GET /work-items/:id/execution/recommendation. */
+export interface ExecutionRecommendation {
+  workItemId: string;
+  recommendedCandidate: ExecutionCandidate | null;
+  eligibleCandidates: ExecutionCandidate[];
+  excludedCandidates: ExecutionCandidate[];
+  why: RecommendationWhy;
+  benchmarkEvidence: HistoricalPerformance;
+  policy: BenchmarkPolicy;
+  taskProfile: ExecutionTaskProfile;
+  /** §22 immutable decision record id (append-only audit). */
+  decisionId: string;
+}
+
+/** §31 project execution policy (per-project). */
+export interface ProjectPolicyRecord {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  defaultBenchmarkMode: BenchmarkMode;
+  externalExecutionAllowed: boolean;
+  nativeExecutionAllowed: boolean;
+  maxCostPerTaskCents: number | null;
+  maxCostPerTrialCents: number | null;
+  maxTimeToPrMs: number | null;
+  humanInterventionAllowed: boolean;
+  privacyLevel: PrivacyLevel;
+  allowedProviders: string[];
+  deniedProviders: string[];
+  allowedModes: ExecutionMode[];
+  frozen: boolean;
+  policyVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** §12 user preferences (advisory; never override hard constraints). */
+export interface UserPreferenceRecord {
+  id: string;
+  organizationId: string;
+  userId: string;
+  qualityWeight: number;
+  costWeight: number;
+  latencyWeight: number;
+  privacyWeight: number;
+  preferredMode: ExecutionMode | null;
+  externalPreferred: boolean;
+  nativePreferred: boolean;
+  defaultBenchmarkMode: BenchmarkMode;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** §5 user-scoped provider access profile record (DB row). */
+export interface ProviderAccessProfileRecord extends ProviderAccessProfile {
+  id: string;
+  organizationId: string;
+  userId: string;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** §22 append-only decision record (audit). */
+export interface ExecutionPolicyDecisionRecord {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  workItemId: string;
+  requestedBy: string | null;
+  policyVersion: number;
+  benchmarkMode: BenchmarkMode;
+  taskProfile: ExecutionTaskProfile;
+  eligibleCandidates: ExecutionCandidate[];
+  excludedCandidates: ExecutionCandidate[];
+  recommendedCandidate: ExecutionCandidate | null;
+  whyExplanation: string;
+  scores: Record<string, number>;
+  benchmarkEvidence: HistoricalPerformance;
+  createdAt: string;
+}
+
+/** §31 input for PATCH /projects/:projectId/execution-policy. */
+export interface UpdateProjectPolicyInput {
+  defaultBenchmarkMode?: BenchmarkMode;
+  externalExecutionAllowed?: boolean;
+  nativeExecutionAllowed?: boolean;
+  maxCostPerTaskCents?: number | null;
+  maxCostPerTrialCents?: number | null;
+  maxTimeToPrMs?: number | null;
+  humanInterventionAllowed?: boolean;
+  privacyLevel?: PrivacyLevel;
+  allowedProviders?: string[];
+  deniedProviders?: string[];
+  allowedModes?: ExecutionMode[];
+}
+
+/** §12 input for PATCH /projects/:projectId/execution-preferences. */
+export interface UpdateUserPreferencesInput {
+  qualityWeight?: number;
+  costWeight?: number;
+  latencyWeight?: number;
+  privacyWeight?: number;
+  preferredMode?: ExecutionMode | null;
+  externalPreferred?: boolean;
+  nativePreferred?: boolean;
+  defaultBenchmarkMode?: BenchmarkMode;
+}
+
+/** §5 input for POST /projects/:projectId/provider-access-profiles. */
+export interface UpsertAccessProfileInput {
+  provider: string;
+  plan?: string | null;
+  codingAgent?: CapabilityReadiness;
+  externalUi?: CapabilityReadiness;
+  nativeApi?: CapabilityReadiness;
+  statusSource?: 'verified' | 'user_configured' | 'unknown';
+  notes?: string | null;
+}
+
+/**
+ * WORK-033 execution-policy API namespace. Mirrors the routes registered in
+ * `backend/src/api/routes/execution-policy.route.ts`. All routes are
+ * backend-authorized; the authenticated user.id is the server-side actor.
+ */
+export const executionPolicy = {
+  // --- §16/§22/§10 work-item-scoped ---
+
+  recommendation: {
+    /** §16 produce a recommendation for a Work Item. */
+    get: async (workItemId: string): Promise<ExecutionRecommendation> => {
+      const body = await apiGet<{ recommendation: ExecutionRecommendation }>(
+        `/work-items/${workItemId}/execution/recommendation`,
+      );
+      return body.recommendation;
+    },
+  },
+
+  decisions: {
+    /** §22 list historical policy decisions for a Work Item (audit). */
+    list: async (workItemId: string): Promise<ExecutionPolicyDecisionRecord[]> => {
+      const body = await apiGet<{ decisions: ExecutionPolicyDecisionRecord[] }>(
+        `/work-items/${workItemId}/execution/decisions`,
+      );
+      return body.decisions ?? [];
+    },
+  },
+
+  /** §10 controlled-comparison dimension display. */
+  controlledComparison: async (
+    workItemId: string,
+  ): Promise<ControlledComparisonDimensions> => {
+    const body = await apiGet<{ dimensions: ControlledComparisonDimensions }>(
+      `/work-items/${workItemId}/execution/controlled-comparison`,
+    );
+    return body.dimensions;
+  },
+
+  // --- §31 project policy ---
+
+  policy: {
+    /** §31 get the project execution policy (null if not yet created). */
+    get: async (projectId: string): Promise<ProjectPolicyRecord | null> => {
+      const body = await apiGet<{ policy: ProjectPolicyRecord | null }>(
+        `/projects/${projectId}/execution-policy`,
+      );
+      return body.policy ?? null;
+    },
+
+    /** §31 get-or-create the project default policy. */
+    ensure: (projectId: string) =>
+      apiPost<{ policy: ProjectPolicyRecord }>(
+        `/projects/${projectId}/execution-policy`,
+        {},
+      ).then((b) => b.policy),
+
+    /** §31 update the project policy (409 if frozen — §9). */
+    update: (projectId: string, input: UpdateProjectPolicyInput) =>
+      apiPatch<{ policy: ProjectPolicyRecord }>(
+        `/projects/${projectId}/execution-policy`,
+        input,
+      ).then((b) => b.policy),
+
+    /** §9 freeze the project policy (called when a benchmark experiment starts). */
+    freeze: (projectId: string) =>
+      apiPost<{ policy: ProjectPolicyRecord }>(
+        `/projects/${projectId}/execution-policy/freeze`,
+        {},
+      ).then((b) => b.policy),
+  },
+
+  // --- §12 user preferences (project-scoped for tenant context) ---
+
+  preferences: {
+    /** §12 get the user preference profile (null if not yet created). */
+    get: async (projectId: string): Promise<UserPreferenceRecord | null> => {
+      const body = await apiGet<{ preferences: UserPreferenceRecord | null }>(
+        `/projects/${projectId}/execution-preferences`,
+      );
+      return body.preferences ?? null;
+    },
+
+    /** §12 get-or-create the user default preferences. */
+    ensure: (projectId: string) =>
+      apiPost<{ preferences: UserPreferenceRecord }>(
+        `/projects/${projectId}/execution-preferences`,
+        {},
+      ).then((b) => b.preferences),
+
+    /** §12 update the user preference profile. */
+    update: (projectId: string, input: UpdateUserPreferencesInput) =>
+      apiPatch<{ preferences: UserPreferenceRecord }>(
+        `/projects/${projectId}/execution-preferences`,
+        input,
+      ).then((b) => b.preferences),
+  },
+
+  // --- §5 provider access profiles (user-scoped, project-tenant context) ---
+
+  accessProfiles: {
+    /** §5 list the user's provider access profiles. */
+    list: async (projectId: string): Promise<ProviderAccessProfileRecord[]> => {
+      const body = await apiGet<{ profiles: ProviderAccessProfileRecord[] }>(
+        `/projects/${projectId}/provider-access-profiles`,
+      );
+      return body.profiles ?? [];
+    },
+
+    /** §5 upsert a user provider access profile. */
+    upsert: (projectId: string, input: UpsertAccessProfileInput) =>
+      apiPost<{ profile: ProviderAccessProfileRecord }>(
+        `/projects/${projectId}/provider-access-profiles`,
+        input,
+      ).then((b) => b.profile),
+  },
+};

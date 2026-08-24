@@ -803,6 +803,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     //   - `export const xxxModule: ModuleContract & ... = { ... }` (the marker)
     //   - `export default`
     // Any `export { ConcreteClass } from '...'` (value re-export) is forbidden.
+    //
+    // WORK-033 exception: pure-data catalog constants (display + validation
+    // metadata only — no credentials, URLs, or DOM automation) MAY be exposed
+    // via the barrel so application-layer orchestrators (e.g. src/execution-policy)
+    // can compose provider metadata without inventing a second catalog. The
+    // allowlist enumerates these known pure-data catalogs.
+    const PURE_DATA_CATALOG_EXPORTS = new Set<string>([
+      'EXTERNAL_UI_CATALOG', // @modules/agents — display + validation metadata
+    ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
       const dir = moduleDir(name);
@@ -817,6 +826,7 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
         for (const n of names) {
           // The local binding (after `as`) is what matters.
           const localName = n.includes(' as ') ? n.split(' as ')[1]!.trim() : n;
+          if (PURE_DATA_CATALOG_EXPORTS.has(localName)) continue;
           violations.push(
             `src/modules/${dir}/index.ts value-exports "${localName}" — ` +
               `module barrels must expose only types/interfaces; concrete impls ` +
@@ -6836,5 +6846,653 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
     // ...and injected into the WorkerHost options (the boot sweep).
     expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
+  });
+});
+
+// ============================================================================
+// WORK-033 — Execution Policy & Fair Benchmarking architecture checks
+// (§21 fairness, §9 immutability, §22 append-only, §27 server-side actor)
+// ============================================================================
+// The execution-policy domain lives at src/execution-policy/ (application-layer
+// orchestrator OUTSIDE src/modules/, mirroring the §34 benchmark pattern). It
+// CONSUMES the 17 frozen domain modules via their public barrels. It NEVER
+// mutates workflow state, NEVER stores credentials, NEVER invents provider
+// capabilities, NEVER instantiates another ExecutionService. These checks
+// prove the boundary is intact (§1, §21, §34).
+// ============================================================================
+
+describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
+  const EXEC_POLICY_DIR = join(BACKEND_ROOT, 'src', 'execution-policy');
+  const EXEC_POLICY_INTERNAL = join(EXEC_POLICY_DIR, 'internal');
+  const MIGRATION_PATH = join(
+    BACKEND_ROOT,
+    'src',
+    'platform',
+    'postgres',
+    'migrations',
+    '0026_execution_policy.sql',
+  );
+
+  /** Strip line + block comments so TODO/NOTE text does not trip regex checks. */
+  function stripComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  // Strip SQL line comments (-- ...) and block comments for migration scans.
+  function stripSqlComments(src: string): string {
+    return src.replace(/--[^\n]*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readExecPolicyFiles(): { path: string; src: string }[] {
+    if (!existsSync(EXEC_POLICY_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(EXEC_POLICY_DIR);
+    return out;
+  }
+
+  // --- (a) execution-policy domain exists at src/execution-policy/ (with
+  //     index.ts + types.ts + internal/) --------------------------------------
+
+  it('execution policy domain exists at src/execution-policy/ with index.ts + types.ts + internal/', () => {
+    expect(existsSync(EXEC_POLICY_DIR), 'src/execution-policy/ must exist').toBe(true);
+    expect(existsSync(join(EXEC_POLICY_DIR, 'index.ts')), 'src/execution-policy/index.ts must exist').toBe(true);
+    expect(existsSync(join(EXEC_POLICY_DIR, 'types.ts')), 'src/execution-policy/types.ts must exist').toBe(true);
+    expect(existsSync(EXEC_POLICY_INTERNAL), 'src/execution-policy/internal/ must exist').toBe(true);
+  });
+
+  // --- (b) execution-policy is NOT a frozen module ---------------------------
+
+  it('execution-policy is NOT a frozen module (no dir under src/modules/; not in 17-module list)', () => {
+    // It must NOT appear under src/modules/ (it is an application-layer
+    // orchestrator, mirroring the §34 benchmark pattern — NOT the 18th module).
+    expect(existsSync(join(MODULES_DIR, 'execution-policy'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'execution-policy must not be in FROZEN_MODULE_NAMES').not.toContain('/execution-policy');
+    expect(FROZEN_MODULE_NAMES).toHaveLength(17);
+  });
+
+  // --- (c) execution-policy never imports any module's /internal/ ----------
+
+  it('execution-policy never imports any module internal/ (must use @modules/* public barrels)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      for (const specifier of extractSpecifiers(f.path)) {
+        const resolved = resolveSpecifier(f.path, specifier);
+        if (!resolved) continue;
+        // Forbidden: importing into src/modules/<m>/internal/ — must use the
+        // module's index.ts public barrel instead.
+        if (moduleOf(resolved) && isInsideInternal(resolved)) {
+          violations.push(
+            `${relative(BACKEND_ROOT, f.path)} imports "${specifier}" -> ` +
+              `${relative(BACKEND_ROOT, resolved)} (inside ${moduleOf(resolved)}/internal; ` +
+              `use the module's index.ts public interface instead)`,
+          );
+        }
+        // Forbidden: importing the benchmark domain's internal/ — must use the
+        // public barrel `../benchmark/index.js` (§34 boundary).
+        if (specifier.includes('../benchmark/internal/') || specifier.includes('/benchmark/internal/')) {
+          violations.push(
+            `${relative(BACKEND_ROOT, f.path)} imports "${specifier}" -> ` +
+              `benchmark/internal (forbidden — must use ../../benchmark/index.js public barrel)`,
+          );
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (d) execution-policy never stores credentials -------------------------
+
+  it('execution-policy never stores credentials (no secret/token/key/cookie columns in migration 0026)', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    const stripped = stripSqlComments(migrationSrc);
+    const violations: string[] = [];
+    for (const line of stripped.split('\n')) {
+      const trimmed = line.trim().toLowerCase();
+      if (trimmed === '') continue;
+      if (
+        /(?:^|\s)(?:secret|password|api_key|apikey|credential|private_key|cookie|access_token|refresh_token|callback_token|handoff_token)\b/.test(
+          trimmed,
+        )
+      ) {
+        // `notes` is allowed (free-text annotation column — not a credential).
+        if (trimmed.includes('notes') && !trimmed.includes('token')) continue;
+        violations.push(`credential-like column: ${trimmed}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (e) execution-policy never mutates workflow state ---------------------
+
+  it('execution-policy never mutates workflow state (no INSERT INTO wfos_workflow_* / no toState=merged|verified|approved)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/INSERT\s+INTO\s+wfos_workflow_executions/i.test(codeOnly)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_executions (forbidden — /workflows authority)`);
+      }
+      if (/INSERT\s+INTO\s+wfos_workflow_transitions/i.test(codeOnly)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_transitions (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]merged['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'merged' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]verified['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'verified' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]approved['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: toState:'approved' (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (f) execution-policy never creates another ExecutionService ---------
+
+  it('execution-policy never instantiates another ExecutionService (may import the TYPE; must NOT construct)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/\bnew\s+DefaultExecutionService\b/.test(codeOnly)) {
+        violations.push(`${f.path}: new DefaultExecutionService (forbidden — submit via the existing ExecutionService through the route layer)`);
+      }
+      if (/\bextends\s+\w*ExecutionService\b/.test(codeOnly)) {
+        violations.push(`${f.path}: extends *ExecutionService (forbidden — never subclass the execution service)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (g) execution-policy composes existing provider metadata ------------
+
+  it('execution-policy composes existing provider metadata (no second provider catalog)', () => {
+    const normalizerSrc = readFileSync(
+      join(EXEC_POLICY_INTERNAL, 'provider-capability-normalizer.ts'),
+      'utf8',
+    );
+    // Must reference ExecutionProviderInfo (the @modules/agents source of truth).
+    expect(normalizerSrc).toMatch(/ExecutionProviderInfo/);
+    // Must NOT declare a new provider catalog constant.
+    const codeOnly = stripComments(normalizerSrc);
+    expect(codeOnly, 'provider-capability-normalizer.ts must not declare a new catalog constant').not.toMatch(
+      /\bconst\s+[A-Z_]*CATALOG\b/,
+    );
+
+    // The agents barrel re-exports the WORK-033 surface-capability types so the
+    // execution-policy layer can compose them WITHOUT inventing capabilities.
+    const agentsBarrelSrc = readFileSync(
+      join(MODULES_DIR, 'agents', 'index.ts'),
+      'utf8',
+    );
+    expect(agentsBarrelSrc).toMatch(/EXTERNAL_UI_CATALOG/);
+    expect(agentsBarrelSrc).toMatch(/ProviderSurfaceCapabilities/);
+    expect(agentsBarrelSrc).toMatch(/SurfaceReadiness/);
+    expect(agentsBarrelSrc).toMatch(/ProviderSurfaceKind/);
+  });
+
+  // --- (h) execution-policy recommendation is evidence-backed --------------
+
+  it('execution-policy recommendation is evidence-backed (references historicalPerformance / observedQuality)', () => {
+    const recSrc = readFileSync(
+      join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'),
+      'utf8',
+    );
+    // The recommendation engine MUST consume historical evidence (§14) — never
+    // declare a winner string without evidence.
+    expect(recSrc).toMatch(/historicalPerformance/);
+    expect(recSrc).toMatch(/observedQuality/);
+    // The Why explanation must NOT be a bare "AI chose this" string — it must
+    // be structured (RecommendationReason with dimension + satisfied + detail).
+    expect(recSrc).toMatch(/RecommendationReason/);
+    expect(recSrc).toMatch(/dimension:/);
+    expect(recSrc).toMatch(/satisfied:/);
+    expect(recSrc).not.toMatch(/['"]AI chose this['"]/);
+  });
+
+  // --- (h2) §21 fairness integrity — BenchmarkMode + ToolPolicy shape ------
+
+  it('§21 fairness integrity — BenchmarkMode has both maximum_capability + controlled_comparison; ToolPolicy has noArtificialCaps', () => {
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    // BenchmarkMode MUST declare both literals (§8 — fairness depends on the
+    // distinction; maximum-capability mode vs. controlled-comparison mode).
+    expect(typesSrc).toMatch(/'maximum_capability'/);
+    expect(typesSrc).toMatch(/'controlled_comparison'/);
+    // ToolPolicy MUST include noArtificialCaps (§21 — the explicit fairness
+    // invariant: NEVER artificially cap a provider's tools solely for fairness).
+    expect(typesSrc).toMatch(/noArtificialCaps/);
+    expect(typesSrc).toMatch(/maximumCapability/);
+    expect(typesSrc).toMatch(/toolClassFixed/);
+    // DEFAULT_TOOL_POLICY must default to maximum-capability mode (no caps).
+    expect(typesSrc).toMatch(/DEFAULT_TOOL_POLICY/);
+    expect(typesSrc).toMatch(/maximumCapability:\s*true/);
+    expect(typesSrc).toMatch(/noArtificialCaps:\s*true/);
+  });
+
+  // --- (i) execution-policy route is wired ---------------------------------
+
+  it('execution-policy route is wired in server.ts + index.ts', () => {
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverSrc).toMatch(/executionPolicyRoutes/);
+    expect(serverSrc).toMatch(/ExecutionPolicyRouteDeps/);
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/executionPolicy:/);
+  });
+
+  // --- (j) execution-policy service is constructed in app.ts ----------------
+
+  it('execution-policy service is constructed in app.ts', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultExecutionPolicyService/);
+    expect(appSrc).toMatch(/PgExecutionPolicyRepository/);
+    expect(appSrc).toMatch(/executionPolicyService/);
+  });
+
+  // --- (k) migration 0026 + test-database truncates -------------------------
+
+  it('migration 0026 exists + test-database truncates execution-policy tables', () => {
+    expect(existsSync(MIGRATION_PATH), '0026_execution_policy.sql must exist').toBe(true);
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_policy_decisions/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_policies/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_execution_preferences/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_provider_access_profiles/);
+  });
+
+  // --- (l) §9 policy immutability ------------------------------------------
+
+  it('§9 policy immutability — migration 0026 has frozen reject trigger + policy_version column + touch trigger', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    // policy_version column (monotonically increasing; bumped on every UPDATE).
+    expect(migrationSrc).toMatch(/policy_version\s+INTEGER\s+NOT\s+NULL/);
+    // wfos_execution_policy_touch — bumps policy_version + updated_at.
+    expect(migrationSrc).toMatch(/wfos_execution_policy_touch/);
+    expect(migrationSrc).toMatch(/BEFORE INSERT OR UPDATE ON wfos_execution_policies/);
+    // wfos_reject_frozen_execution_policy — rejects UPDATE on frozen policies.
+    expect(migrationSrc).toMatch(/wfos_reject_frozen_execution_policy/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE ON wfos_execution_policies/);
+  });
+
+  // --- (m) §22 decisions append-only ----------------------------------------
+
+  it('§22 decisions append-only — migration 0026 has wfos_execution_policy_decision_immutable trigger (BEFORE UPDATE + BEFORE DELETE)', () => {
+    const migrationSrc = readFileSync(MIGRATION_PATH, 'utf8');
+    expect(migrationSrc).toMatch(/wfos_execution_policy_decision_immutable/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE ON wfos_execution_policy_decisions/);
+    expect(migrationSrc).toMatch(/BEFORE DELETE ON wfos_execution_policy_decisions/);
+  });
+
+  // --- (n) §27 server-side actor -------------------------------------------
+
+  it('§27 server-side actor — route calls requireProjectAuthorization; does NOT read actor/createdBy/userId from req.body', () => {
+    const routeSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'),
+      'utf8',
+    );
+    // Every authorized route must call requireProjectAuthorization (the actor
+    // is derived server-side from the authenticated user — §27, PR #35 fix #5).
+    expect(routeSrc).toMatch(/requireProjectAuthorization/);
+    // Must NEVER read actor / createdBy / userId from the request body.
+    const codeOnly = stripComments(routeSrc);
+    expect(codeOnly, 'route must not read body.actor').not.toMatch(/body\.actor/);
+    expect(codeOnly, 'route must not read body.createdBy').not.toMatch(/body\.createdBy/);
+    expect(codeOnly, 'route must not read body.userId').not.toMatch(/body\.userId/);
+  });
+
+  // --- (o) execution-policy never imports provider SDKs ---------------------
+
+  it('execution-policy never imports provider SDKs or env secrets (no @octokit/openai/anthropic/zai-sdk; no process.env *_API_KEY/_SECRET/_TOKEN)', () => {
+    const files = readExecPolicyFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const codeOnly = stripComments(f.src);
+      if (/from\s+['"]@octokit/.test(codeOnly)) {
+        violations.push(`${f.path}: imports @octokit (forbidden — use @modules/github)`);
+      }
+      if (/from\s+['"]openai['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: imports openai (forbidden — use @modules/llm)`);
+      }
+      if (/from\s+['"]anthropic['"]/.test(codeOnly)) {
+        violations.push(`${f.path}: imports anthropic (forbidden — use @modules/agents)`);
+      }
+      if (/\bzai-sdk\b/.test(codeOnly)) {
+        violations.push(`${f.path}: imports zai-sdk (forbidden — provider SDKs are not for the policy layer)`);
+      }
+      if (/process\.env\.[A-Z_]*_API_KEY\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_API_KEY (forbidden — never reads secrets)`);
+      }
+      if (/process\.env\.[A-Z_]*_SECRET\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_SECRET (forbidden — never reads secrets)`);
+      }
+      if (/process\.env\.[A-Z_]*_TOKEN\b/.test(codeOnly)) {
+        violations.push(`${f.path}: reads process.env *_TOKEN (forbidden — never reads secrets)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('execution-policy preferences are ADVISORY — buildConstraintSet routes NO preference into the hard constraint set (§12)', () => {
+    // PR #37 review fix 1: the previous buildConstraintSet did
+    //   allowedModes: prefs.preferredMode ? [prefs.preferredMode] : []
+    // inside user constraints — making preferredMode a HARD eligibility
+    // block (preferredMode='external' excluded every native candidate even
+    // when native execution was fully allowed). The §12 contract:
+    // preferences (preferredMode / externalPreferred / nativePreferred /
+    // weights) influence RANKING ONLY.
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private buildConstraintSet[\s\S]*?\n  \}/);
+    expect(fn, 'buildConstraintSet must exist').not.toBeNull();
+    const code = stripComments(fn![0]);
+    // The constraint builder must NOT receive or read the preference
+    // profile at all (structural separation: hard constraints in, hard
+    // constraints out).
+    expect(code).not.toMatch(/prefs\.|UserPreferenceRecord|preferredMode|externalPreferred|nativePreferred/);
+    // The user.allowedModes hard-constraint slot must be EMPTY (reserved
+    // for an explicit user-configured mode restriction — never a preference).
+    expect(code).toMatch(/allowedModes:\s*\[\]/);
+    // The preference profile flows EXCLUSIVELY into the ranking input.
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    expect(recommendFn).toMatch(/toPreferenceProfile\(prefs\)/);
+    // The ranking input is the only consumer (RankInput.preferences).
+    const recSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'), 'utf8');
+    expect(recSrc).toMatch(/preferences: ExecutionPreferenceProfile/);
+    // And the eligibility input carries NO preference field at all
+    // (structural: the hard filter cannot honor preferences).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    const eligInput = typesSrc.match(/export interface EligibilityEvaluationInput[\s\S]*?\n\}/)![0];
+    expect(eligInput).not.toMatch(/preference|preferred/i);
+  });
+
+  it('execution-policy constrained modes FAIL CLOSED on unknown cost/latency evidence (§8 — unknown is NOT neutral under an explicit maximum)', () => {
+    // PR #37 review fix 2: the previous eligibility only blocked a cost
+    // budget when candidate.estimatedCost.cents != null — so an unknown cost
+    // PASSED the hard cost constraint (neutral), and maxDurationMs fed only
+    // the recommendation scorer (no hard latency check). A candidate with
+    // unknown cost or latency cannot legitimately be declared eligible
+    // under an explicit maximum constraint:
+    //   cost constraint + unknown cost     → ineligible (unknown_constrained)
+    //   latency constraint + unknown latency → ineligible (unknown_constrained)
+    //   known latency over the cap          → ineligible (hard latency check)
+    const eligSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-eligibility-service.ts'), 'utf8');
+    const code = stripComments(eligSrc);
+    // The fail-closed evaluation section exists + runs in evaluate().
+    expect(code).toMatch(/evaluateConstrainedEvidence\(input, blocks, satisfied\)/);
+    expect(code).toMatch(/private evaluateConstrainedEvidence/);
+    // Unknown cost under ANY explicit cost cap (user + org + policy
+    // snapshot) blocks with the 'evidence' category.
+    expect(code).toMatch(/'unknown_cost_under_cost_constraint'/);
+    expect(eligSrc).toMatch(/category: 'evidence'/);
+    // Unknown latency under the policy's maxDurationMs blocks.
+    expect(code).toMatch(/'unknown_latency_under_latency_constraint'/);
+    // Known over-cap latency is a HARD violation (not scoring-only).
+    expect(code).toMatch(/'latency_over_max'/);
+    // The new status + category exist in the public contract (both backend
+    // + the mirrored frontend contract).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/'unknown_constrained'/);
+    expect(typesSrc).toMatch(/\| 'evidence';/);
+    const frontendSrc = readFileSync(join(BACKEND_ROOT, '..', 'frontend', 'src', 'api', 'client.ts'), 'utf8');
+    expect(frontendSrc).toMatch(/'unknown_constrained'/);
+    expect(frontendSrc).toMatch(/\| 'evidence';/);
+    // The recommendation's neutral-unknown components are only reachable
+    // when NO cap is active (fail-closed handles the capped case upstream).
+    const recSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'), 'utf8');
+    expect(recSrc).toMatch(/FAIL-CLOSED INTERPLAY/);
+  });
+
+  it('execution-policy §9 freeze is CONNECTED to the authoritative benchmark start (migration 0032 triggers — no code path can bypass)', () => {
+    // PR #37 review fix 3: migration 0026 defined the freeze MECHANISM (the
+    // frozen column + reject-frozen-mutation trigger) and the service
+    // exposed freezeProjectPolicy(), but NOTHING invoked it from the start
+    // path — a policy could remain mutable while an experiment ran. The fix
+    // enforces §9 at the persistence boundary, atomically with the
+    // authoritative created|paused → running transition:
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0032_execution_policy_freeze_on_benchmark_start.sql',
+    );
+    expect(existsSync(migrationPath), '0032_execution_policy_freeze_on_benchmark_start.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // (1) Freeze-on-start: an AFTER UPDATE trigger on the experiments table
+    // guarded on the authoritative start transition.
+    expect(src).toMatch(/AFTER UPDATE ON wfos_benchmark_experiments/);
+    expect(src).toMatch(/NEW\.status = 'running' AND OLD\.status IN \('created', 'paused'\)/);
+    expect(src).toMatch(/SET frozen = true/);
+    expect(src).toMatch(/WHERE project_id = NEW\.project_id/);
+    // (2) Born-frozen: a BEFORE INSERT trigger on the policies table for
+    // projects with already-started experiments (the created-later hole).
+    expect(src).toMatch(/BEFORE INSERT ON wfos_execution_policies/);
+    expect(src).toMatch(/started_at IS NOT NULL/);
+    // No unfreeze path (§9 is one-way).
+    expect(src).not.toMatch(/SET frozen = false/);
+    // No scheduler machinery in the migration (touch-driven by the start
+    // transition itself).
+    expect(src).not.toMatch(/setInterval|pg_cron|set_timeout/i);
+    // The service-level freeze is documented as the EXPLICIT early freeze
+    // (not load-bearing for §9 — the trigger is).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/EXPLICIT freeze/);
+    expect(serviceSrc).toMatch(/migration 0032/);
+    // The regression proof exists: the integration test exercising the REAL
+    // start path (startExperiment + claimExperimentStart) + born-frozen +
+    // frozen-reject.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'policy-freeze-on-start.integration.test.ts');
+    expect(existsSync(testPath), 'policy-freeze-on-start.integration.test.ts must exist').toBe(true);
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/experiment start FREEZES the project policy atomically/);
+    expect(testSrc).toMatch(/BORN FROZEN/);
+    expect(testSrc).toMatch(/rejects\.toThrow\(\/execution-policy-frozen\/\)/);
+    // And the preference-advisory + fail-closed regressions exist.
+    const regPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-policy.regression.test.ts');
+    const regSrc = readFileSync(regPath, 'utf8');
+    expect(regSrc).toMatch(/preferences are ADVISORY \(never hard eligibility constraints\)/);
+    expect(regSrc).toMatch(/constrained modes FAIL CLOSED on unknown cost\/latency evidence/);
+  });
+
+  it('execution-policy constrained modes REQUIRE their caps at the policy boundary (§8 — no meaningless constrained policy can persist or evaluate)', () => {
+    // PR #37 review final correction: fail-closed eligibility was not
+    // enough — the system could still persist + return
+    // COST_CONSTRAINED with maxCostCents=NULL (or LATENCY_CONSTRAINED with
+    // maxDurationMs=NULL): labeled constrained while imposing no
+    // constraint. The invariant is enforced at TWO boundaries:
+    //   * the SERVICE (validateBenchmarkModeConstraint — merged-view on
+    //     policy update + resolved-mode on recommendation);
+    //   * the DATABASE (migration 0033's CHECK — no write path can persist
+    //     a meaningless combination, including removing the cap while the
+    //     mode stays constrained).
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0033_execution_policy_constrained_mode_requires_cap.sql',
+    );
+    expect(existsSync(migrationPath), '0033_execution_policy_constrained_mode_requires_cap.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The CHECK constraint: both modes require their caps.
+    expect(src).toMatch(/wfos_execution_policy_constrained_mode_requires_cap/);
+    expect(src).toMatch(/default_benchmark_mode <> 'cost_constrained' OR max_cost_per_task_cents IS NOT NULL/);
+    expect(src).toMatch(/default_benchmark_mode <> 'latency_constrained' OR max_time_to_pr_ms IS NOT NULL/);
+    // The service validator exists + throws the domain error for both modes.
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/export function validateBenchmarkModeConstraint[\s\S]*?\n\}/);
+    expect(fn, 'validateBenchmarkModeConstraint must exist').not.toBeNull();
+    expect(fn![0]).toMatch(/'cost_constrained' && maxCostCents == null/);
+    expect(fn![0]).toMatch(/'latency_constrained' && maxDurationMs == null/);
+    expect(fn![0]).toMatch(/execution-policy-invalid-mode-constraint/);
+    // Applied at POLICY UPDATE time (the MERGED view — existing + patch).
+    const updateFn = serviceSrc.match(/async updateProjectPolicy[\s\S]*?\n  \}/)![0];
+    expect(updateFn).toMatch(/validateBenchmarkModeConstraint\(/);
+    expect(updateFn).toMatch(/input\.defaultBenchmarkMode \?\? existing\.defaultBenchmarkMode/);
+    // Applied at RECOMMENDATION time (the RESOLVED mode vs the policy caps
+    // — before the snapshot is built).
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    const modeIdx = recommendFn.indexOf('input.benchmarkMode ?? policy.defaultBenchmarkMode');
+    const validateIdx = recommendFn.indexOf('validateBenchmarkModeConstraint(benchmarkMode');
+    const snapshotIdx = recommendFn.indexOf('buildPolicySnapshot(policy, benchmarkMode)');
+    expect(modeIdx).toBeGreaterThanOrEqual(0);
+    expect(validateIdx).toBeGreaterThan(modeIdx);
+    expect(snapshotIdx).toBeGreaterThan(validateIdx);
+    // Exported from the domain barrel + mapped to HTTP 400 on BOTH routes.
+    const indexSrc = readFileSync(join(EXEC_POLICY_DIR, 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/export \{ validateBenchmarkModeConstraint \}/);
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-invalid-mode-constraint/);
+    expect(routeSrc).toMatch(/'invalid-mode-constraint'/);
+    // Regression coverage: the reviewer's three required scenarios + the
+    // merged directions + the recommendation-time rejection + the DB
+    // backstop + the HTTP-level 400 mapping.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    expect(existsSync(testPath), 'mode-constraint-validation.integration.test.ts must exist').toBe(true);
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/COST_CONSTRAINED \+ null maxCost → rejected/);
+    expect(testSrc).toMatch(/LATENCY_CONSTRAINED \+ null maxDuration → rejected/);
+    expect(testSrc).toMatch(/valid constrained mode \+ cap → accepted/);
+    expect(testSrc).toMatch(/removing the cap while the mode is COST_CONSTRAINED → rejected/);
+    expect(testSrc).toMatch(/explicit constrained mode on a capless project → rejected/);
+    expect(testSrc).toMatch(/DB CHECK rejects/);
+    const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
+    expect(e2eSrc).toMatch(/constrained mode without its cap → 400/);
+  });
+
+  it('execution-policy frozen-mode override is REJECTED at recommendation time (§9 — a decision cannot claim the frozen policyVersion under a different mode)', () => {
+    // PR #37 review final blocker: a frozen project policy could still be
+    // overridden at recommendation time with ?benchmarkMode=... even when
+    // the frozen policy said benchmarkMode=maximum_capability /
+    // policyVersion=N — the resulting decision would claim version N while
+    // using a different mode, undermining the §9 immutability/audit
+    // guarantee. The fix: in recommend(), an explicit benchmarkMode that
+    // DIFFERS from the frozen policy's mode is rejected (the same mode is a
+    // no-op; unfrozen policies keep the §16 request-scoped override).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    // The frozen-mode guard exists with the exact semantics (frozen +
+    // explicit + differing).
+    expect(recommendFn).toMatch(/policy\.frozen && input\.benchmarkMode != null && input\.benchmarkMode !== policy\.defaultBenchmarkMode/);
+    // ...throwing the frozen-mode domain error (which includes the frozen
+    // version + mode in the message for auditability).
+    expect(recommendFn).toMatch(/execution-policy-frozen-mode: the project policy is frozen \(policyVersion=\$\{policy\.policyVersion\}, benchmarkMode=\$\{policy\.defaultBenchmarkMode\}\)/);
+    // ORDERING: the frozen-mode guard MUST precede the mode-constraint
+    // validation (a frozen-policy override is a frozen-state violation
+    // first, not a missing-cap problem — the reviewer's scenario must
+    // surface as the frozen rejection).
+    const frozenIdx = recommendFn.indexOf('execution-policy-frozen-mode');
+    const validateIdx = recommendFn.indexOf('validateBenchmarkModeConstraint(benchmarkMode');
+    expect(frozenIdx).toBeGreaterThan(-1);
+    expect(frozenIdx).toBeLessThan(validateIdx);
+    // RecommendInput documents the frozen rejection (the public contract).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    const recInput = typesSrc.match(/export interface RecommendInput[\s\S]*?\n\}/)![0];
+    expect(recInput).toMatch(/FROZEN/);
+    expect(recInput).toMatch(/REJECTED/);
+    // The route maps it to HTTP 409 policy-frozen-mode.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-frozen-mode/);
+    expect(routeSrc).toMatch(/'policy-frozen-mode'/);
+    // Regression coverage: frozen+differing rejected (multiple modes),
+    // frozen+same allowed, frozen+none allowed, unfrozen override
+    // preserved — + the HTTP-level 409 e2e.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/frozen policy \+ a DIFFERING explicit benchmarkMode → rejected/);
+    expect(testSrc).toMatch(/frozen policy \+ the SAME explicit benchmarkMode → not a frozen-mode rejection/);
+    expect(testSrc).toMatch(/frozen policy \+ NO explicit benchmarkMode → uses the frozen mode/);
+    expect(testSrc).toMatch(/UNFROZEN policy \+ a differing explicit benchmarkMode → the §16 override still works/);
+    const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
+    expect(e2eSrc).toMatch(/frozen-mode override → 409/);
+  });
+
+  it('execution-policy decision write is an ATOMIC SNAPSHOT VALIDATION (TOCTOU eliminated — every persisted decision claims one exact, currently authoritative policy version)', () => {
+    // PR #37 review final concurrency gap: the read-time frozen-mode guard
+    // was not race-safe — recommend() could read policy vN (unfrozen),
+    // a concurrent request could mutate/freeze the policy to vN+1, and the
+    // recommendation could still persist a decision claiming vN (with a
+    // request-scoped mode valid only before the freeze). The decision
+    // record is the authoritative audit of policyVersion / benchmarkMode /
+    // candidates / why / evidence — it must describe ONE COHERENT policy
+    // snapshot. The fix: the decision INSERT is ONE atomic statement
+    // conditioned on the CURRENT policy row:
+    //   current policy_version == snapshot version
+    //   AND (current frozen = false OR decision mode == current default mode)
+    // A mutation/freeze during the recommendation → no row → the retryable
+    // stale-snapshot error (409) → the caller retries with the fresh policy.
+    const repoSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'pg-execution-policy-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async insertDecision[\s\S]*?\n  \}/);
+    expect(fn, 'insertDecision must exist').not.toBeNull();
+    const body = fn![0];
+    // ONE atomic statement: the INSERT is gated by a CTE over the CURRENT
+    // policy row (no separate check-then-insert window).
+    expect(body).toMatch(/WITH current_policy AS \(/);
+    expect(body).toMatch(/SELECT policy_version, frozen, default_benchmark_mode\s+FROM wfos_execution_policies/);
+    // THE ROW LOCK (the follow-up review's finding): a plain SELECT reads
+    // the STATEMENT-START snapshot, so a concurrent policy UPDATE
+    // committing mid-statement could leave the decision persisted against
+    // the OLD version. The current_policy read MUST take FOR UPDATE — the
+    // locked read blocks on an in-flight concurrent UPDATE and then
+    // re-fetches the NEWEST committed row (READ COMMITTED locked-read
+    // semantics), serializing the decision boundary against every policy
+    // writer.
+    expect(body).toMatch(/WHERE project_id = \$2\s+FOR UPDATE/);
+    // The version predicate (stale snapshot → no insert).
+    expect(body).toMatch(/WHERE cp\.policy_version = \$14/);
+    // The frozen/mode predicate (frozen + differing effective mode → no
+    // insert — the belt-and-braces clause that holds even if a future
+    // change made freezing version-neutral).
+    expect(body).toMatch(/AND \(cp\.frozen = false OR \$6::text = cp\.default_benchmark_mode\)/);
+    // Null (not a throw) on rejection — the SERVICE surfaces the retryable
+    // error (separation of concerns: the repository guards, the service
+    // decides the contract).
+    expect(body).toMatch(/return res\.rows\[0\] \? mapDecision\(res\.rows\[0\]\) : null;/);
+    // The interface requires the guard parameter (callers cannot bypass
+    // the validation — there is NO unvalidated insert path).
+    const typesInternalSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8');
+    expect(typesInternalSrc).toMatch(/insertDecision\([^)]*row: DecisionRow, guard: DecisionSnapshotGuard\): Promise<ExecutionPolicyDecisionRecord \| null>/);
+    expect(typesInternalSrc).toMatch(/export interface DecisionSnapshotGuard/);
+    // The service passes the snapshot version + throws the retryable
+    // stale-snapshot error on null (with the request-scoped-mode note).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    expect(recommendFn).toMatch(/\{ snapshotPolicyVersion: policy\.policyVersion \}/);
+    expect(recommendFn).toMatch(/if \(!decision\)/);
+    expect(recommendFn).toMatch(/execution-policy-snapshot-stale: the project policy changed during the recommendation/);
+    expect(recommendFn).toMatch(/retry with the fresh policy/);
+    // The route maps it to a retryable HTTP 409.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-snapshot-stale/);
+    expect(routeSrc).toMatch(/'policy-snapshot-stale'/);
+    // Regression coverage: the concurrent mutation race, the freeze race
+    // (with the retry hitting the frozen-mode guard), the happy path, and
+    // the repository-level clause isolation.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/atomic decision snapshot validation \(TOCTOU elimination\)/);
+    expect(testSrc).toMatch(/policy MUTATED during the recommendation → the decision insert is REJECTED/);
+    expect(testSrc).toMatch(/policy FROZEN during the recommendation \(with a request-scoped mode\) → the decision insert is REJECTED/);
+    expect(testSrc).toMatch(/NO mutation during the recommendation → the decision persists with the CURRENT version/);
+    expect(testSrc).toMatch(/repository-level guard: each clause in isolation/);
+    // The race is genuinely simulated MID-recommendation (the mutating
+    // task-profile hook runs after the policy read + before the insert).
+    expect(testSrc).toMatch(/buildRacingService/);
+    // The follow-up review required the regression to exercise the ACTUAL
+    // lock contention/interleaving — a real second connection holding the
+    // policy row lock with an in-flight uncommitted UPDATE while the
+    // guarded insert BLOCKS (proof of contention: 'still-blocked'), then
+    // COMMIT → the newest row rejects the stale snapshot; ROLLBACK → the
+    // original row accepts. On pglite (single-session) the closest
+    // analogue runs (the in-flight update visible at the decision
+    // boundary).
+    expect(testSrc).toMatch(/decision boundary serializes against the policy writer \(FOR UPDATE row lock\)/);
+    expect(testSrc).toMatch(/holds the row lock → the guarded decision insert WAITS/);
+    expect(testSrc).toMatch(/'still-blocked'/);
+    expect(testSrc).toMatch(/ROLLED BACK → the \(previously blocked\) insert unblocks against the ORIGINAL row/);
   });
 });

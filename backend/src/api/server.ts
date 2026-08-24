@@ -22,6 +22,7 @@ import { githubProvisioningRoutes, type GithubProvisioningRouteDeps } from './ro
 import { executionRoutes, type ExecutionRouteDeps } from './routes/execution.route.js';
 import { companionRoutes, type CompanionRouteDeps } from './routes/companion.route.js';
 import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.route.js';
+import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -82,6 +83,8 @@ export interface ServerDeps extends JobsRouteDeps {
   companion?: CompanionRouteDeps;
   /** WORK-032: Native vs External Execution Benchmark routes. Backend-authorized. */
   benchmark?: BenchmarkRouteDeps;
+  /** WORK-033: Execution Policy & Fair Benchmarking routes. Backend-authorized. */
+  executionPolicy?: ExecutionPolicyRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -171,6 +174,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.benchmark) {
     await benchmarkRoutes(app, deps.benchmark);
+  }
+  if (deps.auth && deps.executionPolicy) {
+    await executionPolicyRoutes(app, deps.executionPolicy);
   }
   return app;
 }

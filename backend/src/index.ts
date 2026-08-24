@@ -288,6 +288,27 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-033: Execution Policy & Fair Benchmarking routes.
+      // Backend-authorized (project.read / project.write). The route layer
+      // derives the actor from requireProjectAuthorization (server-side,
+      // PR #35 fix #5 pattern) — NEVER from the request body (§27).
+      ...(app.deps.authorizationService &&
+      app.deps.executionPolicyService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository
+        ? {
+            executionPolicy: {
+              authorizationService: app.deps.authorizationService,
+              executionPolicyService: app.deps.executionPolicyService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

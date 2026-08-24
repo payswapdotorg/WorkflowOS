@@ -19,6 +19,7 @@ import BenchmarkCreatePage from './pages/BenchmarkCreatePage';
 import BenchmarkDetailPage from './pages/BenchmarkDetailPage';
 import BenchmarkComparisonPage from './pages/BenchmarkComparisonPage';
 import BenchmarkTrialPage from './pages/BenchmarkTrialPage';
+import ExecutionPreferencesPage from './pages/ExecutionPreferencesPage';
 
 export default function App() {
   const { hasApiKey } = useAuth();
@@ -98,6 +99,15 @@ export default function App() {
         element={
           <AppShell>
             <SettingsPage />
+          </AppShell>
+        }
+      />
+      {/* WORK-033: Execution policy + user preferences + access profiles. */}
+      <Route
+        path="/projects/:projectId/settings/execution"
+        element={
+          <AppShell>
+            <ExecutionPreferencesPage />
           </AppShell>
         }
       />
