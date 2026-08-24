@@ -811,6 +811,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     // allowlist enumerates these known pure-data catalogs.
     const PURE_DATA_CATALOG_EXPORTS = new Set<string>([
       'EXTERNAL_UI_CATALOG', // @modules/agents — display + validation metadata
+      // WORK-034: the session-domain typed error. A discriminated error
+      // CLASS is the sanctioned exception to the types-only barrel rule —
+      // consumers must instanceof-check it (a type-only export cannot
+      // carry a runtime prototype), and it is domain logic, not a concrete
+      // implementation: it wires nothing, constructs nothing, and holds
+      // only (code, message, context). The same reasoning applies to the
+      // frozen pure-data error-code list.
+      'ExecutionSessionError',      // @modules/agents — the typed domain error
+      'EXECUTION_SESSION_ERROR_CODES', // @modules/agents — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -7548,11 +7557,25 @@ describe('WORK-034 invariants — persistent agent session core (first slice)', 
     expect(src).toMatch(/BEFORE INSERT ON wfos_execution_session_events/);
   });
 
-  it('the session state machine is STRICT + terminal states are immutable (migration transition guard)', () => {
+  it('the session state machine is STRICT + terminal states are FULLY immutable + the identity tuple is immutable (migration guards)', () => {
     const src = readFileSync(MIGRATION_PATH, 'utf8');
     expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_transition_guard/);
-    // Terminal immutability.
+    // Terminal FULL immutability (the audit correction): every authoritative
+    // field is compared — status, version, current_turn, interrupted_at,
+    // terminal_at, AND the identity tuple — not just the status.
     expect(src).toMatch(/execution-session-terminal-immutable/);
+    expect(src).toMatch(/NEW\.version IS DISTINCT FROM OLD\.version/);
+    expect(src).toMatch(/NEW\.current_turn IS DISTINCT FROM OLD\.current_turn/);
+    expect(src).toMatch(/NEW\.interrupted_at IS DISTINCT FROM OLD\.interrupted_at/);
+    expect(src).toMatch(/NEW\.terminal_at IS DISTINCT FROM OLD\.terminal_at/);
+    // The no-op terminal update is explicitly allowed (harmless bookkeeping).
+    expect(src).toMatch(/-- A terminal row with NO authoritative change: harmless/);
+    // IDENTITY-TUPLE immutability (the audit correction): the execution
+    // identity can never be re-targeted — a database invariant, not an
+    // application convention. Applies to EVERY row state.
+    expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_identity_guard/);
+    expect(src).toMatch(/execution-session-identity-immutable/);
+    expect(src).toMatch(/BEFORE UPDATE ON wfos_execution_sessions\s+FOR EACH ROW EXECUTE FUNCTION wfos_execution_session_identity_guard/);
     // The strict legal edges (created→running/cancelled; running→interrupted/
     // completed/failed/cancelled; interrupted→running/cancelled).
     expect(src).toMatch(/OLD\.status = 'created'\s+AND NEW\.status IN \('running', 'cancelled'\)/);
@@ -7661,5 +7684,39 @@ describe('WORK-034 invariants — persistent agent session core (first slice)', 
     expect(src).toMatch(/interrupt → resumable; resume → exactly one state transition/);
     expect(src).toMatch(/terminal session → further mutation rejected/);
     expect(src).toMatch(/wrong project\/work-item\/work-order linkage → rejected/);
+    // The audit-correction regressions: FULL terminal immutability (every
+    // authoritative field), identity re-target rejection, + REAL typed
+    // errors (instanceof + stable codes + structured context).
+    expect(src).toMatch(/mutation of ANY authoritative field is rejected/);
+    expect(src).toMatch(/execution identity tuple is IMMUTABLE/);
+    expect(src).toMatch(/typed errors are REAL/);
+    expect(src).toMatch(/expectSessionError/);
+  });
+
+  it('session-domain errors are REAL typed errors (discriminated class + stable codes + structured context — no string parsing)', () => {
+    // The audit correction: the repository contract documents typed errors;
+    // the implementation must deliver a discriminated ExecutionSessionError
+    // class with a stable machine-readable code. Consumers assert
+    // instanceof / switch on the code; they never parse message strings.
+    const typesSrc = readFileSync(SESSION_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/export class ExecutionSessionError extends Error/);
+    expect(typesSrc).toMatch(/readonly code: ExecutionSessionErrorCode;/);
+    expect(typesSrc).toMatch(/readonly context: Readonly<Record<string, unknown>>;/);
+    // The stable code list (the single source of truth).
+    expect(typesSrc).toMatch(/'execution-session-duplicate-execution'/);
+    expect(typesSrc).toMatch(/'execution-session-linkage-mismatch'/);
+    expect(typesSrc).toMatch(/'execution-session-illegal-transition'/);
+    expect(typesSrc).toMatch(/'execution-session-not-found'/);
+    expect(typesSrc).toMatch(/'execution-session-terminal'/);
+    expect(typesSrc).toMatch(/'execution-session-event-duplicate-sequence'/);
+    // The repository throws the TYPED errors (not plain Error).
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    expect(repoSrc).not.toMatch(/new Error\(\s*['"]execution-session-/);
+    expect(repoSrc).toMatch(/new ExecutionSessionError\(/);
+    // The class + code list are exported from the /agents barrel (the
+    // public contract for programmatic handling).
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/export \{ ExecutionSessionError, EXECUTION_SESSION_ERROR_CODES \}/);
+    expect(barrelSrc).toMatch(/export type \{ ExecutionSessionErrorCode \}/);
   });
 });

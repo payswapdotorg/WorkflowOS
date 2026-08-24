@@ -92,6 +92,13 @@ export type {
   ExecutionSessionEventType,
   ExecutionSessionRepository,
 } from './internal/execution-session.types.js';
+// The typed session-domain error: a discriminated class with a stable
+// machine-readable `code` (EXECUTION_SESSION_ERROR_CODES) + structured
+// context — programmatic handling never parses message strings. Concrete
+// PostgreSQL error details stay internal (mapped at the repository
+// boundary).
+export { ExecutionSessionError, EXECUTION_SESSION_ERROR_CODES } from './internal/execution-session.types.js';
+export type { ExecutionSessionErrorCode } from './internal/execution-session.types.js';
 
 export interface AgentsModuleApi {}
 

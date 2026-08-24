@@ -118,14 +118,29 @@ CREATE TRIGGER wfos_execution_session_touch_trigger
 
 CREATE OR REPLACE FUNCTION wfos_execution_session_transition_guard() RETURNS trigger AS $$
 BEGIN
-  -- TERMINAL states are immutable: no status change, ever (the CAS
-  -- predicate cannot transition FROM a terminal state either — this is
-  -- the mechanical backstop against direct SQL).
-  IF OLD.status IN ('completed', 'failed', 'cancelled')
-     AND NEW.status IS DISTINCT FROM OLD.status THEN
-    RAISE EXCEPTION
-      'execution-session-terminal-immutable: session % is terminal (%) — no further transitions',
-      OLD.id, OLD.status;
+  -- TERMINAL states are FULLY immutable: once a session is terminal, NO
+  -- authoritative field may change — status, version, current_turn,
+  -- interrupted_at, terminal_at, and the execution identity tuple (guarded
+  -- below). This is the system-of-record backstop: direct SQL cannot tamper
+  -- with a terminal session's state. (The updated_at maintenance trigger is
+  -- deliberately retained — it is bookkeeping, not authoritative state.)
+  IF OLD.status IN ('completed', 'failed', 'cancelled') THEN
+    IF NEW.status IS DISTINCT FROM OLD.status
+       OR NEW.version IS DISTINCT FROM OLD.version
+       OR NEW.current_turn IS DISTINCT FROM OLD.current_turn
+       OR NEW.interrupted_at IS DISTINCT FROM OLD.interrupted_at
+       OR NEW.terminal_at IS DISTINCT FROM OLD.terminal_at
+       OR NEW.execution_id IS DISTINCT FROM OLD.execution_id
+       OR NEW.project_id IS DISTINCT FROM OLD.project_id
+       OR NEW.work_item_id IS DISTINCT FROM OLD.work_item_id
+       OR NEW.work_order_id IS DISTINCT FROM OLD.work_order_id THEN
+      RAISE EXCEPTION
+        'execution-session-terminal-immutable: session % is terminal (%) — no authoritative field may change (status, version, current_turn, interrupted_at, terminal_at, or the execution identity)',
+        OLD.id, OLD.status;
+    END IF;
+    -- A terminal row with NO authoritative change: harmless (e.g. the
+    -- updated_at touch on a no-op UPDATE). Allow.
+    RETURN NEW;
   END IF;
 
   -- Strict transition graph (only the legal edges; a no-op status UPDATE
@@ -175,6 +190,40 @@ DROP TRIGGER IF EXISTS wfos_execution_session_transition_guard_trigger
 CREATE TRIGGER wfos_execution_session_transition_guard_trigger
   BEFORE UPDATE ON wfos_execution_sessions
   FOR EACH ROW EXECUTE FUNCTION wfos_execution_session_transition_guard();
+
+-- ---------------------------------------------------------------------------
+-- (3b) IMMUTABLE execution identity tuple.
+--
+-- The session's continuation identity is fixed at insertion:
+--   (execution_id, project_id, work_item_id, work_order_id)
+-- A session can NEVER be re-targeted onto a different ExecutionRecord —
+-- not by the repository (no such method exists), not by direct SQL. The
+-- composite FK guarantees the tuple is CONSISTENT with a real execution;
+-- this guard guarantees the tuple is IMMUTABLE. Together: the chain
+--   WorkItem → WorkOrder → ExecutionRecord → ExecutionSession
+-- is a database invariant, not an application convention.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION wfos_execution_session_identity_guard() RETURNS trigger AS $$
+BEGIN
+  IF NEW.execution_id IS DISTINCT FROM OLD.execution_id
+     OR NEW.project_id IS DISTINCT FROM OLD.project_id
+     OR NEW.work_item_id IS DISTINCT FROM OLD.work_item_id
+     OR NEW.work_order_id IS DISTINCT FROM OLD.work_order_id THEN
+    RAISE EXCEPTION
+      'execution-session-identity-immutable: the execution identity tuple (execution, project, work item, work order) of session % is immutable — a session can never be re-targeted onto a different ExecutionRecord',
+      OLD.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS wfos_execution_session_identity_guard_trigger
+  ON wfos_execution_sessions;
+
+CREATE TRIGGER wfos_execution_session_identity_guard_trigger
+  BEFORE UPDATE ON wfos_execution_sessions
+  FOR EACH ROW EXECUTE FUNCTION wfos_execution_session_identity_guard();
 
 -- ---------------------------------------------------------------------------
 -- (4) The append-only event/turn store.

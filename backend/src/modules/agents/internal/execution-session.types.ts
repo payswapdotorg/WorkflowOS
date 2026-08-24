@@ -214,6 +214,53 @@ export interface ExecutionSessionRepository {
   listEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
 }
 
+// ============================================================================
+// §typed-errors — the session-domain error hierarchy
+//
+// PR-review correction: the repository contract documents typed errors; the
+// implementation now delivers REAL typed errors — a discriminated
+// ExecutionSessionError class with a stable machine-readable `code` (the
+// single source of truth for programmatic handling). Consumers assert
+// instanceof / switch on the code; they never parse message strings.
+// Concrete PostgreSQL error details stay INTERNAL to the repository
+// (mapped at the boundary — the domain error carries only the stable code
+// + a human-readable message + structured context).
+// ============================================================================
+
+/** The stable machine-readable session-domain error codes. */
+export const EXECUTION_SESSION_ERROR_CODES = [
+  'execution-session-duplicate-execution',
+  'execution-session-linkage-mismatch',
+  'execution-session-illegal-transition',
+  'execution-session-not-found',
+  'execution-session-terminal',
+  'execution-session-event-duplicate-sequence',
+] as const;
+
+export type ExecutionSessionErrorCode =
+  (typeof EXECUTION_SESSION_ERROR_CODES)[number];
+
+/**
+ * The discriminated session-domain error. `code` is the stable
+ * programmatic handle (EXECUTION_SESSION_ERROR_CODES); `context` carries
+ * structured details (ids, expected/actual) — never raw driver errors.
+ */
+export class ExecutionSessionError extends Error {
+  readonly code: ExecutionSessionErrorCode;
+  readonly context: Readonly<Record<string, unknown>>;
+
+  constructor(
+    code: ExecutionSessionErrorCode,
+    message: string,
+    context: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message);
+    this.name = 'ExecutionSessionError';
+    this.code = code;
+    this.context = context;
+  }
+}
+
 /** Constructor deps for the Pg implementation (internal). */
 export interface PgExecutionSessionRepositoryDeps {
   readonly db: DatabaseClient;

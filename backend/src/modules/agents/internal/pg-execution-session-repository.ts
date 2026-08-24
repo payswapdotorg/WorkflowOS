@@ -30,7 +30,7 @@ import type {
   ExecutionSessionRepository,
   ExecutionSessionStatus,
 } from './execution-session.types.js';
-import { EXECUTION_SESSION_TRANSITIONS } from './execution-session.types.js';
+import { EXECUTION_SESSION_TRANSITIONS, ExecutionSessionError } from './execution-session.types.js';
 
 const SESSION_COLUMNS = `id, execution_id, project_id, work_item_id, work_order_id,
        status, version, current_turn, created_at, updated_at,
@@ -106,8 +106,10 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
     // mechanical backstop for direct SQL).
     const legal = EXECUTION_SESSION_TRANSITIONS[expectedStatus] ?? [];
     if (!legal.includes(next)) {
-      throw new Error(
+      throw new ExecutionSessionError(
+        'execution-session-illegal-transition',
         `execution-session-illegal-transition: ${expectedStatus} -> ${next} is not a legal session transition`,
+        { sessionId: id, from: expectedStatus, to: next },
       );
     }
     // The CAS: version + status predicate, version increment, derived
@@ -161,12 +163,18 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
         [sessionId],
       );
       if (!locked.rows[0]) {
-        throw new Error(`execution-session-not-found: ${sessionId}`);
+        throw new ExecutionSessionError(
+          'execution-session-not-found',
+          `execution-session-not-found: ${sessionId}`,
+          { sessionId },
+        );
       }
       const status = locked.rows[0].status;
       if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-        throw new Error(
+        throw new ExecutionSessionError(
+          'execution-session-terminal',
           `execution-session-terminal: session ${sessionId} is terminal (${status}) — no further events`,
+          { sessionId, status },
         );
       }
       const res = await tx.query<EventRow>(
@@ -194,12 +202,18 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
         [sessionId],
       );
       if (!locked.rows[0]) {
-        throw new Error(`execution-session-not-found: ${sessionId}`);
+        throw new ExecutionSessionError(
+          'execution-session-not-found',
+          `execution-session-not-found: ${sessionId}`,
+          { sessionId },
+        );
       }
       const status = locked.rows[0].status;
       if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-        throw new Error(
+        throw new ExecutionSessionError(
+          'execution-session-terminal',
           `execution-session-terminal: session ${sessionId} is terminal (${status}) — no further events`,
+          { sessionId, status },
         );
       }
       try {
@@ -214,8 +228,10 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
       } catch (err) {
         const dup = err as { code?: string; constraint?: string };
         if (dup.code === '23505' && dup.constraint === 'wfos_execution_session_events_sequence_unique') {
-          throw new Error(
+          throw new ExecutionSessionError(
+            'execution-session-event-duplicate-sequence',
             `execution-session-event-duplicate-sequence: sequence ${sequenceNumber} already exists for session ${sessionId}`,
+            { sessionId, sequenceNumber },
           );
         }
         throw err;
@@ -242,15 +258,21 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
 function mapCreateError(err: unknown, input: CreateExecutionSessionInput): Error {
   const e = err as { code?: string; constraint?: string; message?: string };
   if (e.code === '23505' && e.constraint === 'wfos_execution_sessions_execution_unique') {
-    return new Error(
+    return new ExecutionSessionError(
+      'execution-session-duplicate-execution',
       `execution-session-duplicate-execution: execution ${input.executionId} already has a session (one session per ExecutionRecord)`,
+      { executionId: input.executionId },
     );
   }
   if (e.code === '23503' && e.constraint === 'wfos_execution_sessions_execution_linkage_fkey') {
-    return new Error(
+    return new ExecutionSessionError(
+      'execution-session-linkage-mismatch',
       `execution-session-linkage-mismatch: the (execution, project, work item, work order) tuple does not match execution ${input.executionId}`,
+      { executionId: input.executionId, projectId: input.projectId, workItemId: input.workItemId, workOrderId: input.workOrderId },
     );
   }
+  // Anything else (including ExecutionSessionError already thrown by the
+  // caller) passes through unchanged.
   return err instanceof Error ? err : new Error(String(err));
 }
 

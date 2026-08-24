@@ -29,7 +29,28 @@ import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stac
 import { PgExecutionRecordRepository } from '../../../src/modules/agents/internal/pg-execution-repository.js';
 import { PgExecutionSessionRepository } from '../../../src/modules/agents/internal/pg-execution-session-repository.js';
 import { PgImplementationContextRepository } from '../../../src/modules/work-items/internal/pg-implementation-context-repository.js';
+import { ExecutionSessionError } from '../../../src/modules/agents/index.js';
 import type { ExecutionSession } from '../../../src/modules/agents/index.js';
+
+
+/** Assert a rejection is a TYPED ExecutionSessionError with the exact code. */
+async function expectSessionError(
+  promise: Promise<unknown>,
+  code: string,
+): Promise<ExecutionSessionError> {
+  try {
+    await promise;
+  } catch (err) {
+    expect(err).toBeInstanceOf(ExecutionSessionError);
+    const e = err as ExecutionSessionError;
+    expect(e.code).toBe(code);
+    expect(e.name).toBe('ExecutionSessionError');
+    expect(typeof e.message).toBe('string');
+    expect(e.message.length).toBeGreaterThan(0);
+    return e;
+  }
+  throw new Error(`expected a rejection with ExecutionSessionError(${code}) — the promise resolved`);
+}
 
 describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
   let stack: TestAuthStack;
@@ -124,18 +145,22 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
   it('duplicate execution → rejected (one session per ExecutionRecord)', async () => {
     const executionId = await makeExecution(2);
     await sessionRepo.createSession({ executionId, projectId, workItemId, workOrderId });
-    await expect(
+    const dupErr = await expectSessionError(
       sessionRepo.createSession({ executionId, projectId, workItemId, workOrderId }),
-    ).rejects.toThrow('execution-session-duplicate-execution');
+      'execution-session-duplicate-execution',
+    );
+    expect(dupErr.context.executionId).toBe(executionId);
   });
 
   it('wrong project/work-item/work-order linkage → rejected (composite FK)', async () => {
     const executionId = await makeExecution(3);
     // A different (real) project — the tuple does not match the execution.
     const otherProject = await stack.projectRepository.create({ organizationId, name: 'Session Core Other Project' });
-    await expect(
+    const linkErr = await expectSessionError(
       sessionRepo.createSession({ executionId, projectId: otherProject.id, workItemId, workOrderId }),
-    ).rejects.toThrow('execution-session-linkage-mismatch');
+      'execution-session-linkage-mismatch',
+    );
+    expect(linkErr.context.projectId).toBe(otherProject.id);
     // A mismatched work item id (bogus UUID) — same mechanical rejection.
     await expect(
       sessionRepo.createSession({
@@ -199,13 +224,15 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
   it('illegal transition edges → typed error (repository) + DB trigger backstop', async () => {
     const session = await makeSession(6);
     // Repository-level pre-validation: created → completed is not an edge.
-    await expect(
+    await expectSessionError(
       sessionRepo.transitionSession(session.id, 0, 'created', 'completed'),
-    ).rejects.toThrow('execution-session-illegal-transition');
+      'execution-session-illegal-transition',
+    );
     // created → interrupted is not an edge either.
-    await expect(
+    await expectSessionError(
       sessionRepo.transitionSession(session.id, 0, 'created', 'interrupted'),
-    ).rejects.toThrow('execution-session-illegal-transition');
+      'execution-session-illegal-transition',
+    );
 
     // DB-trigger backstop: direct SQL bypassing the repository is rejected.
     await sessionRepo.transitionSession(session.id, 0, 'created', 'running');
@@ -252,9 +279,11 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
     const session = await makeSession(9);
     await sessionRepo.appendEventWithSequence(session.id, 1, 'turn_started');
     // The same explicit sequence again → typed duplicate error.
-    await expect(
+    const seqErr = await expectSessionError(
       sessionRepo.appendEventWithSequence(session.id, 1, 'observation'),
-    ).rejects.toThrow('execution-session-event-duplicate-sequence');
+      'execution-session-event-duplicate-sequence',
+    );
+    expect(seqErr.context.sequenceNumber).toBe(1);
     // The DB constraint is the mechanical guarantee (raw SQL collides too).
     await expect(
       stack.db.client.query(
@@ -336,9 +365,10 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
 
     // (a) CAS transitions FROM the terminal state → the repository's
     // transition graph has no edges from 'completed' → typed error.
-    await expect(
+    await expectSessionError(
       sessionRepo.transitionSession(session.id, 2, 'completed', 'running'),
-    ).rejects.toThrow('execution-session-illegal-transition');
+      'execution-session-illegal-transition',
+    );
 
     // (b) DB-trigger backstop: a direct status mutation of a terminal row
     // is rejected (terminal immutability).
@@ -350,9 +380,10 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
     ).rejects.toThrow('execution-session-terminal-immutable');
 
     // (c) No further events on a terminal session (typed + trigger).
-    await expect(
+    await expectSessionError(
       sessionRepo.appendEvent(session.id, 'observation', {}),
-    ).rejects.toThrow('execution-session-terminal');
+      'execution-session-terminal',
+    );
     await expect(
       stack.db.client.query(
         `INSERT INTO wfos_execution_session_events (session_id, sequence_number, event_type)
@@ -418,5 +449,142 @@ describe('WORK-034 — Persistent Session Core (durable session slice)', () => {
         [session.id],
       ),
     ).rejects.toThrow('execution-session-version-regression');
+  });
+
+  // ---------------------------------------------------------------------------
+  // AUDIT CORRECTIONS (the slice-1 review):
+  //   (1) terminal sessions are FULLY immutable (every authoritative field)
+  //   (2) the execution identity tuple is immutable (no re-targeting)
+  //   (3) typed errors are real (discriminated class + stable code)
+  // ---------------------------------------------------------------------------
+  it('terminal session → mutation of ANY authoritative field is rejected (status, version, current_turn, interrupted_at, terminal_at, identity)', async () => {
+    const session = await makeSession(16);
+    await sessionRepo.transitionSession(session.id, 0, 'created', 'running');
+    await sessionRepo.advanceTurn(session.id, 1);
+    await sessionRepo.transitionSession(session.id, 2, 'running', 'interrupted');
+    await sessionRepo.transitionSession(session.id, 3, 'interrupted', 'running');
+    const done = await sessionRepo.transitionSession(session.id, 4, 'running', 'completed');
+    expect(done?.terminalAt).not.toBeNull();
+    const frozenVersion = done!.version;
+
+    const attempts: [string, string][] = [
+      ['status mutation', `UPDATE wfos_execution_sessions SET status = 'running' WHERE id = '${session.id}'`],
+      ['version mutation', `UPDATE wfos_execution_sessions SET version = version + 1 WHERE id = '${session.id}'`],
+      ['version regression', `UPDATE wfos_execution_sessions SET version = 99 WHERE id = '${session.id}'`],
+      ['current_turn mutation', `UPDATE wfos_execution_sessions SET current_turn = current_turn + 1 WHERE id = '${session.id}'`],
+      ['interrupted_at tampering', `UPDATE wfos_execution_sessions SET interrupted_at = NOW() WHERE id = '${session.id}'`],
+      ['terminal_at clearing', `UPDATE wfos_execution_sessions SET terminal_at = NULL WHERE id = '${session.id}'`],
+      ['terminal_at shifting', `UPDATE wfos_execution_sessions SET terminal_at = NOW() WHERE id = '${session.id}'`],
+    ];
+    for (const [label, sql] of attempts) {
+      await expect(
+        stack.db.client.query(sql),
+        `${label} must be rejected`,
+      ).rejects.toThrow('execution-session-terminal-immutable');
+    }
+
+    // The identity tuple is guarded by BOTH the terminal guard and the
+    // identity guard (the identity guard fires for every row state).
+    await expect(
+      stack.db.client.query(`UPDATE wfos_execution_sessions SET terminal_at = terminal_at WHERE id = '${session.id}'`),
+      'a NO-OP update of a terminal row is allowed (harmless bookkeeping)',
+    ).resolves.toBeTruthy();
+
+    // Nothing changed: the session is still exactly as it was terminalized.
+    const after = await sessionRepo.getSession(session.id);
+    expect(after?.status).toBe('completed');
+    expect(after?.version).toBe(frozenVersion);
+    expect(after?.currentTurn).toBe(1);
+    expect(after?.interruptedAt?.toISOString()).toBe(done!.interruptedAt?.toISOString());
+    expect(after?.terminalAt?.toISOString()).toBe(done!.terminalAt?.toISOString());
+  });
+
+  it('execution identity tuple is IMMUTABLE — a session can never be re-targeted onto another ExecutionRecord', async () => {
+    // A non-terminal session (the identity guard applies to EVERY row
+    // state, not only terminal rows).
+    const session = await makeSession(17);
+    await sessionRepo.transitionSession(session.id, 0, 'created', 'running');
+
+    // A second, REAL execution whose identity tuple is fully valid — the
+    // FK would accept the move, but the identity guard must reject it.
+    const otherExecutionId = await makeExecution(18);
+    await expect(
+      stack.db.client.query(
+        `UPDATE wfos_execution_sessions SET execution_id = $1 WHERE id = $2`,
+        [otherExecutionId, session.id],
+      ),
+    ).rejects.toThrow('execution-session-identity-immutable');
+
+    // Re-targeting via the work-order column (keeping the execution) — also
+    // part of the identity tuple.
+    const bogusWorkOrder = '99999999-9999-9999-9999-999999999999';
+    await expect(
+      stack.db.client.query(
+        `UPDATE wfos_execution_sessions SET work_order_id = $1 WHERE id = $2`,
+        [bogusWorkOrder, session.id],
+      ),
+    ).rejects.toThrow('execution-session-identity-immutable');
+
+    // A no-op identity update (same values) is fine.
+    await expect(
+      stack.db.client.query(
+        `UPDATE wfos_execution_sessions SET execution_id = execution_id WHERE id = $1`,
+        [session.id],
+      ),
+    ).resolves.toBeTruthy();
+
+    // The session still continues its ORIGINAL execution.
+    const after = await sessionRepo.getSession(session.id);
+    expect(after?.executionId).toBe(session.executionId);
+    expect(await sessionRepo.getSessionByExecutionId(session.executionId)?.then((s) => s?.id)).toBe(session.id);
+  });
+
+  it('typed errors are REAL — discriminated ExecutionSessionError instances with stable codes + structured context', async () => {
+    // (a) instanceof + code + name + context, for every documented error:
+    const executionId = await makeExecution(19);
+    await sessionRepo.createSession({ executionId, projectId, workItemId, workOrderId });
+    const dup = await expectSessionError(
+      sessionRepo.createSession({ executionId, projectId, workItemId, workOrderId }),
+      'execution-session-duplicate-execution',
+    );
+    expect(dup).toBeInstanceOf(ExecutionSessionError);
+    expect(dup.code).toBe('execution-session-duplicate-execution');
+    expect(dup.context).toEqual({ executionId });
+
+    const session = await sessionRepo.getSessionByExecutionId(executionId);
+    expect(session).not.toBeNull();
+
+    const illegal = await expectSessionError(
+      sessionRepo.transitionSession(session!.id, 0, 'created', 'completed'),
+      'execution-session-illegal-transition',
+    );
+    expect(illegal.context).toEqual({ sessionId: session!.id, from: 'created', to: 'completed' });
+
+    const notFound = await expectSessionError(
+      sessionRepo.appendEvent('99999999-9999-9999-9999-999999999999', 'observation'),
+      'execution-session-not-found',
+    );
+    expect(notFound.context.sessionId).toBe('99999999-9999-9999-9999-999999999999');
+
+    await sessionRepo.transitionSession(session!.id, 0, 'created', 'running');
+    await sessionRepo.transitionSession(session!.id, 1, 'running', 'cancelled');
+    const terminal = await expectSessionError(
+      sessionRepo.appendEvent(session!.id, 'observation'),
+      'execution-session-terminal',
+    );
+    expect(terminal.context.status).toBe('cancelled');
+
+    // (b) the class is exported from the /agents barrel (the public
+    // contract) + the stable code list is exported for exhaustive switch
+    // handling.
+    const barrel = await import('../../../src/modules/agents/index.js');
+    expect(barrel.ExecutionSessionError).toBe(ExecutionSessionError);
+    expect(Array.isArray(barrel.EXECUTION_SESSION_ERROR_CODES)).toBe(true);
+    expect(barrel.EXECUTION_SESSION_ERROR_CODES).toContain('execution-session-terminal');
+    expect(barrel.EXECUTION_SESSION_ERROR_CODES).toContain('execution-session-duplicate-execution');
+
+    // (c) NOT a plain Error of another kind: the code discriminant exists
+    // only on the typed class.
+    expect((new Error('x') as { code?: string }).code).toBeUndefined();
   });
 });
