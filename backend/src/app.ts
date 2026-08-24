@@ -165,6 +165,8 @@ import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHan
 import { NativeExecutionProvider } from './modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from './modules/agents/internal/external-execution-provider.js';
 import { DefaultExecutionService } from './modules/agents/internal/execution-service.js';
+import { PgExecutionSessionRepository } from './modules/agents/internal/pg-execution-session-repository.js';
+import { DefaultExecutionSessionService } from './modules/agents/internal/execution-session-service.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
@@ -894,11 +896,23 @@ export async function buildApp(
       logger,
     });
     const externalExecutionProvider = new ExternalExecutionProvider();
+    // WORK-034: the persistent session lifecycle boundary. The execution
+    // service becomes session-aware (exactly one session per execution
+    // record, CAS start + turn_started, session outcomes mirror execution
+    // outcomes). Providers are NOT session-aware — session lifecycle stays
+    // /agents-owned.
+    const executionSessionRepository = new PgExecutionSessionRepository(database);
+    const executionSessionService = new DefaultExecutionSessionService({
+      sessionRepository: executionSessionRepository,
+      executionRecordRepository,
+      logger,
+    });
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
       auditService,
       logger,
+      sessionService: executionSessionService,
     });
     executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository,
@@ -929,7 +943,24 @@ export async function buildApp(
       eventRepository: executionEventRepository,
       auditService,
       logger,
-      onExecutionTerminal: async (execId, _state) => {
+      onExecutionTerminal: async (execId, state) => {
+        // WORK-034: an external execution reaching its terminal state
+        // (completed/failed) terminalizes its session through the same
+        // logical execution identity (idempotent — already-terminal
+        // sessions are a no-op). Session completion does NOT mean
+        // VERIFIED/MERGED — those stay /verification + GitHub authority.
+        try {
+          if (state === 'completed') {
+            await executionSessionService.completeSession(execId);
+          } else if (state === 'failed') {
+            await executionSessionService.failSession(execId, 'external-execution-failed');
+          }
+        } catch (err) {
+          logger.error('execution.session-terminal-hook-failed', {
+            executionId: execId,
+            error: (err as Error).message,
+          });
+        }
         if (benchmarkService) {
           await benchmarkService.advanceTrialsForExecution(execId);
         }

@@ -184,6 +184,22 @@ export interface ExecutionSessionRepository {
   advanceTurn(id: string, expectedVersion: number): Promise<ExecutionSession | null>;
 
   /**
+   * WORK-034 integration: ATOMIC transition + event append — ONE statement
+   * (locked CTE → CAS predicate → event INSERT → CAS UPDATE). The winner's
+   * transition and its event commit together; a CAS loser gets ZERO rows →
+   * null with NO side effects (no event, no state change). Illegal edges
+   * throw the typed error before the statement.
+   */
+  transitionWithEvent(
+    id: string,
+    expectedVersion: number,
+    expectedStatus: ExecutionSessionStatus,
+    next: ExecutionSessionStatus,
+    eventType: ExecutionSessionEventType,
+    payload?: Record<string, unknown>,
+  ): Promise<SessionTransitionResult | null>;
+
+  /**
    * Append an event with the NEXT sequence number (MAX+1; assigned under the
    * session row lock so concurrent appends serialize to unique sequences).
    * Throws typed errors:
@@ -212,6 +228,73 @@ export interface ExecutionSessionRepository {
 
   /** The session's events, ordered by sequence number (ascending). */
   listEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
+}
+
+/** The atomic transition + event result (the winner's row + the appended event). */
+export interface SessionTransitionResult {
+  readonly session: ExecutionSession;
+  readonly event: ExecutionSessionEvent;
+}
+
+/**
+ * WORK-034 integration — the session lifecycle boundary owned by /agents.
+ *
+ * Composes the repository's CAS transitions with the append-only event
+ * store so every lifecycle change is atomic + observable:
+ *
+ *   ensureSession  — idempotent create-or-get: exactly ONE session per
+ *                    ExecutionRecord (duplicate creation is impossible —
+ *                    the UNIQUE(execution_id) constraint is the backstop).
+ *   startSession   — CAS created → running + 'turn_started' event.
+ *   interruptSession — CAS running → interrupted + 'interrupted' event
+ *                    (interrupted is resumable; it is NOT success).
+ *   resumeSession  — CAS interrupted → running + 'resumed' event; the
+ *                    SAME executionId / sessionId / Work Item / Work Order
+ *                    identity — no second ExecutionRecord, no second
+ *                    Session.
+ *   completeSession / failSession — CAS running → terminal + the terminal
+ *                    event; idempotent for already-terminal sessions; a
+ *                    no-op when the execution has no session.
+ *
+ * Every transition uses repository-level CAS (lost CAS → null, NO side
+ * effects — the atomic transitionWithEvent statement appends the event and
+ * updates the state in ONE commit). Session terminal states are DISTINCT
+ * from WorkflowOS authority: session=completed does NOT mean Work
+ * Item=VERIFIED (verification stays owned by /verification) nor PR=MERGED
+ * (GitHub stays authoritative).
+ *
+ * Session identity ≠ provider identity ≠ model identity ≠ execution-mode
+ * identity: the session belongs to the LOGICAL execution (the
+ * ExecutionRecord), so a future cross-mode handoff (WORK-042) can move the
+ * execution between native and external without re-identifying the session.
+ */
+export interface ExecutionSessionService {
+  /**
+   * Idempotent: the ONE session for the logical execution (identified by
+   * its TEXT executionId — the same logical identity the routes, the
+   * AgentGateway, and the external event boundary use). Resolves the
+   * ExecutionRecord, then looks up the session or creates it with the
+   * record's OWN identity tuple (callers cannot supply a mismatched
+   * linkage — the composite FK enforces consistency). A retry after
+   * "session created → crash" returns the SAME session. Throws the typed
+   * not-found error when no ExecutionRecord exists for the executionId
+   * (the session CONTINUES an existing execution — it never creates one).
+   */
+  ensureSession(executionId: string): Promise<ExecutionSession>;
+  /** CAS created → running + turn_started. Null when the CAS loses (e.g. a retry after the session already started). */
+  startSession(sessionId: string): Promise<ExecutionSession | null>;
+  /** CAS running → interrupted + the interrupted event. Null on CAS loss. */
+  interruptSession(sessionId: string, expectedVersion: number): Promise<SessionTransitionResult | null>;
+  /** CAS interrupted → running + the resumed event. Null on CAS loss (exactly one concurrent winner). */
+  resumeSession(sessionId: string, expectedVersion: number): Promise<SessionTransitionResult | null>;
+  /** CAS running → completed + the completed event. Idempotent for terminal sessions; null when the execution has no session. */
+  completeSession(executionId: string): Promise<ExecutionSession | null>;
+  /** CAS running → failed + the failed event. Idempotent for terminal sessions; null when the execution has no session. */
+  failSession(executionId: string, reason: string): Promise<ExecutionSession | null>;
+  /** The (single) session continuing the logical execution (TEXT executionId). */
+  getSessionForExecution(executionId: string): Promise<ExecutionSession | null>;
+  /** The session's events, ordered by sequence (the existing append-only store). */
+  listSessionEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
 }
 
 // ============================================================================

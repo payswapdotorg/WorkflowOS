@@ -91,6 +91,11 @@ export type {
   ExecutionSessionEvent,
   ExecutionSessionEventType,
   ExecutionSessionRepository,
+  // WORK-034 integration: the /agents-owned session lifecycle boundary
+  // (idempotent ensure + CAS start/interrupt/resume/terminal with atomic
+  // event emission). Provider-independent.
+  ExecutionSessionService,
+  SessionTransitionResult,
 } from './internal/execution-session.types.js';
 // The typed session-domain error: a discriminated class with a stable
 // machine-readable `code` (EXECUTION_SESSION_ERROR_CODES) + structured

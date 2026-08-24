@@ -29,6 +29,7 @@ import type {
   ExecutionSessionEventType,
   ExecutionSessionRepository,
   ExecutionSessionStatus,
+  SessionTransitionResult,
 } from './execution-session.types.js';
 import { EXECUTION_SESSION_TRANSITIONS, ExecutionSessionError } from './execution-session.types.js';
 
@@ -131,6 +132,117 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
       [id, expectedVersion, next, expectedStatus],
     );
     return res.rows[0] ? mapSession(res.rows[0]) : null;
+  }
+
+  async transitionWithEvent(
+    id: string,
+    expectedVersion: number,
+    expectedStatus: ExecutionSessionStatus,
+    next: ExecutionSessionStatus,
+    eventType: ExecutionSessionEventType,
+    payload?: Record<string, unknown>,
+  ): Promise<SessionTransitionResult | null> {
+    // WORK-034 integration: ATOMIC transition + event append — ONE
+    // transaction under the session row lock (the same serialized pattern
+    // appendEvent uses):
+    //
+    //   * the CAS check happens UNDER the lock — after any concurrent
+    //     writer commits, the locked read sees the NEWEST committed row, so
+    //     a stale snapshot loses cleanly to null with NO side effects;
+    //   * the winner's transition + event commit TOGETHER (no crash window
+    //     between them);
+    //   * the row lock serializes against concurrent appendEvent /
+    //     transitionWithEvent callers, so the MAX+1 sequence is
+    //     collision-free.
+    //
+    // STATEMENT ORDERING (deliberate, per transition kind):
+    //   * NON-TERMINAL transitions (start/interrupt/resume): the CAS UPDATE
+    //     runs FIRST and the event is appended ONLY when the update returns
+    //     a row — a CAS loser performs NO writes at all, so even fully
+    //     interleaved executions (e.g. a single-session driver) can never
+    //     duplicate the event.
+    //   * TERMINAL transitions (complete/fail/cancel): the event is
+    //     appended FIRST — the migration's terminal-event guard rejects
+    //     events once the session row is terminal, so the event must land
+    //     while the row is still non-terminal INSIDE this transaction.
+    //
+    // Illegal transition edges are rejected BEFORE the transaction (same
+    // typed pre-validation as transitionSession; the DB trigger is the
+    // backstop). The UPDATE retains the full CAS predicate (version +
+    // status) as belt-and-braces under the lock.
+    const legal = EXECUTION_SESSION_TRANSITIONS[expectedStatus] ?? [];
+    if (!legal.includes(next)) {
+      throw new ExecutionSessionError(
+        'execution-session-illegal-transition',
+        `execution-session-illegal-transition: ${expectedStatus} -> ${next} is not a legal session transition`,
+        { sessionId: id, from: expectedStatus, to: next },
+      );
+    }
+    const isTerminal = next === 'completed' || next === 'failed' || next === 'cancelled';
+    return this.db.transaction(async (tx) => {
+      // Lock the session row; READ COMMITTED locked-read semantics return
+      // the newest committed version after waiting on any concurrent writer.
+      const locked = await tx.query<{ status: string; version: number }>(
+        `SELECT status, version FROM wfos_execution_sessions WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (!locked.rows[0]) {
+        throw new ExecutionSessionError(
+          'execution-session-not-found',
+          `execution-session-not-found: ${id}`,
+          { sessionId: id },
+        );
+      }
+      const currentStatus = String(locked.rows[0].status);
+      const currentVersion = Number(locked.rows[0].version);
+      if (currentStatus !== expectedStatus || currentVersion !== expectedVersion) {
+        // Lost the CAS (a concurrent transition advanced the row). NO side
+        // effects: the transaction ends without appending or updating.
+        return null;
+      }
+
+      const appendEvent = () =>
+        tx.query<EventRow>(
+          `INSERT INTO wfos_execution_session_events
+              (session_id, sequence_number, event_type, payload)
+           SELECT $1, COALESCE(MAX(e.sequence_number), 0) + 1, $2, $3::jsonb
+             FROM wfos_execution_session_events e
+            WHERE e.session_id = $1
+           RETURNING ${EVENT_COLUMNS}`,
+          [id, eventType, JSON.stringify(payload ?? {})],
+        );
+      const casUpdate = () =>
+        tx.query<SessionRow>(
+          `UPDATE wfos_execution_sessions
+              SET status = $3,
+                  version = version + 1,
+                  interrupted_at = CASE WHEN $3 = 'interrupted' THEN NOW() ELSE interrupted_at END,
+                  terminal_at = CASE
+                                  WHEN $3 IN ('completed', 'failed', 'cancelled') THEN COALESCE(terminal_at, NOW())
+                                  ELSE terminal_at
+                                END
+            WHERE id = $1
+              AND version = $2
+              AND status = $4
+            RETURNING ${SESSION_COLUMNS}`,
+          [id, expectedVersion, next, expectedStatus],
+        );
+
+      if (isTerminal) {
+        // Terminal: event first (the row is still non-terminal inside this
+        // transaction — the terminal-event guard passes), then the CAS.
+        const evRes = await appendEvent();
+        const updRes = await casUpdate();
+        if (!updRes.rows[0]) return null; // unreachable under the lock
+        return { session: mapSession(updRes.rows[0]), event: mapEvent(evRes.rows[0]!) };
+      }
+      // Non-terminal: CAS first; the event is appended ONLY by the winner
+      // (a lost CAS writes nothing).
+      const updRes = await casUpdate();
+      if (!updRes.rows[0]) return null;
+      const evRes = await appendEvent();
+      return { session: mapSession(updRes.rows[0]), event: mapEvent(evRes.rows[0]!) };
+    });
   }
 
   async advanceTurn(id: string, expectedVersion: number): Promise<ExecutionSession | null> {
