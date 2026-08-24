@@ -7182,4 +7182,122 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     }
     expect(violations, violations.join('\n')).toEqual([]);
   });
+
+  it('execution-policy preferences are ADVISORY — buildConstraintSet routes NO preference into the hard constraint set (§12)', () => {
+    // PR #37 review fix 1: the previous buildConstraintSet did
+    //   allowedModes: prefs.preferredMode ? [prefs.preferredMode] : []
+    // inside user constraints — making preferredMode a HARD eligibility
+    // block (preferredMode='external' excluded every native candidate even
+    // when native execution was fully allowed). The §12 contract:
+    // preferences (preferredMode / externalPreferred / nativePreferred /
+    // weights) influence RANKING ONLY.
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private buildConstraintSet[\s\S]*?\n  \}/);
+    expect(fn, 'buildConstraintSet must exist').not.toBeNull();
+    const code = stripComments(fn![0]);
+    // The constraint builder must NOT receive or read the preference
+    // profile at all (structural separation: hard constraints in, hard
+    // constraints out).
+    expect(code).not.toMatch(/prefs\.|UserPreferenceRecord|preferredMode|externalPreferred|nativePreferred/);
+    // The user.allowedModes hard-constraint slot must be EMPTY (reserved
+    // for an explicit user-configured mode restriction — never a preference).
+    expect(code).toMatch(/allowedModes:\s*\[\]/);
+    // The preference profile flows EXCLUSIVELY into the ranking input.
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    expect(recommendFn).toMatch(/toPreferenceProfile\(prefs\)/);
+    // The ranking input is the only consumer (RankInput.preferences).
+    const recSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'), 'utf8');
+    expect(recSrc).toMatch(/preferences: ExecutionPreferenceProfile/);
+    // And the eligibility input carries NO preference field at all
+    // (structural: the hard filter cannot honor preferences).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    const eligInput = typesSrc.match(/export interface EligibilityEvaluationInput[\s\S]*?\n\}/)![0];
+    expect(eligInput).not.toMatch(/preference|preferred/i);
+  });
+
+  it('execution-policy constrained modes FAIL CLOSED on unknown cost/latency evidence (§8 — unknown is NOT neutral under an explicit maximum)', () => {
+    // PR #37 review fix 2: the previous eligibility only blocked a cost
+    // budget when candidate.estimatedCost.cents != null — so an unknown cost
+    // PASSED the hard cost constraint (neutral), and maxDurationMs fed only
+    // the recommendation scorer (no hard latency check). A candidate with
+    // unknown cost or latency cannot legitimately be declared eligible
+    // under an explicit maximum constraint:
+    //   cost constraint + unknown cost     → ineligible (unknown_constrained)
+    //   latency constraint + unknown latency → ineligible (unknown_constrained)
+    //   known latency over the cap          → ineligible (hard latency check)
+    const eligSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-eligibility-service.ts'), 'utf8');
+    const code = stripComments(eligSrc);
+    // The fail-closed evaluation section exists + runs in evaluate().
+    expect(code).toMatch(/evaluateConstrainedEvidence\(input, blocks, satisfied\)/);
+    expect(code).toMatch(/private evaluateConstrainedEvidence/);
+    // Unknown cost under ANY explicit cost cap (user + org + policy
+    // snapshot) blocks with the 'evidence' category.
+    expect(code).toMatch(/'unknown_cost_under_cost_constraint'/);
+    expect(eligSrc).toMatch(/category: 'evidence'/);
+    // Unknown latency under the policy's maxDurationMs blocks.
+    expect(code).toMatch(/'unknown_latency_under_latency_constraint'/);
+    // Known over-cap latency is a HARD violation (not scoring-only).
+    expect(code).toMatch(/'latency_over_max'/);
+    // The new status + category exist in the public contract (both backend
+    // + the mirrored frontend contract).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/'unknown_constrained'/);
+    expect(typesSrc).toMatch(/\| 'evidence';/);
+    const frontendSrc = readFileSync(join(BACKEND_ROOT, '..', 'frontend', 'src', 'api', 'client.ts'), 'utf8');
+    expect(frontendSrc).toMatch(/'unknown_constrained'/);
+    expect(frontendSrc).toMatch(/\| 'evidence';/);
+    // The recommendation's neutral-unknown components are only reachable
+    // when NO cap is active (fail-closed handles the capped case upstream).
+    const recSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'), 'utf8');
+    expect(recSrc).toMatch(/FAIL-CLOSED INTERPLAY/);
+  });
+
+  it('execution-policy §9 freeze is CONNECTED to the authoritative benchmark start (migration 0032 triggers — no code path can bypass)', () => {
+    // PR #37 review fix 3: migration 0026 defined the freeze MECHANISM (the
+    // frozen column + reject-frozen-mutation trigger) and the service
+    // exposed freezeProjectPolicy(), but NOTHING invoked it from the start
+    // path — a policy could remain mutable while an experiment ran. The fix
+    // enforces §9 at the persistence boundary, atomically with the
+    // authoritative created|paused → running transition:
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0032_execution_policy_freeze_on_benchmark_start.sql',
+    );
+    expect(existsSync(migrationPath), '0032_execution_policy_freeze_on_benchmark_start.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // (1) Freeze-on-start: an AFTER UPDATE trigger on the experiments table
+    // guarded on the authoritative start transition.
+    expect(src).toMatch(/AFTER UPDATE ON wfos_benchmark_experiments/);
+    expect(src).toMatch(/NEW\.status = 'running' AND OLD\.status IN \('created', 'paused'\)/);
+    expect(src).toMatch(/SET frozen = true/);
+    expect(src).toMatch(/WHERE project_id = NEW\.project_id/);
+    // (2) Born-frozen: a BEFORE INSERT trigger on the policies table for
+    // projects with already-started experiments (the created-later hole).
+    expect(src).toMatch(/BEFORE INSERT ON wfos_execution_policies/);
+    expect(src).toMatch(/started_at IS NOT NULL/);
+    // No unfreeze path (§9 is one-way).
+    expect(src).not.toMatch(/SET frozen = false/);
+    // No scheduler machinery in the migration (touch-driven by the start
+    // transition itself).
+    expect(src).not.toMatch(/setInterval|pg_cron|set_timeout/i);
+    // The service-level freeze is documented as the EXPLICIT early freeze
+    // (not load-bearing for §9 — the trigger is).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/EXPLICIT freeze/);
+    expect(serviceSrc).toMatch(/migration 0032/);
+    // The regression proof exists: the integration test exercising the REAL
+    // start path (startExperiment + claimExperimentStart) + born-frozen +
+    // frozen-reject.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'policy-freeze-on-start.integration.test.ts');
+    expect(existsSync(testPath), 'policy-freeze-on-start.integration.test.ts must exist').toBe(true);
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/experiment start FREEZES the project policy atomically/);
+    expect(testSrc).toMatch(/BORN FROZEN/);
+    expect(testSrc).toMatch(/rejects\.toThrow\(\/execution-policy-frozen\/\)/);
+    // And the preference-advisory + fail-closed regressions exist.
+    const regPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-policy.regression.test.ts');
+    const regSrc = readFileSync(regPath, 'utf8');
+    expect(regSrc).toMatch(/preferences are ADVISORY \(never hard eligibility constraints\)/);
+    expect(regSrc).toMatch(/constrained modes FAIL CLOSED on unknown cost\/latency evidence/);
+  });
 });

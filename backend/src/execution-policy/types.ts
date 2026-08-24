@@ -145,6 +145,7 @@ export type ExecutionEligibilityStatus =
   | 'unavailable'
   | 'subscription_blocked'
   | 'capability_blocked'
+  | 'unknown_constrained'
   | 'policy_blocked'
   | 'privacy_blocked'
   | 'project_policy_blocked'
@@ -182,7 +183,15 @@ export type ExecutionConstraintCategory =
   | 'organization'
   | 'availability'
   | 'subscription'
-  | 'privacy';
+  | 'privacy'
+  /**
+   * PR #37 review fix (fail-closed constrained modes): a constrained
+   * benchmark mode (§8) whose required cost/latency EVIDENCE is unknown for
+   * this candidate. Unknown evidence under an explicit maximum constraint
+   * is NOT neutral — the candidate cannot legitimately be declared eligible
+   * (fail-closed), because the constraint cannot be verified.
+   */
+  | 'evidence';
 
 /**
  * §4: the full constraint set evaluated for a candidate. This is the input to
@@ -213,6 +222,16 @@ export type CapabilityRequirement =
   | 'native_api'
   | 'external_ui';
 
+/**
+ * §4.2 user-scoped HARD constraints. NOTE (PR #37 review fix): these are
+ * constraints the user has EXPLICITLY configured as hard (e.g. a budget
+ * cap). §12 PREFERENCES (preferredMode, externalPreferred, nativePreferred,
+ * the scoring weights) are ADVISORY and must NEVER be routed into this
+ * set — they influence RECOMMENDATION ranking only. A preferredMode is not
+ * an allowedModes restriction: preferring external must never make a
+ * native candidate (that is fully allowed by every hard constraint)
+ * ineligible.
+ */
 export interface UserConstraints {
   readonly allowedProviders: readonly string[];
   readonly allowedModes: readonly ExecutionMode[];
@@ -548,7 +567,17 @@ export interface ExecutionPolicyService {
   ensureProjectPolicy(organizationId: string, projectId: string): Promise<ProjectPolicyRecord>;
   /** §31: update the project policy (rejected if frozen — §9). */
   updateProjectPolicy(projectId: string, input: UpdateProjectPolicyInput): Promise<ProjectPolicyRecord>;
-  /** §9: freeze a project policy (called when a benchmark experiment starts). */
+  /**
+   * §9: EXPLICITLY freeze a project policy (pre-freeze before any
+   * experiment starts). NOTE (PR #37 review fix): the §9 GUARANTEE — a
+   * policy is immutable once any benchmark experiment in its project is
+   * RUNNING — is enforced AUTOMATICALLY at the persistence boundary by
+   * migration 0032 (an AFTER UPDATE trigger on wfos_benchmark_experiments
+   * freezes the policy atomically with the authoritative start
+   * transition, + a BEFORE INSERT trigger births policies frozen for
+   * projects with already-started experiments). This method remains for
+   * explicit EARLY freezing only — it is not load-bearing for §9.
+   */
   freezeProjectPolicy(projectId: string): Promise<ProjectPolicyRecord>;
   /** §12: get the user preference profile (null if not yet created). */
   getUserPreferences(userId: string): Promise<UserPreferenceRecord | null>;

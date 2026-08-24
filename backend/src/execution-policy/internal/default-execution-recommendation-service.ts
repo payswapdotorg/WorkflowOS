@@ -1,14 +1,20 @@
 /**
  * WORK-033 §13/§16/§19 — ExecutionRecommendationService.
  *
- * ORDER (§13):
- *   1. hard eligibility (already filtered — only eligible candidates reach here)
- *   2. user/project/org policy (reflected in score via small boosts/penalties)
- *   3. required capability (already filtered — but surfaces in Why)
- *   4. benchmark evidence (the DOMINANT axis)
- *   5. cost
- *   6. latency
- *   7. user preferences (small tie-breaker — NEVER overrides capability)
+ * ORDER (§13, per the PR #37 review's required revision):
+ *
+ *   hard constraints → ELIGIBILITY (§3, upstream hard filter)
+ *     → eligible candidates
+ *       → benchmark evidence (the DOMINANT axis)
+ *       → cost / latency
+ *       → user preferences (advisory tie-breaker — NEVER a hard filter)
+ *         → RECOMMENDATION
+ *
+ * Only ELIGIBLE candidates reach this service. §12 preferences
+ * (preferredMode / externalPreferred / nativePreferred / weights) are
+ * RANKING inputs ONLY (preferenceComponent + normalizeWeights) — they
+ * never exclude a candidate (the PR #37 review fix removed the
+ * preference→allowedModes leak from the hard constraint set).
  *
  * CAPABILITY CEILING INVARIANT (§13, §21):
  *   The recommendation engine MUST preserve the capability ceiling. Claude's
@@ -21,6 +27,11 @@
  *   to [0,1]); it is never mathematically reduced to equalize outcomes. The
  *   cost/latency/preference components add bounded adjustments; quality
  *   remains the dominant axis (weight ≥ 0.5 after normalization).
+ *
+ * FAIL-CLOSED INTERPLAY: an unknown cost under an active cost cap (or an
+ * unknown/over-cap latency under an active latency cap) makes a candidate
+ * INELIGIBLE upstream (§3) — so the neutral 0.5 components below are only
+ * reachable when NO cap is active (neutral is honest exactly then).
  */
 import type {
   ExecutionCandidateInput,

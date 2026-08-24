@@ -82,8 +82,19 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     const candidates = await this.buildCandidates(providers, normalizer, projectId, policySnapshot, taskProfile, accessMap);
 
     // --- build the constraint set (§4) ---
+    // PR #37 review fix (preferences are ADVISORY): the user PREFERENCE
+    // profile (§12 — preferredMode, externalPreferred, nativePreferred,
+    // the scoring weights) is deliberately NOT an input here. Hard
+    // constraints come from the PROJECT policy + org policy ONLY; the
+    // preferences flow exclusively into the recommendation ranking
+    // (toPreferenceProfile → recommendationService.rank). Feeding
+    // prefs.preferredMode into user.allowedModes made a PREFERENCE act as a
+    // hard eligibility block (preferredMode='external' excluded every
+    // native candidate even when native execution was fully allowed) —
+    // violating the §12 contract "advisory; NEVER overrides hard
+    // constraints".
     const orgPolicy = this.deps.orgPolicyResolver ? await this.deps.orgPolicyResolver.resolve(organizationId) : null;
-    const constraints = this.buildConstraintSet(policy, prefs, orgPolicy, candidates);
+    const constraints = this.buildConstraintSet(policy, orgPolicy);
 
     // --- evaluate eligibility (§3 hard filter) ---
     const evaluated = candidates.map((c) => {
@@ -172,6 +183,15 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
   }
 
   async freezeProjectPolicy(projectId: string): Promise<ProjectPolicyRecord> {
+    // NOTE (PR #37 review fix): this EXPLICIT freeze is a convenience for
+    // pre-freezing a policy before any experiment starts. The §9 GUARANTEE
+    // itself is enforced at the persistence boundary by migration 0032 —
+    // an AFTER UPDATE trigger on wfos_benchmark_experiments freezes the
+    // project's policy atomically with the authoritative created|paused →
+    // running start transition (no crash window, no bypass), and a BEFORE
+    // INSERT trigger births policies frozen for projects that already
+    // have started experiments. There is no code path that can leave an
+    // experiment running with a mutable policy.
     const frozen = await this.deps.repository.freezeProjectPolicy(projectId);
     if (!frozen) throw new Error(`execution-policy: project ${projectId} not found`);
     return frozen;
@@ -288,16 +308,25 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
 
   private buildConstraintSet(
     policy: ProjectPolicyRecord,
-    prefs: UserPreferenceRecord,
     org: ResolvedOrgPolicy | null,
-    _candidates: readonly ExecutionCandidateInput[],
   ): ExecutionConstraintSet {
     return {
       capability: [],
       user: {
         allowedProviders: [],
-        allowedModes: prefs.preferredMode ? [prefs.preferredMode] : [],
+        // PR #37 review fix (preferences are ADVISORY, §12): user.allowedModes
+        // is a HARD-constraint slot for an EXPLICIT user-configured mode
+        // restriction — it is deliberately NOT populated from the preference
+        // profile's preferredMode. Preferences influence RANKING only
+        // (recommendationService's preferenceComponent + weights). A user
+        // who prefers external execution must not hard-block native
+        // candidates that satisfy every hard constraint.
+        allowedModes: [],
         monthlyBudgetCents: null,
+        // The project policy's per-task cost cap is a REAL hard constraint
+        // (explicitly configured, not a preference) — it flows into the
+        // user-constraint slot (and, via the policy snapshot, into the
+        // fail-closed evidence check).
         maxPerTaskCostCents: policy.maxCostPerTaskCents,
       },
       project: {

@@ -54,11 +54,13 @@ import type {
   LatencyEstimate,
   PrivacyConstraints,
   ProjectConstraints,
+  ProjectPolicyRecord,
   ProviderAccessProfile,
   ProviderAvailability,
   ProviderCapabilityProfile,
   ToolPolicy,
   UserConstraints,
+  UserPreferenceRecord,
   OrganizationConstraints,
   AvailabilityConstraints,
 } from '../../../src/execution-policy/types.js';
@@ -732,3 +734,237 @@ describe('WORK-033 §29 — type-surface invariants (BenchmarkMode + ToolPolicy 
     expect(tp.noArtificialCaps).toBe(true);
   });
 });
+
+// ============================================================================
+// PR #37 REVIEW FIXES — the three semantic blockers
+//   (1) preferences are ADVISORY (never hard eligibility constraints)
+//   (2) constrained modes FAIL CLOSED on unknown cost/latency evidence
+//   (3) policy freezing on experiment start — covered by the integration
+//       test policy-freeze-on-start.integration.test.ts (DB triggers).
+// ============================================================================
+
+describe('PR #37 review fix 1 — preferences are ADVISORY (never hard eligibility constraints)', () => {
+  it('preferredMode=external does NOT make native candidates ineligible — it only boosts the ranking (§12 advisory contract)', async () => {
+    const { DefaultExecutionPolicyService } = await import('../../../src/execution-policy/internal/default-execution-policy-service.js');
+
+    // End-to-end through the real service: a user whose PREFERENCE is
+    // external execution, a project where BOTH modes are fully allowed, and
+    // a native-only + an external-only candidate. Pre-fix, buildConstraintSet
+    // routed prefs.preferredMode into user.allowedModes → the native
+    // candidate was EXCLUDED from eligibility (the reviewer's exact
+    // scenario). Post-fix the preference flows ONLY into the ranking.
+    const nativeCandidate = makeCandidate({
+      provider: 'nativeprov', name: 'NativeProv', model: 'm1', mode: 'native', quality: 90,
+    });
+    const externalCandidate = makeCandidate({
+      provider: 'extprov', name: 'ExtProv', model: 'm2', mode: 'external', quality: 90,
+    });
+
+    const service = new DefaultExecutionPolicyService({
+      db: {} as never,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+      repository: {
+        getProjectPolicy: async () => policyRecord(),
+        insertDefaultProjectPolicy: async () => policyRecord(),
+        getUserPreferences: async () => prefRecord({ preferredMode: 'external' }),
+        insertDefaultUserPreferences: async () => prefRecord({ preferredMode: 'external' }),
+        listAccessProfiles: async () => [
+          accessRecord('nativeprov'),
+          accessRecord('extprov'),
+        ],
+        insertDecision: async () => ({ id: 'decision-1' }),
+        listDecisions: async () => [],
+      } as never,
+      eligibilityService: new DefaultExecutionEligibilityService(),
+      recommendationService: new DefaultExecutionRecommendationService(),
+      taskProfileBuilder: { build: async () => makeTaskProfile() } as never,
+      agentProviderRegistry: {
+        getExecutionProviders: async () => [
+          {
+            name: 'NativeProv', provider: 'nativeprov', model: 'm1',
+            nativeApi: 'ready', externalUi: 'not-supported',
+            capabilities: { conversationalChat: 'ready', codingAgent: 'ready', implementationSurface: 'coding_agent' },
+          },
+          {
+            name: 'ExtProv', provider: 'extprov', model: 'm2',
+            nativeApi: 'not-configured', externalUi: 'available',
+            capabilities: { conversationalChat: 'ready', codingAgent: 'ready', implementationSurface: 'coding_agent' },
+          },
+        ],
+      } as never,
+      benchmarkEvidenceProvider: {
+        historicalPerformanceForCell: async () => historical(0, null, false),
+        aggregateForProject: async () => historical(0, null, false),
+      } as never,
+    });
+
+    const rec = await service.recommend({
+      organizationId: 'org-1', projectId: 'proj-1', workItemId: 'wi-1', userId: 'user-1',
+    });
+
+    // ASSERTION 1 — the NATIVE candidate is ELIGIBLE (not excluded): the
+    // preferredMode preference must never act as a hard mode restriction.
+    const eligibleIds = rec.eligibleCandidates.map((c) => `${c.provider}:${c.executionMode}`);
+    expect(eligibleIds).toContain('nativeprov:native');
+    expect(eligibleIds).toContain('extprov:external');
+    expect(rec.excludedCandidates).toHaveLength(0);
+
+    // ASSERTION 2 — the preference still ADVISES the ranking: with equal
+    // quality, the preferred (external) candidate ranks first. Advisory
+    // influence, not exclusion.
+    expect(rec.recommendedCandidate?.provider).toBe('extprov');
+    const native = rec.eligibleCandidates.find((c) => c.provider === 'nativeprov')!;
+    const external = rec.eligibleCandidates.find((c) => c.provider === 'extprov')!;
+    expect(external.recommendationScore).toBeGreaterThan(native.recommendationScore);
+
+    void nativeCandidate; void externalCandidate;
+  });
+
+  it('pure eligibility takes NO preference input — the advisory contract is structural', () => {
+    // The EligibilityEvaluationInput carries candidate/task/policy/constraints
+    // ONLY: there is structurally no preference input the hard filter could
+    // honor. Preferences enter exclusively via RankInput (the ranking).
+    const input: EligibilityEvaluationInput = {
+      candidate: makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 80 }),
+      taskProfile: makeTaskProfile(),
+      policy: makePolicy(),
+      constraints: makeConstraints(),
+    };
+    expect(Object.keys(input).sort()).toEqual(['candidate', 'constraints', 'policy', 'taskProfile']);
+  });
+});
+
+describe('PR #37 review fix 2 — constrained modes FAIL CLOSED on unknown cost/latency evidence', () => {
+  const taskProfile = makeTaskProfile();
+
+  it('cost constraint + UNKNOWN cost → ineligible (unknown_constrained), NOT neutral-eligible', () => {
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, costCents: null });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'cost_constrained', maxCostCents: 500 }),
+      makeConstraints({ user: { allowedProviders: [], allowedModes: [], monthlyBudgetCents: null, maxPerTaskCostCents: 500 } }),
+    );
+    expect(result.eligible).toBe(false);
+    expect(result.status).toBe('unknown_constrained');
+    expect(result.blockingReasons.some((b) => b.category === 'evidence' && b.constraint === 'unknown_cost_under_cost_constraint')).toBe(true);
+  });
+
+  it('cost constraint via the POLICY snapshot alone also fails closed', () => {
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, costCents: null });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'cost_constrained', maxCostCents: 500 }),
+      makeConstraints(),
+    );
+    expect(result.eligible).toBe(false);
+    expect(result.status).toBe('unknown_constrained');
+  });
+
+  it('cost constraint + KNOWN under-cap cost → eligible (constraint verified)', () => {
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, costCents: 200 });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'cost_constrained', maxCostCents: 500 }),
+      makeConstraints({ user: { allowedProviders: [], allowedModes: [], monthlyBudgetCents: null, maxPerTaskCostCents: 500 } }),
+    );
+    expect(result.eligible).toBe(true);
+    expect(result.satisfiedConstraints).toContain('evidence:cost_known');
+  });
+
+  it('COST_CONSTRAINED mode with all-unknown costs → ZERO eligible candidates (the honest verdict)', () => {
+    // The pre-fix behavior: unknown cost passed the hard cost constraint
+    // (neutral), so a cost-constrained benchmark could recommend a candidate
+    // that was never verified against the cost constraint. Post-fix the
+    // eligibility filter excludes every unverified candidate (mirroring the
+    // service's eligible/excluded split), so the RANKING receives zero
+    // candidates + the recommendation honestly reports none.
+    const c1 = makeCandidate({ provider: 'p1', name: 'P1', model: 'm', mode: 'native', quality: 90, costCents: null });
+    const c2 = makeCandidate({ provider: 'p2', name: 'P2', model: 'm', mode: 'external', quality: 88, costCents: null });
+    const policy = makePolicy({ benchmarkMode: 'cost_constrained', maxCostCents: 500 });
+    const constraints = makeConstraints({ user: { allowedProviders: [], allowedModes: [], monthlyBudgetCents: null, maxPerTaskCostCents: 500 } });
+    const eligible = [c1, c2].filter((c) => evaluate(c, taskProfile, policy, constraints).eligible);
+    expect(eligible).toHaveLength(0);
+    const ranked = rank(eligible, policy, taskProfile);
+    expect(ranked.ranked).toHaveLength(0);
+    expect(ranked.recommended).toBeNull();
+  });
+
+  it('latency constraint + UNKNOWN latency → ineligible (unknown_constrained)', () => {
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, latencyMs: null });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'latency_constrained', maxDurationMs: 600_000 }),
+      makeConstraints(),
+    );
+    expect(result.eligible).toBe(false);
+    expect(result.status).toBe('unknown_constrained');
+    expect(result.blockingReasons.some((b) => b.category === 'evidence' && b.constraint === 'unknown_latency_under_latency_constraint')).toBe(true);
+  });
+
+  it('latency constraint + KNOWN over-cap latency → ineligible (hard latency check — previously scoring-only)', () => {
+    // Pre-fix, maxDurationMs only fed the recommendation scorer: a KNOWN
+    // 2x-over-cap latency still passed eligibility. Post-fix a known
+    // over-cap latency is a hard violation, symmetric with over-cap cost.
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, latencyMs: 1_200_000 });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'latency_constrained', maxDurationMs: 600_000 }),
+      makeConstraints(),
+    );
+    expect(result.eligible).toBe(false);
+    expect(result.blockingReasons.some((b) => b.constraint === 'latency_over_max')).toBe(true);
+  });
+
+  it('latency constraint + KNOWN under-cap latency → eligible', () => {
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, latencyMs: 300_000 });
+    const result = evaluate(
+      candidate, taskProfile,
+      makePolicy({ benchmarkMode: 'latency_constrained', maxDurationMs: 600_000 }),
+      makeConstraints(),
+    );
+    expect(result.eligible).toBe(true);
+    expect(result.satisfiedConstraints).toContain('evidence:latency_known');
+  });
+
+  it('NO constraint set → unknown cost/latency remains eligible (neutral is honest exactly then)', () => {
+    // Fail-closed applies ONLY under an explicit maximum. Without a cap,
+    // unknown evidence is not a constraint violation (§24: unknown ≠ 0).
+    const candidate = makeCandidate({ provider: 'p', name: 'P', model: 'm', mode: 'native', quality: 90, costCents: null, latencyMs: null });
+    const result = evaluate(candidate, taskProfile, makePolicy(), makeConstraints());
+    expect(result.eligible).toBe(true);
+  });
+});
+
+// --- fixtures for the service-level preference test -------------------------
+
+function policyRecord(): ProjectPolicyRecord {
+  return {
+    id: 'policy-1', organizationId: 'org-1', projectId: 'proj-1',
+    defaultBenchmarkMode: 'maximum_capability',
+    externalExecutionAllowed: true, nativeExecutionAllowed: true,
+    maxCostPerTaskCents: null, maxCostPerTrialCents: null, maxTimeToPrMs: null,
+    humanInterventionAllowed: true, privacyLevel: 'standard',
+    allowedProviders: [], deniedProviders: [], allowedModes: [],
+    frozen: false, policyVersion: 1, createdAt: new Date(), updatedAt: new Date(),
+  };
+}
+
+function prefRecord(overrides: Partial<UserPreferenceRecord> = {}): UserPreferenceRecord {
+  return {
+    id: 'pref-1', organizationId: 'org-1', userId: 'user-1',
+    qualityWeight: 0.6, costWeight: 0.2, latencyWeight: 0.1, privacyWeight: 0.1,
+    preferredMode: null, externalPreferred: false, nativePreferred: false,
+    defaultBenchmarkMode: 'maximum_capability',
+    createdAt: new Date(), updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+function accessRecord(provider: string) {
+  return {
+    id: `access-${provider}`, organizationId: 'org-1', userId: 'user-1', notes: null,
+    createdAt: new Date(), updatedAt: new Date(),
+    provider, plan: 'plus', codingAgent: 'ready', externalUi: 'ready', nativeApi: 'ready',
+    statusSource: 'user_configured',
+  };
+}

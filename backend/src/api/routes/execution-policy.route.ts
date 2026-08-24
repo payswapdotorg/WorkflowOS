@@ -13,11 +13,17 @@
  *   GET   /projects/:projectId/execution-policy                    — §31 get policy
  *   POST  /projects/:projectId/execution-policy                     — ensure default
  *   PATCH /projects/:projectId/execution-policy                     — update (§9 frozen-reject)
- *   POST  /projects/:projectId/execution-policy/freeze              — §9 freeze
+ *   POST  /projects/:projectId/execution-policy/freeze              — §9 EXPLICIT early freeze
  *   GET   /projects/:projectId/execution-preferences                — §12 user prefs
  *   PATCH /projects/:projectId/execution-preferences                — update prefs
  *   GET   /projects/:projectId/provider-access-profiles            — §5 list
  *   POST  /projects/:projectId/provider-access-profiles            — §5 upsert
+ *
+ * §9 NOTE (PR #37 review fix): the §9 invariant — a policy is immutable
+ * once any benchmark experiment in its project is RUNNING — is enforced
+ * AUTOMATICALLY by migration 0032's database triggers on the authoritative
+ * start transition (created|paused → running). The /freeze endpoint above
+ * is an optional EXPLICIT pre-freeze; it is NOT load-bearing for §9.
  *
  * SECURITY: no route ever returns credentials, callback tokens, handoff
  * tokens, or cookies. The ExecutionCandidate is metadata only (§2).

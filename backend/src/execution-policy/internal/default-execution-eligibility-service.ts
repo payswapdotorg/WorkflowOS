@@ -25,6 +25,7 @@ import type {
 const STATUS_PRECEDENCE: readonly ExecutionEligibilityStatus[] = [
   'capability_blocked',
   'subscription_blocked',
+  'unknown_constrained',
   'privacy_blocked',
   'project_policy_blocked',
   'policy_blocked',
@@ -40,6 +41,11 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
 
     // §4.1 Capability constraints — task-profile required capabilities.
     this.evaluateCapability(input, blocks, satisfied);
+    // PR #37 review fix (fail-closed §8): constrained modes require KNOWN
+    // cost/latency evidence — unknown evidence under an explicit maximum
+    // constraint is NOT neutral; the candidate cannot be declared eligible
+    // because the constraint cannot be verified.
+    this.evaluateConstrainedEvidence(input, blocks, satisfied);
     // §4.2 User constraints — allowed providers/modes, budget.
     this.evaluateUser(input, blocks, satisfied);
     // §4.3 Project constraints — external/native allowed, allowlist, denylist.
@@ -84,6 +90,11 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
       case 'organization': return 'policy_blocked';
       case 'availability': return 'unavailable';
       case 'user': return 'project_policy_blocked';
+      // PR #37 review fix (fail-closed): unknown cost/latency evidence under
+      // an explicit maximum constraint is its own verdict — the candidate is
+      // not policy-blocked or unavailable; it CANNOT BE VERIFIED against the
+      // constraint, so it is 'unknown_constrained'.
+      case 'evidence': return 'unknown_constrained';
     }
   }
 
@@ -119,6 +130,74 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
       case 'native_api': return caps.nativeApi;
       case 'external_ui': return caps.externalUi;
       default: return 'unavailable';
+    }
+  }
+
+  // ----- PR #37 review fix: fail-closed constrained evidence (§8) -----
+  /**
+   * FAIL-CLOSED rule for constrained benchmark modes (§8) + explicit
+   * maximum constraints:
+   *
+   *   cost constraint + unknown cost      → ineligible (unknown_constrained)
+   *   latency constraint + unknown latency → ineligible (unknown_constrained)
+   *   known cost over the cap              → ineligible (existing §4.2/§4.4 checks)
+   *   known latency over the cap           → ineligible (hard latency check)
+   *
+   * A candidate whose required evidence is UNKNOWN cannot legitimately be
+   * declared eligible under an explicit maximum — treating unknown as
+   * neutral would let COST_CONSTRAINED / LATENCY_CONSTRAINED modes recommend
+   * candidates that were never verified against the constraint. The honest
+   * verdict is 'unknown_constrained' with the missing-evidence reason, so
+   * the UI can tell the user exactly what evidence is missing (§19 why).
+   *
+   * Cost caps compose from every source: the user/project per-task cap, the
+   * org maximum, and the benchmark policy snapshot's maxCostCents. Latency
+   * uses the policy snapshot's maxDurationMs (§26 max_time_to_pr_ms).
+   */
+  private evaluateConstrainedEvidence(
+    input: EligibilityEvaluationInput,
+    blocks: EligibilityBlock[],
+    satisfied: string[],
+  ): void {
+    const { candidate, policy, constraints } = input;
+    // --- cost: fail closed when ANY explicit cap is set + cost unknown ---
+    const costCaps = [
+      constraints.user.maxPerTaskCostCents,
+      constraints.organization.maximumExecutionCostCents,
+      policy.maxCostCents,
+    ].filter((c): c is number => c != null);
+    if (costCaps.length > 0) {
+      if (candidate.estimatedCost.cents == null) {
+        blocks.push({
+          category: 'evidence',
+          constraint: 'unknown_cost_under_cost_constraint',
+          reason: `A cost constraint is active (max ${Math.min(...costCaps)} cents) but this candidate's cost estimate is unknown — it cannot be verified against the constraint (fail-closed).`,
+        });
+      } else {
+        satisfied.push('evidence:cost_known');
+      }
+    }
+    // --- latency: hard check + fail closed ---
+    const latencyCap = policy.maxDurationMs;
+    if (latencyCap != null) {
+      if (candidate.estimatedLatency.estimatedMs == null) {
+        blocks.push({
+          category: 'evidence',
+          constraint: 'unknown_latency_under_latency_constraint',
+          reason: `A latency constraint is active (max ${latencyCap}ms) but this candidate's latency estimate is unknown — it cannot be verified against the constraint (fail-closed).`,
+        });
+      } else if (candidate.estimatedLatency.estimatedMs > latencyCap) {
+        // PR #37 review fix: the latency constraint was previously only a
+        // recommendation-scoring input — a KNOWN over-cap latency is a hard
+        // constraint violation, exactly like a known over-cap cost.
+        blocks.push({
+          category: 'evidence',
+          constraint: 'latency_over_max',
+          reason: `Estimated latency ${candidate.estimatedLatency.estimatedMs}ms exceeds the maximum ${latencyCap}ms.`,
+        });
+      } else {
+        satisfied.push('evidence:latency_known');
+      }
     }
   }
 

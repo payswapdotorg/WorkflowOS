@@ -1945,6 +1945,7 @@ export type ExecutionEligibilityStatus =
   | 'unavailable'
   | 'subscription_blocked'
   | 'capability_blocked'
+  | 'unknown_constrained'
   | 'policy_blocked'
   | 'privacy_blocked'
   | 'project_policy_blocked'
@@ -1959,7 +1960,8 @@ export type ExecutionConstraintCategory =
   | 'organization'
   | 'availability'
   | 'subscription'
-  | 'privacy';
+  | 'privacy'
+  | 'evidence';
 
 /** §10 capability requirement kinds feeding the eligibility filter. */
 export type CapabilityRequirement =
