@@ -598,7 +598,14 @@ export interface RecommendInput {
   readonly projectId: string;
   readonly workItemId: string;
   readonly userId: string;
-  /** §8: optional explicit mode override (else project default / user pref). */
+  /**
+   * §8/§16: optional request-scoped benchmark mode override (else the
+   * project default). NOTE (PR #37 review fix): when the project policy is
+   * FROZEN (§9), an override that DIFFERS from the frozen policy's mode is
+   * REJECTED — a decision must never claim the frozen policyVersion while
+   * using a different benchmark mode. Passing the frozen mode itself is a
+   * no-op and stays allowed; unfrozen policies keep the full override.
+   */
   readonly benchmarkMode?: BenchmarkMode;
 }
 

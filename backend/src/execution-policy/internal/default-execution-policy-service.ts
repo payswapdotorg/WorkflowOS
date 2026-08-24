@@ -70,6 +70,21 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     // --- resolve benchmark mode (explicit > project default > user pref) ---
     const benchmarkMode: BenchmarkMode = input.benchmarkMode ?? policy.defaultBenchmarkMode;
 
+    // PR #37 review fix (frozen-mode override): a FROZEN policy's benchmark
+    // mode is part of the immutable §9 policy version. An explicit
+    // ?benchmarkMode= differing from the frozen policy's mode would produce
+    // a decision claiming policyVersion N while using a DIFFERENT mode —
+    // undermining the §9 immutability/audit guarantee. The override is
+    // REJECTED (passing the SAME mode is a no-op and stays allowed;
+    // unfrozen policies keep the §16 request-scoped override). Checked
+    // BEFORE the mode-constraint validation: a frozen-policy override is a
+    // frozen-state violation first, not a missing-cap problem.
+    if (policy.frozen && input.benchmarkMode != null && input.benchmarkMode !== policy.defaultBenchmarkMode) {
+      throw new Error(
+        `execution-policy-frozen-mode: the project policy is frozen (policyVersion=${policy.policyVersion}, benchmarkMode=${policy.defaultBenchmarkMode}) — the frozen benchmark mode cannot be overridden at recommendation time (§9)`,
+      );
+    }
+
     // PR #37 review fix (constrained modes must be MEANINGFUL): reject the
     // request rather than silently producing an unconstrained-but-labeled-
     // constrained policy snapshot. COST_CONSTRAINED requires a cost cap;

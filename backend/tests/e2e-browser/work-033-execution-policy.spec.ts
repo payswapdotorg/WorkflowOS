@@ -56,6 +56,7 @@ let worker: WorkerHost;
 let policyProjectId: string;
 let freshPolicyProjectId: string;
 let policyWorkItemId: string;
+let freshPolicyWorkItemId: string;
 
 const API_KEY = 'raw-key-policy-e2e';
 
@@ -98,9 +99,35 @@ test.beforeAll(async () => {
   policyWorkItemId = workItem.id;
 
   // PR #37 review fix e2e: a second project with NO experiments started —
-  // its (unfrozen) policy exercises the constrained-mode validation.
+  // its (unfrozen) policy exercises the constrained-mode validation. It
+  // carries its own full work-item chain (needed for the
+  // /work-items/:id/execution/recommendation route resolution + task
+  // profile).
   const freshProject = await stack.projectRepository.create({ organizationId: org.id, name: 'Fresh Policy Project' });
   freshPolicyProjectId = freshProject.id;
+  const freshArch = await stack.architectureRepository.create({ projectId: freshProject.id, name: 'Fresh Policy Arch' });
+  const freshVersion = await stack.architectureVersionRepository.create({ architectureId: freshArch.id, contentInline: '# Fresh Policy Architecture' });
+  await stack.architectureVersionRepository.transitionState(freshVersion.id, 'frozen', user.id);
+  const freshReq = await stack.requirementRepository.create({
+    architectureVersionId: freshVersion.id, requirementId: 'REQ-FRESH-E2E-001',
+    title: 'Calculator adds', description: 'add(2,3)===5',
+  });
+  const freshCrit = await stack.acceptanceCriterionRepository.create({
+    requirementId: freshReq.id, criterionId: 'AC-FRESH-E2E-001', description: 'add(2,3) returns 5', verificationExpectation: 'unit-test',
+  });
+  const freshWorkItem = await stack.workItemRepository.create({
+    architectureVersionId: freshVersion.id, workItemId: 'WORK-FRESH-E2E-001',
+    title: 'Calculator addition', objective: 'Add a calculator.', scope: 'src/calc.ts', outOfScope: 'sub',
+    metadata: { baseCommit: 'fresh-e2e-baseline-commit-000000000000000001' },
+  });
+  await stack.workItemRequirementRepository.associate(freshWorkItem.id, freshReq.id);
+  await stack.workItemCriterionRepository.associate(freshWorkItem.id, freshCrit.id);
+  await stack.workOrderRepository.create({
+    workItemId: freshWorkItem.id, projectId: freshProject.id, architectureVersionId: freshVersion.id,
+    requirementIds: [freshReq.id], criterionIds: [freshCrit.id], scope: 'src/calc.ts',
+    verificationRequirements: ['unit-test: add(2,3)===5'],
+  });
+  freshPolicyWorkItemId = freshWorkItem.id;
 
   // --- wire the execution-policy service (the WORK-033 surface) ---
   const authorizationService = new DefaultAuthorizationService(
@@ -281,12 +308,32 @@ test('PR #37 review fix — constrained mode without its cap → 400 (rejected, 
   expect(res.status).toBe(200);
   expect((res.data as { policy: { defaultBenchmarkMode: string } }).policy.defaultBenchmarkMode).toBe('cost_constrained');
 
-  // Recommendation with an explicit constrained mode on a capless project → 400.
-  // (Reset to capless first.)
+  // Recommendation with an explicit constrained mode on a capless UNFROZEN
+  // project → 400 (uses the FRESH project's work item — the main project's
+  // policy is frozen by the preceding test).
+  // (Reset the fresh project to capless first.)
   await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'PATCH', { defaultBenchmarkMode: 'maximum_capability', maxCostPerTaskCents: null });
-  res = await api(`/work-items/${policyWorkItemId}/execution/recommendation?benchmarkMode=cost_constrained`);
+  res = await api(`/work-items/${freshPolicyWorkItemId}/execution/recommendation?benchmarkMode=cost_constrained`);
   expect(res.status).toBe(400);
   expect((res.data as { error: string }).error).toBe('invalid-mode-constraint');
+});
+
+test('PR #37 review fix — frozen-mode override → 409 (a decision cannot claim the frozen policyVersion under a different mode)', async () => {
+  // policyProjectId's policy is FROZEN (§9 test above) with
+  // benchmarkMode=maximum_capability. An explicit ?benchmarkMode= override
+  // that DIFFERS from the frozen mode must be rejected — the resulting
+  // decision would claim the frozen policyVersion while using a different
+  // mode, undermining the §9 immutability/audit guarantee.
+  const res = await api(`/work-items/${policyWorkItemId}/execution/recommendation?benchmarkMode=controlled_comparison`);
+  expect(res.status).toBe(409);
+  expect((res.data as { error: string }).error).toBe('policy-frozen-mode');
+  expect(String((res.data as { message: string }).message)).toContain('execution-policy-frozen-mode');
+
+  // Any differing mode is rejected — the reviewer's exact scenario
+  // (cost_constrained against a frozen maximum_capability policy).
+  const res2 = await api(`/work-items/${policyWorkItemId}/execution/recommendation?benchmarkMode=cost_constrained`);
+  expect(res2.status).toBe(409);
+  expect((res2.data as { error: string }).error).toBe('policy-frozen-mode');
 });
 
 // ---------------------------------------------------------------------------

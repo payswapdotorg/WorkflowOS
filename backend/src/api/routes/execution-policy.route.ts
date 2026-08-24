@@ -86,6 +86,13 @@ export async function executionPolicyRoutes(app: FastifyInstance, deps: Executio
         if (msg.includes('execution-policy-invalid-mode-constraint')) {
           return reply.code(400).send({ error: 'invalid-mode-constraint', message: msg });
         }
+        // PR #37 review fix (frozen-mode override): overriding a FROZEN
+        // policy's benchmark mode at recommendation time is a conflict with
+        // the immutable §9 policy state → 409 (a decision must never claim
+        // the frozen policyVersion while using a different mode).
+        if (msg.includes('execution-policy-frozen-mode')) {
+          return reply.code(409).send({ error: 'policy-frozen-mode', message: msg });
+        }
         return reply.code(500).send({ error: 'execution-policy-recommend-failed', message: msg });
       }
     });

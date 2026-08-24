@@ -7363,4 +7363,51 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
     expect(e2eSrc).toMatch(/constrained mode without its cap → 400/);
   });
+
+  it('execution-policy frozen-mode override is REJECTED at recommendation time (§9 — a decision cannot claim the frozen policyVersion under a different mode)', () => {
+    // PR #37 review final blocker: a frozen project policy could still be
+    // overridden at recommendation time with ?benchmarkMode=... even when
+    // the frozen policy said benchmarkMode=maximum_capability /
+    // policyVersion=N — the resulting decision would claim version N while
+    // using a different mode, undermining the §9 immutability/audit
+    // guarantee. The fix: in recommend(), an explicit benchmarkMode that
+    // DIFFERS from the frozen policy's mode is rejected (the same mode is a
+    // no-op; unfrozen policies keep the §16 request-scoped override).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    // The frozen-mode guard exists with the exact semantics (frozen +
+    // explicit + differing).
+    expect(recommendFn).toMatch(/policy\.frozen && input\.benchmarkMode != null && input\.benchmarkMode !== policy\.defaultBenchmarkMode/);
+    // ...throwing the frozen-mode domain error (which includes the frozen
+    // version + mode in the message for auditability).
+    expect(recommendFn).toMatch(/execution-policy-frozen-mode: the project policy is frozen \(policyVersion=\$\{policy\.policyVersion\}, benchmarkMode=\$\{policy\.defaultBenchmarkMode\}\)/);
+    // ORDERING: the frozen-mode guard MUST precede the mode-constraint
+    // validation (a frozen-policy override is a frozen-state violation
+    // first, not a missing-cap problem — the reviewer's scenario must
+    // surface as the frozen rejection).
+    const frozenIdx = recommendFn.indexOf('execution-policy-frozen-mode');
+    const validateIdx = recommendFn.indexOf('validateBenchmarkModeConstraint(benchmarkMode');
+    expect(frozenIdx).toBeGreaterThan(-1);
+    expect(frozenIdx).toBeLessThan(validateIdx);
+    // RecommendInput documents the frozen rejection (the public contract).
+    const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
+    const recInput = typesSrc.match(/export interface RecommendInput[\s\S]*?\n\}/)![0];
+    expect(recInput).toMatch(/FROZEN/);
+    expect(recInput).toMatch(/REJECTED/);
+    // The route maps it to HTTP 409 policy-frozen-mode.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-frozen-mode/);
+    expect(routeSrc).toMatch(/'policy-frozen-mode'/);
+    // Regression coverage: frozen+differing rejected (multiple modes),
+    // frozen+same allowed, frozen+none allowed, unfrozen override
+    // preserved — + the HTTP-level 409 e2e.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/frozen policy \+ a DIFFERING explicit benchmarkMode → rejected/);
+    expect(testSrc).toMatch(/frozen policy \+ the SAME explicit benchmarkMode → not a frozen-mode rejection/);
+    expect(testSrc).toMatch(/frozen policy \+ NO explicit benchmarkMode → uses the frozen mode/);
+    expect(testSrc).toMatch(/UNFROZEN policy \+ a differing explicit benchmarkMode → the §16 override still works/);
+    const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
+    expect(e2eSrc).toMatch(/frozen-mode override → 409/);
+  });
 });

@@ -202,4 +202,76 @@ describe('PR #37 review fix — constrained benchmark modes require their caps (
     expect(policy.maxCostPerTaskCents).toBeNull();
     expect(policy.maxTimeToPrMs).toBeNull();
   });
+
+  // ------------------------------------------------------------------------
+  // PR #37 review fix (final) — FROZEN-MODE OVERRIDE REJECTION (§9
+  // immutability/audit guarantee): a frozen policy's benchmark mode is part
+  // of the immutable policy version. A decision must never claim
+  // policyVersion N while using a DIFFERENT benchmark mode than the frozen
+  // policy — so an explicit ?benchmarkMode= override that differs from the
+  // frozen mode is rejected (409). Passing the frozen mode itself is a
+  // no-op (allowed), and unfrozen policies keep the §16 request-scoped
+  // override.
+  // ------------------------------------------------------------------------
+  describe('frozen-mode override rejection (§9 immutability/audit guarantee)', () => {
+    let frozenProjectId: string;
+    let unfrozenProjectId: string;
+
+    beforeAll(async () => {
+      frozenProjectId = (await stack.projectRepository.create({ organizationId, name: 'Frozen Mode Project' })).id;
+      unfrozenProjectId = (await stack.projectRepository.create({ organizationId, name: 'Unfrozen Override Project' })).id;
+      await repository.insertDefaultProjectPolicy(organizationId, frozenProjectId);
+      await repository.insertDefaultProjectPolicy(organizationId, unfrozenProjectId);
+      // Freeze the frozen project explicitly (the §9 pre-freeze; the
+      // freeze-on-start trigger from migration 0032 covers the other path).
+      await repository.freezeProjectPolicy(frozenProjectId);
+    });
+
+    it('frozen policy + a DIFFERING explicit benchmarkMode → rejected (the decision cannot claim the frozen version under another mode)', async () => {
+      // The frozen policy: maximum_capability (policyVersion bumped by the
+      // freeze). The reviewer's exact scenario: ?benchmarkMode=cost_constrained
+      // would produce a decision claiming that policyVersion while using a
+      // different mode than the frozen policy.
+      await expect(
+        service.recommend({ organizationId, projectId: frozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'cost_constrained' }),
+      ).rejects.toThrow(/execution-policy-frozen-mode: the project policy is frozen \(policyVersion=\d+, benchmarkMode=maximum_capability\)/);
+      // Any differing mode is rejected — not just constrained ones.
+      await expect(
+        service.recommend({ organizationId, projectId: frozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'controlled_comparison' }),
+      ).rejects.toThrow('execution-policy-frozen-mode');
+      await expect(
+        service.recommend({ organizationId, projectId: frozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'latency_constrained' }),
+      ).rejects.toThrow('execution-policy-frozen-mode');
+    });
+
+    it('frozen policy + the SAME explicit benchmarkMode → not a frozen-mode rejection (a no-op override)', async () => {
+      // Passing the frozen mode itself is semantically identical to no
+      // override — the decision uses exactly the frozen mode + version.
+      // (The call proceeds past the frozen-mode + mode-constraint checks; it
+      // then fails on the nonexistent work item in the real repository — a
+      // DIFFERENT error, proving the override was not rejected as frozen.)
+      await expect(
+        service.recommend({ organizationId, projectId: frozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'maximum_capability' }),
+      ).rejects.not.toThrow(/execution-policy-frozen-mode/);
+    });
+
+    it('frozen policy + NO explicit benchmarkMode → uses the frozen mode (not rejected)', async () => {
+      await expect(
+        service.recommend({ organizationId, projectId: frozenProjectId, workItemId: 'wi-none', userId }),
+      ).rejects.not.toThrow(/execution-policy-frozen-mode/);
+    });
+
+    it('UNFROZEN policy + a differing explicit benchmarkMode → the §16 override still works', async () => {
+      // The request-scoped override remains available for unfrozen policies
+      // (this is the §16 feature — freezing only locks the mode). Uses
+      // controlled_comparison (no cap requirement) so the mode-constraint
+      // validation also passes.
+      await expect(
+        service.recommend({ organizationId, projectId: unfrozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'controlled_comparison' }),
+      ).rejects.not.toThrow(/execution-policy-frozen-mode/);
+      await expect(
+        service.recommend({ organizationId, projectId: unfrozenProjectId, workItemId: 'wi-none', userId, benchmarkMode: 'controlled_comparison' }),
+      ).rejects.not.toThrow(/execution-policy-invalid-mode-constraint/);
+    });
+  });
 });
