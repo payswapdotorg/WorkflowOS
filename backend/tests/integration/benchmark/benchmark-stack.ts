@@ -75,14 +75,19 @@ export interface BenchmarkStack {
 /**
  * Build the full benchmark service stack. Sets `process.env[secretRef]` to
  * the API key (the deterministic providers read it). Starts the WorkerHost
- * (pollIntervalMs=5 — fast for tests). The caller MUST `stop()` the worker +
- * `close()` the queue + `teardown()` the auth stack in afterAll.
+ * (pollIntervalMs=5 — fast for tests) UNLESS `startWorker: false` — the
+ * start-delivery durability tests use that mode so enqueued
+ * `benchmark.trial` jobs stay in the queue + enqueue counts are
+ * deterministic. The caller MUST `stop()` the worker (safe on an unstarted
+ * host) + `close()` the queue + `teardown()` the auth stack in afterAll.
  */
 export async function buildBenchmarkStack(opts: {
   apiKey: string;
   secretRef: string;
   /** Variant for the deterministic providers — 'perfect-first-pass' yields verified delivery. */
   variant?: 'perfect-first-pass';
+  /** Skip starting the WorkerHost (deterministic enqueue counting). Default: start it. */
+  startWorker?: boolean;
 }): Promise<BenchmarkStack> {
   process.env[opts.secretRef] = opts.apiKey;
   const stack = await buildAuthStack({ [opts.secretRef]: opts.apiKey });
@@ -238,7 +243,9 @@ export async function buildBenchmarkStack(opts: {
     createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
   ]);
   const worker = new WorkerHost(queue, handlers, logger as never, { pollIntervalMs: 5 });
-  await worker.start();
+  if (opts.startWorker !== false) {
+    await worker.start();
+  }
 
   return {
     authStack: stack,

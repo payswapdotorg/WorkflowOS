@@ -205,16 +205,21 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
         projectId: experiment.projectId,
       });
       if (!user) return;
-      // POST-AUTHORIZATION recovery (authorized control-plane path): if
-      // the experiment is stuck in `finalizing` (a previous worker won the
-      // reservation but died), an AUTHORIZED reader triggers the recovery.
+      // POST-AUTHORIZATION recovery (authorized control-plane path). Called
+      // UNCONDITIONALLY — recoverExperimentIfStale internally decides what
+      // (if anything) needs recovering + no-ops otherwise:
+      //   * WORK-032 start-delivery durability: an incomplete start
+      //     delivery (a start that crashed between the claim and full
+      //     delivery) is replayed — exactly one BENCHMARK_STARTED audit +
+      //     the missing benchmark.trial jobs.
+      //   * PR #36 crash-safe completion: a stuck `finalizing`
+      //     reservation with an expired lease is recovered to exactly one
+      //     terminal state.
       // An unauthorized caller never reaches this line (403 above), so an
       // unauthorized read CANNOT mutate another project's experiment. NO
       // polling sweep, NO second execution engine (§34 invariant intact).
-      const recovered = experiment.status === 'finalizing'
-        ? await benchmarkService.recoverExperimentIfStale(id)
-        : experiment;
-      return reply.code(200).send({ experiment: recovered });
+      const recovered = await benchmarkService.recoverExperimentIfStale(id);
+      return reply.code(200).send({ experiment: recovered ?? experiment });
     });
   });
 

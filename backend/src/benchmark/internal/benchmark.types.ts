@@ -86,28 +86,94 @@ export interface BenchmarkRepository {
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
   /**
-   * PR #35 review fix (control-plane concurrency): ATOMIC experiment-start
-   * claim. Compare-and-swap: `UPDATE wfos_benchmark_experiments SET
-   * status='running', started_at=COALESCE(started_at, NOW()) WHERE id=$1
-   * AND status IN ('created','paused') RETURNING *`.
+   * WORK-032 start-delivery durability: ATOMIC experiment-start claim +
+   * DURABLE DELIVERY INTENT — ONE CTE statement:
    *
-   * The previous startExperiment() was read-check-write: it read the
-   * experiment, checked status ∈ {created, paused} in the application
-   * layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
-   * 'running')`. Under concurrent starts BOTH callers passed the check
-   * (both read 'created'), BOTH wrote 'running', BOTH emitted a
-   * BENCHMARK_STARTED audit, and BOTH enqueued the queued trials —
-   * duplicate auditing + duplicate queue delivery.
+   *   WITH claimed AS (
+   *     UPDATE wfos_benchmark_experiments
+   *        SET status = 'running', started_at = COALESCE(started_at, NOW())
+   *      WHERE id = $1 AND status IN ('created', 'paused')
+   *      RETURNING *
+   *   ), delivery AS (
+   *     INSERT INTO wfos_benchmark_start_deliveries (experiment_id, project_id)
+   *     SELECT id, project_id FROM claimed RETURNING id, experiment_id
+   *   ), obligations AS (
+   *     INSERT INTO wfos_benchmark_start_trial_deliveries (start_delivery_id, trial_id)
+   *     SELECT d.id, t.id FROM delivery d
+   *       JOIN wfos_benchmark_trials t
+   *         ON t.experiment_id = d.experiment_id AND t.lifecycle_phase = 'queued'
+   *     ON CONFLICT (start_delivery_id, trial_id) DO NOTHING
+   *   )
+   *   SELECT c.*, d.id AS start_delivery_id FROM claimed c, delivery d
    *
-   * This CAS makes the transition + its side effects exactly-once: only
-   * the caller that receives a RETURNING row won the created|paused →
-   * running transition and may perform the side effects (audit +
-   * enqueue). The loser (null) no-ops — the caller re-reads + throws the
-   * invalid-state error, mirroring the sequential double-start
-   * semantics. This is the same CAS pattern as claimTrialForSetup /
-   * claimTerminal / claimExperimentCompletion.
+   * The state transition and the durable delivery record are INSEPARABLE
+   * (the reviewer's requirement: "The repository should own the atomic
+   * state transition and durable delivery record"). A crash after this
+   * statement leaves a recoverable, replayable start: the delivery row +
+   * its per-trial obligations persist, and the worker/read layers replay
+   * the incomplete ones. The CAS loser (null) gets NO second start
+   * obligation. A pause → re-start is a NEW logical start (a NEW delivery
+   * row + NEW obligations for still-queued trials).
    */
-  claimExperimentStart(id: string): Promise<BenchmarkExperiment | null>;
+  claimExperimentStart(id: string): Promise<ClaimedExperimentStart | null>;
+
+  /**
+   * WORK-032 start-delivery durability: every start-delivery for the
+   * experiment whose completion marker is unset — the replay work list.
+   * A crash at ANY point leaves completed_at NULL; replaying a fully
+   * delivered-but-unmarked row is a safe no-op.
+   */
+  listIncompleteStartDeliveries(experimentId: string): Promise<BenchmarkStartDelivery[]>;
+
+  /**
+   * WORK-032 start-delivery durability: the EXACTLY-ONCE BENCHMARK_STARTED
+   * audit write. ONE atomic CTE statement:
+   *
+   *   WITH flag AS (
+   *     UPDATE wfos_benchmark_start_deliveries
+   *        SET audit_delivered = TRUE, audit_delivered_at = NOW()
+   *      WHERE id = $1 AND audit_delivered = FALSE
+   *      RETURNING *
+   *   ), audit AS (
+   *     INSERT INTO wfos_audit_events (id, project_id, event_type, actor,
+   *       source, resource_type, resource_id, metadata)
+   *     SELECT f.id, f.project_id, 'BENCHMARK_STARTED', 'system',
+   *       'benchmark-service', 'benchmark_experiment', f.experiment_id,
+   *       jsonb_build_object('startDeliveryId', f.id)
+   *       FROM flag f
+   *     ON CONFLICT (id) DO NOTHING
+   *   )
+   *   SELECT * FROM flag
+   *
+   * The audit event's id is DETERMINISTIC (the delivery id), so the
+   * INSERT can never duplicate; the flag-CAS means only ONE concurrent
+   * caller performs the write; and both happen atomically (the flag is
+   * never set without the audit row existing). Returns the flag row when
+   * THIS call wrote the audit, null when it was already delivered.
+   */
+  deliverStartAudit(deliveryId: string): Promise<BenchmarkStartDelivery | null>;
+
+  /**
+   * WORK-032 start-delivery durability: the undelivered enqueue
+   * obligations for one delivery (the per-delivery replay work list).
+   */
+  listPendingStartTrialObligations(deliveryId: string): Promise<BenchmarkStartTrialObligation[]>;
+
+  /**
+   * WORK-032 start-delivery durability: mark ONE enqueue obligation as
+   * delivered (CAS delivered FALSE → TRUE). CALLER ORDERING CONTRACT:
+   * enqueue the job FIRST, then mark — a crash between them replays the
+   * job (duplicate delivery, absorbed by the idempotent trial claim),
+   * never a lost delivery.
+   */
+  markStartTrialDelivered(obligationId: string): Promise<BenchmarkStartTrialObligation | null>;
+
+  /**
+   * WORK-032 start-delivery durability: best-effort completion marker —
+   * set when the audit is delivered AND no undelivered obligation
+   * remains. Idempotent; not load-bearing (the per-obligation flags are).
+   */
+  completeStartDeliveryIfDone(deliveryId: string): Promise<BenchmarkStartDelivery | null>;
   /**
    * PR #36 review fix #2 + #3 + #4: ATOMIC experiment-completion RESERVATION
    * (phase 1 of the two-phase completion protocol). Compare-and-swap:
@@ -406,6 +472,54 @@ export interface BenchmarkExperimentInsert {
   readonly status: BenchmarkExperiment['status'];
   readonly randomizationSeed: string | null;
   readonly repetitions: number;
+}
+
+// --- WORK-032 start-delivery durability (the transactional outbox) ---
+
+/**
+ * WORK-032 start-delivery durability: the result of winning the atomic
+ * experiment-start claim — the claimed experiment row PLUS the id of the
+ * durable start-delivery (outbox) record created in the SAME statement.
+ * The winner drives the replayable delivery (audit + trial enqueues)
+ * through the service's replayStartDeliveries using the delivery id.
+ */
+export interface ClaimedExperimentStart {
+  readonly experiment: BenchmarkExperiment;
+  readonly startDeliveryId: string;
+}
+
+/**
+ * WORK-032 start-delivery durability: ONE durable start-delivery (outbox)
+ * record per logical start (per successful claimExperimentStart win). The
+ * repository creates it atomically with the created|paused → running CAS;
+ * the delivery layers replay its incomplete obligations.
+ */
+export interface BenchmarkStartDelivery {
+  readonly id: string;
+  readonly experimentId: string;
+  readonly projectId: string;
+  /** Exactly-one BENCHMARK_STARTED audit per logical start (deterministic audit id = the delivery id). */
+  readonly auditDelivered: boolean;
+  readonly auditDeliveredAt: Date | null;
+  readonly createdAt: Date;
+  /** Best-effort completion marker (audit delivered AND all obligations delivered). */
+  readonly completedAt: Date | null;
+}
+
+/**
+ * WORK-032 start-delivery durability: ONE durable enqueue obligation per
+ * (logical start × trial queued at claim time). The claim-time snapshot
+ * — the obligation set is frozen at claim time regardless of later phase
+ * advances. UNIQUE (start_delivery_id, trial_id): repeated replay of the
+ * same delivery never creates a second obligation for a trial.
+ */
+export interface BenchmarkStartTrialObligation {
+  readonly id: string;
+  readonly startDeliveryId: string;
+  readonly trialId: string;
+  readonly delivered: boolean;
+  readonly deliveredAt: Date | null;
+  readonly createdAt: Date;
 }
 
 export interface BenchmarkTrialInsert {

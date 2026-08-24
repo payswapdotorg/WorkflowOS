@@ -32,6 +32,9 @@ import type {
   BenchmarkTrialMetricsInsert,
   BenchmarkReviewFindingInsert,
   BenchmarkIntegrityInsert,
+  ClaimedExperimentStart,
+  BenchmarkStartDelivery,
+  BenchmarkStartTrialObligation,
 } from './benchmark.types.js';
 
 interface Row {
@@ -218,6 +221,35 @@ function toIntegrity(r: Row): BenchmarkIntegrityRecord {
   };
 }
 
+function toDate(v: unknown): Date {
+  return v instanceof Date ? v : new Date(String(v));
+}
+
+/** WORK-032 start-delivery durability: map a start-delivery (outbox) row. */
+function toStartDelivery(r: Row): BenchmarkStartDelivery {
+  return {
+    id: String(r.id),
+    experimentId: String(r.experiment_id),
+    projectId: String(r.project_id),
+    auditDelivered: Boolean(r.audit_delivered),
+    auditDeliveredAt: r.audit_delivered_at === null || r.audit_delivered_at === undefined ? null : toDate(r.audit_delivered_at),
+    createdAt: toDate(r.created_at),
+    completedAt: r.completed_at === null || r.completed_at === undefined ? null : toDate(r.completed_at),
+  };
+}
+
+/** WORK-032 start-delivery durability: map a trial enqueue-obligation row. */
+function toStartTrialObligation(r: Row): BenchmarkStartTrialObligation {
+  return {
+    id: String(r.id),
+    startDeliveryId: String(r.start_delivery_id),
+    trialId: String(r.trial_id),
+    delivered: Boolean(r.delivered),
+    deliveredAt: r.delivered_at === null || r.delivered_at === undefined ? null : toDate(r.delivered_at),
+    createdAt: toDate(r.created_at),
+  };
+}
+
 export class PgBenchmarkRepository implements BenchmarkRepository {
   constructor(
     private readonly db: DatabaseClient,
@@ -341,41 +373,182 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
-  async claimExperimentStart(id: string): Promise<BenchmarkExperiment | null> {
-    // PR #35 review fix (control-plane concurrency): ATOMIC experiment-start
-    // claim. Compare-and-swap: `UPDATE wfos_benchmark_experiments SET
-    // status='running', started_at=COALESCE(started_at, NOW()) WHERE id=$1
-    // AND status IN ('created','paused') RETURNING *`.
+  async claimExperimentStart(id: string): Promise<ClaimedExperimentStart | null> {
+    // WORK-032 start-delivery durability: ATOMIC experiment-start claim +
+    // DURABLE DELIVERY INTENT — ONE statement (a CTE chain), so the state
+    // transition and its delivery record are INSEPARABLE:
     //
-    // The previous startExperiment() was read-check-write: it read the
-    // experiment, checked status ∈ {created, paused} in the application
-    // layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
-    // 'running')`. Under concurrent starts, BOTH callers passed the
-    // application-layer check (both read 'created'), BOTH wrote 'running',
-    // BOTH emitted a BENCHMARK_STARTED audit, and BOTH enqueued the queued
-    // trials — duplicate auditing + duplicate queue delivery.
+    //   claimed      — the CAS: created|paused → running (RETURNING *)
+    //   delivery     — the intent record (one row per logical start,
+    //                  inserted only if the CAS won)
+    //   obligations  — the claim-time snapshot of the enqueue obligations
+    //                  (one row per trial with lifecycle_phase='queued')
     //
-    // This CAS makes the transition + its side effects exactly-once: only
-    // the caller that receives a RETURNING row won the created|paused →
-    // running transition and may perform the side effects (audit +
-    // enqueue). The loser (null) no-ops — the experiment is already
-    // 'running' (or in any other non-startable state), so the caller
-    // re-reads + throws the invalid-state error, mirroring the sequential
-    // double-start semantics.
+    // The PR #35 review found the follow-up side effects (BENCHMARK_STARTED
+    // audit + trial enqueues) were in-memory intent: a crash after the CAS
+    // left the experiment 'running' with no audit and only some (or zero)
+    // jobs delivered. The repository now owns the transition AND the intent
+    // (the reviewer's requirement: "The repository should own the atomic
+    // state transition and durable delivery record"), and the worker/read
+    // layers replay the incomplete obligations (see replayStartDeliveries
+    // in the service — NO polling, NO second execution engine, §34).
     //
     // `started_at = COALESCE(started_at, NOW())` preserves the prior
     // semantics: a first start stamps NOW(); a RE-start after pause keeps
-    // the original started_at (the experiment's overall start time, not
-    // the resume time).
-    const { rows } = await this.db.query<Row>(
-      `UPDATE wfos_benchmark_experiments
-         SET status = 'running',
-             started_at = COALESCE(started_at, NOW())
-       WHERE id = $1 AND status IN ('created', 'paused')
-       RETURNING *`,
+    // the original started_at. A pause → re-start is a NEW logical start
+    // (a NEW delivery row + NEW obligations for still-queued trials).
+    //
+    // Postgres CTE semantics: every data-modifying CTE executes exactly
+    // once; `delivery` reads `claimed`'s RETURNING output, `obligations`
+    // reads `delivery`'s — all under the statement's single atomic commit.
+    // If the CAS loses (no `claimed` row), nothing is inserted and the
+    // query returns zero rows → null (no second start obligation).
+    const { rows } = await this.db.query<Row & { start_delivery_id: string }>(
+      `WITH claimed AS (
+         UPDATE wfos_benchmark_experiments
+            SET status = 'running',
+                started_at = COALESCE(started_at, NOW())
+          WHERE id = $1 AND status IN ('created', 'paused')
+          RETURNING *
+       ), delivery AS (
+         INSERT INTO wfos_benchmark_start_deliveries (experiment_id, project_id)
+         SELECT id, project_id FROM claimed
+         RETURNING id, experiment_id
+       ), obligations AS (
+         INSERT INTO wfos_benchmark_start_trial_deliveries (start_delivery_id, trial_id)
+         SELECT d.id, t.id
+           FROM delivery d
+           JOIN wfos_benchmark_trials t
+             ON t.experiment_id = d.experiment_id AND t.lifecycle_phase = 'queued'
+         ON CONFLICT (start_delivery_id, trial_id) DO NOTHING
+       )
+       SELECT c.*, d.id AS start_delivery_id
+         FROM claimed c, delivery d`,
       [id],
     );
-    return rows[0] ? toExperiment(rows[0]) : null;
+    if (!rows[0]) return null;
+    return { experiment: toExperiment(rows[0]), startDeliveryId: rows[0].start_delivery_id };
+  }
+
+  async listIncompleteStartDeliveries(experimentId: string): Promise<BenchmarkStartDelivery[]> {
+    // WORK-032 start-delivery durability: the replay work list — every
+    // delivery for this experiment whose completion marker is unset. A
+    // crash at ANY point (after CAS / after audit / mid-enqueue / even
+    // between the last obligation mark and the completion marker) leaves
+    // completed_at NULL, so the next touch replays it. Replaying a fully
+    // delivered-but-unmarked row is a safe no-op (audit flag already set,
+    // no pending obligations → just sets the marker).
+    const { rows } = await this.db.query<Row>(
+      `SELECT * FROM wfos_benchmark_start_deliveries
+        WHERE experiment_id = $1 AND completed_at IS NULL
+        ORDER BY created_at, id`,
+      [experimentId],
+    );
+    return rows.map(toStartDelivery);
+  }
+
+  async deliverStartAudit(deliveryId: string): Promise<BenchmarkStartDelivery | null> {
+    // WORK-032 start-delivery durability: the EXACTLY-ONCE BENCHMARK_STARTED
+    // audit write — ONE atomic statement (CTE):
+    //
+    //   flag  — CAS: audit_delivered FALSE → TRUE (only ONE concurrent
+    //           caller receives a row — the audit-write claim)
+    //   audit — INSERT INTO wfos_audit_events with the DETERMINISTIC id =
+    //           the delivery id, ON CONFLICT (id) DO NOTHING
+    //
+    // Because both run in one statement, the flag is NEVER set without the
+    // audit row existing, and the audit row can NEVER be duplicated (the
+    // deterministic id + ON CONFLICT absorb even the pathological
+    // flag-was-reset case). A concurrent replay loser gets no flag row →
+    // no insert. A crash mid-statement rolls back BOTH (statement
+    // atomicity) → replay retries cleanly.
+    //
+    // The INSERT mirrors the audit service's write path (the same columns
+    // the existing auditService.write call for BENCHMARK_STARTED sets:
+    // organization_id NULL, project_id, event_type, actor 'system', source
+    // 'benchmark-service', resource_type 'benchmark_experiment',
+    // resource_id = experiment). The metadata gains startDeliveryId for
+    // provenance. Secret-scrubbing is bypassed (repo-level write) — the
+    // metadata is a server-generated UUID, not user input, so there is
+    // nothing to scrub.
+    const { rows } = await this.db.query<Row>(
+      `WITH flag AS (
+         UPDATE wfos_benchmark_start_deliveries
+            SET audit_delivered = TRUE,
+                audit_delivered_at = NOW()
+          WHERE id = $1 AND audit_delivered = FALSE
+          RETURNING *
+       ), audit AS (
+         INSERT INTO wfos_audit_events
+           (id, project_id, event_type, actor, source,
+            resource_type, resource_id, metadata)
+         SELECT f.id, f.project_id, 'BENCHMARK_STARTED', 'system',
+                'benchmark-service', 'benchmark_experiment', f.experiment_id,
+                jsonb_build_object('startDeliveryId', f.id)
+           FROM flag f
+         ON CONFLICT (id) DO NOTHING
+       )
+       SELECT * FROM flag`,
+      [deliveryId],
+    );
+    return rows[0] ? toStartDelivery(rows[0]) : null;
+  }
+
+  async listPendingStartTrialObligations(deliveryId: string): Promise<BenchmarkStartTrialObligation[]> {
+    // WORK-032 start-delivery durability: the undelivered enqueue
+    // obligations for one delivery (the per-delivery replay work list).
+    const { rows } = await this.db.query<Row>(
+      `SELECT id, start_delivery_id, trial_id, delivered, delivered_at, created_at
+         FROM wfos_benchmark_start_trial_deliveries
+        WHERE start_delivery_id = $1 AND delivered = FALSE
+        ORDER BY created_at, id`,
+      [deliveryId],
+    );
+    return rows.map(toStartTrialObligation);
+  }
+
+  async markStartTrialDelivered(obligationId: string): Promise<BenchmarkStartTrialObligation | null> {
+    // WORK-032 start-delivery durability: mark ONE enqueue obligation as
+    // delivered. CAS (delivered FALSE → TRUE): a concurrent replay that
+    // both enqueued the job gets exactly one successful mark — the other
+    // sees null (harmless; the duplicate job delivery is absorbed by the
+    // trial claim CAS from PR #36, which makes runTrialJob idempotent).
+    //
+    // ORDERING CONTRACT (enqueue-then-mark, set by the caller): the job is
+    // enqueued BEFORE this mark. A crash between them replays the job —
+    // duplicate DELIVERY, never a LOST delivery. This is the deliberate
+    // at-least-once + idempotent-consumer pairing.
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_start_trial_deliveries
+          SET delivered = TRUE, delivered_at = NOW()
+        WHERE id = $1 AND delivered = FALSE
+        RETURNING id, start_delivery_id, trial_id, delivered, delivered_at, created_at`,
+      [obligationId],
+    );
+    return rows[0] ? toStartTrialObligation(rows[0]) : null;
+  }
+
+  async completeStartDeliveryIfDone(deliveryId: string): Promise<BenchmarkStartDelivery | null> {
+    // WORK-032 start-delivery durability: the best-effort completion marker
+    // — set only when the audit is delivered AND no undelivered trial
+    // obligation remains. Idempotent (guarded on completed_at IS NULL).
+    // Not load-bearing for correctness (the per-obligation flags are); it
+    // keeps the incomplete-delivery replay lookup a single partial-index
+    // scan and makes "fully delivered" observable for operators.
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_start_deliveries
+          SET completed_at = NOW()
+        WHERE id = $1
+          AND completed_at IS NULL
+          AND audit_delivered = TRUE
+          AND NOT EXISTS (
+            SELECT 1 FROM wfos_benchmark_start_trial_deliveries
+             WHERE start_delivery_id = $1 AND delivered = FALSE
+          )
+        RETURNING *`,
+      [deliveryId],
+    );
+    return rows[0] ? toStartDelivery(rows[0]) : null;
   }
 
   async claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {

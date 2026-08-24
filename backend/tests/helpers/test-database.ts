@@ -154,6 +154,8 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
       TRUNCATE wfos_benchmark_review_findings RESTART IDENTITY CASCADE;
       TRUNCATE wfos_benchmark_trial_metrics RESTART IDENTITY CASCADE;
       TRUNCATE wfos_benchmark_trials RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_start_trial_deliveries RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_start_deliveries RESTART IDENTITY CASCADE;
       TRUNCATE wfos_benchmark_integrity RESTART IDENTITY CASCADE;
       TRUNCATE wfos_benchmark_experiments RESTART IDENTITY CASCADE;
       TRUNCATE wfos_benchmark_task_snapshots RESTART IDENTITY CASCADE;

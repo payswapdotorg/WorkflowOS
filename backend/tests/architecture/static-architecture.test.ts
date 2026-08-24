@@ -6438,9 +6438,15 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // PR #35 review fix (control-plane boundary): the route ordering MUST
     // be (1) PURE getExperiment read (resolves projectId), (2) 404, (3)
     // requireProjectAuthorization, (4) ONLY THEN the mutating
-    // recoverExperimentIfStale hook (gated on status === 'finalizing').
-    // The reviewer's required invariant: "A caller must be authorized
-    // before any mutation, even recovery."
+    // recoverExperimentIfStale hook. The reviewer's required invariant:
+    // "A caller must be authorized before any mutation, even recovery."
+    //
+    // WORK-032 start-delivery durability widened the hook: it is now
+    // called UNCONDITIONALLY post-authorization (recoverExperimentIfStale
+    // internally replays incomplete start deliveries AND recovers a stuck
+    // `finalizing` reservation, no-op-ing when there is nothing to
+    // recover). The route itself stays a pure-read-then-authorize-then-
+    // recover shape — the status gating lives INSIDE the service method.
     const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'benchmark.route.ts'), 'utf8');
     const fn = routeSrc.match(/app\.get\('\/benchmarks\/:id'[\s\S]*?\n  \}\);/);
     expect(fn, 'GET /benchmarks/:id route must exist').not.toBeNull();
@@ -6457,64 +6463,85 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // ORDER: pure read → authorization → recovery.
     expect(pureReadIdx).toBeLessThan(authzIdx);
     expect(authzIdx).toBeLessThan(recoveryIdx);
-    // The recovery hook MUST be gated on the stuck status (only a
-    // `finalizing` experiment triggers recovery — a normal read is
-    // untouched).
-    expect(body).toMatch(/status === 'finalizing'/);
+    // The recovery call MUST be UNCONDITIONAL (not gated on a status the
+    // route inspects) — recoverExperimentIfStale owns the gating for BOTH
+    // recovery kinds (incomplete start deliveries + stuck finalizing). A
+    // route-level status ternary would leave running experiments with
+    // incomplete start deliveries unrecoverable via the read path.
+    expect(body).toMatch(/const recovered = await benchmarkService\.recoverExperimentIfStale\(id\)/);
+    expect(body).not.toMatch(/status === 'finalizing'/);
     // MUST return the recovered row (the caller sees the post-recovery
-    // terminal state, not the stale `finalizing` row).
-    expect(body).toMatch(/send\(\{ experiment: recovered \}\)/);
+    // state, not the stale pre-recovery row).
+    expect(body).toMatch(/experiment: recovered \?\? experiment/);
   });
 
-  it('benchmark claimExperimentStart is an ATOMIC CAS (created|paused → running, RETURNING row = the only winner)', () => {
-    // PR #35 review fix (start concurrency): the previous startExperiment
-    // was read-check-write — both concurrent starters passed the
-    // application-layer status check, both wrote 'running', both audited
-    // BENCHMARK_STARTED, and both enqueued the trials (duplicate auditing
-    // + duplicate queue delivery). The fix is a compare-and-swap owned by
-    // the persistence layer, the same pattern as claimTrialForSetup /
-    // claimTerminal / claimExperimentCompletion.
+  it('benchmark claimExperimentStart is an ATOMIC CAS + DURABLE DELIVERY INTENT (ONE statement: created|paused → running + outbox rows)', () => {
+    // WORK-032 start-delivery durability: the PR #35 CAS (created|paused →
+    // running) is now ONE CTE statement that ALSO creates the durable
+    // delivery intent — a start-delivery (outbox) row + one enqueue
+    // obligation per trial queued at claim time. The reviewer's
+    // requirement: "The repository should own the atomic state transition
+    // and durable delivery record" — the transition and the intent are
+    // INSEPARABLE (a crash after the statement leaves a recoverable,
+    // replayable start; the CAS loser gets NO second start obligation).
     const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
     const fn = repoSrc.match(/async claimExperimentStart[\s\S]*?\n  \}/);
     expect(fn, 'claimExperimentStart must exist').not.toBeNull();
     const body = fn![0];
-    // MUST be guarded on the startable states (the CAS predicate — NOT an
-    // unconditional UPDATE).
+    // ONE statement — a CTE chain (no separate INSERT the crash can fall
+    // between).
+    expect(body).toMatch(/WITH claimed AS \(/);
+    // The CAS predicate MUST be guarded on the startable states.
     expect(body).toMatch(/WHERE id = \$1 AND status IN \('created', 'paused'\)/);
     // MUST set status='running' + preserve the first started_at
     // (COALESCE — a re-start after pause keeps the original start time).
     expect(body).toMatch(/SET status = 'running'/);
     expect(body).toMatch(/started_at = COALESCE\(started_at, NOW\(\)\)/);
-    // MUST return the winner's row (RETURNING * — only the winner may
-    // perform the side effects).
+    // The SAME statement MUST create the delivery intent row...
+    expect(body).toMatch(/INSERT INTO wfos_benchmark_start_deliveries \(experiment_id, project_id\)/);
+    // ...AND the per-trial enqueue obligations (the claim-time snapshot of
+    // queued trials).
+    expect(body).toMatch(/INSERT INTO wfos_benchmark_start_trial_deliveries \(start_delivery_id, trial_id\)/);
+    expect(body).toMatch(/t\.lifecycle_phase = 'queued'/);
+    // Only the CAS winner's row is returned (the loser → zero rows →
+    // null → no obligation created).
     expect(body).toMatch(/RETURNING \*/);
-    // The repository interface MUST require it (the type system enforces
-    // the CAS — callers cannot bypass it with updateExperimentStatus).
+    // The repository interface MUST require the new return shape (the
+    // claimed experiment + the delivery id the winner drives the replay
+    // with).
     const typesSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark.types.ts'), 'utf8');
-    expect(typesSrc).toMatch(/claimExperimentStart\(id: string\): Promise<BenchmarkExperiment \| null>/);
+    expect(typesSrc).toMatch(/claimExperimentStart\(id: string\): Promise<ClaimedExperimentStart \| null>/);
   });
 
-  it('benchmark startExperiment performs the audit + enqueue side effects ONLY AFTER winning the start CAS (exactly-once under concurrency)', () => {
-    // PR #35 review fix (start concurrency): only the CAS winner may
-    // emit BENCHMARK_STARTED + enqueue the queued trials. The loser
-    // (claim returns null) re-reads + throws the invalid-state error
-    // (mirroring the sequential double-start semantics) — it MUST NOT
-    // write any audit + MUST NOT enqueue anything.
+  it('benchmark startExperiment delegates delivery to the REPLAYABLE path (NO ad-hoc inline side effects after the claim)', () => {
+    // WORK-032 start-delivery durability: startExperiment performs NO
+    // ad-hoc side effects of its own — the audit write + the trial
+    // enqueues live ONLY in the durable replay path
+    // (replayStartDeliveries → deliverStartAudit / enqueue-then-mark),
+    // shared by the happy path AND every recovery touch. This is what
+    // makes a crash between the claim and full delivery recoverable: there
+    // is no in-memory delivery intent left to lose.
+    //
+    // The PR #35 invariant still holds: only the CAS winner reaches the
+    // delivery path; the loser re-reads + throws the invalid-state error
+    // (no side effects).
     const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
     const fn = serviceSrc.match(/async startExperiment[\s\S]*?\n  \}/);
     expect(fn, 'startExperiment must exist').not.toBeNull();
-    // Strip comments — the ordering assertions are about the CODE.
+    // Strip comments — the assertions are about the CODE.
     const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
     const claimIdx = body.indexOf('claimExperimentStart(experimentId)');
-    const auditIdx = body.indexOf("'BENCHMARK_STARTED'");
-    const enqueueIdx = body.indexOf("queue.enqueue('benchmark.trial'");
+    const replayIdx = body.indexOf('replayStartDeliveries(experimentId)');
     expect(claimIdx).toBeGreaterThanOrEqual(0);
-    expect(auditIdx).toBeGreaterThanOrEqual(0);
-    expect(enqueueIdx).toBeGreaterThanOrEqual(0);
-    // ORDER: the CAS claim MUST precede BOTH side effects.
-    expect(claimIdx).toBeLessThan(auditIdx);
-    expect(claimIdx).toBeLessThan(enqueueIdx);
-    // The loser MUST throw the invalid-state error (no side effects).
+    expect(replayIdx).toBeGreaterThanOrEqual(0);
+    // ORDER: the atomic claim → the replayable delivery.
+    expect(claimIdx).toBeLessThan(replayIdx);
+    // NO ad-hoc inline side effects — the audit write + enqueue live ONLY
+    // in the replay path (a second copy would reintroduce the crash hole).
+    expect(body).not.toMatch(/auditService\.write/);
+    expect(body).not.toMatch(/queue\.enqueue/);
+    // The loser MUST throw the invalid-state error (no side effects, no
+    // second start obligation).
     expect(body).toMatch(/benchmark-experiment-invalid-state/);
     // MUST NOT use the unconditional status update for the start
     // transition (the CAS owns created|paused → running).
@@ -6543,5 +6570,140 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(src).toMatch(/BENCHMARK_STARTED/);
     expect(src).toMatch(/trialJobEnqueues - enqueuesBefore\)\.toBe\(1\)/);
     expect(src).toMatch(/toBe\('running'\)/);
+  });
+
+  it('benchmark migration 0031 adds the durable start-delivery outbox (transactional outbox for experiment start)', () => {
+    // WORK-032 start-delivery durability: the start's side effects
+    // (BENCHMARK_STARTED audit + benchmark.trial enqueues) were in-memory
+    // intent — lost on any crash after the CAS. Migration 0031 adds the
+    // durable intent: one delivery row per logical start + one enqueue
+    // obligation per (logical start × trial queued at claim time). The
+    // UNIQUE constraint is the "one logical enqueue obligation per trial"
+    // invariant, mechanically enforced.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0031_benchmark_start_delivery_durability.sql');
+    expect(existsSync(migrationPath), '0031_benchmark_start_delivery_durability.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The outbox tables.
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_benchmark_start_deliveries/);
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_benchmark_start_trial_deliveries/);
+    // The audit-obligation flag (flipped atomically WITH the audit INSERT
+    // by deliverStartAudit).
+    expect(src).toMatch(/audit_delivered/);
+    // ONE logical enqueue obligation per trial per logical start.
+    expect(src).toMatch(/UNIQUE \(start_delivery_id, trial_id\)/);
+    // The replay lookups are partial-index scans (incomplete deliveries +
+    // pending obligations).
+    expect(src).toMatch(/WHERE completed_at IS NULL/);
+    expect(src).toMatch(/WHERE delivered = FALSE/);
+    // NO polling/scheduler machinery in the migration (§34 — the replay is
+    // touch-driven).
+    expect(src).not.toMatch(/setInterval|set_timeout|pg_cron/i);
+    // The test-DB reset must truncate the outbox tables (child first —
+    // CASCADE handles the FK, but the established convention is explicit).
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_start_trial_deliveries/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_start_deliveries/);
+  });
+
+  it('benchmark deliverStartAudit is an ATOMIC exactly-once write (flag-CAS + deterministic-id audit INSERT in ONE statement)', () => {
+    // WORK-032 start-delivery durability: the BENCHMARK_STARTED audit must
+    // be written EXACTLY ONCE per logical start, even under concurrent
+    // replays + crashes. deliverStartAudit achieves this with ONE CTE
+    // statement:
+    //   * the flag-CAS (audit_delivered FALSE → TRUE) — only ONE concurrent
+    //     caller receives a row (the audit-write claim);
+    //   * the INSERT INTO wfos_audit_events with the DETERMINISTIC id (the
+    //     delivery id) ON CONFLICT (id) DO NOTHING — the row can never be
+    //     duplicated;
+    //   * both in one statement — the flag is never set without the audit
+    //     row existing (a crash rolls back both).
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async deliverStartAudit[\s\S]*?\n  \}/);
+    expect(fn, 'deliverStartAudit must exist').not.toBeNull();
+    const body = fn![0];
+    // ONE statement (CTE chain — no separate flag update + insert).
+    expect(body).toMatch(/WITH flag AS \(/);
+    // The flag-CAS.
+    expect(body).toMatch(/WHERE id = \$1 AND audit_delivered = FALSE/);
+    expect(body).toMatch(/SET audit_delivered = TRUE/);
+    // The deterministic-id audit INSERT with conflict absorption.
+    expect(body).toMatch(/INSERT INTO wfos_audit_events/);
+    expect(body).toMatch(/ON CONFLICT \(id\) DO NOTHING/);
+    // The audit payload mirrors the previous auditService.write call
+    // (BENCHMARK_STARTED / benchmark_experiment / system / benchmark-service).
+    expect(body).toMatch(/'BENCHMARK_STARTED'/);
+    expect(body).toMatch(/'benchmark_experiment'/);
+    // The id is the DELIVERY id (deterministic — the exactly-once key).
+    expect(body).toMatch(/SELECT f\.id, f\.project_id, 'BENCHMARK_STARTED'/);
+  });
+
+  it('benchmark startExperiment owns NO retry loop or scheduler (start-delivery replay is touch-driven, single-pass — §34)', () => {
+    // WORK-032 start-delivery durability, the reviewer-required static
+    // invariant: startExperiment (and the replay path it shares) must NOT
+    // become an ad-hoc retry loop / second scheduler. The replay is a
+    // SINGLE PASS over durable obligation rows, invoked ONLY by existing
+    // touch points — never a timer, never a self-scheduling loop, never a
+    // new queue consumer.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const startFn = serviceSrc.match(/async startExperiment[\s\S]*?\n  \}/);
+    expect(startFn, 'startExperiment must exist').not.toBeNull();
+    const replayFn = serviceSrc.match(/async replayStartDeliveries[\s\S]*?\n  \}/);
+    expect(replayFn, 'replayStartDeliveries must exist').not.toBeNull();
+    for (const [name, fn] of [['startExperiment', startFn], ['replayStartDeliveries', replayFn]] as const) {
+      // Drop the declaration signature line — the recursion checks target
+      // CALLS, not the method's own signature.
+      const code = fn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // NO timers/schedulers.
+      expect(code, `${name} must not schedule`).not.toMatch(/setInterval|setTimeout|setImmediate/);
+      // NO unbounded retry loops.
+      expect(code, `${name} must not spin`).not.toMatch(/while\s*\(\s*true\s*\)/);
+    }
+    // NO self-recursion: neither method may re-invoke ITSELF (note:
+    // startExperiment DELEGATING to replayStartDeliveries is the design —
+    // the happy path shares the replay code path; the forbidden shape is a
+    // method scheduling/re-entering itself, e.g. replay → replay).
+    const startCode = startFn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(startCode).not.toMatch(/startExperiment\(/);
+    const replayCodeStripped = replayFn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(replayCodeStripped).not.toMatch(/replayStartDeliveries\(/);
+    expect(replayCodeStripped).not.toMatch(/startExperiment\(/);
+    // The replay is a bounded single pass (for...of over the durable rows).
+    const replayCode = replayFn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(replayCode).toMatch(/for \(const delivery of deliveries\)/);
+    // The ONLY invocation sites of replayStartDeliveries are the existing
+    // touch points: startExperiment (happy path), runTrialJob (worker
+    // touch), recoverExperimentIfStale (post-auth read path). Counting the
+    // call sites (excluding the method's own declaration + interface docs)
+    // keeps the replay touch-driven — a new scheduler would have to add a
+    // site, which this count makes visible in review.
+    const callSites = serviceSrc.split('replayStartDeliveries(').length - 1;
+    // 1 (declaration) + 3 (startExperiment + runTrialJob + recoverExperimentIfStale)
+    expect(callSites).toBe(4);
+    // NO WorkerHost / queue-consumer construction in the benchmark domain
+    // (the replay enqueues onto the EXISTING queue; it never consumes).
+    const benchmarkFiles = readBenchmarkFiles();
+    for (const f of benchmarkFiles) {
+      expect(f.src, `${f.path} must not construct a worker`).not.toMatch(/new WorkerHost/);
+    }
+  });
+
+  it('benchmark start-delivery durability regression tests exist (the six crash-matrix scenarios)', () => {
+    // WORK-032 start-delivery durability: the reviewer required regression
+    // coverage for the full crash matrix — a start must be recoverable
+    // after ANY crash point, + repeated delivery must produce one logical
+    // start / one audit / one enqueue obligation per trial.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'start-delivery-durability.regression.test.ts');
+    expect(existsSync(testPath), 'start-delivery-durability.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    // The six scenarios, by their test titles.
+    expect(src).toMatch(/concurrent start → exactly one winner/);
+    expect(src).toMatch(/crash after CAS → recovery resumes delivery/);
+    expect(src).toMatch(/crash after audit → no duplicate audit/);
+    expect(src).toMatch(/crash during trial enqueue → missing jobs are replayed/);
+    expect(src).toMatch(/replay after complete delivery → zero duplicate logical deliveries/);
+    expect(src).toMatch(/experiment already running → no second start obligation/);
+    // The tests must be built on the no-worker stack (deterministic
+    // enqueue counting).
+    expect(src).toMatch(/startWorker: false/);
   });
 });

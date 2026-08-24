@@ -369,6 +369,24 @@ export interface BenchmarkService {
   createExperiment(input: CreateBenchmarkExperimentInput): Promise<BenchmarkExperiment>;
   /** §45: Start an experiment (runs queued trials). */
   startExperiment(experimentId: string): Promise<BenchmarkExperiment>;
+  /**
+   * WORK-032 start-delivery durability: REPLAY the incomplete durable
+   * start obligations for an experiment — the single delivery code path
+   * shared by the happy path (startExperiment, right after the atomic
+   * claim) and every recovery touch (runTrialJob worker touches + the
+   * post-authorization recoverExperimentIfStale read path).
+   *
+   * Per incomplete delivery: the exactly-once BENCHMARK_STARTED audit
+   * (atomic flag-CAS + deterministic-id INSERT), then each undelivered
+   * trial obligation (enqueue the `benchmark.trial` job, then mark it
+   * delivered — at-least-once job delivery + the idempotent trial claim
+   * from PR #36), then the best-effort completion marker.
+   *
+   * This is a SINGLE PASS over durable obligation rows — NOT a retry
+   * loop, NOT a scheduler, NOT a poller (§34). It never schedules
+   * itself; it is only invoked by the existing touch points.
+   */
+  replayStartDeliveries(experimentId: string): Promise<void>;
   /** §45: Pause a running experiment. */
   pauseExperiment(experimentId: string): Promise<BenchmarkExperiment>;
   /** §45: Cancel an experiment. */

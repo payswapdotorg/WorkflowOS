@@ -197,66 +197,107 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   async startExperiment(experimentId: string): Promise<BenchmarkExperiment> {
     const experiment = await this.deps.repository.getExperiment(experimentId);
     if (!experiment) throw new Error('benchmark-experiment-not-found');
-    // PR #35 review fix (control-plane concurrency): ATOMIC START CLAIM.
-    // The previous implementation was read-check-write: it read the
-    // experiment, checked status ∈ {created, paused} in the application
-    // layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
-    // 'running')`. Under concurrent starts, BOTH callers passed the check
-    // (both read 'created'), BOTH wrote 'running', BOTH emitted a
-    // BENCHMARK_STARTED audit, and BOTH enqueued the queued trials —
-    // duplicate auditing + duplicate queue delivery (the reviewer's
-    // secondary blocker).
+    // WORK-032 start-delivery durability: the ATOMIC START CLAIM now also
+    // creates the DURABLE DELIVERY INTENT (one CTE statement, owned by the
+    // repository): the created|paused → running CAS + a start-delivery
+    // (outbox) row + one enqueue obligation per trial queued at claim
+    // time. A crash after this statement leaves a RECOVERABLE start —
+    // the obligations persist and are replayed by the existing touch
+    // points (this method's immediate delivery, runTrialJob's worker
+    // touch, and the post-authorization recoverExperimentIfStale read
+    // path). NO polling, NO second execution engine (§34 invariant).
     //
-    // The fix: a compare-and-swap (claimExperimentStart: created|paused →
-    // running). Only the CAS WINNER (the caller that receives a RETURNING
-    // row) performs the side effects — the BENCHMARK_STARTED audit + the
-    // trial enqueues. The loser (null) threw no audit, enqueued nothing,
-    // and re-reads to report the invalid-state error (mirroring the
-    // sequential double-start semantics: starting an already-running
-    // experiment is invalid).
+    // Under concurrent starts, exactly ONE caller wins the CAS (and the
+    // obligation creation with it); the loser (null) creates NO second
+    // start obligation and re-reads to report the invalid-state error —
+    // the sequential double-start semantics.
     const claimed = await this.deps.repository.claimExperimentStart(experimentId);
     if (!claimed) {
       // Lost the start race OR the experiment is in a non-startable
       // state. Re-read for an accurate error message (the winner may have
-      // already advanced it to 'running').
+      // already advanced it to 'running'). Critically, NO new start
+      // obligation exists for this caller — the claim is the only path
+      // that creates one.
       const current = await this.deps.repository.getExperiment(experimentId);
       throw new Error(`benchmark-experiment-invalid-state: ${current?.status ?? 'unknown'}`);
     }
-    // WINNER ONLY: side effects (exactly-once under concurrency).
-    await this.deps.auditService.write({
-      projectId: claimed.projectId,
-      eventType: 'BENCHMARK_STARTED',
-      actor: 'system',
-      source: 'benchmark-service',
-      resourceType: 'benchmark_experiment',
-      resourceId: experimentId,
-      metadata: {},
-    });
-    // PR #35 review fix #4: the benchmark trial lifecycle is EVENT-DRIVEN +
-    // ASYNCHRONOUS. `startExperiment()` enqueues a `benchmark.trial` job per
-    // queued trial and returns IMMEDIATELY (experiment 'running'). The
-    // WorkerHost picks up each job asynchronously and calls
-    // `runTrialJob(trialId)`, which advances the trial to terminal + collects
-    // metrics + checks experiment completion.
-    //
-    // The experiment stays 'running' until EVERY trial is terminal. It is
-    // NEVER marked 'completed' while an external trial is only
-    // 'handoff_ready'/'running' (the core correctness invariant from review
-    // fix #4).
-    const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
-    for (const trial of trials) {
-      // PR #35 follow-up: filter by the explicit phase (queued = not yet
-      // claimed by an orchestrator worker). Equivalent to status='queued'
-      // for freshly created trials, but phase-aware for the rare case of a
-      // re-start after a partial run.
-      if (trial.lifecyclePhase !== 'queued') continue;
-      await this.deps.queue.enqueue('benchmark.trial', { trialId: trial.id });
+    // WINNER ONLY: deliver the durable obligations (exactly one
+    // BENCHMARK_STARTED audit + one benchmark.trial job per obligation)
+    // through the SAME replayable path a recovery touch uses — the happy
+    // path and the crash-recovery path are one code path. Best-effort
+    // here: the obligations are DURABLE, so a delivery failure (e.g. the
+    // queue is briefly down) does NOT fail the start — the next touch
+    // replays them. The start itself succeeded (the claim committed).
+    try {
+      await this.replayStartDeliveries(experimentId);
+    } catch (err) {
+      this.deps.logger.error('benchmark.start-delivery-replay-failed', {
+        experimentId, error: (err as Error).message,
+      });
     }
     // If there are no queued trials (defensive: empty experiment), finalize
     // immediately. Otherwise the worker drives completion.
     await this.checkExperimentCompletion(experimentId);
     const running = await this.deps.repository.getExperiment(experimentId);
-    return running ?? claimed;
+    return running ?? claimed.experiment;
+  }
+
+  /**
+   * WORK-032 start-delivery durability: REPLAY the incomplete start
+   * obligations for an experiment — the single delivery code path shared
+   * by the happy path (startExperiment, right after the claim) and every
+   * recovery touch (runTrialJob worker touches + the post-authorization
+   * recoverExperimentIfStale read path).
+   *
+   * Per incomplete delivery (usually zero or one — a pause → re-start
+   * creates a NEW logical start, and stale pre-pause deliveries replay
+   * harmlessly):
+   *
+   *   1. AUDIT OBLIGATION (exactly-once): deliverStartAudit is ONE atomic
+   *      CTE — the audit_delivered flag-CAS plus the INSERT of the
+   *      BENCHMARK_STARTED audit with a DETERMINISTIC id (the delivery
+   *      id) ON CONFLICT (id) DO NOTHING. Only one concurrent caller
+   *      writes the audit; the flag is never set without the row
+   *      existing; the row can never be duplicated. A crash after the
+   *      audit but before the trial enqueues replays WITHOUT a duplicate
+   *      audit.
+   *
+   *   2. TRIAL OBLIGATIONS (at-least-once delivery + idempotent
+   *      consumer): for each UNDELIVERED obligation, enqueue the
+   *      `benchmark.trial` job FIRST, THEN mark the obligation delivered.
+   *      A crash between enqueue and mark replays the job — a duplicate
+   *      DELIVERY, never a lost one — and duplicate job delivery is
+   *      absorbed by the trial claim CAS from PR #36 (duplicate
+   *      runTrialJob → observe already-advanced state → no side
+   *      effects). One logical enqueue obligation per trial
+   *      (UNIQUE (start_delivery_id, trial_id)); replay never creates a
+   *      second obligation for the same trial.
+   *
+   *   3. COMPLETION MARKER (best-effort): completeStartDeliveryIfDone sets
+   *      completed_at when the audit is delivered and no undelivered
+   *      obligation remains — so the replay lookup is a single
+   *      partial-index scan and a fully-delivered start stops being
+   *      replayed. A crash before the marker leaves the delivery in the
+   *      replay list; replaying it is a no-op that just sets the marker.
+   *
+   * This method is a SINGLE PASS over durable rows — NOT a retry loop,
+   * NOT a scheduler, NOT a poller (§34). It is invoked only by the
+   * existing touch points; it never schedules itself.
+   */
+  async replayStartDeliveries(experimentId: string): Promise<void> {
+    const deliveries = await this.deps.repository.listIncompleteStartDeliveries(experimentId);
+    for (const delivery of deliveries) {
+      // (1) The exactly-once BENCHMARK_STARTED audit.
+      await this.deps.repository.deliverStartAudit(delivery.id);
+      // (2) The per-trial enqueue obligations — enqueue then mark.
+      const pending = await this.deps.repository.listPendingStartTrialObligations(delivery.id);
+      for (const obligation of pending) {
+        await this.deps.queue.enqueue('benchmark.trial', { trialId: obligation.trialId });
+        await this.deps.repository.markStartTrialDelivered(obligation.id);
+      }
+      // (3) The best-effort completion marker.
+      await this.deps.repository.completeStartDeliveryIfDone(delivery.id);
+    }
   }
 
   /**
@@ -275,6 +316,21 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
     if (!trial) {
       this.deps.logger.warn('benchmark.trial.trial-not-found', { trialId });
       return;
+    }
+
+    // WORK-032 start-delivery durability: a worker TOUCHING this experiment
+    // replays any incomplete start obligations (a crash between the start
+    // claim and full delivery is recovered by the very workers that
+    // consume the delivered jobs — event-driven recovery, NO polling, NO
+    // second execution engine, §34). Best-effort: a replay failure must
+    // not break this trial's own processing — the obligations are DURABLE
+    // and the next touch retries them.
+    try {
+      await this.replayStartDeliveries(trial.experimentId);
+    } catch (err) {
+      this.deps.logger.error('benchmark.start-delivery-replay-failed', {
+        experimentId: trial.experimentId, error: (err as Error).message,
+      });
     }
 
     // PR #35 follow-up (idempotency): route by the EXPLICIT persisted phase
@@ -879,6 +935,24 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   async recoverExperimentIfStale(experimentId: string): Promise<BenchmarkExperiment | null> {
     const experiment = await this.deps.repository.getExperiment(experimentId);
     if (!experiment) return null;
+    // WORK-032 start-delivery durability: replay any INCOMPLETE start
+    // deliveries first (an authorized reader discovering a start that
+    // crashed between the claim and full delivery — the audit is written
+    // exactly once + the missing trial jobs are enqueued). This is the
+    // same post-authorization recovery philosophy as the `finalizing`
+    // recovery below: the durable obligation makes the recovery safe +
+    // idempotent, and the read path NEVER mutates pre-authorization (the
+    // route calls this method only AFTER requireProjectAuthorization).
+    // Best-effort: a failure is caught + logged and the remaining
+    // recovery still runs — the obligations stay durable for the next
+    // touch.
+    try {
+      await this.replayStartDeliveries(experimentId);
+    } catch (err) {
+      this.deps.logger.error('benchmark.start-delivery-replay-failed', {
+        experimentId, error: (err as Error).message,
+      });
+    }
     if (experiment.status !== 'finalizing') return experiment;
     // The recovery CAS guards on `finalizing_lease_expires_at < NOW()`, so
     // an ACTIVE worker (lease not yet expired) is never preempted — the CAS
