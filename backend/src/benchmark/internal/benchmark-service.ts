@@ -197,12 +197,34 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   async startExperiment(experimentId: string): Promise<BenchmarkExperiment> {
     const experiment = await this.deps.repository.getExperiment(experimentId);
     if (!experiment) throw new Error('benchmark-experiment-not-found');
-    if (experiment.status !== 'created' && experiment.status !== 'paused') {
-      throw new Error(`benchmark-experiment-invalid-state: ${experiment.status}`);
+    // PR #35 review fix (control-plane concurrency): ATOMIC START CLAIM.
+    // The previous implementation was read-check-write: it read the
+    // experiment, checked status ∈ {created, paused} in the application
+    // layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
+    // 'running')`. Under concurrent starts, BOTH callers passed the check
+    // (both read 'created'), BOTH wrote 'running', BOTH emitted a
+    // BENCHMARK_STARTED audit, and BOTH enqueued the queued trials —
+    // duplicate auditing + duplicate queue delivery (the reviewer's
+    // secondary blocker).
+    //
+    // The fix: a compare-and-swap (claimExperimentStart: created|paused →
+    // running). Only the CAS WINNER (the caller that receives a RETURNING
+    // row) performs the side effects — the BENCHMARK_STARTED audit + the
+    // trial enqueues. The loser (null) threw no audit, enqueued nothing,
+    // and re-reads to report the invalid-state error (mirroring the
+    // sequential double-start semantics: starting an already-running
+    // experiment is invalid).
+    const claimed = await this.deps.repository.claimExperimentStart(experimentId);
+    if (!claimed) {
+      // Lost the start race OR the experiment is in a non-startable
+      // state. Re-read for an accurate error message (the winner may have
+      // already advanced it to 'running').
+      const current = await this.deps.repository.getExperiment(experimentId);
+      throw new Error(`benchmark-experiment-invalid-state: ${current?.status ?? 'unknown'}`);
     }
-    await this.deps.repository.updateExperimentStatus(experimentId, 'running', { startedAt: experiment.startedAt ?? new Date() });
+    // WINNER ONLY: side effects (exactly-once under concurrency).
     await this.deps.auditService.write({
-      projectId: experiment.projectId,
+      projectId: claimed.projectId,
       eventType: 'BENCHMARK_STARTED',
       actor: 'system',
       source: 'benchmark-service',
@@ -234,7 +256,7 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
     // immediately. Otherwise the worker drives completion.
     await this.checkExperimentCompletion(experimentId);
     const running = await this.deps.repository.getExperiment(experimentId);
-    return running ?? experiment;
+    return running ?? claimed;
   }
 
   /**
@@ -659,9 +681,9 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
    * Only called when every trial is terminal. If any trial is still in a
    * non-terminal phase, this is a no-op (the worker re-checks when the
    * last trial finishes). The recovery path (phase 0) is also triggered
-   * lazily by `getExperiment` reads when the experiment is stuck in
-   * `finalizing` — NO polling sweep, NO second execution engine (§34
-   * invariant intact).
+   * POST-AUTHORIZATION by `recoverExperimentIfStale` (the authorized
+   * control-plane read path) when the experiment is stuck in `finalizing`
+   * — NO polling sweep, NO second execution engine (§34 invariant intact).
    */
   private async checkExperimentCompletion(experimentId: string): Promise<void> {
     const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
@@ -806,32 +828,71 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   async getExperiment(experimentId: string): Promise<BenchmarkExperiment | null> {
+    // PR #35 review fix (control-plane boundary): PURE READ.
+    //
+    // The previous implementation triggered LAZY RECOVERY here: a read of a
+    // `finalizing` experiment called checkExperimentCompletion, which runs
+    // the recovery CAS + the finalization CASes + writes terminal audit
+    // events. Because every route resolves the experiment's projectId via
+    // `getExperiment(id)` BEFORE calling requireProjectAuthorization, that
+    // made a state-mutating operation reachable BEFORE authorization — a
+    // caller with NO access to the experiment's project could trigger
+    // recovery (mutation + audits) on another project's experiment merely
+    // by knowing its UUID. The experiment UUID is NOT an authorization
+    // credential; authorization MUST precede ANY mutation, even recovery.
+    //
+    // The fix: this method is now a PURE read (select + map). The recovery
+    // trigger moved to `recoverExperimentIfStale()`, which the route layer
+    // calls ONLY AFTER requireProjectAuthorization succeeded for the
+    // experiment's owning project. The system-internal worker paths
+    // (runTrialJob terminal redelivery / startExperiment) keep their
+    // existing checkExperimentCompletion triggers — those are queue-driven,
+    // never user-supplied. NO polling sweep, NO second execution engine
+    // (§34 invariant intact).
+    const experiment = await this.deps.repository.getExperiment(experimentId);
+    return experiment;
+  }
+
+  /**
+   * PR #35 review fix (control-plane boundary): POST-AUTHORIZATION recovery
+   * for a stuck `finalizing` experiment (a previous worker won the
+   * reservation but died before finalizing — its lease has expired).
+   *
+   * CONTROL-PLANE BOUNDARY: this method MUTATES (it runs the recovery CAS +
+   * the finalization CASes + writes terminal audit events). It MUST only be
+   * called from a path that has ALREADY succeeded at
+   * `requireProjectAuthorization` for the experiment's owning project (the
+   * route layer does exactly that). It exists so read routes can recover a
+   * stuck experiment AFTER authorization WITHOUT making the service-level
+   * `getExperiment` impure.
+   *
+   * Behavior:
+   *   - experiment not found → null
+   *   - status ≠ 'finalizing' → returned as-is (nothing to recover — no-op)
+   *   - status = 'finalizing' → runs checkExperimentCompletion (phase 0
+   *     recovery CAS reclaims the expired lease + phase 2 validation +
+   *     phase 3 finalization), then re-reads so the caller sees the
+   *     recovered terminal state. Best-effort: a recovery failure is caught
+   *     + logged and the stuck `finalizing` row is returned (a visible,
+   *     debuggable stuck-state, NOT a false completion).
+   */
+  async recoverExperimentIfStale(experimentId: string): Promise<BenchmarkExperiment | null> {
     const experiment = await this.deps.repository.getExperiment(experimentId);
     if (!experiment) return null;
-    // PR #36 review fix #3: LAZY RECOVERY on read. If the experiment is
-    // stuck in `finalizing` (a previous worker won the reservation but
-    // died before finalizing), trigger checkExperimentCompletion to run
-    // the recovery path (phase 0: recoverStaleFinalizingExperiment). The
-    // recovery CAS guards on `finalizing_lease_expires_at < NOW()`, so an
-    // ACTIVE worker (lease not yet expired) is never preempted — the CAS
+    if (experiment.status !== 'finalizing') return experiment;
+    // The recovery CAS guards on `finalizing_lease_expires_at < NOW()`, so
+    // an ACTIVE worker (lease not yet expired) is never preempted — the CAS
     // returns null + checkExperimentCompletion no-ops. This is the safety
-    // net that ensures no experiment is permanently stuck: the moment
-    // anyone reads a stuck experiment (the natural way to discover it),
-    // it gets recovered. NO polling sweep, NO second execution engine (§34
-    // invariant intact). Best-effort in the read path — a recovery failure
-    // logs + the read returns the stuck `finalizing` row (a visible,
-    // debuggable stuck-state, NOT a false completion).
-    if (experiment.status === 'finalizing') {
-      try {
-        await this.checkExperimentCompletion(experimentId);
-      } catch (err) {
-        this.deps.logger.error('benchmark.experiment-finalizing-recovery-failed', {
-          experimentId, error: (err as Error).message,
-        });
-      }
-      return this.deps.repository.getExperiment(experimentId);
+    // net that ensures no experiment is permanently stuck: the moment an
+    // AUTHORIZED reader reads a stuck experiment, it gets recovered.
+    try {
+      await this.checkExperimentCompletion(experimentId);
+    } catch (err) {
+      this.deps.logger.error('benchmark.experiment-finalizing-recovery-failed', {
+        experimentId, error: (err as Error).message,
+      });
     }
-    return experiment;
+    return this.deps.repository.getExperiment(experimentId);
   }
 
   async listTrials(experimentId: string, opts: { limit?: number; offset?: number } = {}): Promise<{ trials: BenchmarkTrial[]; total: number }> {

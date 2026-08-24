@@ -341,6 +341,43 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
+  async claimExperimentStart(id: string): Promise<BenchmarkExperiment | null> {
+    // PR #35 review fix (control-plane concurrency): ATOMIC experiment-start
+    // claim. Compare-and-swap: `UPDATE wfos_benchmark_experiments SET
+    // status='running', started_at=COALESCE(started_at, NOW()) WHERE id=$1
+    // AND status IN ('created','paused') RETURNING *`.
+    //
+    // The previous startExperiment() was read-check-write: it read the
+    // experiment, checked status ∈ {created, paused} in the application
+    // layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
+    // 'running')`. Under concurrent starts, BOTH callers passed the
+    // application-layer check (both read 'created'), BOTH wrote 'running',
+    // BOTH emitted a BENCHMARK_STARTED audit, and BOTH enqueued the queued
+    // trials — duplicate auditing + duplicate queue delivery.
+    //
+    // This CAS makes the transition + its side effects exactly-once: only
+    // the caller that receives a RETURNING row won the created|paused →
+    // running transition and may perform the side effects (audit +
+    // enqueue). The loser (null) no-ops — the experiment is already
+    // 'running' (or in any other non-startable state), so the caller
+    // re-reads + throws the invalid-state error, mirroring the sequential
+    // double-start semantics.
+    //
+    // `started_at = COALESCE(started_at, NOW())` preserves the prior
+    // semantics: a first start stamps NOW(); a RE-start after pause keeps
+    // the original started_at (the experiment's overall start time, not
+    // the resume time).
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'running',
+             started_at = COALESCE(started_at, NOW())
+       WHERE id = $1 AND status IN ('created', 'paused')
+       RETURNING *`,
+      [id],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
   async claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
     // PR #36 review fix #2 + #3 + #4: phase 1 — RESERVATION. Atomic running →
     // finalizing (NOT running → completed). Only the winner (RETURNING row)

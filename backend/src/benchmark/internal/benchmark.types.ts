@@ -86,6 +86,29 @@ export interface BenchmarkRepository {
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
   /**
+   * PR #35 review fix (control-plane concurrency): ATOMIC experiment-start
+   * claim. Compare-and-swap: `UPDATE wfos_benchmark_experiments SET
+   * status='running', started_at=COALESCE(started_at, NOW()) WHERE id=$1
+   * AND status IN ('created','paused') RETURNING *`.
+   *
+   * The previous startExperiment() was read-check-write: it read the
+   * experiment, checked status ∈ {created, paused} in the application
+   * layer, then ran an UNCONDITIONAL `updateExperimentStatus(...,
+   * 'running')`. Under concurrent starts BOTH callers passed the check
+   * (both read 'created'), BOTH wrote 'running', BOTH emitted a
+   * BENCHMARK_STARTED audit, and BOTH enqueued the queued trials —
+   * duplicate auditing + duplicate queue delivery.
+   *
+   * This CAS makes the transition + its side effects exactly-once: only
+   * the caller that receives a RETURNING row won the created|paused →
+   * running transition and may perform the side effects (audit +
+   * enqueue). The loser (null) no-ops — the caller re-reads + throws the
+   * invalid-state error, mirroring the sequential double-start
+   * semantics. This is the same CAS pattern as claimTrialForSetup /
+   * claimTerminal / claimExperimentCompletion.
+   */
+  claimExperimentStart(id: string): Promise<BenchmarkExperiment | null>;
+  /**
    * PR #36 review fix #2 + #3 + #4: ATOMIC experiment-completion RESERVATION
    * (phase 1 of the two-phase completion protocol). Compare-and-swap:
    * `UPDATE wfos_benchmark_experiments SET status='finalizing',
@@ -152,8 +175,11 @@ export interface BenchmarkRepository {
    * is presumed dead). This closes the stuck-`finalizing` failure the
    * reviewer flagged: a crashed worker's reservation is eventually
    * reclaimable, so no experiment is permanently stuck. The recovery is
-   * triggered lazily on `getExperiment` reads (NO polling sweep, NO second
-   * execution engine — §34 invariant intact).
+   * triggered POST-AUTHORIZATION by `recoverExperimentIfStale` (the
+   * control-plane read path) + by the system-internal worker paths
+   * (runTrialJob terminal redelivery / startExperiment) — NEVER by the
+   * pure `getExperiment` read (NO polling sweep, NO second execution
+   * engine — §34 invariant intact).
    *
    * PR #36 review fix #4 — FENCING GENERATION: the recovery CAS also
    * INCREMENTS `finalizing_generation` (COALESCE(NULL, 0) + 1 to handle

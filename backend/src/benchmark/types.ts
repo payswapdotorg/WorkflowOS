@@ -375,8 +375,34 @@ export interface BenchmarkService {
   cancelExperiment(experimentId: string): Promise<BenchmarkExperiment>;
   /** List experiments for a project (paginated, §49). */
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
-  /** Get an experiment by id. */
+  /**
+   * Get an experiment by id. PURE READ — never mutates.
+   *
+   * PR #35 review fix (control-plane boundary): this method MUST NOT
+   * trigger recovery (or any other mutation). Routes resolve the
+   * experiment's projectId with this read BEFORE calling
+   * requireProjectAuthorization; a mutating read would expose
+   * state mutation to unauthorized callers (the experiment UUID is NOT an
+   * authorization credential). Recovery lives in
+   * {@link BenchmarkService.recoverExperimentIfStale}, which callers may
+   * invoke only AFTER authorization succeeded.
+   */
   getExperiment(experimentId: string): Promise<BenchmarkExperiment | null>;
+  /**
+   * PR #35 review fix (control-plane boundary): POST-AUTHORIZATION recovery
+   * for a stuck `finalizing` experiment (a previous worker won the
+   * completion reservation but died before finalizing). Runs the recovery
+   * CAS + the two-phase finalization + the terminal audit events.
+   *
+   * CONTROL-PLANE BOUNDARY: this method MUTATES. It MUST only be called
+   * from a path that has ALREADY succeeded at requireProjectAuthorization
+   * for the experiment's owning project — NEVER from an unauthenticated or
+   * pre-authorization read path. No-op (returns the experiment as-is) when
+   * the status is not `finalizing`; best-effort (a recovery failure is
+   * logged + the stuck row is returned) so a read never surfaces a false
+   * completion.
+   */
+  recoverExperimentIfStale(experimentId: string): Promise<BenchmarkExperiment | null>;
   /** List trials for an experiment (paginated, §49). */
   listTrials(experimentId: string, opts?: { limit?: number; offset?: number }): Promise<{ trials: BenchmarkTrial[]; total: number }>;
   /** Get a trial by id (§25 detail view). */

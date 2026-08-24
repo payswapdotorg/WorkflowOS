@@ -6274,32 +6274,40 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(body).toMatch(/recovered \?\? .*claimExperimentCompletion/);
   });
 
-  it('benchmark getExperiment triggers lazy recovery on a stale `finalizing` status (NO polling sweep, NO second execution engine)', () => {
-    // PR #36 review fix #3: the recovery trigger is LAZY — on
-    // getExperiment reads, NOT a background polling sweep. This preserves
-    // the §34 invariant (no second execution engine, no bounded poll): the
-    // moment anyone reads a stuck experiment (the natural way to discover
-    // it), the lazy-recovery guard runs checkExperimentCompletion which
-    // runs the recovery CAS. If the lease is NOT stale (an active worker
-    // is mid-validation), the recovery CAS returns null + the read returns
-    // `finalizing` (no preemption). Best-effort — recovery failures are
-    // caught + logged so the read still returns the stuck row (a visible,
-    // debuggable stuck-state, NOT a false completion).
+  it('benchmark getExperiment is a PURE read (NO lazy recovery — authorization must precede mutation)', () => {
+    // PR #35 review fix (control-plane boundary): the previous
+    // implementation triggered LAZY RECOVERY in getExperiment — a read of
+    // a `finalizing` experiment ran checkExperimentCompletion (recovery
+    // CAS + finalization CASes + terminal audit events). Because every
+    // route resolves the experiment's projectId via getExperiment(id)
+    // BEFORE requireProjectAuthorization, that put a state-mutating
+    // operation BEFORE authorization: an unauthorized caller could mutate
+    // another project's experiment by knowing its UUID. The experiment
+    // UUID is NOT an authorization credential.
+    //
+    // The fix: getExperiment is now a PURE read (select + map). The
+    // recovery trigger lives in recoverExperimentIfStale, which the route
+    // layer calls ONLY AFTER requireProjectAuthorization succeeded. This
+    // test enforces the purity: NO checkExperimentCompletion call, NO
+    // status branching on 'finalizing', NO catch, NO re-read — just the
+    // single repository read.
     const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
     const fn = serviceSrc.match(/async getExperiment[\s\S]*?\n  \}/);
     expect(fn, 'getExperiment must exist').not.toBeNull();
-    const body = fn![0];
-    // The lazy-recovery guard MUST check for status === 'finalizing'.
-    expect(body).toMatch(/status === 'finalizing'/);
-    // It MUST call checkExperimentCompletion (the recovery entry point).
-    expect(body).toMatch(/checkExperimentCompletion/);
-    // Recovery failures MUST be caught (best-effort — the read still
-    // returns the stuck row, NOT a thrown error).
-    expect(body).toMatch(/catch/);
-    expect(body).toMatch(/benchmark.experiment-finalizing-recovery-failed/);
-    // It MUST re-read after recovery (so the caller sees the recovered
-    // terminal state, not the stale `finalizing` row).
-    expect(body).toMatch(/getExperiment/);
+    // Strip comments — the fix's explanatory doc block legitimately
+    // MENTIONS the removed lazy-recovery behavior ('finalizing',
+    // 'checkExperimentCompletion'); purity is about the CODE, not the
+    // comments.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // MUST read from the repository (the pure select).
+    expect(body).toMatch(/repository\.getExperiment/);
+    // MUST NOT run the completion/recovery protocol (no mutation).
+    expect(body).not.toMatch(/checkExperimentCompletion/);
+    // MUST NOT branch on the `finalizing` status (the old lazy-recovery
+    // guard — a pure read has no status-dependent behavior).
+    expect(body).not.toMatch(/finalizing/);
+    // MUST NOT catch + log recovery failures (no side effects to guard).
+    expect(body).not.toMatch(/catch/);
   });
 
   it('benchmark migration 0030 adds the fencing generation column (monotonic ownership token for the finalizing reservation)', () => {
@@ -6390,5 +6398,150 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // MUST pass expectedGeneration to BOTH finalization CASes.
     expect(body).toMatch(/finalizeExperimentCompletion\(\s*experimentId,\s*expectedGeneration/);
     expect(body).toMatch(/finalizeExperimentInvalidation\(\s*experimentId,\s*expectedGeneration/);
+  });
+
+  it('benchmark recoverExperimentIfStale is the POST-AUTHORIZATION recovery trigger (guarded on finalizing, best-effort, re-reads)', () => {
+    // PR #35 review fix (control-plane boundary): the recovery the lazy
+    // hook used to perform is NOT removed — forward progress for a stuck
+    // `finalizing` experiment is preserved. It is RE-HOMED in
+    // recoverExperimentIfStale, a method that MUTATES and therefore MUST
+    // only be called from a path that has ALREADY succeeded at
+    // requireProjectAuthorization for the experiment's owning project.
+    //   - not found → null
+    //   - status ≠ 'finalizing' → returned as-is (no-op)
+    //   - status = 'finalizing' → checkExperimentCompletion (phase 0
+    //     recovery CAS + phase 2 validation + phase 3 finalization), best
+    //     effort (failures caught + logged), then a re-read so the caller
+    //     sees the recovered terminal state.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async recoverExperimentIfStale[\s\S]*?\n  \}/);
+    expect(fn, 'recoverExperimentIfStale must exist').not.toBeNull();
+    const body = fn![0];
+    // MUST no-op unless the experiment is stuck in `finalizing`.
+    expect(body).toMatch(/status !== 'finalizing'/);
+    // MUST run the recovery protocol (phase 0 lives in
+    // checkExperimentCompletion).
+    expect(body).toMatch(/checkExperimentCompletion/);
+    // MUST be best-effort: recovery failures are caught + logged so a
+    // read never surfaces a false completion.
+    expect(body).toMatch(/catch/);
+    expect(body).toMatch(/benchmark\.experiment-finalizing-recovery-failed/);
+    // MUST re-read after recovery so the caller sees the recovered state.
+    expect(body).toMatch(/return this\.deps\.repository\.getExperiment/);
+    // The public service interface MUST expose it (so the route layer can
+    // call it post-authorization).
+    const typesSrc = readFileSync(join(BACKEND_ROOT, 'src', 'benchmark', 'types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/recoverExperimentIfStale\(experimentId: string\)/);
+  });
+
+  it('benchmark GET /benchmarks/:id AUTHORIZES BEFORE recovery (pure read → requireProjectAuthorization → recoverExperimentIfStale)', () => {
+    // PR #35 review fix (control-plane boundary): the route ordering MUST
+    // be (1) PURE getExperiment read (resolves projectId), (2) 404, (3)
+    // requireProjectAuthorization, (4) ONLY THEN the mutating
+    // recoverExperimentIfStale hook (gated on status === 'finalizing').
+    // The reviewer's required invariant: "A caller must be authorized
+    // before any mutation, even recovery."
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'benchmark.route.ts'), 'utf8');
+    const fn = routeSrc.match(/app\.get\('\/benchmarks\/:id'[\s\S]*?\n  \}\);/);
+    expect(fn, 'GET /benchmarks/:id route must exist').not.toBeNull();
+    // Strip comments — the ordering assertions are about the CODE; the
+    // fix's explanatory comments legitimately mention
+    // requireProjectAuthorization before the code that calls it.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const pureReadIdx = body.indexOf('benchmarkService.getExperiment(id)');
+    const authzIdx = body.indexOf('requireProjectAuthorization');
+    const recoveryIdx = body.indexOf('recoverExperimentIfStale');
+    expect(pureReadIdx).toBeGreaterThanOrEqual(0);
+    expect(authzIdx).toBeGreaterThanOrEqual(0);
+    expect(recoveryIdx).toBeGreaterThanOrEqual(0);
+    // ORDER: pure read → authorization → recovery.
+    expect(pureReadIdx).toBeLessThan(authzIdx);
+    expect(authzIdx).toBeLessThan(recoveryIdx);
+    // The recovery hook MUST be gated on the stuck status (only a
+    // `finalizing` experiment triggers recovery — a normal read is
+    // untouched).
+    expect(body).toMatch(/status === 'finalizing'/);
+    // MUST return the recovered row (the caller sees the post-recovery
+    // terminal state, not the stale `finalizing` row).
+    expect(body).toMatch(/send\(\{ experiment: recovered \}\)/);
+  });
+
+  it('benchmark claimExperimentStart is an ATOMIC CAS (created|paused → running, RETURNING row = the only winner)', () => {
+    // PR #35 review fix (start concurrency): the previous startExperiment
+    // was read-check-write — both concurrent starters passed the
+    // application-layer status check, both wrote 'running', both audited
+    // BENCHMARK_STARTED, and both enqueued the trials (duplicate auditing
+    // + duplicate queue delivery). The fix is a compare-and-swap owned by
+    // the persistence layer, the same pattern as claimTrialForSetup /
+    // claimTerminal / claimExperimentCompletion.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async claimExperimentStart[\s\S]*?\n  \}/);
+    expect(fn, 'claimExperimentStart must exist').not.toBeNull();
+    const body = fn![0];
+    // MUST be guarded on the startable states (the CAS predicate — NOT an
+    // unconditional UPDATE).
+    expect(body).toMatch(/WHERE id = \$1 AND status IN \('created', 'paused'\)/);
+    // MUST set status='running' + preserve the first started_at
+    // (COALESCE — a re-start after pause keeps the original start time).
+    expect(body).toMatch(/SET status = 'running'/);
+    expect(body).toMatch(/started_at = COALESCE\(started_at, NOW\(\)\)/);
+    // MUST return the winner's row (RETURNING * — only the winner may
+    // perform the side effects).
+    expect(body).toMatch(/RETURNING \*/);
+    // The repository interface MUST require it (the type system enforces
+    // the CAS — callers cannot bypass it with updateExperimentStatus).
+    const typesSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark.types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/claimExperimentStart\(id: string\): Promise<BenchmarkExperiment \| null>/);
+  });
+
+  it('benchmark startExperiment performs the audit + enqueue side effects ONLY AFTER winning the start CAS (exactly-once under concurrency)', () => {
+    // PR #35 review fix (start concurrency): only the CAS winner may
+    // emit BENCHMARK_STARTED + enqueue the queued trials. The loser
+    // (claim returns null) re-reads + throws the invalid-state error
+    // (mirroring the sequential double-start semantics) — it MUST NOT
+    // write any audit + MUST NOT enqueue anything.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async startExperiment[\s\S]*?\n  \}/);
+    expect(fn, 'startExperiment must exist').not.toBeNull();
+    // Strip comments — the ordering assertions are about the CODE.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const claimIdx = body.indexOf('claimExperimentStart(experimentId)');
+    const auditIdx = body.indexOf("'BENCHMARK_STARTED'");
+    const enqueueIdx = body.indexOf("queue.enqueue('benchmark.trial'");
+    expect(claimIdx).toBeGreaterThanOrEqual(0);
+    expect(auditIdx).toBeGreaterThanOrEqual(0);
+    expect(enqueueIdx).toBeGreaterThanOrEqual(0);
+    // ORDER: the CAS claim MUST precede BOTH side effects.
+    expect(claimIdx).toBeLessThan(auditIdx);
+    expect(claimIdx).toBeLessThan(enqueueIdx);
+    // The loser MUST throw the invalid-state error (no side effects).
+    expect(body).toMatch(/benchmark-experiment-invalid-state/);
+    // MUST NOT use the unconditional status update for the start
+    // transition (the CAS owns created|paused → running).
+    expect(body).not.toMatch(/updateExperimentStatus\(experimentId, 'running'/);
+  });
+
+  it('benchmark control-plane authz regression tests exist (unauthorized read cannot mutate; concurrent start is exactly-once)', () => {
+    // PR #35 review fix: the reviewer required regressions proving (a) an
+    // unauthorized cross-project read produces no mutation/audit, and (b)
+    // concurrent starts produce exactly one transition, one audit, and
+    // one set of enqueues. Both live in
+    // control-plane-authz.regression.test.ts (HTTP-level, two projects,
+    // two users — the cross-tenant read is meaningful because User B's
+    // key cannot authorize Project A).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'control-plane-authz.regression.test.ts');
+    expect(existsSync(testPath), 'control-plane-authz.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/UNAUTHORIZED cross-project read produces NO mutation \+ NO audit \(authorization precedes recovery\)/);
+    expect(src).toMatch(/CONCURRENT experiment starts finalize exactly once \(one transition, one audit, one set of enqueues\)/);
+    // The unauthorized-read test MUST assert BOTH halves of the reviewer's
+    // requirement: the unauthorized read mutates nothing AND the
+    // authorized read still recovers (forward progress preserved).
+    expect(src).toMatch(/forward progress is PRESERVED for the AUTHORIZED/);
+    // The concurrent-start test MUST assert all three exactly-once
+    // dimensions: one audit, one enqueue set, one transition.
+    expect(src).toMatch(/BENCHMARK_STARTED/);
+    expect(src).toMatch(/trialJobEnqueues - enqueuesBefore\)\.toBe\(1\)/);
+    expect(src).toMatch(/toBe\('running'\)/);
   });
 });

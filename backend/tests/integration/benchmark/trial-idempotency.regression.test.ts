@@ -696,7 +696,24 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     // the lease), phase 2 (integrity validation — passes, the snapshot +
     // trial digests match), phase 3a (finalizeExperimentCompletion:
     // finalizing → completed) + the BENCHMARK_COMPLETED audit.
-    const recovered = await stack.benchmarkService.getExperiment(experimentId);
+    //
+    // PR #35 review fix (control-plane boundary): the service-level
+    // getExperiment is now a PURE read — the recovery trigger moved to
+    // recoverExperimentIfStale (the POST-AUTHORIZATION control-plane
+    // path the route layer calls AFTER requireProjectAuthorization). So
+    // FIRST prove the purity (a read does NOT recover), THEN trigger the
+    // authorized recovery + assert the exact same invariants as before.
+    const pureRead = await stack.benchmarkService.getExperiment(experimentId);
+    expect(pureRead?.status).toBe('finalizing'); // NOT recovered by the read
+    expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
+
+    // The AUTHORIZED control-plane read path recovers the experiment: phase 0
+    // (recoverStaleFinalizingExperiment reclaims + renews the lease), phase 2
+    // (integrity validation — passes), phase 3a (finalizeExperimentCompletion:
+    // finalizing → completed) + the BENCHMARK_COMPLETED audit.
+    const recovered = await stack.benchmarkService.recoverExperimentIfStale(experimentId);
     expect(recovered?.status).toBe('completed');
 
     // ASSERTION 1 — exactly ONE terminal audit event. The lost worker
@@ -709,11 +726,11 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(1);
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
 
-    // ASSERTION 2 — the recovery CAS is idempotent. A SECOND getExperiment
-    // call does NOT produce a second audit (the experiment is `completed`,
-    // not `finalizing` — the lazy-recovery guard no-ops; + even if it did
+    // ASSERTION 2 — the recovery is idempotent. A SECOND authorized read
+    // does NOT produce a second audit (the experiment is `completed`,
+    // not `finalizing` — the recovery guard no-ops; + even if it did
     // re-enter, the fresh-claim CAS would reject `completed`). Exactly-once.
-    await stack.benchmarkService.getExperiment(experimentId);
+    await stack.benchmarkService.recoverExperimentIfStale(experimentId);
     expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(1);
   });
@@ -762,14 +779,18 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
 
-    // Expire the lease + trigger lazy recovery via getExperiment.
+    // Expire the lease + trigger recovery. PR #35 review fix (control-plane
+    // boundary): the service-level getExperiment is now a PURE read — first
+    // prove the read does NOT recover, then trigger the authorized recovery.
     await stack.authStack.db.client.query(
       `UPDATE wfos_benchmark_experiments
          SET finalizing_lease_expires_at = NOW() - INTERVAL '1 second'
        WHERE id = $1`,
       [experimentId],
     );
-    const recovered = await stack.benchmarkService.getExperiment(experimentId);
+    const pureRead = await stack.benchmarkService.getExperiment(experimentId);
+    expect(pureRead?.status).toBe('finalizing'); // NOT recovered by the read
+    const recovered = await stack.benchmarkService.recoverExperimentIfStale(experimentId);
 
     // ASSERTION 1 — the recovery reached the CORRECT terminal state for
     // the corrupt data: `invalidated` (NOT a false `completed`).

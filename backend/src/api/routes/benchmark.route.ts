@@ -26,7 +26,11 @@
  *
  * Authorization: every route resolves the resource → project → runs
  * requireProjectAuthorization BEFORE returning any data (no cross-tenant
- * existence oracle, same pattern as execution.route.ts).
+ * existence oracle, same pattern as execution.route.ts) AND BEFORE any
+ * mutation — including the post-authorization `recoverExperimentIfStale`
+ * recovery hook on GET /benchmarks/:id. The resource-UUID → projectId
+ * resolution read is PURE (never mutates); the experiment UUID is NOT an
+ * authorization credential.
  *
  * SECURITY: no route ever returns credentials, callback tokens, handoff
  * tokens, or cookies. The external_session_ref is an opaque provider-side
@@ -186,14 +190,31 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
   app.get('/benchmarks/:id', async (req, reply) => {
     return runAuthed(req, async () => {
       const { id } = req.params as { id: string };
+      // PURE read — resolves the experiment's projectId for authorization.
+      // PR #35 review fix (control-plane boundary): this read MUST NOT
+      // mutate. The previous lazy-recovery hook in the service-level
+      // getExperiment ran the recovery CAS + finalization + audits BEFORE
+      // requireProjectAuthorization below, so an unauthorized caller
+      // could mutate another project's experiment by knowing its UUID.
+      // The experiment UUID is NOT an authorization credential.
       const experiment = await benchmarkService.getExperiment(id);
       if (!experiment) return reply.code(404).send({ error: 'benchmark-experiment-not-found' });
+      // AUTHORIZE FIRST — before ANY mutation, including recovery.
       const user = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId: experiment.projectId,
       });
       if (!user) return;
-      return reply.code(200).send({ experiment });
+      // POST-AUTHORIZATION recovery (authorized control-plane path): if
+      // the experiment is stuck in `finalizing` (a previous worker won the
+      // reservation but died), an AUTHORIZED reader triggers the recovery.
+      // An unauthorized caller never reaches this line (403 above), so an
+      // unauthorized read CANNOT mutate another project's experiment. NO
+      // polling sweep, NO second execution engine (§34 invariant intact).
+      const recovered = experiment.status === 'finalizing'
+        ? await benchmarkService.recoverExperimentIfStale(id)
+        : experiment;
+      return reply.code(200).send({ experiment: recovered });
     });
   });
 
