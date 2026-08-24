@@ -11,6 +11,7 @@
  */
 import type { DatabaseClient } from '@platform/postgres/database-client.js';
 import type { Logger } from '@platform/logger.js';
+import type { Queue } from '@platform/queue/queue.js';
 import type {
   AuditService,
 } from '@modules/audit/index.js';
@@ -18,6 +19,8 @@ import type {
   ExecutionService,
   ExecutionMode,
   ExecutionSubmitResult,
+  ExecutionRecordRepository,
+  ExecutionState,
 } from '@modules/agents/index.js';
 import type {
   AgentRunRepository,
@@ -266,8 +269,43 @@ export interface BenchmarkMetricCollector {
 
 /** Orchestrates a single trial: clone work item → branch → ExecutionService (§8). */
 export interface BenchmarkTrialOrchestrator {
-  /** Run a single trial to completion (or failure). Synchronous for fixtures. */
+  /**
+   * Run a single trial's setup + submission. Returns the trial in the
+   * state the orchestrator reached:
+   *   - native mode    → 'completed' or 'failed' (synchronous).
+   *   - external mode  → 'running' (handoff_ready — the companion + provider
+   *     adapter drive the rest; completion is observed asynchronously).
+   *   - infrastructure failure → 'failed'.
+   *
+   * This method does NOT block on external completion. The
+   * {@link BenchmarkTrialRunner.runTrialJob} entrypoint drives the full
+   * lifecycle (including external completion polling + metric collection).
+   */
   runTrial(trial: BenchmarkTrial): Promise<BenchmarkTrial>;
+}
+
+/**
+ * PR #35 review fix #4: the benchmark trial lifecycle is EVENT-DRIVEN +
+ * ASYNCHRONOUS. `startExperiment()` enqueues a `benchmark.trial` job per
+ * queued trial and returns immediately (experiment 'running'). The
+ * WorkerHost picks up each job and calls `runTrialJob(trialId)`, which:
+ *
+ *   1. Runs the trial orchestrator (clone, branch, submit).
+ *   2. For native: the trial is terminal → collect metrics.
+ *      For external: poll the execution record until terminal
+ *      (completed/failed/expired) → collect metrics.
+ *   3. Marks the trial terminal (completed/failed).
+ *   4. Checks experiment completion — if ALL trials are terminal,
+ *      validates integrity + marks the experiment 'completed' +
+ *      audits BENCHMARK_COMPLETED.
+ *
+ * An experiment is NEVER 'completed' while any trial is still
+ * 'running'/'handoff_ready'. This is the core correctness invariant
+ * the review fix #4 enforces.
+ */
+export interface BenchmarkTrialRunner {
+  /** Advance a single trial to terminal state + check experiment completion. */
+  runTrialJob(trialId: string): Promise<void>;
 }
 
 /** Exports experiment results as JSON or CSV (§40). */
@@ -293,6 +331,17 @@ export interface DefaultBenchmarkServiceDeps {
   readonly recommendationService: BenchmarkRecommendationService;
   readonly auditService: AuditService;
   readonly authorizationService: AuthorizationService;
+  /** PR #35 review fix #4: background queue for async `benchmark.trial` jobs. */
+  readonly queue: Queue;
+  /** PR #35 review fix #4: polls external execution records until terminal. */
+  readonly executionRecordRepository: ExecutionRecordRepository;
+  /**
+   * PR #35 review fix #4: max wall-clock ms to wait for an external execution
+   * to reach a terminal state (completed/failed/expired). Defaults to 30000.
+   * The job handler polls every 25ms; when the deadline elapses, the trial
+   * is marked failed (infrastructure, 'external-execution-timeout').
+   */
+  readonly externalTimeoutMs?: number;
 }
 
 export type {
@@ -305,10 +354,13 @@ export type {
   BenchmarkRecommendation,
   DatabaseClient,
   Logger,
+  Queue,
   AuditService,
   ExecutionService,
   ExecutionMode,
   ExecutionSubmitResult,
+  ExecutionRecordRepository,
+  ExecutionState,
   AgentRunRepository,
   WorkflowEngine,
   VerificationService,

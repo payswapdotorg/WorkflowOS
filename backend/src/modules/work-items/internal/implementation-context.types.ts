@@ -130,10 +130,40 @@ export interface ImplementationContextRepository {
 }
 
 /**
+ * The resolved context content WITHOUT a persisted row. Used by read-only
+ * callers (e.g. the WORK-032 benchmark snapshot PREVIEW) that need the
+ * canonical content + computed revision/kind to derive a promptDigest, but
+ * MUST NOT mutate project state (no `wfos_implementation_contexts` INSERT).
+ *
+ * `workItemId` is echoed back so the caller can correlate the preview with the
+ * template work item. `revision` + `kind` are computed exactly as
+ * {@link ImplementationContextBuilder.build} would persist them, so a
+ * subsequent `build()` call produces a row with the same `(revision, kind)`.
+ */
+export interface ImplementationContextPreview {
+  readonly workItemId: string;
+  readonly revision: number;
+  readonly kind: 'initial' | 'correction';
+  readonly content: ImplementationContextContent;
+}
+
+/**
  * Builds + persists an ImplementationContext for a Work Item. The builder
  * reads ONLY from public repository interfaces (no agent / GitHub / Vercel
  * direct calls) and is owned by /work-items.
+ *
+ * `build()` persists a new revision row and returns it. `buildPreview()`
+ * returns the SAME content + computed revision/kind WITHOUT persisting — for
+ * read-only callers (benchmark snapshot preview, dry-run prompt inspection)
+ * that must not mutate project state.
  */
 export interface ImplementationContextBuilder {
+  /** Build + persist a new ImplementationContext revision. */
   build(workItemId: string): Promise<ImplementationContext>;
+  /**
+   * Build the canonical content + computed revision/kind WITHOUT persisting.
+   * The returned `revision`/`kind` match what a subsequent `build()` would
+   * persist. Read-only — no database writes.
+   */
+  buildPreview(workItemId: string): Promise<ImplementationContextPreview>;
 }

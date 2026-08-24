@@ -21,27 +21,22 @@
 import { test, expect, type Page } from '@playwright/test';
 import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
 import { buildServer } from '@api/server.js';
-import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger } from '@platform/index.js';
-import { CaptureStream } from '../helpers/capture-stream.js';
+import { InMemoryQueue, buildHandlerRegistry, WorkerHost } from '@platform/index.js';
 import { DefaultWorkflowEngine } from '../../src/modules/workflows/internal/workflow-engine.js';
-import { DefaultAgentGateway, FakeAgentAdapter } from '../../src/modules/agents/internal/agent-gateway.js';
 import { PgAgentRunRepository } from '../../src/modules/agents/internal/pg-agent-repository.js';
-import { DefaultLlmGateway, FakeLlmAdapter } from '../../src/modules/llm/internal/llm-gateway.js';
-import { DefaultArchitectService } from '../../src/modules/llm/internal/architect-service.js';
-import { PgCiEvidenceIngestionRepository } from '../../src/modules/github/internal/pg-ci-evidence-repository.js';
-import { DefaultCiEvidenceIngestionService } from '../../src/modules/github/internal/ci-evidence-ingestion-service.js';
 import { FakeGitHubAdapter } from '../../src/modules/github/internal/fake-github-adapter.js';
-import { DefaultVerificationService } from '../../src/modules/verification/internal/verification-service.js';
 import { DefaultReviewService } from '../../src/modules/reviews/internal/review-service.js';
 import { DefaultAuditService } from '../../src/modules/audit/internal/audit-service.js';
 import { DefaultAuthorizationService } from '../../src/modules/auth/internal/authorization-service.js';
-import { PgExecutionRecordRepository } from '../../src/modules/agents/internal/pg-execution-repository.js';
+import { PgExecutionRecordRepository, PgExecutionEventRepository } from '../../src/modules/agents/internal/pg-execution-repository.js';
 import { DefaultExecutionService } from '../../src/modules/agents/internal/execution-service.js';
+import { DefaultExecutionEventIngestionService } from '../../src/modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionTaskService } from '../../src/modules/work-items/internal/execution-task-service.js';
 import { DefaultImplementationContextBuilder } from '../../src/modules/work-items/internal/implementation-context-builder.js';
 import { DefaultExecutionPromptBuilder } from '../../src/modules/work-items/internal/execution-prompt-builder.js';
 import { PgImplementationContextRepository } from '../../src/modules/work-items/internal/pg-implementation-context-repository.js';
 import { PgProjectGitHubRepositoryRepository } from '../../src/modules/github/internal/pg-project-github-repository-repository.js';
+import { PgCiEvidenceIngestionRepository } from '../../src/modules/github/internal/pg-ci-evidence-repository.js';
 import {
   DefaultBenchmarkService,
   DefaultBenchmarkSnapshotService,
@@ -53,14 +48,19 @@ import {
   PgBenchmarkRepository,
   DeterministicNativeBenchmarkProvider,
   DeterministicExternalBenchmarkProvider,
+  createBenchmarkTrialJobHandler,
 } from '../../src/benchmark/index.js';
+import { driveExternalCompletions, awaitExperimentCompleted } from '../integration/benchmark/benchmark-async-helpers.js';
 import type { FastifyInstance } from 'fastify';
 
 let stack: TestAuthStack;
 let server: FastifyInstance;
+let queue: InMemoryQueue;
+let worker: WorkerHost;
+let benchmarkService: DefaultBenchmarkService;
+let executionEventIngestionService: DefaultExecutionEventIngestionService;
 let benchProjectId: string;
 let benchWorkItemId: string;
-let benchUserId: string;
 
 const API_KEY = 'raw-key-bench-e2e';
 
@@ -102,7 +102,6 @@ test.beforeAll(async () => {
   });
   benchProjectId = project.id;
   benchWorkItemId = workItem.id;
-  benchUserId = user.id;
   const projectGitHubRepoRepo = new PgProjectGitHubRepositoryRepository(db);
   await projectGitHubRepoRepo.create({
     projectId: project.id, installationId: 'bench-install', owner: 'bench-org', repository: 'bench-repo', defaultBranch: 'main', linkType: 'linked',
@@ -113,7 +112,16 @@ test.beforeAll(async () => {
   const authorizationService = new DefaultAuthorizationService(stack.membershipRepository, stack.rolePermissionRepository, stack.projectRepository, stack.projectAccessRepository);
   const workflowEngine = new DefaultWorkflowEngine(db, logger);
   const reviewService = new DefaultReviewService(db, stack.workItemRepository, logger);
-  const verificationService = new DefaultVerificationService(db, logger, stack.acceptanceCriterionRepository, stack.requirementRepository);
+  // PR #35 review fix: use a minimal verification stub — the benchmark
+  // metric collector only reads listRunsForWorkItem / listEvidenceForRun /
+  // listMappingsForRun. The deterministic providers don't drive verification,
+  // so a stub returning empty arrays is sufficient + avoids the heavy
+  // DefaultVerificationService 10-arg constructor.
+  const verificationService = {
+    listRunsForWorkItem: async () => [],
+    listEvidenceForRun: async () => [],
+    listMappingsForRun: async () => [],
+  } as never;
   const ciEvidenceRepo = new PgCiEvidenceIngestionRepository(db);
   const agentRunRepository = new PgAgentRunRepository(db);
   const promptBuilder = new DefaultExecutionPromptBuilder();
@@ -146,7 +154,15 @@ test.beforeAll(async () => {
   const detNative = new DeterministicNativeBenchmarkProvider({ variant: 'perfect-first-pass', agentRunRepository });
   const detExternal = new DeterministicExternalBenchmarkProvider({ variant: 'perfect-first-pass' });
   const executionRecordRepository = new PgExecutionRecordRepository(db);
+  const executionEventRepository = new PgExecutionEventRepository(db);
   const executionService = new DefaultExecutionService({ executionRecordRepository, providers: [detNative, detExternal], auditService, logger });
+  // PR #35 review fix #4: the execution-event ingestion boundary — the test
+  // simulates the Companion reporting external completion through this
+  // authoritative boundary (the worker's runTrialJob polls the execution
+  // record this updates).
+  executionEventIngestionService = new DefaultExecutionEventIngestionService({
+    executionRecordRepository, eventRepository: executionEventRepository, auditService, logger,
+  });
   const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
     repository: benchRepo, executionService, executionTaskService, agentRunRepository,
     workItemRepository: stack.workItemRepository, workOrderRepository: stack.workOrderRepository,
@@ -156,17 +172,22 @@ test.beforeAll(async () => {
   });
   const exportService = new DefaultBenchmarkExportService({ repository: benchRepo, logger });
   const recommendationService = new DefaultBenchmarkRecommendationService({ repository: benchRepo, logger });
-  const benchmarkService = new DefaultBenchmarkService({
+  queue = new InMemoryQueue();
+  benchmarkService = new DefaultBenchmarkService({
     db, logger, repository: benchRepo, snapshotService, integrityService, metricCollector,
     trialOrchestrator, exportService, recommendationService, auditService, authorizationService,
+    queue,
+    executionRecordRepository,
+    externalTimeoutMs: 30_000,
   });
-
-  const queue = new InMemoryQueue();
-  const workerHost = new WorkerHost(queue, buildHandlerRegistry([]), logger);
-  await workerHost.start();
+  const handlers = buildHandlerRegistry([
+    createBenchmarkTrialJobHandler(benchmarkService, logger),
+  ]);
+  worker = new WorkerHost(queue, handlers, logger, { pollIntervalMs: 5 });
+  await worker.start();
 
   server = await buildServer({
-    queue, logger, infrastructure: { database: { query: async () => ({ rows: [] }), exec: async () => undefined, transaction: async () => undefined, close: async () => undefined }, redis: null, objectStore: null },
+    queue, logger,
     auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
     projects: { authorizationService, projectRepository: stack.projectRepository, repositoryAssociationRepository: stack.repositoryAssociationRepository } as never,
     workItems: { authorizationService, workItemRepository: stack.workItemRepository, architectureRepository: stack.architectureRepository, architectureVersionRepository: stack.architectureVersionRepository } as never,
@@ -183,6 +204,8 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  if (worker) await worker.stop();
+  if (queue) await queue.close();
   if (server) await server.close();
   if (stack) await stack.teardown();
 });
@@ -223,14 +246,21 @@ test('WORK-032 benchmark end-to-end through the real browser UI', async ({ page 
       { provider: 'fake', mode: 'native', repetitions: 1 },
       { provider: 'fake', mode: 'external', repetitions: 1 },
     ],
-    createdBy: benchUserId,
   });
   expect(experimentRes.experiment).toBeTruthy();
   const experimentId = experimentRes.experiment.id;
 
-  // 2. Start the experiment (runs trials synchronously).
-  const startedRes = await api(`/benchmarks/${experimentId}/start`, 'POST');
-  expect(startedRes.experiment.status).toBe('completed');
+  // 2. Start the experiment (async — PR #35 review fix #4 made
+  // startExperiment enqueue benchmark.trial jobs + return immediately).
+  // Drive the external trial's completion through the authoritative
+  // execution-event-ingestion boundary (simulates the Companion), then
+  // wait for the experiment to reach 'completed' (only when ALL trials
+  // are terminal).
+  await api(`/benchmarks/${experimentId}/start`, 'POST');
+  await driveExternalCompletions(benchmarkService, executionEventIngestionService, experimentId);
+  await awaitExperimentCompleted(benchmarkService, experimentId);
+  const expFinal = await benchmarkService.getExperiment(experimentId);
+  expect(expFinal?.status).toBe('completed');
 
   // 3. Navigate to the Benchmarks list page.
   await loginAndGo(page, `/benchmarks?projectId=${benchProjectId}`);

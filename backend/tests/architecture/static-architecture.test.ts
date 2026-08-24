@@ -1371,6 +1371,10 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       // autonomous-implementation entry point (start-implementation route).
       'ImplementationContext',
       'ImplementationContextContent',
+      // PR #35 review fix #1: ImplementationContextPreview is the read-only
+      // preview shape — returned by `buildPreview()` (no DB writes) for
+      // benchmark snapshot previews + dry-run prompt inspection.
+      'ImplementationContextPreview',
       'ImplementationContextRepository',
       'ImplementationContextBuilder',
       // WORK-027: deterministic implementation prompt + provider-independent

@@ -228,7 +228,8 @@ export default function BenchmarkCreatePage() {
         benchmarkTaskSnapshotId: snapshot.id,
         name: name.trim(),
         description: description.trim() || undefined,
-        createdBy: 'frontend',
+        // PR #35 review fix #5: `createdBy` is NOT sent by the frontend — the
+        // backend derives it from the authenticated identity.
         trials: trialSpecs,
         randomizeOrder,
         randomizationSeed: randomizationSeed.trim() || undefined,

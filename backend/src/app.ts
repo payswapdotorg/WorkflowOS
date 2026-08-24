@@ -181,8 +181,9 @@ import {
   DefaultBenchmarkExportService,
   DefaultBenchmarkRecommendationService,
   PgBenchmarkRepository,
+  createBenchmarkTrialJobHandler,
 } from './benchmark/index.js';
-import type { BenchmarkService } from './benchmark/index.js';
+import type { BenchmarkService, BenchmarkTrialRunner } from './benchmark/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -361,6 +362,13 @@ export interface BuildAppOptions {
   workerOptions?: WorkerHostOptions;
   /** Whether to start the worker host. The `api` role does not start it. */
   startWorker?: boolean;
+  /**
+   * PR #35 review fix #4: max wall-clock ms the benchmark trial job handler
+   * waits for an external execution to reach a terminal state. Defaults to
+   * 30000 (30s) in the service. Tests override this to a small value so
+   * timeout failures are fast.
+   */
+  benchmarkExternalTimeoutMs?: number;
 }
 
 export interface AppHandle {
@@ -527,7 +535,7 @@ export async function buildApp(
   let executionRecordRepository: ExecutionRecordRepository | undefined;
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
-  let benchmarkService: BenchmarkService | undefined;
+  let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -948,6 +956,14 @@ export async function buildApp(
       recommendationService: benchmarkRecommendationService,
       auditService: auditService!,
       authorizationService: authorizationService!,
+      // PR #35 review fix #4: async trial lifecycle. `startExperiment()`
+      // enqueues `benchmark.trial` jobs onto this queue + returns
+      // immediately; the WorkerHost picks them up + calls
+      // `runTrialJob(trialId)`. The executionRecordRepository is polled
+      // to observe external execution completion.
+      queue,
+      executionRecordRepository: executionRecordRepository!,
+      externalTimeoutMs: options.benchmarkExternalTimeoutMs,
     });
 
     // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1,
@@ -1052,6 +1068,12 @@ export async function buildApp(
   // WORK-008: GitHub webhook job handler — processes webhook events async.
   if (webhookProcessingService) {
     handlerList.push(createWebhookJobHandler(webhookProcessingService, logger));
+  }
+  // WORK-032 (PR #35 review fix #4): benchmark trial job handler — drives
+  // the async trial lifecycle (clone → branch → submit → poll external →
+  // collect metrics → check experiment completion).
+  if (benchmarkService) {
+    handlerList.push(createBenchmarkTrialJobHandler(benchmarkService, logger));
   }
   const handlers = buildHandlerRegistry(handlerList);
   const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);

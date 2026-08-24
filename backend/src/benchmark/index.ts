@@ -62,6 +62,7 @@ export type {
   BenchmarkIntegrityService,
   BenchmarkMetricCollector,
   BenchmarkTrialOrchestrator,
+  BenchmarkTrialRunner,
   BenchmarkExportService,
   BenchmarkRecommendationService,
   DefaultBenchmarkServiceDeps,
@@ -94,6 +95,14 @@ export {
 export {
   DefaultBenchmarkService,
 } from './internal/benchmark-service.js';
+
+// PR #35 review fix #4: the `benchmark.trial` background job handler. The
+// WorkerHost picks up each enqueued job + delegates to the
+// BenchmarkTrialRunner (DefaultBenchmarkService) to advance a trial to
+// terminal + collect metrics + check experiment completion.
+export {
+  createBenchmarkTrialJobHandler,
+} from './internal/benchmark-trial-job-handler.js';
 
 export {
   PgBenchmarkRepository,

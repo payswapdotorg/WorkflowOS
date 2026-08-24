@@ -34,6 +34,7 @@ import type {
   WorkItemRepository,
   WorkOrderRepository,
   ImplementationContextBuilder,
+  ImplementationContextContent,
   ImplementationContextRepository,
   ExecutionPromptBuilder,
 } from '@modules/work-items/index.js';
@@ -87,9 +88,16 @@ export class DefaultBenchmarkSnapshotService implements BenchmarkSnapshotService
    * canonical prompt digest + repository + baseline + snapshot hash so the
    * UI can show "SAME TASK SNAPSHOT ✓ / SAME PROMPT DIGEST ✓ / SAME BASELINE ✓"
    * before the user clicks [Create Experiment].
+   *
+   * READ-ONLY (PR #35 review fix #1): this path MUST NOT write to the
+   * database. It calls `implementationContextBuilder.buildPreview()` (which
+   * returns the canonical content + computed revision/kind WITHOUT inserting
+   * a `wfos_implementation_contexts` row). No ImplementationContext is
+   * persisted, no revision row is created, no audit event is emitted.
+   * `implementationContextId` in the preview result is `null`.
    */
   async preview(input: { projectId: string; workItemId: string }): Promise<BenchmarkSnapshotPreview> {
-    const built = await this.resolveSnapshotData(input.projectId, input.workItemId);
+    const built = await this.resolveSnapshotData(input.projectId, input.workItemId, { persist: false });
     return {
       projectId: built.projectId,
       workItemId: built.workItemId,
@@ -111,7 +119,15 @@ export class DefaultBenchmarkSnapshotService implements BenchmarkSnapshotService
   }
 
   async create(input: CreateBenchmarkSnapshotInput): Promise<BenchmarkTaskSnapshot> {
-    const built = await this.resolveSnapshotData(input.projectId, input.workItemId);
+    const built = await this.resolveSnapshotData(input.projectId, input.workItemId, { persist: true });
+    // PR #35 review fix #1: when persist === true, resolveSnapshotData calls
+    // implementationContextBuilder.build() (which persists exactly ONE row)
+    // and returns the persisted id. A null here would indicate a contract
+    // violation — fail loudly rather than persisting a snapshot with no
+    // ImplementationContext linkage.
+    if (!built.implementationContextId) {
+      throw new Error('benchmark-snapshot-implementation-context-not-persisted');
+    }
     const slug = input.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     const insert: BenchmarkSnapshotInsert = {
       organizationId: built.organizationId,
@@ -135,7 +151,7 @@ export class DefaultBenchmarkSnapshotService implements BenchmarkSnapshotService
     return this.deps.repository.createSnapshot(insert);
   }
 
-  private async resolveSnapshotData(projectId: string, workItemId: string): Promise<ResolvedSnapshotData> {
+  private async resolveSnapshotData(projectId: string, workItemId: string, opts: { persist: boolean }): Promise<ResolvedSnapshotData> {
     // 1. Load the template work item.
     const workItem = await this.deps.workItemRepository.findById(workItemId);
     if (!workItem) {
@@ -168,20 +184,32 @@ export class DefaultBenchmarkSnapshotService implements BenchmarkSnapshotService
     }
 
     // 4. Build the ImplementationContext via the EXISTING builder (the
-    //    context authority). This produces the canonical content + a fresh
-    //    revision row. The benchmark does NOT re-implement context building.
-    const context = await this.deps.implementationContextBuilder.build(workItemId);
-    const persisted = await this.deps.contextRepository.create({
-      workItemId,
-      revision: context.revision,
-      kind: context.kind,
-      content: context.content,
-    });
+    //    context authority). The benchmark does NOT re-implement context
+    //    building.
+    //
+    //    PR #35 review fix #1: the preview path MUST NOT persist. `buildPreview()`
+    //    returns the canonical content + computed revision/kind WITHOUT
+    //    inserting a `wfos_implementation_contexts` row. Only the `create()`
+    //    path (opts.persist === true) calls `build()`, which inserts exactly
+    //    ONE row. The previous implementation called `build()` (which
+    //    persisted) AND then `contextRepository.create()` again — a duplicate
+    //    write that made even the read-only preview mutate project state.
+    let implementationContextId: string | null;
+    let contextContent: ImplementationContextContent;
+    if (opts.persist) {
+      const context = await this.deps.implementationContextBuilder.build(workItemId);
+      implementationContextId = context.id;
+      contextContent = context.content;
+    } else {
+      const previewCtx = await this.deps.implementationContextBuilder.buildPreview(workItemId);
+      implementationContextId = null;
+      contextContent = previewCtx.content;
+    }
 
     // 5. Run the EXISTING prompt builder → canonical markdown + digest.
     //    The promptDigest is the §27 equality key across all trials that
     //    derive from this snapshot.
-    const prompt = this.deps.promptBuilder.build(context.content, { workItemLabel: workItem.workItemId });
+    const prompt = this.deps.promptBuilder.build(contextContent, { workItemLabel: workItem.workItemId });
 
     // 6. Resolve repository + baseCommit via the EXISTING
     //    ProjectGitHubRepositoryRepository (the persisted project↔repo link
@@ -235,7 +263,7 @@ export class DefaultBenchmarkSnapshotService implements BenchmarkSnapshotService
       workItemLabel: workItem.workItemId,
       architectureVersionId: workItem.architectureVersionId,
       workOrderId: latestOrder.id,
-      implementationContextId: persisted.id,
+      implementationContextId,
       requirementIds: latestOrder.requirementIds,
       criterionIds: latestOrder.criterionIds,
       repository,
@@ -256,7 +284,8 @@ interface ResolvedSnapshotData {
   readonly workItemLabel: string;
   readonly architectureVersionId: string;
   readonly workOrderId: string;
-  readonly implementationContextId: string;
+  /** null when produced by the read-only preview path; the persisted row id when produced by create(). */
+  readonly implementationContextId: string | null;
   readonly requirementIds: readonly string[];
   readonly criterionIds: readonly string[];
   readonly repository: string;

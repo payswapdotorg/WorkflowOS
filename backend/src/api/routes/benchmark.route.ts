@@ -34,7 +34,7 @@
  */
 import type { FastifyInstance } from 'fastify';
 import type { AuthorizationService } from '@modules/auth/index.js';
-import type { BenchmarkService } from '../../benchmark/index.js';
+import type { BenchmarkService, BenchmarkTrial } from '../../benchmark/index.js';
 import type { BenchmarkExportFormat } from '../../benchmark/index.js';
 import {
   requireProjectAuthorization,
@@ -75,12 +75,16 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
         projectId: body.projectId,
       });
       if (!user) return;
+      // PR #35 review fix #5: `actor` comes from the authenticated identity,
+      // NEVER from the request body. The request body cast above omits
+      // `createdBy`/`actor` — they are server-derived only.
       const snapshot = await benchmarkService.createSnapshot({
         projectId: body.projectId,
         workItemId: body.workItemId,
         name: body.name,
         description: body.description,
         targetBranchPrefix: body.targetBranchPrefix,
+        actor: user.id,
       });
       return reply.code(201).send({ snapshot });
     });
@@ -121,6 +125,9 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
 
   app.post('/benchmarks', async (req, reply) => {
     return runAuthed(req, async () => {
+      // PR #35 review fix #5: `createdBy` is NOT accepted from the request
+      // body. The authenticated user identity (`user.id`) is the only
+      // source of the experiment's `createdBy` + audit `actor`.
       const body = req.body as {
         projectId: string;
         benchmarkTaskSnapshotId: string;
@@ -130,7 +137,6 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
         randomizeOrder?: boolean;
         randomizationSeed?: string;
         repetitions?: number;
-        createdBy: string;
       };
       const user = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write',
@@ -151,7 +157,7 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
           randomizeOrder: body.randomizeOrder,
           randomizationSeed: body.randomizationSeed,
           repetitions: body.repetitions,
-          createdBy: body.createdBy,
+          createdBy: user.id,
         });
         return reply.code(201).send({ experiment });
       } catch (err) {
@@ -313,13 +319,41 @@ export async function benchmarkRoutes(app: FastifyInstance, deps: BenchmarkRoute
       if (!body.trialIds || body.trialIds.length < 2) {
         return reply.code(400).send({ error: 'benchmark-comparison-requires-at-least-two-trials' });
       }
-      // Authorize on the first trial's project (all trials in a comparison
-      // must share the same snapshot, hence the same project).
-      const first = await benchmarkService.getTrial(body.trialIds[0]!);
-      if (!first) return reply.code(404).send({ error: 'benchmark-trial-not-found' });
+      // PR #35 review fix #2: authorize ALL trials, not just trialIds[0].
+      // The previous implementation authorized only the first trial's
+      // project and then returned comparison data for every trial id —
+      // leaking cross-tenant trial metadata when the caller mixed trials
+      // from different projects.
+      //
+      // Flow:
+      //   1. Load EVERY requested trial (reject missing → 404).
+      //   2. Verify all trials share the same projectId + snapshotId
+      //      (§27/§28/§29 equality invariants). If they span projects or
+      //      snapshots → 403, NO project metadata returned.
+      //   3. requireProjectAuthorization on the shared project.
+      //   4. Perform the comparison.
+      const trials: BenchmarkTrial[] = [];
+      for (const id of body.trialIds) {
+        const trial = await benchmarkService.getTrial(id);
+        if (!trial) {
+          return reply.code(404).send({ error: `benchmark-trial-not-found: ${id}` });
+        }
+        trials.push(trial);
+      }
+      const projectIds = new Set(trials.map((t) => t.projectId));
+      const snapshotIds = new Set(trials.map((t) => t.benchmarkTaskSnapshotId));
+      if (projectIds.size !== 1 || snapshotIds.size !== 1) {
+        // Cross-tenant or cross-snapshot comparison — forbidden. No project
+        // id or snapshot id is echoed back (no metadata leak).
+        return reply.code(403).send({
+          error: 'forbidden',
+          reason: 'benchmark-comparison-trials-must-share-snapshot',
+        });
+      }
+      const projectId = trials[0]!.projectId;
       const user = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
-        projectId: first.projectId,
+        projectId,
       });
       if (!user) return;
       try {

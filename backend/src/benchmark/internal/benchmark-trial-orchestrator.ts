@@ -131,12 +131,27 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
       }
       const templateDeps = await this.deps.workItemDependencyRepository.listForWorkItem(snapshot.workItemId);
       for (const dep of templateDeps) {
-        // Skip cycle risk: dependencies reference OTHER work items by id; the
-        // cloned work item can safely reference the same depends-on items.
+        // PR #35 review fix #3: trial isolation requires the EXACT dependency
+        // graph from the snapshot (§6). If a dependency edge cannot be
+        // replicated (cycle, missing target, FK violation), the trial
+        // CANNOT have the same task as the snapshot → fail loudly. Never
+        // submit execution with an incomplete dependency graph (the agent
+        // would receive an incomplete task, violating §6 trial isolation).
         try {
           await this.deps.workItemDependencyRepository.add(cloned.id, dep.dependsOnId);
-        } catch {
-          // cycle or missing dependency — skip
+        } catch (err) {
+          this.deps.logger.error('benchmark-trial-dependency-replication-failed', {
+            trialId: trial.id, clonedWorkItemId: cloned.id, dependsOnId: dep.dependsOnId, error: (err as Error).message,
+          });
+          const failed = await this.deps.repository.updateTrial(trial.id, {
+            workItemId: cloned.id,
+            status: 'failed',
+            failureKind: 'infrastructure',
+            failureReason: `dependency-replication-failed: dependsOnId=${dep.dependsOnId} error=${(err as Error).message}`,
+            completedAt: new Date(),
+          });
+          if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
+          return failed;
         }
       }
 
@@ -171,6 +186,12 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
       }
 
       // 6. Create the isolated trial branch from the baseline commit.
+      // PR #35 review fix #3: §6 trial isolation requires each trial to run
+      // on its OWN branch cut from the snapshot's baseline commit. If the
+      // branch cannot be created, the trial CANNOT be isolated → fail
+      // loudly. Never submit execution without the isolated branch (the
+      // agent would push to an unprotected/shared branch, violating §6 +
+      // corrupting cross-trial isolation).
       const repoLink = await this.deps.projectGitHubRepositoryRepository.findByProject(snapshot.projectId);
       if (repoLink) {
         try {
@@ -182,12 +203,19 @@ export class DefaultBenchmarkTrialOrchestrator implements BenchmarkTrialOrchestr
             installationId: repoLink.installationId,
           });
         } catch (err) {
-          this.deps.logger.warn('benchmark-trial-branch-create-failed', {
+          this.deps.logger.error('benchmark-trial-branch-create-failed', {
             trialId: trial.id, branch: trial.trialBranch, error: (err as Error).message,
           });
-          // Not fatal — the execution may still proceed (the agent pushes to
-          // the branch; if the branch doesn't exist, the agent or the
-          // workflow orchestrator creates it).
+          const failed = await this.deps.repository.updateTrial(trial.id, {
+            workItemId: cloned.id,
+            workOrderId: newOrder.id,
+            status: 'failed',
+            failureKind: 'infrastructure',
+            failureReason: `branch-creation-failed: branch=${trial.trialBranch} error=${(err as Error).message}`,
+            completedAt: new Date(),
+          });
+          if (!failed) throw new Error(`benchmark-trial-not-found: ${trial.id}`);
+          return failed;
         }
       }
 

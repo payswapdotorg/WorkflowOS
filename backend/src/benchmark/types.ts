@@ -65,6 +65,14 @@ export interface CreateBenchmarkSnapshotInput {
   readonly name: string;
   readonly description?: string;
   readonly targetBranchPrefix?: string;
+  /**
+   * PR #35 review fix #5: the authenticated user identity (server-side).
+   * Populated by the route from `requireProjectAuthorization(...).id` —
+   * NEVER from the request body. Recorded as the audit `actor` for
+   * BENCHMARK_SNAPSHOT_CREATED. Defaults to `'system'` when absent
+   * (system-initiated snapshots).
+   */
+  readonly actor?: string;
 }
 
 /** An experiment: one or more trials against a single snapshot (§5). */
@@ -330,7 +338,12 @@ export interface BenchmarkSnapshotPreview {
   readonly criterionIds: readonly string[];
   readonly repository: string;
   readonly baseCommit: string;
-  readonly implementationContextId: string;
+  /**
+   * PR #35 review fix #1: `null` for previews (the preview path is
+   * read-only — no ImplementationContext is persisted). The persisted row
+   * id is only available on the frozen `BenchmarkTaskSnapshot`.
+   */
+  readonly implementationContextId: string | null;
   readonly promptDigest: string;
   readonly promptVersion: string;
   readonly verificationRequirements: readonly unknown[];

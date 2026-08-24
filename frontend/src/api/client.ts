@@ -1486,7 +1486,8 @@ export interface BenchmarkSnapshotPreview {
   criterionIds: string[];
   repository: string;
   baseCommit: string;
-  implementationContextId: string;
+  /** PR #35 review fix #1: `null` for previews (read-only path persists nothing). */
+  implementationContextId: string | null;
   promptDigest: string;
   promptVersion: string;
   verificationRequirements: unknown[];
@@ -1530,13 +1531,14 @@ export interface BenchmarkTrialSpec {
   repetitions?: number;
 }
 
-/** Input to create an experiment (§44). */
+/** Input to create an experiment (§44).
+ *  PR #35 review fix #5: `createdBy` is NOT sent by the frontend — the
+ *  backend derives it from the authenticated identity (`user.id`). */
 export interface CreateBenchmarkExperimentInput {
   projectId: string;
   benchmarkTaskSnapshotId: string;
   name: string;
   description?: string;
-  createdBy: string;
   trials: BenchmarkTrialSpec[];
   randomizeOrder?: boolean;
   randomizationSeed?: string;

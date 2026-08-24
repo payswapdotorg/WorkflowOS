@@ -49,6 +49,7 @@ import type {
   ImplementationContext,
   ImplementationContextBuilder,
   ImplementationContextContent,
+  ImplementationContextPreview,
   ImplementationContextRepository,
 } from './implementation-context.types.js';
 
@@ -122,6 +123,21 @@ export class DefaultImplementationContextBuilder
   ) {}
 
   async build(workItemId: string): Promise<ImplementationContext> {
+    // Persist a new ImplementationContext revision row. Delegates to
+    // buildPreview() for the canonical content + computed revision/kind, then
+    // inserts the row. Callers that need a persisted row (the real execution
+    // path) call this; callers that must not mutate project state (benchmark
+    // snapshot PREVIEW) call buildPreview() directly.
+    const preview = await this.buildPreview(workItemId);
+    return this.contextRepository.create({
+      workItemId: preview.workItemId,
+      revision: preview.revision,
+      kind: preview.kind,
+      content: preview.content,
+    });
+  }
+
+  async buildPreview(workItemId: string): Promise<ImplementationContextPreview> {
     // 1. Load the work item (throw if not found).
     const workItem = await this.workItemRepository.findById(workItemId);
     if (!workItem) {
@@ -330,16 +346,12 @@ export class DefaultImplementationContextBuilder
       architectureName: architecture.name,
     };
 
-    // 13. Persist via contextRepository.create(...).
-    const persisted = await this.contextRepository.create({
-      workItemId,
-      revision: nextRevision,
-      kind,
-      content,
-    });
-
-    // 14. Return the persisted ImplementationContext.
-    return persisted;
+    // 13. Return the resolved preview WITHOUT persisting. Callers that need
+    // a persisted row call `build()` (which delegates here + inserts). This
+    // keeps preview paths (benchmark snapshot PREVIEW) strictly read-only —
+    // no `wfos_implementation_contexts` INSERT, no audit event, no project
+    // state mutation.
+    return { workItemId, revision: nextRevision, kind, content };
   }
 }
 

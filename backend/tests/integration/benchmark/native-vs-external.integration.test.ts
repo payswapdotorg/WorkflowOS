@@ -36,7 +36,10 @@ import {
   PgBenchmarkRepository,
   DeterministicNativeBenchmarkProvider,
   DeterministicExternalBenchmarkProvider,
+  createBenchmarkTrialJobHandler,
 } from '../../../src/benchmark/index.js';
+import { InMemoryQueue, WorkerHost, buildHandlerRegistry } from '@platform/index.js';
+import { startAndAwaitExperiment } from './benchmark-async-helpers.js';
 import { DefaultExecutionService } from '../../../src/modules/agents/internal/execution-service.js';
 import { DefaultExecutionTaskService } from '../../../src/modules/work-items/internal/execution-task-service.js';
 import { DefaultImplementationContextBuilder } from '../../../src/modules/work-items/internal/implementation-context-builder.js';
@@ -65,6 +68,9 @@ describe('WORK-032 — native vs external execution benchmark', () => {
   let stack: TestAuthStack;
   let fixture: BenchmarkFixture;
   let benchmarkService: BenchmarkService;
+  let queue: InMemoryQueue;
+  let worker: WorkerHost;
+  let executionEventIngestionService: DefaultExecutionEventIngestionService;
 
   const API_KEY = 'raw-key-benchmark-a';
   const SECRET_REF = 'WFOS_TEST_KEY_BENCHMARK_A';
@@ -177,13 +183,12 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       logger: logger as never,
     });
     void executionCallbackService;
-    const executionEventIngestionService = new DefaultExecutionEventIngestionService({
+    executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository,
       eventRepository: executionEventRepository,
       auditService,
       logger: logger as never,
     });
-    void executionEventIngestionService;
 
     // The DETERMINISTIC native benchmark provider (§38) — replaces the real
     // NativeExecutionProvider. The deterministic external benchmark provider
@@ -221,6 +226,12 @@ describe('WORK-032 — native vs external execution benchmark', () => {
     const exportService = new DefaultBenchmarkExportService({ repository: benchmarkRepository, logger: logger as never });
     const recommendationService = new DefaultBenchmarkRecommendationService({ repository: benchmarkRepository, logger: logger as never });
 
+    // PR #35 review fix #4: async trial lifecycle — `startExperiment()`
+    // enqueues `benchmark.trial` jobs + returns immediately (experiment
+    // 'running'). The WorkerHost picks them up + calls runTrialJob(trialId),
+    // which advances each trial to terminal + collects metrics + checks
+    // experiment completion.
+    queue = new InMemoryQueue();
     benchmarkService = new DefaultBenchmarkService({
       db,
       logger: logger as never,
@@ -233,10 +244,20 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       recommendationService,
       auditService,
       authorizationService,
+      queue,
+      executionRecordRepository,
+      externalTimeoutMs: 30_000,
     });
+    const handlers = buildHandlerRegistry([
+      createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
+    ]);
+    worker = new WorkerHost(queue, handlers, logger as never, { pollIntervalMs: 5 });
+    await worker.start();
   });
 
   afterAll(async () => {
+    await worker.stop();
+    await queue.close();
     await stack.teardown();
   });
 
@@ -317,9 +338,12 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       createdBy: fixture.userId,
     });
 
-    // Start the experiment (runs queued trials synchronously).
-    const completed = await benchmarkService.startExperiment(experiment.id);
-    expect(completed.status).toBe('completed');
+    // Start the experiment + wait for the async trial lifecycle to complete
+    // (PR #35 review fix #4: startExperiment enqueues benchmark.trial jobs +
+    // returns immediately; the WorkerHost drives each trial to terminal).
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
+    const exp = await benchmarkService.getExperiment(experiment.id);
+    expect(exp?.status).toBe('completed');
 
     const { trials } = await benchmarkService.listTrials(experiment.id);
     expect(trials).toHaveLength(1);
@@ -363,7 +387,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       ],
       createdBy: fixture.userId,
     });
-    await benchmarkService.startExperiment(experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
     const { trials } = await benchmarkService.listTrials(experiment.id);
     expect(trials.length).toBeGreaterThanOrEqual(2);
 
@@ -389,7 +413,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await benchmarkService.startExperiment(experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
 
     const json = await benchmarkService.exportExperiment(experiment.id, 'json');
     expect(json.contentType).toBe('application/json');
@@ -420,7 +444,7 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       trials: [{ provider: 'fake', mode: 'native', repetitions: 1 }],
       createdBy: fixture.userId,
     });
-    await benchmarkService.startExperiment(experiment.id);
+    await startAndAwaitExperiment(benchmarkService, executionEventIngestionService, experiment.id);
 
     const recommendation = await benchmarkService.recommend(experiment.id);
     expect(recommendation).not.toBeNull();
