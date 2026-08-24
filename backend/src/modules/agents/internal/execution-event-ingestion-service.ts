@@ -51,6 +51,19 @@ export interface DefaultExecutionEventIngestionServiceDeps {
   readonly logger: Logger;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
+  /**
+   * PR #35 review fix v2 / Blocker A: best-effort composition hook invoked
+   * AFTER a successful terminal ingest (`completed` or `failed`). The
+   * composition root (app.ts) wires this to call
+   * `benchmarkService.advanceTrialsForExecution(executionId)` so any
+   * benchmark trial awaiting this execution's terminal state is
+   * re-enqueued onto `benchmark.trial` and advanced through the delivery
+   * phase. NOT invoked for `progress`/`started`, for duplicates
+   * (idempotency-key match), or for the `expired`-throw path. Wrap in
+   * try/catch + log on error — a hook failure MUST NEVER break the core
+   * ingestion operation (the execution record is already authoritative).
+   */
+  readonly onExecutionTerminal?: (executionId: string, state: ExecutionState) => Promise<void>;
 }
 
 const STARTED_FROM: readonly ExecutionState[] = ['handoff_ready', 'submitted', 'running'];
@@ -153,6 +166,30 @@ export class DefaultExecutionEventIngestionService implements ExecutionEventInge
       eventType: input.eventType,
       status: nextStatus,
     });
+
+    // PR #35 review fix v2 / Blocker A: best-effort composition hook —
+    // re-advance any benchmark trial awaiting this execution's terminal
+    // state. Invoked ONLY for terminal events (completed/failed), NOT for
+    // `progress`/`started`, NOT for duplicates (the idempotency-key check
+    // above returns early at line ~104-114 before reaching here), + NOT
+    // for the `expired`-throw path (that throws in `loadAndExpire` before
+    // reaching here). Wrapped in try/catch + log on error so a hook
+    // failure NEVER breaks the core ingestion operation (the execution
+    // record + audit + event row are already persisted + authoritative).
+    if (
+      this.deps.onExecutionTerminal &&
+      (nextStatus === 'completed' || nextStatus === 'failed')
+    ) {
+      try {
+        await this.deps.onExecutionTerminal(input.executionId, nextStatus);
+      } catch (err) {
+        this.deps.logger.warn('execution.on-terminal-callback-failed', {
+          executionId: input.executionId,
+          state: nextStatus,
+          error: (err as Error).message,
+        });
+      }
+    }
 
     return {
       accepted: true,

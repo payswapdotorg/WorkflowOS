@@ -168,6 +168,25 @@ import { DefaultExecutionService } from './modules/agents/internal/execution-ser
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
+// WORK-032: Native vs External Execution Benchmark — application-layer
+// orchestrator at src/benchmark/ (outside src/modules/ — a cross-cutting
+// harness that CONSUMES the 17 frozen domain modules via their public
+// barrels). It does NOT create another workflow/verification/review/CI engine.
+import {
+  DefaultBenchmarkService,
+  DefaultBenchmarkSnapshotService,
+  DefaultBenchmarkIntegrityService,
+  DefaultBenchmarkMetricCollector,
+  DefaultBenchmarkTrialOrchestrator,
+  DefaultBenchmarkExportService,
+  DefaultBenchmarkRecommendationService,
+  PgBenchmarkRepository,
+  createBenchmarkTrialJobHandler,
+  BenchmarkStartDeliveryOutboxRelay,
+  createStartDeliveryRelayJobHandler,
+} from './benchmark/index.js';
+import type { BenchmarkService, BenchmarkTrialRunner } from './benchmark/index.js';
+import type { OutboxRelay } from '@platform/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -330,6 +349,9 @@ export interface AppDeps {
   executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
+  /** WORK-032: Native vs External Execution Benchmark service. Present when
+   *  DB + execution + workflow + verification + review are configured. */
+  benchmarkService?: BenchmarkService;
 }
 
 export interface BuildAppOptions {
@@ -509,6 +531,12 @@ export async function buildApp(
   let executionRecordRepository: ExecutionRecordRepository | undefined;
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
+  let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
+  // WORK-032 start-delivery durability: the generic OutboxRelay for the
+  // benchmark start-delivery outbox. Injected into the WorkerHost below —
+  // the boot sweep (once per process start) is what makes an orphaned
+  // outbox autonomously recoverable after total process death.
+  let benchmarkStartDeliveryRelay: OutboxRelay | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -549,11 +577,28 @@ export async function buildApp(
     // WORK-020: wire the workflow engine with the audit emitter so
     // production workflow transitions emit audit events. Without this,
     // transitions can execute without audit (issue 1 from PR #19 review).
+    // PR #35 review fix v2 / Blocker B: also wire an `onTransition`
+    // composition hook so the benchmark service can re-advance any trial
+    // awaiting the work item's terminal transition (verified /
+    // verification_failed / implementation_blocked). The hook is a
+    // forward-reference closure over the `benchmarkService` binding — by
+    // the time any transition fires (after buildApp returns), the
+    // benchmark service has been constructed + the binding is assigned.
+    // The hook is best-effort (wrapped in try/catch + log) so a callback
+    // failure NEVER breaks the core transition.
     const depService = new DefaultWorkItemDependencyService(database);
     workflowEngine = new DefaultWorkflowEngine(
       database, logger,
       (wiId: string) => depService.canBeginImplementation(wiId),
       auditService, // WorkflowAuditEmitter — workflow transitions emit audit events
+      async (workItemId, _from, to) => {
+        if (
+          benchmarkService &&
+          (to === 'verified' || to === 'verification_failed' || to === 'implementation_blocked')
+        ) {
+          await benchmarkService.advanceTrialsForWorkItem(workItemId);
+        }
+      },
     );
     // WORK-021: wire the notification service + register the
     // notification.send worker handler so production can deliver
@@ -850,11 +895,124 @@ export async function buildApp(
       auditService,
       logger,
     });
+    // PR #35 review fix v2 / Blocker A: wire the `onExecutionTerminal`
+    // composition hook so the benchmark service can re-advance any trial
+    // awaiting an external execution's terminal state (completed / failed).
+    // Forward-reference closure over `benchmarkService` — by the time any
+    // terminal ingestion event fires (after buildApp returns), the
+    // benchmark service has been constructed + the binding is assigned.
+    // The hook is best-effort (wrapped in try/catch + log inside the
+    // ingestion service) so a callback failure NEVER breaks the core
+    // ingestion operation.
     executionEventIngestionService = new DefaultExecutionEventIngestionService({
       executionRecordRepository,
       eventRepository: executionEventRepository,
       auditService,
       logger,
+      onExecutionTerminal: async (execId, _state) => {
+        if (benchmarkService) {
+          await benchmarkService.advanceTrialsForExecution(execId);
+        }
+      },
+    });
+
+    // --- WORK-032: Native vs External Execution Benchmark. ---
+    // The benchmark is a cross-cutting application-layer orchestrator at
+    // src/benchmark/ that CONSUMES the 17 frozen domain modules via their
+    // public barrels. It does NOT create another workflow/verification/review/
+    // CI engine (static check in tests/architecture/static-architecture.test.ts).
+    // It delegates execution to ExecutionService (owned by /agents) and reads
+    // authoritative state from /workflows, /verification, /reviews, /github,
+    // /agents, /audit. NEVER stores credentials.
+    const benchmarkRepository = new PgBenchmarkRepository(database);
+    // WORK-032 start-delivery durability: the outbox relay for the benchmark
+    // start-delivery obligations. Constructed next to its repository (it
+    // needs the boot-sweep query + the queue); consumed by the WorkerHost
+    // wiring below (outboxRelays) — the generic platform contract lives at
+    // platform/worker/outbox-relay.ts.
+    benchmarkStartDeliveryRelay = new BenchmarkStartDeliveryOutboxRelay({
+      repository: benchmarkRepository,
+      queue,
+      logger,
+    });
+    const benchmarkSnapshotService = new DefaultBenchmarkSnapshotService({
+      repository: benchmarkRepository,
+      workItemRepository: workItemRepository!,
+      workOrderRepository: workOrderRepository!,
+      architectureVersionRepository: architectureVersionRepository!,
+      architectureRepository: architectureRepository!,
+      projectRepository: projectRepository!,
+      implementationContextBuilder: implementationContextBuilder!,
+      contextRepository: implementationContextRepository,
+      promptBuilder: executionPromptBuilder,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter: githubAdapter!,
+      logger,
+    });
+    const benchmarkIntegrityService = new DefaultBenchmarkIntegrityService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    const benchmarkMetricCollector = new DefaultBenchmarkMetricCollector({
+      repository: benchmarkRepository,
+      workflowEngine: workflowEngine!,
+      verificationService: verificationService!,
+      reviewService: reviewService!,
+      pullRequestAssociationRepository: pullRequestAssociationRepository!,
+      ciEvidenceIngestionRepository: new PgCiEvidenceIngestionRepository(database),
+      agentRunRepository: agentRunRepository!,
+      logger,
+    });
+    const benchmarkTrialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
+      repository: benchmarkRepository,
+      executionService: executionService!,
+      executionTaskService: executionTaskService!,
+      agentRunRepository: agentRunRepository!,
+      workItemRepository: workItemRepository!,
+      workOrderRepository: workOrderRepository!,
+      workItemRequirementRepository: workItemRequirementRepository!,
+      workItemCriterionRepository: workItemCriterionRepository!,
+      workItemDependencyRepository: workItemDependencyRepository!,
+      workflowEngine: workflowEngine!,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter: githubAdapter!,
+      logger,
+    });
+    const benchmarkExportService = new DefaultBenchmarkExportService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    const benchmarkRecommendationService = new DefaultBenchmarkRecommendationService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    benchmarkService = new DefaultBenchmarkService({
+      db: database,
+      logger,
+      repository: benchmarkRepository,
+      snapshotService: benchmarkSnapshotService,
+      integrityService: benchmarkIntegrityService,
+      metricCollector: benchmarkMetricCollector,
+      trialOrchestrator: benchmarkTrialOrchestrator,
+      exportService: benchmarkExportService,
+      recommendationService: benchmarkRecommendationService,
+      auditService: auditService!,
+      authorizationService: authorizationService!,
+      // PR #35 review fix v2 (Blocker A + Blocker B): the benchmark trial
+      // lifecycle is FULLY EVENT-DRIVEN + ASYNCHRONOUS.
+      // `startExperiment()` enqueues `benchmark.trial` jobs onto this queue
+      // + returns immediately; the WorkerHost picks them up + calls
+      // `runTrialJob(trialId)`. The trial is re-advanced by:
+      //   - onExecutionTerminal hook (wired above on the ingestion
+      //     service) → advanceTrialsForExecution(executionId) when an
+      //     external execution reaches a terminal state.
+      //   - onTransition hook (wired above on the workflow engine) →
+      //     advanceTrialsForWorkItem(workItemId) when the cloned work
+      //     item reaches `verified` or a terminal failure state.
+      // NO bounded poll. NO `externalTimeoutMs`.
+      queue,
+      executionRecordRepository: executionRecordRepository!,
+      workflowEngine: workflowEngine!,
     });
 
     // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1,
@@ -960,8 +1118,26 @@ export async function buildApp(
   if (webhookProcessingService) {
     handlerList.push(createWebhookJobHandler(webhookProcessingService, logger));
   }
+  // WORK-032 (PR #35 review fix #4): benchmark trial job handler — drives
+  // the async trial lifecycle (clone → branch → submit → poll external →
+  // collect metrics → check experiment completion).
+  // WORK-032 start-delivery durability: the start-delivery relay job
+  // handler — the consumer-side repair the relay job (boot sweep /
+  // claim-time enqueue) invokes. Registered NEXT TO the trial handler in
+  // the SAME existing WorkerHost registry.
+  if (benchmarkService) {
+    handlerList.push(createBenchmarkTrialJobHandler(benchmarkService, logger));
+    handlerList.push(createStartDeliveryRelayJobHandler(benchmarkService, logger));
+  }
   const handlers = buildHandlerRegistry(handlerList);
-  const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
+  const worker = new WorkerHost(queue, handlers, logger, {
+    ...options.workerOptions,
+    // WORK-032 start-delivery durability: the outbox relay boot sweep —
+    // every worker-process start re-enqueues relay jobs for ALL
+    // incomplete durable start obligations (process-startup recovery,
+    // NOT a periodic poll; see platform/worker/outbox-relay.ts).
+    outboxRelays: benchmarkStartDeliveryRelay ? [benchmarkStartDeliveryRelay] : [],
+  });
 
   const handle: AppHandle = {
     deps: {
@@ -1034,6 +1210,8 @@ export async function buildApp(
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,
+      // WORK-032: benchmark service (present when DB + execution configured).
+      benchmarkService,
     },
     start: async () => {
       if (options.startWorker !== false) {

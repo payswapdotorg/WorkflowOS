@@ -151,6 +151,14 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
     // schema_migrations). Safe within the per-call schema / isolated pglite
     // instance. Order: child tables first, then parents.
     await client.exec(`
+      TRUNCATE wfos_benchmark_review_findings RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_trial_metrics RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_trials RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_start_trial_deliveries RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_start_deliveries RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_integrity RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_experiments RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_benchmark_task_snapshots RESTART IDENTITY CASCADE;
       TRUNCATE wfos_agent_runs RESTART IDENTITY CASCADE;
       TRUNCATE wfos_execution_handoffs RESTART IDENTITY CASCADE;
       TRUNCATE wfos_execution_callbacks RESTART IDENTITY CASCADE;

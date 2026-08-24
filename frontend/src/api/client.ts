@@ -1423,3 +1423,484 @@ export const executionProviders = {
     return body.providers ?? [];
   },
 };
+
+// --- WORK-032: Native vs External Execution Benchmark ---
+//
+// The benchmark harness measures Native API execution vs External Companion
+// execution against the SAME engineering task snapshot. The frontend is a
+// CONSUMER — it never derives integrity, computes scores, or picks winners.
+// It only renders backend-supplied experiment/trial/metric/comparison state
+// and surfaces backend-supplied recommendations (always evidence-backed).
+// All routes require the x-api-key header (handled by apiFetch/apiGet/apiPost).
+
+export type BenchmarkExperimentStatus =
+  | 'created'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'cancelled'
+  | 'invalidated';
+
+export type BenchmarkTrialStatus = 'queued' | 'running' | 'completed' | 'failed' | 'unavailable';
+
+export type BenchmarkFailureKind = 'infrastructure' | 'engineering' | 'configuration';
+
+export type BenchmarkExecutionMode = 'native' | 'external';
+
+export type BenchmarkExportFormat = 'json' | 'csv';
+
+export type BenchmarkFindingSeverity = 'blocker' | 'major' | 'minor' | 'info';
+
+export type BenchmarkConfidence = 'low' | 'medium' | 'high';
+
+/** A frozen, immutable snapshot of the exact task to benchmark (§4). */
+export interface BenchmarkTaskSnapshot {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  architectureVersionId: string;
+  workItemId: string;
+  workOrderId: string;
+  implementationContextId: string;
+  requirementIds: string[];
+  criterionIds: string[];
+  repository: string;
+  baseCommit: string;
+  targetBranchPrefix: string;
+  promptDigest: string;
+  promptVersion: string;
+  verificationRequirements: unknown[];
+  snapshotHash: string;
+  harnessVersion: string;
+  scoringVersion: string;
+  createdAt: string;
+}
+
+/** A snapshot preview (§44) — canonical prompt + digest before freezing. */
+export interface BenchmarkSnapshotPreview {
+  projectId: string;
+  workItemId: string;
+  workItemLabel: string;
+  architectureVersionId: string;
+  requirementIds: string[];
+  criterionIds: string[];
+  repository: string;
+  baseCommit: string;
+  /** PR #35 review fix #1: `null` for previews (read-only path persists nothing). */
+  implementationContextId: string | null;
+  promptDigest: string;
+  promptVersion: string;
+  verificationRequirements: unknown[];
+  snapshotHash: string;
+  harnessVersion: string;
+  scoringVersion: string;
+  promptExcerpt: string;
+}
+
+/** Input to freeze a snapshot from a template work item (§4, §44). */
+export interface CreateBenchmarkSnapshotInput {
+  projectId: string;
+  workItemId: string;
+  name: string;
+  description?: string;
+  targetBranchPrefix?: string;
+}
+
+/** An experiment: one or more trials against a single snapshot (§5). */
+export interface BenchmarkExperiment {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  benchmarkTaskSnapshotId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  status: BenchmarkExperimentStatus;
+  randomizationSeed: string | null;
+  repetitions: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** A trial cell definition (provider × mode × repetition) (§5). */
+export interface BenchmarkTrialSpec {
+  provider: string;
+  model?: string | null;
+  mode: BenchmarkExecutionMode;
+  repetitions?: number;
+}
+
+/** Input to create an experiment (§44).
+ *  PR #35 review fix #5: `createdBy` is NOT sent by the frontend — the
+ *  backend derives it from the authenticated identity (`user.id`). */
+export interface CreateBenchmarkExperimentInput {
+  projectId: string;
+  benchmarkTaskSnapshotId: string;
+  name: string;
+  description?: string;
+  trials: BenchmarkTrialSpec[];
+  randomizeOrder?: boolean;
+  randomizationSeed?: string;
+  repetitions?: number;
+}
+
+/** A trial: one execution of one (provider, mode, rep) cell (§5, §6). */
+export interface BenchmarkTrial {
+  id: string;
+  experimentId: string;
+  benchmarkTaskSnapshotId: string;
+  organizationId: string;
+  projectId: string;
+  provider: string;
+  model: string | null;
+  executionMode: BenchmarkExecutionMode;
+  repetitionIndex: number;
+  executionOrder: number;
+  randomizationSeed: string | null;
+  status: BenchmarkTrialStatus;
+  trialBranch: string;
+  baselineCommit: string;
+  promptDigest: string;
+  workItemId: string | null;
+  executionId: string | null;
+  agentRunId: string | null;
+  pullRequestAssociationId: string | null;
+  workOrderId: string | null;
+  implementationContextId: string | null;
+  failureKind: BenchmarkFailureKind | null;
+  failureReason: string | null;
+  humanInterventionCount: number;
+  interventionDurationMs: number | null;
+  // §17 external mode metadata
+  companionVersion: string | null;
+  providerAdapterVersion: string | null;
+  browser: string | null;
+  providerSurface: string | null;
+  externalSessionRef: string | null;
+  handoffIssuedAt: string | null;
+  handoffRedeemedAt: string | null;
+  // §18 native mode metadata
+  adapterVersion: string | null;
+  modelConfigurationVersion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The full metric row for a trial (§10). */
+export interface BenchmarkTrialMetrics {
+  trialId: string;
+  // §10 Execution
+  queueTimeMs: number | null;
+  startLatencyMs: number | null;
+  executionDurationMs: number | null;
+  // §10 Engineering
+  filesChanged: number | null;
+  linesAdded: number | null;
+  linesDeleted: number | null;
+  commits: number | null;
+  pullRequests: number | null;
+  // §15 CI
+  ciRuns: number | null;
+  ciFailures: number | null;
+  ciFirstPass: boolean | null;
+  totalCiDurationMs: number | null;
+  ciFailureCategories: Record<string, number> | null;
+  // §14 Verification
+  verificationRuns: number | null;
+  criteriaPassed: number | null;
+  criteriaFailed: number | null;
+  verificationFirstPass: boolean | null;
+  finalPass: boolean | null;
+  totalCriteria: number | null;
+  // §13 Review
+  reviewCount: number | null;
+  requestChangesCount: number | null;
+  approvalCount: number | null;
+  severityCounts: Record<string, number> | null;
+  // §12 Correction
+  correctionCycles: number | null;
+  agentRuns: number | null;
+  // §10 Completion time
+  timeToPrMs: number | null;
+  timeToApprovedMs: number | null;
+  timeToMergedMs: number | null;
+  timeToVerifiedMs: number | null;
+  // §11 Derived score (versioned)
+  engineeringQualityScore: number | null;
+  scoreVersion: string | null;
+  // §16 Timestamps
+  executionStartedAt: string | null;
+  executionCompletedAt: string | null;
+  prCreatedAt: string | null;
+  ciStartedAt: string | null;
+  ciCompletedAt: string | null;
+  verificationStartedAt: string | null;
+  verificationCompletedAt: string | null;
+  reviewStartedAt: string | null;
+  reviewCompletedAt: string | null;
+  mergedAt: string | null;
+  verifiedAt: string | null;
+  collectedAt: string;
+}
+
+/** A per-trial review finding projection (§13). */
+export interface BenchmarkReviewFinding {
+  id: string;
+  trialId: string;
+  reviewId: string | null;
+  severity: BenchmarkFindingSeverity;
+  category: string | null;
+  file: string | null;
+  line: number | null;
+  description: string;
+  createdAt: string;
+}
+
+/** The integrity record for an experiment (§32). */
+export interface BenchmarkIntegrityRecord {
+  id: string;
+  experimentId: string;
+  snapshotHash: string;
+  promptDigest: string;
+  baselineCommit: string;
+  scoringVersion: string;
+  harnessVersion: string;
+  valid: boolean;
+  validatedAt: string;
+  invalidationReason: string | null;
+}
+
+/** Aggregated statistics for a (provider, mode) cell across N repetitions (§22, §23). */
+export interface BenchmarkCellStatistics {
+  provider: string;
+  mode: BenchmarkExecutionMode;
+  trialCount: number;
+  completed: number;
+  failed: number;
+  unavailable: number;
+  correctionCycles: {
+    mean: number | null;
+    median: number | null;
+    min: number | null;
+    max: number | null;
+  };
+  timeToVerifiedMs: {
+    mean: number | null;
+    median: number | null;
+    min: number | null;
+    max: number | null;
+  };
+  ciFirstPassRate: number | null;
+  verificationFirstPassRate: number | null;
+  engineeringQualityScore: {
+    mean: number | null;
+    median: number | null;
+    min: number | null;
+    max: number | null;
+  };
+}
+
+/** A side-by-side comparison of two or more trials (§26). */
+export interface BenchmarkComparison {
+  benchmarkTaskSnapshotId: string;
+  promptDigest: string;
+  baselineCommit: string;
+  trials: BenchmarkTrial[];
+  metrics: Record<string, BenchmarkTrialMetrics>;
+  cells: BenchmarkCellStatistics[];
+  integrityValid: boolean;
+}
+
+/** §42: Optional explicit recommendation helper. */
+export interface BenchmarkRecommendation {
+  experimentId: string;
+  recommendedProvider: string | null;
+  recommendedMode: BenchmarkExecutionMode | null;
+  reason: string;
+  evidence: {
+    metric: string;
+    value: string;
+    cell: string;
+  }[];
+  sampleSize: number;
+  confidence: BenchmarkConfidence;
+}
+
+export const benchmarks = {
+  // --- Snapshots (§4, §44) ---
+
+  snapshots: {
+    /** Preview a snapshot WITHOUT persisting (§44 creation flow). */
+    preview: (projectId: string, workItemId: string) =>
+      apiPost<{ preview: BenchmarkSnapshotPreview }>(`/benchmarks/snapshots/preview`, {
+        projectId,
+        workItemId,
+      }).then((b) => b.preview),
+
+    /** Freeze a snapshot from a template work item. */
+    create: (input: CreateBenchmarkSnapshotInput) =>
+      apiPost<{ snapshot: BenchmarkTaskSnapshot }>(`/benchmarks/snapshots`, input).then(
+        (b) => b.snapshot,
+      ),
+
+    /** List snapshots for a project (paginated). */
+    list: async (
+      projectId: string,
+      opts?: { limit?: number; offset?: number },
+    ): Promise<{ snapshots: BenchmarkTaskSnapshot[]; total: number }> => {
+      const params = new URLSearchParams({ projectId });
+      if (opts?.limit != null) params.set('limit', String(opts.limit));
+      if (opts?.offset != null) params.set('offset', String(opts.offset));
+      return apiGet<{ snapshots: BenchmarkTaskSnapshot[]; total: number }>(
+        `/benchmarks/snapshots?${params.toString()}`,
+      );
+    },
+
+    /** Get a snapshot by id. */
+    get: async (id: string): Promise<BenchmarkTaskSnapshot> => {
+      const body = await apiGet<{ snapshot: BenchmarkTaskSnapshot }>(`/benchmarks/snapshots/${id}`);
+      return body.snapshot;
+    },
+  },
+
+  // --- Experiments (§5, §45) ---
+
+  /** List experiments for a project (paginated, §49). */
+  list: async (
+    projectId: string,
+    opts?: { limit?: number; offset?: number },
+  ): Promise<{ experiments: BenchmarkExperiment[]; total: number }> => {
+    const params = new URLSearchParams({ projectId });
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    return apiGet<{ experiments: BenchmarkExperiment[]; total: number }>(
+      `/benchmarks?${params.toString()}`,
+    );
+  },
+
+  /** Create an experiment (§44). */
+  create: (input: CreateBenchmarkExperimentInput) =>
+    apiPost<{ experiment: BenchmarkExperiment }>(`/benchmarks`, input).then(
+      (b) => b.experiment,
+    ),
+
+  /** Get an experiment by id. */
+  get: async (id: string): Promise<BenchmarkExperiment> => {
+    const body = await apiGet<{ experiment: BenchmarkExperiment }>(`/benchmarks/${id}`);
+    return body.experiment;
+  },
+
+  /** §45: Start an experiment (runs queued trials synchronously — may take a while). */
+  start: (id: string) =>
+    apiPost<{ experiment: BenchmarkExperiment }>(`/benchmarks/${id}/start`, {}).then(
+      (b) => b.experiment,
+    ),
+
+  /** §45: Pause a running experiment. */
+  pause: (id: string) =>
+    apiPost<{ experiment: BenchmarkExperiment }>(`/benchmarks/${id}/pause`, {}).then(
+      (b) => b.experiment,
+    ),
+
+  /** §45: Cancel an experiment. */
+  cancel: (id: string) =>
+    apiPost<{ experiment: BenchmarkExperiment }>(`/benchmarks/${id}/cancel`, {}).then(
+      (b) => b.experiment,
+    ),
+
+  // --- Trials (§25) ---
+
+  /** List trials for an experiment (paginated, §49). */
+  listTrials: async (
+    experimentId: string,
+    opts?: { limit?: number; offset?: number },
+  ): Promise<{ trials: BenchmarkTrial[]; total: number }> => {
+    const params = new URLSearchParams();
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    return apiGet<{ trials: BenchmarkTrial[]; total: number }>(
+      `/benchmarks/${experimentId}/trials${qs ? `?${qs}` : ''}`,
+    );
+  },
+
+  /** Get a trial by id (§25 detail view). */
+  getTrial: async (trialId: string): Promise<BenchmarkTrial> => {
+    const body = await apiGet<{ trial: BenchmarkTrial }>(`/benchmarks/trials/${trialId}`);
+    return body.trial;
+  },
+
+  /** Get trial metrics (§25). */
+  getTrialMetrics: async (trialId: string): Promise<BenchmarkTrialMetrics | null> => {
+    const body = await apiGet<{ metrics: BenchmarkTrialMetrics | null }>(
+      `/benchmarks/trials/${trialId}/metrics`,
+    );
+    return body.metrics ?? null;
+  },
+
+  /** Get trial review findings (§13). */
+  listTrialFindings: async (trialId: string): Promise<BenchmarkReviewFinding[]> => {
+    const body = await apiGet<{ findings: BenchmarkReviewFinding[] }>(
+      `/benchmarks/trials/${trialId}/findings`,
+    );
+    return body.findings ?? [];
+  },
+
+  // --- Comparison (§26) ---
+
+  /** Side-by-side comparison of two or more trials. */
+  compare: (trialIds: string[]) =>
+    apiPost<{ comparison: BenchmarkComparison }>(`/benchmarks/compare`, { trialIds }).then(
+      (b) => b.comparison,
+    ),
+
+  // --- Integrity (§32) ---
+
+  /** Integrity record for an experiment. */
+  getIntegrity: async (experimentId: string): Promise<BenchmarkIntegrityRecord | null> => {
+    const body = await apiGet<{ integrity: BenchmarkIntegrityRecord | null }>(
+      `/benchmarks/${experimentId}/integrity`,
+    );
+    return body.integrity ?? null;
+  },
+
+  // --- Recommendation (§42) ---
+
+  /** Optional explicit, evidence-backed recommendation. */
+  recommend: async (experimentId: string): Promise<BenchmarkRecommendation | null> => {
+    const body = await apiGet<{ recommendation: BenchmarkRecommendation | null }>(
+      `/benchmarks/${experimentId}/recommend`,
+    );
+    return body.recommendation ?? null;
+  },
+
+  // --- Export (§40) ---
+
+  /**
+   * Export experiment results as a Blob (file download). Uses raw fetch + res.blob()
+   * because the response body is not JSON — it's a JSON or CSV file attachment.
+   */
+  exportExperiment: async (
+    experimentId: string,
+    format: BenchmarkExportFormat,
+  ): Promise<Blob> => {
+    const apiKey = getApiKey();
+    const headers: Record<string, string> = {};
+    if (apiKey) headers['x-api-key'] = apiKey;
+    const res = await fetch(
+      `${API_BASE}/benchmarks/${experimentId}/export?format=${format}`,
+      { headers },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(
+        res.status,
+        body.error || body.reason || `Export failed: ${res.status}`,
+      );
+    }
+    return res.blob();
+  },
+};

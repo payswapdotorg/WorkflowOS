@@ -1371,6 +1371,10 @@ describe('WORK-007 invariants — work-items module boundaries', () => {
       // autonomous-implementation entry point (start-implementation route).
       'ImplementationContext',
       'ImplementationContextContent',
+      // PR #35 review fix #1: ImplementationContextPreview is the read-only
+      // preview shape — returned by `buildPreview()` (no DB writes) for
+      // benchmark snapshot previews + dry-run prompt inspection.
+      'ImplementationContextPreview',
       'ImplementationContextRepository',
       'ImplementationContextBuilder',
       // WORK-027: deterministic implementation prompt + provider-independent
@@ -5542,5 +5546,1295 @@ describe('PRODUCTION READINESS invariants', () => {
   it('bootstrap script exists', () => {
     const scriptPath = join(REPO_ROOT, 'scripts', 'bootstrap-production.ts');
     expect(existsSync(scriptPath), 'scripts/bootstrap-production.ts not found').toBe(true);
+  });
+});
+
+// ============================================================================
+// WORK-032 — Native vs External Execution Benchmark architecture checks (§34)
+// ============================================================================
+// The benchmark domain lives at src/benchmark/ (application-layer orchestrator
+// OUTSIDE src/modules/). It CONSUMES the 17 frozen domain modules via their
+// public barrels. It does NOT create another workflow/verification/review/CI
+// engine. These checks prove the boundary is intact.
+// ============================================================================
+
+describe('WORK-032 — benchmark architecture checks (§34)', () => {
+  const BENCHMARK_DIR = join(BACKEND_ROOT, 'src', 'benchmark');
+  const BENCHMARK_INTERNAL = join(BENCHMARK_DIR, 'internal');
+
+  function readBenchmarkFiles(): { path: string; src: string }[] {
+    if (!existsSync(BENCHMARK_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(BENCHMARK_DIR);
+    return out;
+  }
+
+  it('benchmark domain exists at src/benchmark/ (outside src/modules/)', () => {
+    expect(existsSync(BENCHMARK_DIR), 'src/benchmark/ must exist').toBe(true);
+    expect(existsSync(join(BENCHMARK_DIR, 'index.ts')), 'src/benchmark/index.ts must exist').toBe(true);
+    expect(existsSync(join(BENCHMARK_DIR, 'types.ts')), 'src/benchmark/types.ts must exist').toBe(true);
+    expect(existsSync(BENCHMARK_INTERNAL), 'src/benchmark/internal/ must exist').toBe(true);
+  });
+
+  it('benchmark does not create another workflow engine (no wfos_workflow_executions INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_workflow_executions/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_executions`);
+      }
+      if (/INSERT\s+INTO\s+wfos_workflow_transitions/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_transitions`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not create another verification engine (no wfos_verification_runs INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_verification_runs/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_verification_runs`);
+      }
+      if (/INSERT\s+INTO\s+wfos_evidence/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_evidence`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not create another review engine (no wfos_reviews INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_reviews/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_reviews`);
+      }
+      if (/INSERT\s+INTO\s+wfos_review_findings/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_review_findings (authoritative /reviews table)`);
+      }
+    }
+    // NOTE: wfos_benchmark_review_findings is a benchmark-scoped projection
+    // table (denormalized from /reviews for comparison views). It is NOT the
+    // authoritative /reviews findings table. The check above only flags the
+    // authoritative wfos_review_findings table.
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not calculate authoritative workflow state (reads workflowEngine.getState/getHistory only)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      // The benchmark may call workflowEngine.getOrCreate + transition for
+      // trial initialization (draft → ready) but must NOT call the workflow
+      // ORCHESTRATOR (the authority that drives pr_open → verifying →
+      // approved → merged → verified).
+      if (/orchestrator\./i.test(f.src) && !/benchmark/i.test(f.path)) {
+        // skip — this is just the word "orchestrator" in a non-benchmark file
+      }
+    }
+    // The benchmark trial orchestrator IS allowed to call workflowEngine.getOrCreate
+    // + transition({toState:'ready'}) to initialize a cloned work item. But it
+    // must NOT call transition({toState:'merged'|'verified'}) — those are the
+    // /workflows orchestrator's authority.
+    for (const f of files) {
+      if (/toState:\s*['"]merged['"]/.test(f.src) || /toState:\s*['"]verified['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition to merged/verified (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]approved['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition to approved (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not mutate MERGED / VERIFIED (no transition WRITE to those states)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      // Only flag WRITE calls: transition({ toState: 'merged'|'verified' }).
+      // Reads (firstTransitionTo('merged'), h.toState) are allowed — the
+      // metric collector reads workflow history to compute time-to-VERIFIED.
+      if (/toState:\s*['"]merged['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition WRITE to 'merged' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]verified['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition WRITE to 'verified' (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark uses ExecutionService (delegates execution, no second engine)', () => {
+    const files = readBenchmarkFiles();
+    const hasExecutionServiceImport = files.some((f) =>
+      f.src.includes('ExecutionService') && f.src.includes('@modules/agents'),
+    );
+    expect(hasExecutionServiceImport, 'benchmark must import ExecutionService from @modules/agents').toBe(true);
+    // The trial orchestrator must call executionService.submit
+    const orchestratorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-trial-orchestrator.ts'), 'utf8');
+    expect(orchestratorSrc).toMatch(/executionService\.submit/);
+  });
+
+  it('benchmark uses existing GitHub authority (GitHubAdapter + ProjectGitHubRepositoryRepository)', () => {
+    const files = readBenchmarkFiles();
+    const hasGithubImport = files.some((f) =>
+      f.src.includes('GitHubAdapter') && f.src.includes('@modules/github'),
+    );
+    expect(hasGithubImport, 'benchmark must import GitHubAdapter from @modules/github').toBe(true);
+  });
+
+  it('benchmark uses existing Verification authority (VerificationService)', () => {
+    const files = readBenchmarkFiles();
+    const hasVerificationImport = files.some((f) =>
+      f.src.includes('VerificationService') && f.src.includes('@modules/verification'),
+    );
+    expect(hasVerificationImport, 'benchmark must import VerificationService from @modules/verification').toBe(true);
+    // The metric collector must call verificationService.listRunsForWorkItem
+    const collectorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-metric-collector.ts'), 'utf8');
+    expect(collectorSrc).toMatch(/verificationService\.listRunsForWorkItem/);
+  });
+
+  it('benchmark uses existing Review authority (ReviewService)', () => {
+    const files = readBenchmarkFiles();
+    const hasReviewImport = files.some((f) =>
+      f.src.includes('ReviewService') && f.src.includes('@modules/reviews'),
+    );
+    expect(hasReviewImport, 'benchmark must import ReviewService from @modules/reviews').toBe(true);
+    const collectorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-metric-collector.ts'), 'utf8');
+    expect(collectorSrc).toMatch(/reviewService\.listReviewsForWorkItem/);
+    expect(collectorSrc).toMatch(/reviewService\.listFindingsForReview/);
+  });
+
+  it('benchmark stores promptDigest (§27 equality key)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/prompt_digest/);
+    // The trial table copies promptDigest from the snapshot.
+    expect(migrationSrc).toMatch(/wfos_benchmark_trials/);
+    // The snapshot table stores the canonical promptDigest.
+    expect(migrationSrc).toMatch(/wfos_benchmark_task_snapshots.*prompt_digest/s);
+  });
+
+  it('benchmark requires baseline commit identity (§28 — NOT NULL base_commit)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/base_commit\s+TEXT\s+NOT\s+NULL/);
+    // Trial table also has baseline_commit NOT NULL (copied from snapshot).
+    expect(migrationSrc).toMatch(/baseline_commit\s+TEXT\s+NOT\s+NULL/);
+  });
+
+  it('benchmark trials are isolated (§6 — per-trial branch + cloned work item)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    // Each trial has its own trial_branch.
+    expect(migrationSrc).toMatch(/trial_branch\s+TEXT\s+NOT\s+NULL/);
+    // Each trial has its own work_item_id (the cloned work item).
+    expect(migrationSrc).toMatch(/work_item_id\s+UUID\s+REFERENCES\s+wfos_work_items/);
+    // Unique cell: (experiment, provider, mode, repetition) — no duplicate trials.
+    expect(migrationSrc).toMatch(/UNIQUE\s*\(experiment_id,\s*provider,\s*execution_mode,\s*repetition_index\)/);
+  });
+
+  it('benchmark never stores credentials (§33 — no secret/token/key/cookie columns)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    // No column name may match the credential pattern. The external_session_ref
+    // is an opaque provider-side reference (NOT a credential — the user's own
+    // browser session already holds it; it is not an auth token).
+    const violations: string[] = [];
+    const lines = migrationSrc.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim().toLowerCase();
+      if (trimmed.startsWith('--')) continue; // comment line
+      if (/(?:secret|password|api_key|apikey|credential|private_key|cookie|access_token|refresh_token|callback_token|handoff_token)\b/.test(trimmed)) {
+        // external_session_ref is allowed (opaque reference, not a credential)
+        if (trimmed.includes('external_session_ref') && !trimmed.includes('token')) continue;
+        violations.push(`credential-like column: ${trimmed}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+    // Also check the benchmark source files for credential writes.
+    const files = readBenchmarkFiles();
+    const srcViolations: string[] = [];
+    for (const f of files) {
+      // The export service has a sanitizeMetrics that CHECKS for these patterns
+      // (defense in depth) — that's allowed. The check is: no code writes a
+      // value that IS a credential.
+      if (/localStorage\.setItem.*api_?key/i.test(f.src)) {
+        srcViolations.push(`${f.path}: localStorage API key write`);
+      }
+    }
+    expect(srcViolations, srcViolations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark snapshot is immutable (§4 — DB trigger rejects UPDATE/DELETE)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/wfos_reject_benchmark_snapshot_mutation/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE OR DELETE ON wfos_benchmark_task_snapshots/);
+  });
+
+  it('benchmark audit events use BENCHMARK_/TRIAL_ prefixes (§47 — do not duplicate workflow transition events)', () => {
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    // The benchmark emits its own audit event types — never WORKFLOW_TRANSITION.
+    expect(serviceSrc).toMatch(/BENCHMARK_CREATED/);
+    expect(serviceSrc).toMatch(/BENCHMARK_STARTED/);
+    expect(serviceSrc).toMatch(/BENCHMARK_COMPLETED/);
+    expect(serviceSrc).toMatch(/TRIAL_COMPLETED|TRIAL_FAILED/);
+    // Must NOT emit WORKFLOW_TRANSITION (that's /workflows' authority).
+    expect(serviceSrc).not.toMatch(/eventType:\s*['"]WORKFLOW_TRANSITION['"]/);
+  });
+
+  it('benchmark imports only @modules/* public barrels + @platform/* (never internal/)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const importSpecifiers = f.src.match(/from\s+['"]([^'"]+)['"]/g) ?? [];
+      for (const spec of importSpecifiers) {
+        const path = spec.replace(/from\s+['"]/, '').replace(/['"]$/, '');
+        if (path.includes('@modules/') && path.includes('/internal/')) {
+          violations.push(`${f.path}: imports ${path} (forbidden — must use public barrel)`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark route is wired in server.ts + index.ts', () => {
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverSrc).toMatch(/benchmarkRoutes/);
+    expect(serverSrc).toMatch(/BenchmarkRouteDeps/);
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/benchmark:/);
+  });
+
+  it('benchmark service is constructed in app.ts', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultBenchmarkService/);
+    expect(appSrc).toMatch(/PgBenchmarkRepository/);
+    expect(appSrc).toMatch(/benchmarkService/);
+  });
+
+  it('benchmark migration 0025 exists + db.reset truncates benchmark tables', () => {
+    expect(existsSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'))).toBe(true);
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_task_snapshots/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_experiments/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_trials/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_trial_metrics/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_review_findings/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_integrity/);
+  });
+
+  it('frontend has no direct provider API access (§34 — no fetch to z.ai/openai/anthropic URLs)', () => {
+    const FRONTEND_ROOT = join(BACKEND_ROOT, '..', '..', 'frontend');
+    if (!existsSync(FRONTEND_ROOT)) return; // skip if frontend not present
+    const violations: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === 'dist' || entry === '.git') continue;
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) {
+          const src = readFileSync(full, 'utf8');
+          if (/https?:\/\/[^'"]*(?:api\.openai|api\.anthropic|chat\.z\.ai|chatgpt\.com|claude\.(?:ai|com))/i.test(src)) {
+            violations.push(`${full}: direct provider API URL`);
+          }
+        }
+      }
+    };
+    walk(join(FRONTEND_ROOT, 'src'));
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // ==========================================================================
+  // PR #35 follow-up (idempotency): the benchmark trial lifecycle MUST be
+  // exactly-once under duplicate job delivery + concurrent workers. The
+  // claim (queued→running) + finalization (running→terminal) transitions
+  // are atomic compare-and-swap on the persisted `lifecycle_phase` column.
+  // A duplicate delivery that loses the claim observes null + NO-OPS (never
+  // reruns orchestration / refinalizes). These static checks enforce the
+  // invariant at the source level so a future regression cannot silently
+  // reintroduce the unconditional `UPDATE ... WHERE id=$1` pattern.
+  // ==========================================================================
+
+  it('benchmark trial lifecycle migration 0027 exists (lifecycle_phase column)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    expect(existsSync(migrationPath), '0027_benchmark_trial_lifecycle_phase.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS lifecycle_phase/);
+    expect(src).toMatch(/CHECK \(lifecycle_phase IN/);
+    // The explicit phase set: queued → starting → execution_wait →
+    // delivery_wait → completed | failed.
+    expect(src).toMatch(/'queued'/);
+    expect(src).toMatch(/'starting'/);
+    expect(src).toMatch(/'execution_wait'/);
+    expect(src).toMatch(/'delivery_wait'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'failed'/);
+  });
+
+  it('benchmark migration 0027 MECHANICALLY ENFORCES the status↔lifecycle_phase invariant (NOT a dual-state model)', () => {
+    // The review explicitly warned: "The dual-state model is dangerous unless
+    // there is a mechanically enforced invariant between the two." Application-
+    // layer sync alone is insufficient — a future raw UPDATE touching only one
+    // column could silently introduce a divergent row (e.g.
+    // status='running', lifecycle_phase='completed') that the concurrency
+    // model does not know how to route. The DB itself MUST reject such rows.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    // The CHECK constraint exists + is named (so a grep can find it + so
+    // drop/replace is explicit).
+    expect(src).toMatch(/wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant/);
+    expect(src).toMatch(/CHECK \(/);
+    // The 6 canonical pairs the review specified. Every allowed (phase,
+    // status) combination must appear so the constraint is total — a row
+    // with any other pairing is physically rejected.
+    expect(src).toMatch(/lifecycle_phase = 'queued'\s+AND status = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'starting'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'\s+AND status = 'running'/);
+    expect(src).toMatch(/lifecycle_phase = 'completed'\s+AND status = 'completed'/);
+    expect(src).toMatch(/lifecycle_phase = 'failed'\s+AND status IN \('failed','unavailable'\)/);
+    // CRITICAL ORDERING: the CHECK constraint MUST be added AFTER the
+    // backfill UPDATEs. Otherwise the ADD would reject the pre-backfill
+    // divergent rows (status='running' with the default lifecycle_phase=
+    // 'queued'). Verify the constraint text appears after the last backfill
+    // UPDATE for 'unavailable' → 'failed'.
+    const backfillIdx = src.indexOf("status IN ('failed', 'unavailable') AND lifecycle_phase = 'queued'");
+    const constraintIdx = src.indexOf('ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant');
+    expect(backfillIdx, 'unavailable backfill UPDATE must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK constraint must be present').toBeGreaterThan(-1);
+    expect(constraintIdx, 'invariant CHECK must come AFTER the backfill (else ADD rejects pre-backfill rows)').toBeGreaterThan(backfillIdx);
+  });
+
+  it('benchmark trial claim is ATOMIC (claimTrialForSetup: queued→starting compare-and-swap)', () => {
+    // The orchestrator's runTrial MUST claim via claimTrialForSetup (atomic
+    // WHERE lifecycle_phase='queued' RETURNING *), NOT via an unconditional
+    // updateTrial. A lost claim returns null + the orchestrator MUST NO-OP
+    // (no clone / branch / submit).
+    const orchestratorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-trial-orchestrator.ts'), 'utf8');
+    expect(orchestratorSrc).toMatch(/claimTrialForSetup/);
+    expect(orchestratorSrc).toMatch(/claim-lost/);
+    // The orchestrator must NOT use an unconditional updateTrial for the
+    // initial claim (the old `UPDATE ... SET status='running' WHERE id=$1`
+    // pattern that caused the claim race).
+    expect(orchestratorSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'running'/);
+
+    // The repository's claimTrialForSetup MUST guard on lifecycle_phase='queued'.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    expect(repoSrc).toMatch(/claimTrialForSetup/);
+    // The atomic compare-and-swap: WHERE id=$1 AND lifecycle_phase='queued'.
+    const claimFn = repoSrc.match(/async claimTrialForSetup[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTrialForSetup must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = 'queued'/);
+    expect(claimFn![0]).toMatch(/lifecycle_phase = 'starting'/);
+  });
+
+  it('benchmark trial finalization is ATOMIC (claimTerminal: execution_wait|delivery_wait→completed|failed compare-and-swap)', () => {
+    // The service's finalizeTrial MUST use claimTerminal (atomic
+    // WHERE lifecycle_phase=$fromPhase RETURNING *). A lost claim returns
+    // null + the service MUST skip metrics / findings / audit (exactly-once
+    // side effects).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/claimTerminal/);
+    expect(serviceSrc).toMatch(/finalize-lost-race/);
+    // finalizeTrial must NOT use an unconditional updateTrial for the
+    // terminal transition (the old pattern that caused the finalize race).
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'completed'/);
+    expect(serviceSrc).not.toMatch(/updateTrial\(trial\.id,\s*\{\s*status:\s*'failed'/);
+
+    // The repository's claimTerminal MUST guard on lifecycle_phase=$fromPhase.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const claimFn = repoSrc.match(/async claimTerminal[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimTerminal must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = \$2/);
+  });
+
+  it('benchmark experiment completion is a TWO-PHASE protocol (reservation running→finalizing, then finalization after integrity, fenced on generation)', () => {
+    // PR #36 review fix #2 + #4: `claimExperimentCompletion` MUST be a
+    // RESERVATION (running → finalizing), NOT a direct completion.
+    // `completed` must become authoritative ONLY via
+    // `finalizeExperimentCompletion`, called AFTER integrity validation
+    // passes. This closes the false-completion race the reviewer found
+    // (the prior version flipped the experiment to `completed` before
+    // validation ran). The finalization CAS MUST also be FENCED on the
+    // `finalizing_generation` (PR #36 review fix #4) so a stale worker
+    // holding an OLDER generation cannot finalize after a newer worker
+    // reclaimed + advanced the generation.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+
+    // Phase 1 — RESERVATION. claimExperimentCompletion MUST set
+    // status='finalizing' (NOT 'completed') + guard on status='running'
+    // + set the fencing generation (COALESCE(NULL, 0) + 1 to handle legacy
+    // pre-0030 rows whose generation is NULL).
+    const claimFn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(claimFn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(claimFn![0]).toMatch(/WHERE id = \$1 AND status = 'running'/);
+    expect(claimFn![0]).toMatch(/SET status = 'finalizing'/);
+    expect(claimFn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The reservation MUST NOT set 'completed' (that is the finalization's
+    // job, after integrity passes).
+    expect(claimFn![0]).not.toMatch(/SET status = 'completed'/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization).
+    expect(claimFn![0]).not.toMatch(/completed_at/);
+
+    // Phase 3a — success finalization. finalizeExperimentCompletion MUST
+    // guard on status='finalizing' + the fencing generation + set
+    // status='completed'.
+    const finalizeFn = repoSrc.match(/async finalizeExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(finalizeFn, 'finalizeExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(finalizeFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing' AND finalizing_generation = \$2/);
+    expect(finalizeFn![0]).toMatch(/SET status = 'completed'/);
+
+    // Phase 3b — failure finalization. finalizeExperimentInvalidation MUST
+    // guard on status='finalizing' + the fencing generation + set
+    // status='invalidated'.
+    const invalidateFn = repoSrc.match(/async finalizeExperimentInvalidation[\s\S]*?RETURNING \*/);
+    expect(invalidateFn, 'finalizeExperimentInvalidation must exist + use RETURNING *').not.toBeNull();
+    expect(invalidateFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing' AND finalizing_generation = \$2/);
+    expect(invalidateFn![0]).toMatch(/SET status = 'invalidated'/);
+  });
+
+  it('benchmark checkExperimentCompletion ORDERING: reservation → integrity validation → finalization → audit (NOT completed-then-validate)', () => {
+    // PR #36 review fix #2: the integrity validation MUST run BETWEEN the
+    // reservation + the finalization. The audit MUST run AFTER the
+    // finalization (so BENCHMARK_COMPLETED is only written when the
+    // experiment actually reached `completed`, + BENCHMARK_INVALIDATED is
+    // written on the failure path). This is the ordering the reviewer
+    // required: "the claim must occur before any of those side effects"
+    // (the reservation claims before validation; the finalization claims
+    // before the audit).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    // Match the full method body up to its closing brace at 2-space indent.
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    // Phase 1 — reservation is the FIRST CAS.
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    const validateIdx = body.indexOf('integrityService.validate');
+    const finalizeIdx = body.indexOf('finalizeExperimentCompletion');
+    const invalidateFinIdx = body.indexOf('finalizeExperimentInvalidation');
+    const auditCompletedIdx = body.indexOf("'BENCHMARK_COMPLETED'");
+    const auditInvalidatedIdx = body.indexOf("'BENCHMARK_INVALIDATED'");
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    expect(validateIdx, 'must call integrityService.validate').toBeGreaterThan(-1);
+    expect(finalizeIdx, 'must call finalizeExperimentCompletion').toBeGreaterThan(-1);
+    expect(invalidateFinIdx, 'must call finalizeExperimentInvalidation').toBeGreaterThan(-1);
+    expect(auditCompletedIdx, 'must emit BENCHMARK_COMPLETED').toBeGreaterThan(-1);
+    expect(auditInvalidatedIdx, 'must emit BENCHMARK_INVALIDATED').toBeGreaterThan(-1);
+    // Ordering: reservation BEFORE validation BEFORE finalization BEFORE audit.
+    expect(claimIdx).toBeLessThan(validateIdx);
+    expect(validateIdx).toBeLessThan(finalizeIdx);
+    expect(validateIdx).toBeLessThan(invalidateFinIdx);
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // The success-path audit (BENCHMARK_COMPLETED) must come AFTER the
+    // success finalization; the failure-path audit (BENCHMARK_INVALIDATED)
+    // must come AFTER the failure finalization.
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // A thrown validation error MUST be treated as a failure (caught +
+    // valid=false), NOT propagated (which would leave the experiment stuck
+    // in 'finalizing' with no audit — but at least not a false completion).
+    expect(body).toMatch(/valid = false/);
+  });
+
+  it('benchmark migration 0028 adds the finalizing reservation status to the experiment CHECK (two-phase completion)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0028_benchmark_experiment_completion_protocol.sql');
+    expect(existsSync(migrationPath), '0028_benchmark_experiment_completion_protocol.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/DROP CONSTRAINT IF EXISTS wfos_benchmark_experiments_status_check/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_experiments_status_check/);
+    // The new CHECK must include 'finalizing' (the reservation state) +
+    // preserve all prior statuses.
+    expect(src).toMatch(/'created'/);
+    expect(src).toMatch(/'running'/);
+    expect(src).toMatch(/'paused'/);
+    expect(src).toMatch(/'finalizing'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'cancelled'/);
+    expect(src).toMatch(/'invalidated'/);
+  });
+
+  it('benchmark migration 0027 backfill splits running trials by execution_mode (native→delivery_wait, external→execution_wait)', () => {
+    // PR #36 review fix #1: a native `running` trial is past execution
+    // (native is synchronous-completed) + awaiting delivery, so it MUST
+    // backfill to `delivery_wait`. An external `running` trial is awaiting
+    // external execution completion, so it backfills to `execution_wait`.
+    // The prior single backfill (all running → execution_wait)
+    // misclassified native trials + would cause runTrialJob to re-read a
+    // non-existent execution record + finalize them as
+    // 'execution-record-not-found'.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/execution_mode = 'native'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'/);
+    expect(src).toMatch(/execution_mode = 'external'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'/);
+    // The native backfill MUST set delivery_wait (NOT execution_wait) +
+    // pair it with execution_mode='native' in the same UPDATE statement.
+    // Assert the full SET→WHERE line adjacency directly (capture-group
+    // approaches cross UPDATE statements because [\s\S]*? spans them).
+    expect(src).toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
+    // The external backfill MUST set execution_wait (NOT delivery_wait) +
+    // pair it with execution_mode='external'.
+    expect(src).toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    // The native backfill MUST NOT pair delivery_wait with external, + the
+    // external backfill MUST NOT pair execution_wait with native (the
+    // misclassification the review found).
+    expect(src).not.toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    expect(src).not.toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
+  });
+
+  it('benchmark trial runTrialJob routes by lifecycle_phase (NOT coarse status)', () => {
+    // The state machine MUST route by the explicit persisted phase so a
+    // duplicate delivery observes the already-advanced phase + no-ops. The
+    // 'starting' phase is the critical guard: a redelivery arriving while
+    // the orchestrator is mid-setup observes 'starting' + returns (it does
+    // NOT read executionId=null + finalize the active trial as
+    // 'execution-record-not-found').
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    expect(serviceSrc).toMatch(/trial\.lifecyclePhase/);
+    expect(serviceSrc).toMatch(/phase === 'starting'/);
+    expect(serviceSrc).toMatch(/phase === 'execution_wait'/);
+    expect(serviceSrc).toMatch(/phase === 'delivery_wait'/);
+    expect(serviceSrc).toMatch(/skipped-starting/);
+    // The old coarse `trial.status === 'running'` routing (which caused the
+    // mid-orchestration clobber race) must NOT be the primary router.
+    expect(serviceSrc).not.toMatch(/if \(trial\.status === 'running'\)/);
+  });
+
+  it('benchmark trial idempotency regression tests exist', () => {
+    // The duplicate-delivery + concurrent-worker regression tests MUST
+    // exist (the review required them before any merge).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'trial-idempotency.regression.test.ts');
+    expect(existsSync(testPath), 'trial-idempotency.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/duplicate runTrialJob on a QUEUED trial claims exactly once/);
+    expect(src).toMatch(/concurrent finalization on a DELIVERY_WAIT trial finalizes exactly once/);
+    expect(src).toMatch(/claimTrialForSetup compare-and-swap: exactly one winner/);
+    expect(src).toMatch(/mid-orchestration redelivery NO-OPS on the starting phase/);
+    // PR #36 review fix #1: migration 0027 backfill mode-split regression.
+    expect(src).toMatch(/migration 0027 backfill classifies native running/);
+    // PR #36 review fix #2a: integrity failure MUST NOT expose a false
+    // `completed` experiment.
+    expect(src).toMatch(/integrity failure does NOT expose a false completed experiment/);
+    // PR #36 review fix #2b: exactly-once finalization under concurrent
+    // checkExperimentCompletion calls.
+    expect(src).toMatch(/concurrent experiment completion finalizes exactly once/);
+    // PR #36 review fix #3: lost `finalizing` worker recovery — both the
+    // success path (recovered to `completed` + one BENCHMARK_COMPLETED)
+    // + the integrity-failure path (recovered to `invalidated` + one
+    // BENCHMARK_INVALIDATED). The reviewer required a regression test
+    // proving a lost worker can be safely recovered to exactly one
+    // terminal state and exactly one terminal audit event.
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(success path\)/);
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(integrity-failure path\)/);
+    // PR #36 review fix #4 (fencing): the regression suite MUST prove BOTH
+    // (a) the stale-worker fencing scenario (an old generation cannot
+    // finalize after a newer worker reclaims + advances the generation)
+    // AND (b) the normal active-lease non-preemption case (an active
+    // worker is never preempted by concurrent recovery CAS calls). The
+    // reviewer required both scenarios: "The regression suite needs to
+    // prove exactly that scenario, plus the normal active-lease
+    // non-preemption case."
+    expect(src).toMatch(/stale worker holding an old generation CANNOT finalize after a newer worker reclaims the reservation \(fencing\)/);
+    expect(src).toMatch(/active lease is NOT preempted by concurrent recovery CAS calls \(active-lease non-preemption\)/);
+  });
+
+  it('benchmark migration 0029 adds the persisted finalizing lease + stale-reservation index (crash-safe recovery)', () => {
+    // PR #36 review fix #3: the two-phase completion protocol (migration
+    // 0028) introduced a durable `running → finalizing` reservation, but
+    // there was NO recovery path if the worker that won the reservation
+    // DIED before finalizing — the experiment would be permanently stuck
+    // in `finalizing` (claimExperimentCompletion only matches
+    // WHERE status='running'; checkExperimentCompletion is only triggered
+    // when a trial reaches terminal, but all trials were already
+    // terminal). Migration 0029 fixes this by adding a persisted lease
+    // (`finalizing_lease_expires_at`) that the recovery CAS reclaims when
+    // it expires.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0029_benchmark_experiment_finalizing_lease.sql');
+    expect(existsSync(migrationPath), '0029_benchmark_experiment_finalizing_lease.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The column MUST exist (nullable — only set when status='finalizing').
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS finalizing_lease_expires_at TIMESTAMPTZ/);
+    // A partial index scoped to status='finalizing' for the stale-lease
+    // sweep query (keeps the index small — finalizing is transient).
+    expect(src).toMatch(/CREATE INDEX IF NOT EXISTS idx_benchmark_experiments_finalizing_stale/);
+    expect(src).toMatch(/WHERE status = 'finalizing'/);
+  });
+
+  it('benchmark recoverStaleFinalizingExperiment is an atomic CAS guarded on status=finalizing + an expired lease (NOT running) + INCREMENTS the fencing generation', () => {
+    // PR #36 review fix #3 + #4: the recovery CAS MUST (a) guard on
+    // status='finalizing' (NOT 'running' — the fresh-claim path owns
+    // 'running'), (b) guard on finalizing_lease_expires_at < NOW() (the
+    // previous winner's lease has expired = the previous winner is
+    // presumed dead — an active worker is never preempted mid-validation),
+    // (c) RENEW the lease (set finalizing_lease_expires_at = NOW()+ttl) so
+    // the recovering worker has exclusive ownership — if it also dies, the
+    // renewed lease eventually expires and another recovery attempt can
+    // claim it again (forward progress), (d) INCREMENT the fencing
+    // generation (PR #36 review fix #4) so the stale worker (holding the
+    // OLD generation) is FENCED — its finalization CAS rejects because the
+    // row's finalizing_generation has advanced past the stale value, (e) use
+    // RETURNING * so the winner proceeds to phase 2 (validation +
+    // finalization) + the loser no-ops.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async recoverStaleFinalizingExperiment[\s\S]*?RETURNING \*/);
+    expect(fn, 'recoverStaleFinalizingExperiment must exist + use RETURNING *').not.toBeNull();
+    // Guard on status='finalizing' (NOT 'running' — that is the fresh-claim path).
+    expect(fn![0]).toMatch(/status = 'finalizing'/);
+    expect(fn![0]).not.toMatch(/status = 'running'/);
+    // Guard on the expired lease (the previous winner is presumed dead).
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at < NOW\(\)/);
+    // RENEW the lease (forward progress if the recovering worker also dies).
+    expect(fn![0]).toMatch(/SET\s+finalizing_lease_expires_at = \$2/);
+    // PR #36 review fix #4 — INCREMENT the fencing generation. The COALESCE
+    // handles legacy pre-0030 `finalizing` rows whose generation is NULL
+    // (COALESCE(NULL, 0) + 1 = 1 on the first reclaim).
+    expect(fn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The recovery MUST NOT touch `status` (the reservation stays
+    // `finalizing` — only the finalization CASes advance to
+    // completed/invalidated) + MUST NOT touch `completed_at` (no terminal
+    // timestamp until the finalization).
+    expect(fn![0]).not.toMatch(/SET status/);
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark claimExperimentCompletion sets the persisted lease + the fencing generation (NOT just status=finalizing)', () => {
+    // PR #36 review fix #3 + #4: the reservation MUST set
+    // finalizing_lease_expires_at alongside the running → finalizing CAS,
+    // so a crashed worker's reservation is eventually reclaimable by the
+    // recovery CAS. Without the lease, the recovery CAS has nothing to
+    // check for staleness — the experiment would be permanently stuck.
+    // The reservation MUST ALSO set finalizing_generation (the fencing
+    // token) so the winner receives a generation it MUST pass to the
+    // finalization CAS — a stale worker holding an OLDER generation is
+    // fenced.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(fn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    // The reservation sets BOTH status='finalizing' AND the lease.
+    expect(fn![0]).toMatch(/SET status = 'finalizing'/);
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at = \$2/);
+    // PR #36 review fix #4 — the reservation ALSO sets the fencing
+    // generation (COALESCE(NULL, 0) + 1 to handle legacy pre-0030 rows).
+    expect(fn![0]).toMatch(/finalizing_generation = COALESCE\(finalizing_generation, 0\) \+ 1/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization — carried over from the PR #36 fix #2 check).
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark checkExperimentCompletion runs RECOVERY BEFORE the fresh reservation (recovery-first ordering)', () => {
+    // PR #36 review fix #3: checkExperimentCompletion MUST try the
+    // recovery CAS (recoverStaleFinalizingExperiment) BEFORE the
+    // fresh-claim CAS (claimExperimentCompletion). If a previous worker
+    // died with a stale lease, the recovery reclaims it; only if there is
+    // no stale reservation does the fresh claim run (which is the normal
+    // path for an experiment still in 'running'). The recovery winner
+    // reuses the SAME phase 2 (validation) + phase 3 (finalization) path
+    // — only the reservation source differs.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    const recoverIdx = body.indexOf('recoverStaleFinalizingExperiment');
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    expect(recoverIdx, 'must call recoverStaleFinalizingExperiment').toBeGreaterThan(-1);
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    // Recovery MUST come before the fresh claim (recovery-first ordering).
+    expect(recoverIdx).toBeLessThan(claimIdx);
+    // The `claimed` variable MUST be the recovery winner OR the fresh-claim
+    // winner (nullish coalescing) — both paths feed the SAME phase 2/3.
+    expect(body).toMatch(/recovered \?\? .*claimExperimentCompletion/);
+  });
+
+  it('benchmark getExperiment is a PURE read (NO lazy recovery — authorization must precede mutation)', () => {
+    // PR #35 review fix (control-plane boundary): the previous
+    // implementation triggered LAZY RECOVERY in getExperiment — a read of
+    // a `finalizing` experiment ran checkExperimentCompletion (recovery
+    // CAS + finalization CASes + terminal audit events). Because every
+    // route resolves the experiment's projectId via getExperiment(id)
+    // BEFORE requireProjectAuthorization, that put a state-mutating
+    // operation BEFORE authorization: an unauthorized caller could mutate
+    // another project's experiment by knowing its UUID. The experiment
+    // UUID is NOT an authorization credential.
+    //
+    // The fix: getExperiment is now a PURE read (select + map). The
+    // recovery trigger lives in recoverExperimentIfStale, which the route
+    // layer calls ONLY AFTER requireProjectAuthorization succeeded. This
+    // test enforces the purity: NO checkExperimentCompletion call, NO
+    // status branching on 'finalizing', NO catch, NO re-read — just the
+    // single repository read.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async getExperiment[\s\S]*?\n  \}/);
+    expect(fn, 'getExperiment must exist').not.toBeNull();
+    // Strip comments — the fix's explanatory doc block legitimately
+    // MENTIONS the removed lazy-recovery behavior ('finalizing',
+    // 'checkExperimentCompletion'); purity is about the CODE, not the
+    // comments.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // MUST read from the repository (the pure select).
+    expect(body).toMatch(/repository\.getExperiment/);
+    // MUST NOT run the completion/recovery protocol (no mutation).
+    expect(body).not.toMatch(/checkExperimentCompletion/);
+    // MUST NOT branch on the `finalizing` status (the old lazy-recovery
+    // guard — a pure read has no status-dependent behavior).
+    expect(body).not.toMatch(/finalizing/);
+    // MUST NOT catch + log recovery failures (no side effects to guard).
+    expect(body).not.toMatch(/catch/);
+  });
+
+  it('benchmark migration 0030 adds the fencing generation column (monotonic ownership token for the finalizing reservation)', () => {
+    // PR #36 review fix #4 (fencing): the recovery CAS (fix #3) renews the
+    // lease but does NOT fence the original worker — the stale worker can
+    // still call the finalization CAS using stale validation after a newer
+    // worker reclaimed. Migration 0030 fixes this by adding the
+    // `finalizing_generation` column (a monotonic ownership token). The
+    // reservation CAS sets it (COALESCE(NULL, 0) + 1), the recovery CAS
+    // increments it, + the finalization CASes require it in their WHERE
+    // clause. A stale worker holding an OLD generation is fenced (its CAS
+    // rejects because the row's generation has advanced).
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0030_benchmark_experiment_finalizing_generation.sql');
+    expect(existsSync(migrationPath), '0030_benchmark_experiment_finalizing_generation.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The column MUST exist (nullable — only meaningful for `finalizing`
+    // rows; NULL for non-`finalizing` rows + for legacy pre-0030
+    // `finalizing` rows that were never reclaimed post-0030).
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS finalizing_generation BIGINT/);
+    // The migration MUST NOT backfill — the column is only meaningful for
+    // `finalizing` rows, + the recovery CAS handles NULL gracefully via
+    // COALESCE(NULL, 0) + 1 = 1 on the first reclaim. A backfill would
+    // imply the column needs a non-NULL starting value for non-`finalizing`
+    // rows, which it does not (the finalization CAS guard
+    // `status='finalizing'` already excludes them).
+    expect(src).not.toMatch(/UPDATE wfos_benchmark_experiments/);
+    // The migration MUST document the fencing invariant (the reviewer
+    // required the diff to be self-explanatory — what + why).
+    expect(src).toMatch(/finalizing_generation/);
+    expect(src).toMatch(/FENCING/);
+  });
+
+  it('benchmark finalizeExperimentCompletion + finalizeExperimentInvalidation REQUIRE the fencing generation in the WHERE clause (stale-worker fencing)', () => {
+    // PR #36 review fix #4 (fencing): the finalization CASes MUST require
+    // the `expectedGeneration` parameter in their WHERE clause
+    // (`WHERE id=$1 AND status='finalizing' AND finalizing_generation=$2`)
+    // so a stale worker holding an OLDER generation cannot finalize after
+    // a newer worker reclaimed + advanced the generation. This is the
+    // exclusive-ownership invariant the reviewer required. (The two-phase
+    // protocol test above already asserts the WHERE clause includes the
+    // generation; this test isolates the FENCING invariant + asserts the
+    // signatures require the generation parameter, so a caller CANNOT
+    // accidentally call finalize without a generation.)
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+
+    // finalizeExperimentCompletion signature MUST require expectedGeneration.
+    const finalizeSig = repoSrc.match(/async finalizeExperimentCompletion\(id: string, expectedGeneration: number\)/);
+    expect(finalizeSig, 'finalizeExperimentCompletion must accept (id, expectedGeneration)').not.toBeNull();
+    // finalizeExperimentInvalidation signature MUST require expectedGeneration.
+    const invalidateSig = repoSrc.match(/async finalizeExperimentInvalidation\(id: string, expectedGeneration: number\)/);
+    expect(invalidateSig, 'finalizeExperimentInvalidation must accept (id, expectedGeneration)').not.toBeNull();
+
+    // Both finalization CASes MUST guard on finalizing_generation = $2.
+    const finalizeFn = repoSrc.match(/async finalizeExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(finalizeFn![0]).toMatch(/AND finalizing_generation = \$2/);
+    const invalidateFn = repoSrc.match(/async finalizeExperimentInvalidation[\s\S]*?RETURNING \*/);
+    expect(invalidateFn![0]).toMatch(/AND finalizing_generation = \$2/);
+
+    // The repository interface (benchmark.types.ts) MUST also require the
+    // generation parameter on both signatures (so callers cannot bypass
+    // the fencing token at the type level).
+    const typesSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark.types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/finalizeExperimentCompletion\(id: string, expectedGeneration: number\)/);
+    expect(typesSrc).toMatch(/finalizeExperimentInvalidation\(id: string, expectedGeneration: number\)/);
+  });
+
+  it('benchmark checkExperimentCompletion passes the claimed generation to the finalization CASes (with a defensive null check)', () => {
+    // PR #36 review fix #4 (fencing): checkExperimentCompletion MUST read
+    // `claimed.finalizingGeneration` (the fencing token the reservation
+    // or recovery CAS returned) + pass it to BOTH finalization CASes. A
+    // null generation (should not happen — every finalizing row post-0030
+    // has a generation set by the reservation/recovery CAS) is treated as
+    // a defensive abort: log + return WITHOUT finalizing (do NOT finalize
+    // without fencing — a missing generation means we cannot prove
+    // exclusive ownership). This is the wiring that makes the fencing
+    // invariant end-to-end: the reservation sets the generation → the
+    // service reads it → the finalization CAS requires it.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    // MUST read claimed.finalizingGeneration into a local variable.
+    expect(body).toMatch(/claimed\.finalizingGeneration/);
+    // MUST defensively abort on null generation (log + return — do NOT
+    // finalize without fencing).
+    expect(body).toMatch(/expectedGeneration === null/);
+    expect(body).toMatch(/benchmark\.experiment-finalizing-missing-generation/);
+    // MUST pass expectedGeneration to BOTH finalization CASes.
+    expect(body).toMatch(/finalizeExperimentCompletion\(\s*experimentId,\s*expectedGeneration/);
+    expect(body).toMatch(/finalizeExperimentInvalidation\(\s*experimentId,\s*expectedGeneration/);
+  });
+
+  it('benchmark recoverExperimentIfStale is the POST-AUTHORIZATION recovery trigger (guarded on finalizing, best-effort, re-reads)', () => {
+    // PR #35 review fix (control-plane boundary): the recovery the lazy
+    // hook used to perform is NOT removed — forward progress for a stuck
+    // `finalizing` experiment is preserved. It is RE-HOMED in
+    // recoverExperimentIfStale, a method that MUTATES and therefore MUST
+    // only be called from a path that has ALREADY succeeded at
+    // requireProjectAuthorization for the experiment's owning project.
+    //   - not found → null
+    //   - status ≠ 'finalizing' → returned as-is (no-op)
+    //   - status = 'finalizing' → checkExperimentCompletion (phase 0
+    //     recovery CAS + phase 2 validation + phase 3 finalization), best
+    //     effort (failures caught + logged), then a re-read so the caller
+    //     sees the recovered terminal state.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async recoverExperimentIfStale[\s\S]*?\n  \}/);
+    expect(fn, 'recoverExperimentIfStale must exist').not.toBeNull();
+    const body = fn![0];
+    // MUST no-op unless the experiment is stuck in `finalizing`.
+    expect(body).toMatch(/status !== 'finalizing'/);
+    // MUST run the recovery protocol (phase 0 lives in
+    // checkExperimentCompletion).
+    expect(body).toMatch(/checkExperimentCompletion/);
+    // MUST be best-effort: recovery failures are caught + logged so a
+    // read never surfaces a false completion.
+    expect(body).toMatch(/catch/);
+    expect(body).toMatch(/benchmark\.experiment-finalizing-recovery-failed/);
+    // MUST re-read after recovery so the caller sees the recovered state.
+    expect(body).toMatch(/return this\.deps\.repository\.getExperiment/);
+    // The public service interface MUST expose it (so the route layer can
+    // call it post-authorization).
+    const typesSrc = readFileSync(join(BACKEND_ROOT, 'src', 'benchmark', 'types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/recoverExperimentIfStale\(experimentId: string\)/);
+  });
+
+  it('benchmark GET /benchmarks/:id AUTHORIZES BEFORE recovery (pure read → requireProjectAuthorization → recoverExperimentIfStale)', () => {
+    // PR #35 review fix (control-plane boundary): the route ordering MUST
+    // be (1) PURE getExperiment read (resolves projectId), (2) 404, (3)
+    // requireProjectAuthorization, (4) ONLY THEN the mutating
+    // recoverExperimentIfStale hook. The reviewer's required invariant:
+    // "A caller must be authorized before any mutation, even recovery."
+    //
+    // WORK-032 start-delivery durability widened the hook: it is now
+    // called UNCONDITIONALLY post-authorization (recoverExperimentIfStale
+    // internally replays incomplete start deliveries AND recovers a stuck
+    // `finalizing` reservation, no-op-ing when there is nothing to
+    // recover). The route itself stays a pure-read-then-authorize-then-
+    // recover shape — the status gating lives INSIDE the service method.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'benchmark.route.ts'), 'utf8');
+    const fn = routeSrc.match(/app\.get\('\/benchmarks\/:id'[\s\S]*?\n  \}\);/);
+    expect(fn, 'GET /benchmarks/:id route must exist').not.toBeNull();
+    // Strip comments — the ordering assertions are about the CODE; the
+    // fix's explanatory comments legitimately mention
+    // requireProjectAuthorization before the code that calls it.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const pureReadIdx = body.indexOf('benchmarkService.getExperiment(id)');
+    const authzIdx = body.indexOf('requireProjectAuthorization');
+    const recoveryIdx = body.indexOf('recoverExperimentIfStale');
+    expect(pureReadIdx).toBeGreaterThanOrEqual(0);
+    expect(authzIdx).toBeGreaterThanOrEqual(0);
+    expect(recoveryIdx).toBeGreaterThanOrEqual(0);
+    // ORDER: pure read → authorization → recovery.
+    expect(pureReadIdx).toBeLessThan(authzIdx);
+    expect(authzIdx).toBeLessThan(recoveryIdx);
+    // The recovery call MUST be UNCONDITIONAL (not gated on a status the
+    // route inspects) — recoverExperimentIfStale owns the gating for BOTH
+    // recovery kinds (incomplete start deliveries + stuck finalizing). A
+    // route-level status ternary would leave running experiments with
+    // incomplete start deliveries unrecoverable via the read path.
+    expect(body).toMatch(/const recovered = await benchmarkService\.recoverExperimentIfStale\(id\)/);
+    expect(body).not.toMatch(/status === 'finalizing'/);
+    // MUST return the recovered row (the caller sees the post-recovery
+    // state, not the stale pre-recovery row).
+    expect(body).toMatch(/experiment: recovered \?\? experiment/);
+  });
+
+  it('benchmark claimExperimentStart is an ATOMIC CAS + DURABLE DELIVERY INTENT (ONE statement: created|paused → running + outbox rows)', () => {
+    // WORK-032 start-delivery durability: the PR #35 CAS (created|paused →
+    // running) is now ONE CTE statement that ALSO creates the durable
+    // delivery intent — a start-delivery (outbox) row + one enqueue
+    // obligation per trial queued at claim time. The reviewer's
+    // requirement: "The repository should own the atomic state transition
+    // and durable delivery record" — the transition and the intent are
+    // INSEPARABLE (a crash after the statement leaves a recoverable,
+    // replayable start; the CAS loser gets NO second start obligation).
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async claimExperimentStart[\s\S]*?\n  \}/);
+    expect(fn, 'claimExperimentStart must exist').not.toBeNull();
+    const body = fn![0];
+    // ONE statement — a CTE chain (no separate INSERT the crash can fall
+    // between).
+    expect(body).toMatch(/WITH claimed AS \(/);
+    // The CAS predicate MUST be guarded on the startable states.
+    expect(body).toMatch(/WHERE id = \$1 AND status IN \('created', 'paused'\)/);
+    // MUST set status='running' + preserve the first started_at
+    // (COALESCE — a re-start after pause keeps the original start time).
+    expect(body).toMatch(/SET status = 'running'/);
+    expect(body).toMatch(/started_at = COALESCE\(started_at, NOW\(\)\)/);
+    // The SAME statement MUST create the delivery intent row...
+    expect(body).toMatch(/INSERT INTO wfos_benchmark_start_deliveries \(experiment_id, project_id\)/);
+    // ...AND the per-trial enqueue obligations (the claim-time snapshot of
+    // queued trials).
+    expect(body).toMatch(/INSERT INTO wfos_benchmark_start_trial_deliveries \(start_delivery_id, trial_id\)/);
+    expect(body).toMatch(/t\.lifecycle_phase = 'queued'/);
+    // Only the CAS winner's row is returned (the loser → zero rows →
+    // null → no obligation created).
+    expect(body).toMatch(/RETURNING \*/);
+    // The repository interface MUST require the new return shape (the
+    // claimed experiment + the delivery id the winner drives the replay
+    // with).
+    const typesSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark.types.ts'), 'utf8');
+    expect(typesSrc).toMatch(/claimExperimentStart\(id: string\): Promise<ClaimedExperimentStart \| null>/);
+  });
+
+  it('benchmark startExperiment delegates delivery to the REPLAYABLE path + enqueues the durable RELAY JOB first (no ad-hoc trial side effects)', () => {
+    // WORK-032 start-delivery durability: startExperiment performs NO
+    // ad-hoc side effects of its own — the audit write + the trial
+    // enqueues live ONLY in the durable replay path
+    // (replayStartDeliveries → deliverStartAudit / enqueue-then-mark),
+    // shared by the happy path AND every recovery touch. This is what
+    // makes a crash between the claim and full delivery recoverable: there
+    // is no in-memory delivery intent left to lose.
+    //
+    // OUTBOX RELAY (the liveness correction): startExperiment's FIRST
+    // action after the claim is enqueueing the DURABLE RELAY JOB (the
+    // generic OutboxRelay integration with the existing queue) — BEFORE
+    // the immediate replay — so a crash at ANY point after the claim
+    // leaves a live worker able to drain the relay job from the durable
+    // queue (recovery WITHOUT a restart). The relay-job enqueue is the
+    // one permitted enqueue in this method; trial-job enqueues remain
+    // exclusive to the replay path.
+    //
+    // The PR #35 invariant still holds: only the CAS winner reaches the
+    // delivery path; the loser re-reads + throws the invalid-state error
+    // (no side effects).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async startExperiment[\s\S]*?\n  \}/);
+    expect(fn, 'startExperiment must exist').not.toBeNull();
+    // Strip comments — the assertions are about the CODE.
+    const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const claimIdx = body.indexOf('claimExperimentStart(experimentId)');
+    const relayIdx = body.indexOf('BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE');
+    const replayIdx = body.indexOf('replayStartDeliveries(experimentId)');
+    expect(claimIdx).toBeGreaterThanOrEqual(0);
+    expect(relayIdx).toBeGreaterThanOrEqual(0);
+    expect(replayIdx).toBeGreaterThanOrEqual(0);
+    // ORDER: the atomic claim → the durable relay job → the immediate
+    // replay (the relay job must exist in the durable queue BEFORE any
+    // delivery begins, so a mid-replay crash is recoverable without a
+    // restart).
+    expect(claimIdx).toBeLessThan(relayIdx);
+    expect(relayIdx).toBeLessThan(replayIdx);
+    // NO ad-hoc inline side effects — the audit write + the TRIAL-job
+    // enqueues live ONLY in the replay path (a second copy would
+    // reintroduce the crash hole). The relay-job enqueue is the one
+    // permitted enqueue (the outbox-relay integration itself).
+    expect(body).not.toMatch(/auditService\.write/);
+    expect(body).not.toMatch(/queue\.enqueue\('benchmark\.trial'/);
+    // The relay-job enqueue MUST be best-effort (a failed enqueue is
+    // caught + logged — the obligations are durable; the boot sweep
+    // re-enqueues at the next process start).
+    expect(fn![0]).toMatch(/benchmark\.start-delivery-relay-enqueue-failed/);
+    // The loser MUST throw the invalid-state error (no side effects, no
+    // second start obligation).
+    expect(body).toMatch(/benchmark-experiment-invalid-state/);
+    // MUST NOT use the unconditional status update for the start
+    // transition (the CAS owns created|paused → running).
+    expect(body).not.toMatch(/updateExperimentStatus\(experimentId, 'running'/);
+  });
+
+  it('benchmark control-plane authz regression tests exist (unauthorized read cannot mutate; concurrent start is exactly-once)', () => {
+    // PR #35 review fix: the reviewer required regressions proving (a) an
+    // unauthorized cross-project read produces no mutation/audit, and (b)
+    // concurrent starts produce exactly one transition, one audit, and
+    // one set of enqueues. Both live in
+    // control-plane-authz.regression.test.ts (HTTP-level, two projects,
+    // two users — the cross-tenant read is meaningful because User B's
+    // key cannot authorize Project A).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'control-plane-authz.regression.test.ts');
+    expect(existsSync(testPath), 'control-plane-authz.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/UNAUTHORIZED cross-project read produces NO mutation \+ NO audit \(authorization precedes recovery\)/);
+    expect(src).toMatch(/CONCURRENT experiment starts finalize exactly once \(one transition, one audit, one set of enqueues\)/);
+    // The unauthorized-read test MUST assert BOTH halves of the reviewer's
+    // requirement: the unauthorized read mutates nothing AND the
+    // authorized read still recovers (forward progress preserved).
+    expect(src).toMatch(/forward progress is PRESERVED for the AUTHORIZED/);
+    // The concurrent-start test MUST assert all three exactly-once
+    // dimensions: one audit, one enqueue set, one transition.
+    expect(src).toMatch(/BENCHMARK_STARTED/);
+    expect(src).toMatch(/trialJobEnqueues - enqueuesBefore\)\.toBe\(1\)/);
+    expect(src).toMatch(/toBe\('running'\)/);
+  });
+
+  it('benchmark migration 0031 adds the durable start-delivery outbox (transactional outbox for experiment start)', () => {
+    // WORK-032 start-delivery durability: the start's side effects
+    // (BENCHMARK_STARTED audit + benchmark.trial enqueues) were in-memory
+    // intent — lost on any crash after the CAS. Migration 0031 adds the
+    // durable intent: one delivery row per logical start + one enqueue
+    // obligation per (logical start × trial queued at claim time). The
+    // UNIQUE constraint is the "one logical enqueue obligation per trial"
+    // invariant, mechanically enforced.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0031_benchmark_start_delivery_durability.sql');
+    expect(existsSync(migrationPath), '0031_benchmark_start_delivery_durability.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The outbox tables.
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_benchmark_start_deliveries/);
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_benchmark_start_trial_deliveries/);
+    // The audit-obligation flag (flipped atomically WITH the audit INSERT
+    // by deliverStartAudit).
+    expect(src).toMatch(/audit_delivered/);
+    // ONE logical enqueue obligation per trial per logical start.
+    expect(src).toMatch(/UNIQUE \(start_delivery_id, trial_id\)/);
+    // The replay lookups are partial-index scans (incomplete deliveries +
+    // pending obligations).
+    expect(src).toMatch(/WHERE completed_at IS NULL/);
+    expect(src).toMatch(/WHERE delivered = FALSE/);
+    // NO polling/scheduler machinery in the migration (§34 — the replay is
+    // touch-driven).
+    expect(src).not.toMatch(/setInterval|set_timeout|pg_cron/i);
+    // The test-DB reset must truncate the outbox tables (child first —
+    // CASCADE handles the FK, but the established convention is explicit).
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_start_trial_deliveries/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_start_deliveries/);
+  });
+
+  it('benchmark deliverStartAudit is an ATOMIC exactly-once write (flag-CAS + deterministic-id audit INSERT in ONE statement)', () => {
+    // WORK-032 start-delivery durability: the BENCHMARK_STARTED audit must
+    // be written EXACTLY ONCE per logical start, even under concurrent
+    // replays + crashes. deliverStartAudit achieves this with ONE CTE
+    // statement:
+    //   * the flag-CAS (audit_delivered FALSE → TRUE) — only ONE concurrent
+    //     caller receives a row (the audit-write claim);
+    //   * the INSERT INTO wfos_audit_events with the DETERMINISTIC id (the
+    //     delivery id) ON CONFLICT (id) DO NOTHING — the row can never be
+    //     duplicated;
+    //   * both in one statement — the flag is never set without the audit
+    //     row existing (a crash rolls back both).
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async deliverStartAudit[\s\S]*?\n  \}/);
+    expect(fn, 'deliverStartAudit must exist').not.toBeNull();
+    const body = fn![0];
+    // ONE statement (CTE chain — no separate flag update + insert).
+    expect(body).toMatch(/WITH flag AS \(/);
+    // The flag-CAS.
+    expect(body).toMatch(/WHERE id = \$1 AND audit_delivered = FALSE/);
+    expect(body).toMatch(/SET audit_delivered = TRUE/);
+    // The deterministic-id audit INSERT with conflict absorption.
+    expect(body).toMatch(/INSERT INTO wfos_audit_events/);
+    expect(body).toMatch(/ON CONFLICT \(id\) DO NOTHING/);
+    // The audit payload mirrors the previous auditService.write call
+    // (BENCHMARK_STARTED / benchmark_experiment / system / benchmark-service).
+    expect(body).toMatch(/'BENCHMARK_STARTED'/);
+    expect(body).toMatch(/'benchmark_experiment'/);
+    // The id is the DELIVERY id (deterministic — the exactly-once key).
+    expect(body).toMatch(/SELECT f\.id, f\.project_id, 'BENCHMARK_STARTED'/);
+  });
+
+  it('benchmark startExperiment owns NO retry loop or scheduler (start-delivery replay is touch-driven, single-pass — §34)', () => {
+    // WORK-032 start-delivery durability, the reviewer-required static
+    // invariant: startExperiment (and the replay path it shares) must NOT
+    // become an ad-hoc retry loop / second scheduler. The replay is a
+    // SINGLE PASS over durable obligation rows, invoked ONLY by existing
+    // touch points — never a timer, never a self-scheduling loop, never a
+    // new queue consumer.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const startFn = serviceSrc.match(/async startExperiment[\s\S]*?\n  \}/);
+    expect(startFn, 'startExperiment must exist').not.toBeNull();
+    const replayFn = serviceSrc.match(/async replayStartDeliveries[\s\S]*?\n  \}/);
+    expect(replayFn, 'replayStartDeliveries must exist').not.toBeNull();
+    for (const [name, fn] of [['startExperiment', startFn], ['replayStartDeliveries', replayFn]] as const) {
+      // Drop the declaration signature line — the recursion checks target
+      // CALLS, not the method's own signature.
+      const code = fn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // NO timers/schedulers.
+      expect(code, `${name} must not schedule`).not.toMatch(/setInterval|setTimeout|setImmediate/);
+      // NO unbounded retry loops.
+      expect(code, `${name} must not spin`).not.toMatch(/while\s*\(\s*true\s*\)/);
+    }
+    // NO self-recursion: neither method may re-invoke ITSELF (note:
+    // startExperiment DELEGATING to replayStartDeliveries is the design —
+    // the happy path shares the replay code path; the forbidden shape is a
+    // method scheduling/re-entering itself, e.g. replay → replay).
+    const startCode = startFn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(startCode).not.toMatch(/startExperiment\(/);
+    const replayCodeStripped = replayFn![0].replace(/^async [a-zA-Z]+\([^)]*\)[^\n]*\n/, '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(replayCodeStripped).not.toMatch(/replayStartDeliveries\(/);
+    expect(replayCodeStripped).not.toMatch(/startExperiment\(/);
+    // The replay is a bounded single pass (for...of over the durable rows).
+    const replayCode = replayFn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(replayCode).toMatch(/for \(const delivery of deliveries\)/);
+    // The ONLY invocation sites of replayStartDeliveries are the touch
+    // points: startExperiment (happy path), runTrialJob (worker touch),
+    // recoverExperimentIfStale (post-auth read path) — in THIS file — plus
+    // the start-delivery relay job handler (start-delivery-relay.ts, the
+    // outbox-relay integration whose delivery the boot sweep guarantees).
+    // Counting the call sites in the service file keeps the replay
+    // touch-driven — a new scheduler would have to add a site, which this
+    // count makes visible in review.
+    const callSites = serviceSrc.split('replayStartDeliveries(').length - 1;
+    // 1 (declaration) + 3 (startExperiment + runTrialJob + recoverExperimentIfStale)
+    expect(callSites).toBe(4);
+    // The FOURTH touch point — the relay job handler — lives in its own
+    // file + must itself own NO scheduler machinery (no timers, no
+    // self-perpetuation: the handler is fire-once; a failed attempt is
+    // re-attempted by the next boot sweep or touch, NOT by the handler
+    // re-enqueueing itself).
+    const relaySrc = readFileSync(join(BENCHMARK_INTERNAL, 'start-delivery-relay.ts'), 'utf8');
+    const relayHandlerFn = relaySrc.match(/export function createStartDeliveryRelayJobHandler[\s\S]*?\n\}/);
+    expect(relayHandlerFn, 'createStartDeliveryRelayJobHandler must exist').not.toBeNull();
+    const relayHandlerCode = relayHandlerFn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(relayHandlerCode).not.toMatch(/setInterval|setTimeout|setImmediate/);
+    expect(relayHandlerCode).not.toMatch(/while\s*\(\s*true\s*\)/);
+    // Fire-once: the handler must NOT enqueue ANYTHING (in particular not
+    // its own job type — that would be a self-perpetuating retry loop).
+    expect(relayHandlerCode).not.toMatch(/\.enqueue\(/);
+    // The relay class (the sweep) enqueues its job type — but ONLY inside
+    // enqueuePendingRelayJobs (the boot-sweep entry point the WorkerHost
+    // calls once per process start), never anywhere else.
+    const sweepFn = relaySrc.match(/async enqueuePendingRelayJobs[\s\S]*?\n  \}/);
+    expect(sweepFn, 'enqueuePendingRelayJobs must exist').not.toBeNull();
+    const outsideSweep = relaySrc.replace(sweepFn![0], '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const handlerOnly = outsideSweep.replace(relayHandlerFn![0], '');
+    expect(handlerOnly).not.toMatch(/\.enqueue\(/);
+    // NO WorkerHost / queue-consumer construction in the benchmark domain
+    // (the replay enqueues onto the EXISTING queue; it never consumes).
+    const benchmarkFiles = readBenchmarkFiles();
+    for (const f of benchmarkFiles) {
+      expect(f.src, `${f.path} must not construct a worker`).not.toMatch(/new WorkerHost/);
+    }
+  });
+
+  it('benchmark start-delivery durability regression tests exist (the crash matrix + the autonomous-liveness scenarios)', () => {
+    // WORK-032 start-delivery durability: the reviewer required regression
+    // coverage for the full crash matrix — a start must be recoverable
+    // after ANY crash point, + repeated delivery must produce one logical
+    // start / one audit / one enqueue obligation per trial. The outbox
+    // relay re-review additionally required the AUTOONOMOUS-liveness
+    // scenarios (the exact orphaned-outbox failure the reviewer flagged).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'start-delivery-durability.regression.test.ts');
+    expect(existsSync(testPath), 'start-delivery-durability.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    // The six crash-matrix scenarios, by their test titles.
+    expect(src).toMatch(/concurrent start → exactly one winner/);
+    expect(src).toMatch(/crash after CAS → recovery resumes delivery/);
+    expect(src).toMatch(/crash after audit → no duplicate audit/);
+    expect(src).toMatch(/crash during trial enqueue → missing jobs are replayed/);
+    expect(src).toMatch(/replay after complete delivery → zero duplicate logical deliveries/);
+    expect(src).toMatch(/experiment already running → no second start obligation/);
+    // The three outbox-relay liveness scenarios: (a) the orphaned outbox
+    // is AUTONOMOUSLY recovered by a new worker process boot (the boot
+    // sweep — the reviewer's exact blocking scenario), (b) the claim-time
+    // relay job recovers a crash WITHOUT a restart (durable queue + live
+    // worker), (c) duplicate relay jobs converge to exactly-once.
+    expect(src).toMatch(/orphaned outbox after total process death is AUTONOMOUSLY recovered by a new worker process boot \(relay boot sweep\)/);
+    expect(src).toMatch(/claim-time relay job recovers a crash after the claim WITHOUT a restart/);
+    expect(src).toMatch(/duplicate relay jobs \(claim-time \+ boot sweep\) converge to exactly-once logical delivery/);
+    // The tests must be built on the no-worker stack (deterministic
+    // enqueue counting).
+    expect(src).toMatch(/startWorker: false/);
+  });
+
+  it('platform OutboxRelay contract exists + WorkerHost runs the BOOT SWEEP exactly once per process start (NOT a periodic poll)', () => {
+    // WORK-032 start-delivery durability (outbox relay liveness), the
+    // reviewer's required hierarchy:
+    //
+    //   existing WorkflowOS durable job infrastructure (Queue + WorkerHost)
+    //       ↓
+    //   generic outbox relay / delivery mechanism (OutboxRelay + boot sweep)
+    //       ↓
+    //   Benchmark start-delivery obligation (replayStartDeliveries)
+    //
+    // The generic contract lives in the PLATFORM worker infrastructure;
+    // domain relays implement it + are injected at composition time. The
+    // WorkerHost invokes each relay's sweep exactly ONCE per process
+    // start — process-startup recovery (like a DB crash-recovery pass),
+    // NOT a periodic poll.
+    const relayContractPath = join(BACKEND_ROOT, 'src', 'platform', 'worker', 'outbox-relay.ts');
+    expect(existsSync(relayContractPath), 'platform/worker/outbox-relay.ts must exist').toBe(true);
+    const contractSrc = readFileSync(relayContractPath, 'utf8');
+    expect(contractSrc).toMatch(/export interface OutboxRelay/);
+    expect(contractSrc).toMatch(/readonly jobType: string/);
+    expect(contractSrc).toMatch(/enqueuePendingRelayJobs\(\): Promise<number>/);
+    // The platform barrel exports the contract (domains import it from
+    // @platform — the frozen boundary).
+    const platformIndexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'index.ts'), 'utf8');
+    expect(platformIndexSrc).toMatch(/OutboxRelay/);
+    // WorkerHost: the options accept relays + start() runs the sweep.
+    const workerHostSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'worker-host.ts'), 'utf8');
+    expect(workerHostSrc).toMatch(/outboxRelays\?: readonly OutboxRelay\[\]/);
+    expect(workerHostSrc).toMatch(/await this\.sweepOutboxRelays\(\)/);
+    // The sweep is in start() ONLY — the poll loop must NOT re-sweep
+    // (that would be a periodic poll). Extract the loop body + assert it
+    // never touches the relays.
+    const loopFn = workerHostSrc.match(/private async loop\(\)[\s\S]*?\n  \}/);
+    expect(loopFn, 'WorkerHost.loop must exist').not.toBeNull();
+    expect(loopFn![0]).not.toMatch(/outboxRelays|enqueuePendingRelayJobs|sweepOutboxRelays/);
+    // A failing sweep MUST be caught (a relay's DB/queue failure must
+    // never prevent the worker — or the other relays — from starting).
+    const sweepFn = workerHostSrc.match(/private async sweepOutboxRelays\(\)[\s\S]*?\n  \}/);
+    expect(sweepFn, 'WorkerHost.sweepOutboxRelays must exist').not.toBeNull();
+    expect(sweepFn![0]).toMatch(/catch/);
+  });
+
+  it('benchmark start-delivery relay implements the generic OutboxRelay + is wired into the existing worker infrastructure (app.ts)', () => {
+    // WORK-032 start-delivery durability (outbox relay liveness): the
+    // benchmark relay implements the PLATFORM contract, its job handler is
+    // registered in the SAME existing WorkerHost registry as
+    // benchmark.trial, and the relay is injected via the WorkerHost
+    // options — no new scheduler, no second execution engine (§34).
+    const relaySrc = readFileSync(join(BENCHMARK_INTERNAL, 'start-delivery-relay.ts'), 'utf8');
+    // The class implements the generic contract.
+    expect(relaySrc).toMatch(/class BenchmarkStartDeliveryOutboxRelay implements OutboxRelay/);
+    // The relay job type is namespaced under benchmark.
+    expect(relaySrc).toMatch(/'benchmark\.start-delivery\.relay'/);
+    // The sweep queries the DURABLE obligations (the repository owns the
+    // delivery record) + enqueues one relay job per experiment.
+    expect(relaySrc).toMatch(/listExperimentsWithIncompleteStartDeliveries/);
+    expect(relaySrc).toMatch(/queue\.enqueue\(this\.jobType/);
+    // The handler delegates to the idempotent consumer-side repair.
+    expect(relaySrc).toMatch(/replayer\.replayStartDeliveries\(experimentId\)/);
+    // The repository MUST own the boot-sweep query (the reviewer: "The
+    // repository should own the atomic state transition and durable
+    // delivery record" — the sweep reads those same durable rows).
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    expect(repoSrc).toMatch(/SELECT DISTINCT experiment_id FROM wfos_benchmark_start_deliveries/);
+    expect(repoSrc).toMatch(/WHERE completed_at IS NULL/);
+    // app.ts composition: the relay handler is registered NEXT TO the
+    // trial handler in the SAME registry...
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/createStartDeliveryRelayJobHandler\(benchmarkService, logger\)/);
+    // ...the relay is constructed from the benchmark repository + the
+    // existing queue...
+    expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
+    // ...and injected into the WorkerHost options (the boot sweep).
+    expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
   });
 });
