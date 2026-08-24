@@ -4594,8 +4594,15 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
   it('WORK-028/029/030: provider DOM automation lives ONLY in provider adapter dirs', () => {
     for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
       const rel = relative(EXT_SRC, file).split(sep).join('/');
-      // WORK-029: Z.ai; WORK-030: ChatGPT — real adapters own their DOM logic.
-      if (rel.startsWith('providers/zai/') || rel.startsWith('providers/chatgpt/')) continue;
+      // WORK-029: Z.ai; WORK-030: ChatGPT; WORK-031: Claude — real adapters
+      // own their DOM logic.
+      if (
+        rel.startsWith('providers/zai/') ||
+        rel.startsWith('providers/chatgpt/') ||
+        rel.startsWith('providers/claude/')
+      ) {
+        continue;
+      }
       const code = strip(readFileSync(file, 'utf8'));
       expect(code, `${rel} must not use DOM selectors`).not.toMatch(
         /querySelector|getElementById|getElementsBy/,
@@ -4609,13 +4616,14 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
       const rel = relative(EXT_SRC, file).replaceAll('\\', '/');
       const code = strip(readFileSync(file, 'utf8'));
       // detector + registry (metadata) and the real adapter dirs (WORK-029
-      // Z.ai, WORK-030 ChatGPT) own their provider identities. Claude
-      // literals exist nowhere else until WORK-031.
+      // Z.ai, WORK-030 ChatGPT, WORK-031 Claude) own their provider
+      // identities.
       if (
         rel === 'providers/detector.ts' ||
         rel === 'providers/registry.ts' ||
         rel.startsWith('providers/zai/') ||
-        rel.startsWith('providers/chatgpt/')
+        rel.startsWith('providers/chatgpt/') ||
+        rel.startsWith('providers/claude/')
       ) {
         continue;
       }
@@ -4624,12 +4632,14 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
         `${rel} must not hard-code provider names`,
       ).not.toMatch(/['"`](zai|chatgpt|claude)['"`]/i);
     }
-    // providers/zai/ + providers/chatgpt/ are the ONLY provider adapter
-    // directories — Claude adapter files must NOT exist yet (WORK-031).
-    for (const file of walkExtTs(join(EXT_SRC, 'providers'))) {
-      const name = relative(EXT_SRC, file).replaceAll('\\', '/').toLowerCase();
-      expect(name, 'no claude adapter files yet').not.toMatch(/claude/);
-    }
+    // providers/zai/ + providers/chatgpt/ + providers/claude/ are the ONLY
+    // provider adapter directories (all shipped — WORK-029/030/031).
+    const adapterDirs = new Set(
+      walkExtTs(join(EXT_SRC, 'providers'))
+        .map((f) => relative(join(EXT_SRC, 'providers'), f).split(sep)[0]!)
+        .filter((d) => d !== 'fake' && !d.endsWith('.ts')),
+    );
+    expect([...adapterDirs].sort()).toEqual(['chatgpt', 'claude', 'zai']);
   });
 
   it('WORK-028: message protocol is a typed discriminated union', () => {
@@ -4654,12 +4664,12 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     const src = readFileSync(join(EXT_SRC, 'providers', 'registry.ts'), 'utf8');
     const code = strip(src);
     expect(code).not.toMatch(/querySelector|innerHTML/);
-    // Registered adapters: fake (028) + Z.ai (029) + ChatGPT (030).
-    // Claude must remain unregistered until WORK-031.
+    // Registered adapters: fake (028) + Z.ai (029) + ChatGPT (030) +
+    // Claude (031) — the full set.
     expect(code).toMatch(/register\(fakeProviderAdapter\)/);
     expect(code).toMatch(/register\(zaiProviderAdapter\)/);
     expect(code).toMatch(/register\(chatgptProviderAdapter\)/);
-    expect(code).not.toMatch(/register\(claudeProviderAdapter\)/);
+    expect(code).toMatch(/register\(claudeProviderAdapter\)/);
   });
 
   it('WORK-028: manifest permissions are minimal (documented set only)', () => {
@@ -4682,7 +4692,7 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     // wildcard form mirroring the detector's recognition rules).
     for (const host of manifest.host_permissions) {
       expect(host).toMatch(
-        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):(5173|3777|3778)\/\*$/,
+        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):(5173|3777|3778|3779)\/\*$/,
       );
     }
   });
@@ -4946,14 +4956,13 @@ describe('WORK-029 invariants — Z.ai adapter boundaries', () => {
     expect(background).toMatch(/promptSubmitted = true/);
   });
 
-  it('WORK-029/030: Z.ai + ChatGPT adapters registered + detected available; Claude NOT', () => {
+  it('WORK-029/030/031: Z.ai + ChatGPT + Claude adapters registered + detected', () => {
     const registry = readFileSync(join(EXT_SRC, 'providers', 'registry.ts'), 'utf8');
     expect(registry).toMatch(/register\(zaiProviderAdapter\)/);
     expect(registry).toMatch(/register\(chatgptProviderAdapter\)/);
-    expect(registry).not.toMatch(/register\(claudeProviderAdapter\)/);
+    expect(registry).toMatch(/register\(claudeProviderAdapter\)/);
     const detector = readFileSync(join(EXT_SRC, 'providers', 'detector.ts'), 'utf8');
-    expect(detector).toMatch(/\['zai', 'chatgpt'\]\.includes\(match\.providerId\)/);
-    expect(detector).not.toMatch(/'claude'[^\n]*includes|includes[^\n]*'claude'/);
+    expect(detector).toMatch(/\['zai', 'chatgpt', 'claude'\]\.includes\(match\.providerId\)/);
   });
 
   it('WORK-029: manifest wires the zai bridge on Z.ai + the documented fixture test origin', () => {
@@ -5245,16 +5254,20 @@ describe('WORK-030 invariants — ChatGPT adapter boundaries', () => {
     expect(agent).toMatch(/\/codex\/t\//);
   });
 
-  it('WORK-030: NO Claude automation exists (§36)', () => {
-    expect(existsSync(join(EXT_SRC, 'providers', 'claude')), 'no providers/claude/ dir').toBe(false);
-    expect(existsSync(join(EXT_SRC, 'content', 'claude-bridge.ts')), 'no claude bridge').toBe(false);
-    expect(existsSync(join(EXT_ROOT, 'tests', 'claude')), 'no claude fixture dir').toBe(false);
+  it('WORK-031: the Claude adapter exists and is properly isolated', () => {
+    expect(existsSync(join(EXT_SRC, 'providers', 'claude', 'claude-provider-adapter.ts'))).toBe(true);
+    expect(existsSync(join(EXT_SRC, 'content', 'claude-bridge.ts'))).toBe(true);
+    expect(existsSync(join(EXT_ROOT, 'tests', 'claude', 'fixture', 'code.html'))).toBe(true);
     const manifest = JSON.parse(
       readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
-    ) as { content_scripts: { js: string[] }[] };
-    for (const cs of manifest.content_scripts) {
-      expect(cs.js.join(' ')).not.toMatch(/claude/);
-    }
+    ) as { content_scripts: { js: string[]; matches: string[] }[] };
+    const claudeBridge = manifest.content_scripts.find((cs) =>
+      cs.js.some((j) => j.includes('claude-bridge')),
+    );
+    expect(claudeBridge, 'claude-bridge registered').toBeTruthy();
+    expect(claudeBridge!.matches).toContain('https://*.claude.ai/*');
+    // The claude bridge does NOT run on other providers.
+    expect(claudeBridge!.matches.join(' ')).not.toMatch(/z\.ai|chatgpt/);
   });
 });
 

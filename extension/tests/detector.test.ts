@@ -13,7 +13,7 @@ describe('provider detection (§11) — generic, no automation', () => {
       providerId: 'chatgpt', supported: true, adapterAvailable: true,
     });
     expect(detectProvider(new URL('https://claude.ai/chat/123'))).toMatchObject({
-      providerId: 'claude', supported: true, adapterAvailable: false,
+      providerId: 'claude', supported: true, adapterAvailable: true,
     });
   });
 
@@ -51,15 +51,15 @@ describe('provider detection (§11) — generic, no automation', () => {
   });
 });
 
-describe('adapter registry (§26) — fake + Z.ai (029) + ChatGPT (030); claude pending', () => {
-  it('registers the fake, Z.ai, and ChatGPT adapters', () => {
+describe('adapter registry (§26) — fake + Z.ai (029) + ChatGPT (030) + Claude (031)', () => {
+  it('registers the fake, Z.ai, ChatGPT, and Claude adapters', () => {
     expect(providerRegistry.get('fake')).not.toBeNull();
     expect(providerRegistry.get('zai')).not.toBeNull();
     expect(providerRegistry.get('chatgpt')).not.toBeNull();
-    expect(providerRegistry.get('claude')).toBeNull();
+    expect(providerRegistry.get('claude')).not.toBeNull();
   });
 
-  it('surfaces Z.ai + ChatGPT as adapter-ready; claude remains a placeholder', () => {
+  it('surfaces Z.ai + ChatGPT + Claude as adapter-ready', () => {
     const providers = providerRegistry.listProviders();
     expect(providers.find((p) => p.providerId === 'zai')).toEqual({
       providerId: 'zai',
@@ -80,10 +80,7 @@ describe('adapter registry (§26) — fake + Z.ai (029) + ChatGPT (030); claude 
         implementationSurface: 'coding-agent',
       },
     });
-    const meta = providerRegistry.pendingProviders;
-    expect(meta.find((m) => m.providerId === 'zai')).toBeUndefined(); // shipped
-    expect(meta.find((m) => m.providerId === 'chatgpt')).toBeUndefined(); // shipped
-    expect(meta.find((m) => m.providerId === 'claude')?.workItem).toBe('WORK-031');
+    expect(providerRegistry.pendingProviders).toEqual([]); // all shipped
   });
 
   it('the fake adapter declares no DOM capabilities (message-driven only)', () => {

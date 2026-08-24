@@ -21,6 +21,15 @@
 # unavailable or unverified." with ZERO submits (no silent fallback); XSS
 # inert.
 #
+# WORK-031 (Claude adapter): the adapter opens its own LOCAL fixture server
+# (127.0.0.1:3779) with a /code/ coding-agent fixture (ProseMirror task
+# composer, aria-label send/stop, /code/<id> task URLs) → surface detected →
+# digest-verified single injection → deterministic progress → completion →
+# WorkflowOS completed event → popup; login wall → BLOCKED "Please sign in
+# to Claude."; Chat-only fixture → BLOCKED "Claude coding environment
+# unavailable or unverified." with ZERO submits (no silent fallback); XSS
+# inert.
+#
 # WORK-029 (Z.ai adapter): the adapter opens a LOCAL fixture server
 # (127.0.0.1:3777) reproducing the OBSERVED chat.z.ai DOM → provider
 # detected as Z.ai → prompt injected (digest verified in-page) → sent
@@ -49,7 +58,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: companion extension E2E (WORK-028 + 029 + 030)
+    name: companion extension E2E (WORK-028 + 029 + 030 + 031)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

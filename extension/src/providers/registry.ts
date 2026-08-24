@@ -2,10 +2,10 @@
  * WorkflowOS Companion — ExternalProviderAdapterRegistry (§26).
  *
  * WORK-028 shipped the deterministic FAKE adapter (extension-page based, no
- * DOM automation). WORK-029 added the REAL Z.ai adapter; WORK-030 adds the
- * REAL ChatGPT adapter; Claude (WORK-031) remains placeholder metadata. This
- * file stays provider-neutral: no selectors, no provider-specific logic —
- * the import + register calls are the entire provider surface here.
+ * DOM automation). WORK-029 added the REAL Z.ai adapter; WORK-030 added the
+ * REAL ChatGPT adapter; WORK-031 added the REAL Claude adapter. This file
+ * stays provider-neutral: no selectors, no provider-specific logic — the
+ * import + register calls are the entire provider surface here.
  */
 import type { ExternalProviderAdapter, ProviderSurfaceCapabilities } from './types.js';
 
@@ -23,6 +23,8 @@ import { fakeProviderAdapter } from './fake/fake-provider-adapter.js';
 import { zaiProviderAdapter } from './zai/zai-provider-adapter.js';
 // WORK-030: the REAL ChatGPT adapter (chatgpt.com, user's existing session).
 import { chatgptProviderAdapter } from './chatgpt/chatgpt-provider-adapter.js';
+// WORK-031: the REAL Claude adapter (claude.ai, user's existing session).
+import { claudeProviderAdapter } from './claude/claude-provider-adapter.js';
 
 /** Placeholder metadata for providers whose adapters ship in later work items. */
 export interface PendingProvider {
@@ -32,8 +34,8 @@ export interface PendingProvider {
 }
 
 const PENDING_PROVIDERS: readonly PendingProvider[] = [
-  // WORK-029 shipped Z.ai; WORK-030 shipped ChatGPT — only Claude remains.
-  { providerId: 'claude', displayName: 'Claude', workItem: 'WORK-031' },
+  // WORK-029 shipped Z.ai; WORK-030 shipped ChatGPT; WORK-031 shipped
+  // Claude — no pending provider adapters remain.
 ];
 
 export class ExternalProviderAdapterRegistry {
@@ -46,6 +48,8 @@ export class ExternalProviderAdapterRegistry {
     this.register(zaiProviderAdapter);
     // WORK-030: the real ChatGPT web-product adapter (chatgpt.com).
     this.register(chatgptProviderAdapter);
+    // WORK-031: the real Claude web-product adapter (claude.ai).
+    this.register(claudeProviderAdapter);
   }
 
   register(adapter: ExternalProviderAdapter): void {

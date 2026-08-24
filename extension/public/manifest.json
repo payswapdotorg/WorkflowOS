@@ -45,6 +45,11 @@
       "matches": ["https://*.chatgpt.com/*", "http://127.0.0.1:3778/*"],
       "js": ["content/chatgpt-bridge.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.claude.ai/*", "http://127.0.0.1:3779/*"],
+      "js": ["content/claude-bridge.js"],
+      "run_at": "document_idle"
     }
   ]
 }

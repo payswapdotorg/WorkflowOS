@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!--
+  WORK-031: Claude CODING-AGENT fixture — reproduces the
+  Claude Code web surface (claude.ai/code) per the confidence-graded
+  contract in src/providers/claude/README.md. Served at
+  http://127.0.0.1:3779/code/ by the fixture server.
+
+  IMPORTANT (review §"do NOT treat the fixture alone as proof"): this page
+  stands in for the REAL Claude Code environment in deterministic CI only. The
+  catalog keeps codingAgent='unverified' until a live signed-in
+  verification pass; the page runtime still verifies the surface at runtime
+  on every execution.
+
+  Reproduced anchors:
+    - URL path /code (HIGH-confidence surface signal)
+    - "New task" flow (composer + send) — the Claude Code task creation surface
+    - task URLs /code/t/<id>
+    - environments sidebar (repository/branch context)
+    - login-wall variant (?wall=login)
+  Variants: ?wall=login · ?fail=1 · ?confirm=1 · ?xss=1
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claude Code Fixture</title>
+    <style>
+      body { font-family: system-ui; margin: 0; display: flex; }
+      #sidebar { width: 230px; border-right: 1px solid #eee; padding: 10px; }
+      #main { flex: 1; display: flex; flex-direction: column; height: 100vh; }
+      #tasks { flex: 1; overflow-y: auto; padding: 16px; }
+      .task { margin: 8px 0; padding: 8px 12px; border-radius: 8px; background: #f4f6f8; white-space: pre-wrap; }
+      .task.agent { background: #eef6ee; }
+      #env-bar { border-bottom: 1px solid #eee; padding: 8px 16px; font-size: 12px; color: #555; }
+      #composer { border-top: 1px solid #eee; padding: 12px; display: flex; gap: 8px; align-items: flex-end; }
+      #prompt-textarea { flex: 1; min-height: 48px; max-height: 200px; border: 1px solid #d9d9e3; border-radius: 10px; padding: 10px; outline: none; }
+      [role="alert"] { background: #fee2e2; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
+      [role="alertdialog"] { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid; place-items: center; }
+      [role="alertdialog"] > div { background: #fff; padding: 20px; border-radius: 10px; }
+      .login-btn { position: absolute; top: 10px; right: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="sidebar">
+      <div data-testid="claude-code-sidebar">Claude Code</div>
+      <nav aria-label="Environments">Environments</nav>
+      <div id="env-repo" data-testid="claude-code-environment">workflowos/repo · main</div>
+      <button class="login-btn" id="login-btn" hidden>Log in</button>
+    </div>
+    <div id="main">
+      <div id="env-bar">Coding environment · task runner</div>
+      <main id="task-log" aria-label="Task log"></main>
+      <div id="error-slot"></div>
+      <form id="composer-form">
+        <div id="composer">
+          <div id="prompt-textarea" contenteditable="true" role="textbox" aria-label="Describe a new coding task" data-placeholder="Describe a new coding task"></div>
+          <button type="button" data-testid="send-button" id="send-btn" disabled aria-label="Send task">➤</button>
+          <button type="button" data-testid="stop-button" id="stop-btn" hidden aria-label="Stop task">■</button>
+        </div>
+      </form>
+    </div>
+
+    <script src="./claude-code-agent.js"></script>
+  </body>
+</html>

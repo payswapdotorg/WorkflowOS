@@ -1,15 +1,15 @@
 /**
- * WORK-030 — ChatGPT background adapter + security regression tests
- * (§32/§33), mirroring the WORK-029 suite.
+ * WORK-031 — Claude background adapter + security regression tests
+ * (§30/§31), mirroring the WORK-029/030 suites.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ChatgptProviderAdapter,
-  resolveChatgptConfig,
-} from '../../src/providers/chatgpt/chatgpt-provider-adapter.js';
+  ClaudeProviderAdapter,
+  resolveClaudeConfig,
+} from '../../src/providers/claude/claude-provider-adapter.js';
 import { toSessionView } from '../../src/shared/session.js';
 import { providerRegistry } from '../../src/providers/registry.js';
 import { detectProvider } from '../../src/providers/detector.js';
@@ -18,29 +18,31 @@ import { ZaiProviderAdapter } from '../../src/providers/zai/zai-provider-adapter
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXT_SRC = join(HERE, '..', '..', 'src');
 
-describe('ChatgptProviderAdapter (background side)', () => {
-  it('matches the real ChatGPT domains; rejects others', () => {
-    const adapter = new ChatgptProviderAdapter();
-    expect(adapter.matchesPage(new URL('https://chatgpt.com/'))).toBe(true);
-    expect(adapter.matchesPage(new URL('https://chatgpt.com/c/abc'))).toBe(true);
-    expect(adapter.matchesPage(new URL('https://ab.chatgpt.com/c/abc'))).toBe(true);
+describe('ClaudeProviderAdapter (background side)', () => {
+  it('matches the real Claude domains; rejects others', () => {
+    const adapter = new ClaudeProviderAdapter();
+    expect(adapter.matchesPage(new URL('https://claude.ai/'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.ai/chat/abc'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.ai/code'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://ab.claude.ai/chat/x'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.com/'))).toBe(true); // redirect host
     expect(adapter.matchesPage(new URL('https://chat.z.ai/'))).toBe(false);
+    expect(adapter.matchesPage(new URL('https://chatgpt.com/'))).toBe(false);
     expect(adapter.matchesPage(new URL('https://example.com/'))).toBe(false);
-    expect(adapter.matchesPage(new URL('https://claude.ai/'))).toBe(false);
   });
 
   it('fixture matching is config-driven and OFF by default', async () => {
-    const adapter = new ChatgptProviderAdapter();
-    expect(await adapter.matchesFixture(new URL('http://127.0.0.1:3778/'))).toBe(false);
-    const staged = new ChatgptProviderAdapter(
+    const adapter = new ClaudeProviderAdapter();
+    expect(await adapter.matchesFixture(new URL('http://127.0.0.1:3779/'))).toBe(false);
+    const staged = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ chatgptOrigin: 'https://chatgpt.com', fixtureOrigin: 'http://127.0.0.1:3778' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.ai', fixtureOrigin: 'http://127.0.0.1:3779' }),
     );
-    expect(await staged.matchesFixture(new URL('http://127.0.0.1:3778/?x=1'))).toBe(true);
+    expect(await staged.matchesFixture(new URL('http://127.0.0.1:3779/?x=1'))).toBe(true);
     expect(await staged.matchesFixture(new URL('http://127.0.0.1:9999/'))).toBe(false);
   });
 
-  it('openTask targets the CODING surface: chatgpt.com/codex (or the staged fixture)', async () => {
+  it('openTask targets the CODING surface: claude.ai/code (or the staged fixture)', async () => {
     const opened: string[] = [];
     const runtime = {
       openTab: async (url: string) => {
@@ -51,25 +53,25 @@ describe('ChatgptProviderAdapter (background side)', () => {
       getActiveTabId: async () => null,
       extensionPageUrl: (p: string) => p,
     };
-    const prod = new ChatgptProviderAdapter(
+    const prod = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ chatgptOrigin: 'https://chatgpt.com' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.ai' }),
     );
     await prod.openTask({} as never, runtime);
     // PR #33 review: implementation targets Codex — never the Chat root.
-    expect(opened[0]).toBe('https://chatgpt.com/codex');
+    expect(opened[0]).toBe('https://claude.ai/code');
 
-    const staged = new ChatgptProviderAdapter(
+    const staged = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ chatgptOrigin: 'https://chatgpt.com', fixtureOrigin: 'http://127.0.0.1:3778' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.ai', fixtureOrigin: 'http://127.0.0.1:3779' }),
     );
     await staged.openTask({} as never, runtime);
-    expect(opened[1]).toBe('http://127.0.0.1:3778');
+    expect(opened[1]).toBe('http://127.0.0.1:3779');
   });
 
   it('injectPrompt REFUSES when the prompt was already submitted (duplicate guard)', async () => {
     const port = { sendMessage: vi.fn(async () => null) };
-    const adapter = new ChatgptProviderAdapter(port);
+    const adapter = new ClaudeProviderAdapter(port);
     await adapter.injectPrompt(
       { executionId: 'wf_1', promptSubmitted: true } as never,
       {
@@ -84,7 +86,7 @@ describe('ChatgptProviderAdapter (background side)', () => {
 
   it('stop() notifies the page runtime via the tab port', async () => {
     const port = { sendMessage: vi.fn(async () => null) };
-    const adapter = new ChatgptProviderAdapter(port);
+    const adapter = new ClaudeProviderAdapter(port);
     await adapter.stop({ executionId: 'wf_1' } as never, {
       openTab: async () => 1,
       closeTab: async () => undefined,
@@ -97,21 +99,21 @@ describe('ChatgptProviderAdapter (background side)', () => {
     );
   });
 
-  it('is registered; Z.ai + Claude + fake all present and preserved (§29)', () => {
-    expect(providerRegistry.get('chatgpt')).toBeInstanceOf(ChatgptProviderAdapter);
-    expect(providerRegistry.get('zai')).toBeInstanceOf(ZaiProviderAdapter); // preserved
-    expect(providerRegistry.get('fake')).not.toBeNull(); // preserved
-    expect(providerRegistry.get('claude')).not.toBeNull(); // WORK-031 shipped
+  it('is registered alongside Z.ai + ChatGPT + fake — all preserved (§29)', () => {
+    expect(providerRegistry.get('claude')).toBeInstanceOf(ClaudeProviderAdapter);
+    expect(providerRegistry.get('chatgpt')).not.toBeNull(); // preserved (WORK-030)
+    expect(providerRegistry.get('zai')).toBeInstanceOf(ZaiProviderAdapter); // preserved (WORK-029)
+    expect(providerRegistry.get('fake')).not.toBeNull(); // preserved (WORK-028)
+    expect(detectProvider(new URL('https://claude.ai/code')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chatgpt.com/c/x')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chat.z.ai/')).adapterAvailable).toBe(true);
-    expect(detectProvider(new URL('https://claude.ai/')).adapterAvailable).toBe(true);
   });
 
-  it('registry lists chatgpt with display name + surface capabilities; all adapters shipped', () => {
+  it('registry lists claude with display name + surface capabilities', () => {
     const providers = providerRegistry.listProviders();
-    expect(providers.find((p) => p.providerId === 'chatgpt')).toEqual({
-      providerId: 'chatgpt',
-      displayName: 'ChatGPT',
+    expect(providers.find((p) => p.providerId === 'claude')).toEqual({
+      providerId: 'claude',
+      displayName: 'Claude',
       supported: true,
       adapterAvailable: true,
       surfaces: {
@@ -120,11 +122,11 @@ describe('ChatgptProviderAdapter (background side)', () => {
         implementationSurface: 'coding-agent',
       },
     });
-    expect(providerRegistry.pendingProviders).toEqual([]); // Claude shipped (WORK-031)
+    expect(providerRegistry.pendingProviders).toEqual([]); // all adapters shipped
   });
 
   it('describeSurfaces(): implementation surface is coding-agent; coding stays unverified (no fixture-only readiness)', () => {
-    const adapter = new ChatgptProviderAdapter();
+    const adapter = new ClaudeProviderAdapter();
     expect(adapter.describeSurfaces()).toEqual({
       conversationalChat: 'ready',
       codingAgent: 'unverified',
@@ -133,7 +135,7 @@ describe('ChatgptProviderAdapter (background side)', () => {
   });
 });
 
-describe('WORK-030 §33 — security regressions', () => {
+describe('WORK-031 §31 — security regressions', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -141,7 +143,7 @@ describe('WORK-030 §33 — security regressions', () => {
     vi.restoreAllMocks();
   });
 
-  it('resolveChatgptConfig reads the fixture origin ONLY from storage.session', async () => {
+  it('resolveClaudeConfig reads the fixture origin ONLY from storage.session', async () => {
     const stored: Record<string, unknown> = {};
     (globalThis as { chrome?: unknown }).chrome = {
       storage: {
@@ -155,18 +157,18 @@ describe('WORK-030 §33 — security regressions', () => {
         },
       },
     };
-    stored['wfos.chatgpt.fixtureOrigin'] = 'http://127.0.0.1:3778';
-    expect((await resolveChatgptConfig()).fixtureOrigin).toBe('http://127.0.0.1:3778');
-    delete stored['wfos.chatgpt.fixtureOrigin'];
-    expect((await resolveChatgptConfig()).fixtureOrigin).toBeUndefined();
+    stored['wfos.claude.fixtureOrigin'] = 'http://127.0.0.1:3779';
+    expect((await resolveClaudeConfig()).fixtureOrigin).toBe('http://127.0.0.1:3779');
+    delete stored['wfos.claude.fixtureOrigin'];
+    expect((await resolveClaudeConfig()).fixtureOrigin).toBeUndefined();
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
   it('the page session + SessionView carry NO credential material (callback token never reaches the adapter)', () => {
     const view = toSessionView({
       executionId: 'wf_1',
-      provider: 'chatgpt',
-      providerLabel: 'ChatGPT',
+      provider: 'claude',
+      providerLabel: 'Claude',
       projectId: 'p',
       workItemId: 'wi',
       workItemLabel: 'WORK-1',
@@ -189,22 +191,22 @@ describe('WORK-030 §33 — security regressions', () => {
       promptSubmitted: true,
       phase: 'agent-running',
       blockedReason: null,
-      externalSessionRef: '/c/abc',
+      externalSessionRef: '/chat/abc',
     });
     const serialized = JSON.stringify(view);
     expect(serialized).not.toContain('wfct_');
     expect(serialized).not.toContain('callback');
   });
 
-  it('ChatGPT sources never touch cookies, storage APIs, API keys, or WorkflowOS HTTP', () => {
+  it('Claude sources never touch cookies, storage APIs, API keys, or WorkflowOS HTTP', () => {
     const files = [
-      'chatgpt-provider-adapter.ts',
-      'chatgpt-page-runtime.ts',
-      'chatgpt-selectors.ts',
-      'chatgpt-types.ts',
+      'claude-provider-adapter.ts',
+      'claude-page-runtime.ts',
+      'claude-selectors.ts',
+      'claude-types.ts',
     ];
     for (const file of files) {
-      const src = readFileSync(join(EXT_SRC, 'providers', 'chatgpt', file), 'utf8');
+      const src = readFileSync(join(EXT_SRC, 'providers', 'claude', file), 'utf8');
       const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
       expect(code, `${file} must not read cookies`).not.toMatch(/document\.cookie|chrome\.cookies/);
       expect(code, `${file} must not use localStorage`).not.toMatch(/localStorage|storage\.local/);
@@ -221,14 +223,14 @@ describe('WORK-030 §33 — security regressions', () => {
     }
   });
 
-  it('chatgpt-bridge content script contains NO ChatGPT DOM selectors', () => {
-    const src = readFileSync(join(EXT_SRC, 'content', 'chatgpt-bridge.ts'), 'utf8');
+  it('claude-bridge content script contains NO Claude DOM selectors', () => {
+    const src = readFileSync(join(EXT_SRC, 'content', 'claude-bridge.ts'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(code).not.toMatch(/querySelector|getElementById|getElementsBy/);
-    expect(code).not.toMatch(/prompt-textarea|send-button|data-testid/);
+    expect(code).not.toMatch(/ProseMirror|Send message|data-testid|assistant-message/);
   });
 
-  it('Claude automation now exists as its OWN adapter (WORK-031 shipped)', () => {
+  it('the claude adapter + bridge exist and are wired (WORK-031 shipped)', () => {
     expect(existsSyncSafe(join(EXT_SRC, 'providers', 'claude', 'claude-provider-adapter.ts'))).toBe(true);
     expect(existsSyncSafe(join(EXT_SRC, 'content', 'claude-bridge.ts'))).toBe(true);
   });
