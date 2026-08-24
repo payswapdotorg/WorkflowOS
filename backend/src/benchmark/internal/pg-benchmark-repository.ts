@@ -334,19 +334,61 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
-  async claimExperimentCompletion(id: string): Promise<BenchmarkExperiment | null> {
-    // PR #36 review fix #2: phase 1 — RESERVATION. Atomic running → finalizing
-    // (NOT running → completed). Only the winner (RETURNING row) may proceed
-    // to integrity validation (phase 2) + the finalization CAS (phase 3).
-    // The loser (null) no-ops. `completed` is NOT set here — it becomes
-    // authoritative only after `finalizeExperimentCompletion` succeeds (i.e.
-    // only after integrity validation passes).
+  async claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #3: phase 1 — RESERVATION. Atomic running →
+    // finalizing (NOT running → completed). Only the winner (RETURNING row)
+    // may proceed to integrity validation (phase 2) + the finalization CAS
+    // (phase 3). The loser (null) no-ops. `completed` is NOT set here — it
+    // becomes authoritative only after `finalizeExperimentCompletion`
+    // succeeds (i.e. only after integrity validation passes).
+    //
+    // PR #36 review fix #3 — CRASH-SAFE LEASE: the reservation also sets
+    // `finalizing_lease_expires_at` (a persisted lease). If the winner dies
+    // before finalizing, the lease eventually expires and a recovery worker
+    // can reclaim the reservation via `recoverStaleFinalizingExperiment`.
+    // The expiry is computed in JS + passed as a TIMESTAMPTZ parameter
+    // (driver-portable across pg + pglite — both accept Date objects for
+    // TIMESTAMPTZ columns).
+    const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
-         SET status = 'finalizing'
+         SET status = 'finalizing',
+             finalizing_lease_expires_at = $2
        WHERE id = $1 AND status = 'running'
        RETURNING *`,
-      [id],
+      [id, leaseExpiresAt],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #3: CRASH-SAFE RECOVERY. Atomic CAS that reclaims
+    // a `finalizing` reservation whose lease has expired (the previous
+    // winner is presumed dead). The lease is RENEWED (set to NOW()+ttl) so
+    // the recovering worker has exclusive ownership — if it also dies, the
+    // renewed lease eventually expires and another recovery attempt can
+    // claim it again (forward progress). The winner (RETURNING row)
+    // re-enters the protocol at phase 2 (validation + finalization); the
+    // loser (null) no-ops.
+    //
+    // The guard is `status='finalizing' AND finalizing_lease_expires_at IS
+    // NOT NULL AND finalizing_lease_expires_at < NOW()`. The IS NOT NULL
+    // guard handles legacy `finalizing` rows from migration 0028 (pre-0029)
+    // that have NULL leases — those are left alone by THIS CAS (a separate
+    // legacy path or a manual recovery can reclaim them; they are rare +
+    // the protocol is idempotent). The `< NOW()` guard is the staleness
+    // check — only expired leases are reclaimable, so an active worker is
+    // never preempted mid-validation.
+    const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET finalizing_lease_expires_at = $2
+       WHERE id = $1
+         AND status = 'finalizing'
+         AND finalizing_lease_expires_at IS NOT NULL
+         AND finalizing_lease_expires_at < NOW()
+       RETURNING *`,
+      [id, leaseExpiresAt],
     );
     return rows[0] ? toExperiment(rows[0]) : null;
   }

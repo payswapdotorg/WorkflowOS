@@ -45,8 +45,27 @@ import {
   buildTrialBranchName,
 } from './benchmark-helpers.js';
 
+/**
+ * PR #36 review fix #3: default TTL (ms) for the `finalizing` reservation
+ * lease. A worker that wins `claimExperimentCompletion` (running →
+ * finalizing) sets `finalizing_lease_expires_at = NOW() + ttl`. If the
+ * worker dies before finalizing, the lease eventually expires and a
+ * recovery worker can reclaim the reservation via
+ * `recoverStaleFinalizingExperiment`. 2 minutes is long enough for
+ * integrity validation + the finalization CAS under normal conditions;
+ * short enough that a crashed worker's reservation is reclaimed within a
+ * tolerable window. The `finalizingLeaseTtlMs` dep overrides this (e.g.
+ * tests may pass a shorter TTL).
+ */
+const DEFAULT_FINALIZING_LEASE_TTL_MS = 120_000;
+
 export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrialRunner {
   constructor(private readonly deps: DefaultBenchmarkServiceDeps) {}
+
+  /** PR #36 review fix #3: the finalizing-lease TTL (dep override or default). */
+  private get finalizingLeaseTtlMs(): number {
+    return this.deps.finalizingLeaseTtlMs ?? DEFAULT_FINALIZING_LEASE_TTL_MS;
+  }
 
   // --- Snapshots (§4) ---
 
@@ -584,11 +603,20 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   /**
-   * Two-phase experiment completion protocol (PR #36 review fix #2):
+   * Two-phase experiment completion protocol (PR #36 review fix #2) with a
+   * crash-safe recovery path (PR #36 review fix #3):
    *
+   *   0. RECOVERY (PR #36 review fix #3): if the experiment is already in
+   *      `finalizing` with a STALE (expired) lease, a previous worker won
+   *      the reservation but died before finalizing. The recovery CAS
+   *      (recoverStaleFinalizingExperiment) reclaims + renews the lease so
+   *      the recovering worker re-enters the protocol at phase 2. Without
+   *      this, the experiment would be permanently stuck in `finalizing`
+   *      (the durable reservation the reviewer flagged).
    *   1. RESERVATION (exactly-once CAS): claimExperimentCompletion
-   *      running → finalizing. Only the winner proceeds; the loser (null)
-   *      no-ops. `completed` is NOT made authoritative here.
+   *      running → finalizing (sets a fresh lease). Only the winner
+   *      proceeds; the loser (null) no-ops. `completed` is NOT made
+   *      authoritative here.
    *   2. INTEGRITY VALIDATION (winner only): integrityService.validate.
    *      Returns BenchmarkIntegrityRecord { valid }. Thrown errors are
    *      treated as a validation failure (the experiment must not read
@@ -599,22 +627,27 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
    *      valid===false → finalizeExperimentInvalidation (finalizing → invalidated)
    *                      + audit BENCHMARK_INVALIDATED
    *
-   * This closes the PR #36 review finding: the prior version flipped the
-   * experiment to `completed` BEFORE validation ran, so a failed integrity
-   * check exposed a false successful completion (the row read `completed` +
-   * BENCHMARK_COMPLETED was already audited). Now `completed` is
-   * authoritative ONLY after integrity passes; a failed check leaves the
-   * experiment in `invalidated` (the existing terminal state for that).
+   * This closes the PR #36 review findings: (a) the prior version flipped
+   * the experiment to `completed` BEFORE validation ran, so a failed
+   * integrity check exposed a false successful completion. Now `completed`
+   * is authoritative ONLY after integrity passes. (b) The `finalizing`
+   * reservation is durable + a crashed worker's lease is reclaimable, so
+   * no experiment is permanently stuck.
    *
    * The `finalizing` reservation state is non-terminal, so no concurrent
    * worker re-enters the protocol while the winner is validating (the
    * all-terminal guard treats `finalizing` as not-yet-terminal). The
    * reservation CAS is exclusive (WHERE status='running'), so exactly one
-   * worker wins — exactly-once validation + exactly-once audit.
+   * worker wins — exactly-once validation + exactly-once audit. The
+   * recovery CAS is also exclusive (WHERE status='finalizing' AND
+   * lease < NOW()), so exactly one recovery worker wins.
    *
    * Only called when every trial is terminal. If any trial is still in a
    * non-terminal phase, this is a no-op (the worker re-checks when the
-   * last trial finishes).
+   * last trial finishes). The recovery path (phase 0) is also triggered
+   * lazily by `getExperiment` reads when the experiment is stuck in
+   * `finalizing` — NO polling sweep, NO second execution engine (§34
+   * invariant intact).
    */
   private async checkExperimentCompletion(experimentId: string): Promise<void> {
     const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
@@ -626,9 +659,24 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       (t) => t.lifecyclePhase === 'completed' || t.lifecyclePhase === 'failed',
     );
     if (!allTerminal) return;
-    // Phase 1 — RESERVATION (exactly-once CAS). Only the winner may run
-    // integrity validation + the finalization CAS. The loser (null) no-ops.
-    const claimed = await this.deps.repository.claimExperimentCompletion(experimentId);
+    // Phase 0 — CRASH-SAFE RECOVERY (PR #36 review fix #3). Try to reclaim
+    // a stale `finalizing` reservation FIRST. If a previous worker won
+    // the reservation (running → finalizing) but died before finalizing,
+    // its lease has expired + this CAS reclaims it (renewing the lease so
+    // the recovering worker has exclusive ownership). If there is no stale
+    // reservation, this returns null + we fall through to the fresh-claim
+    // path. The recovery winner reuses the SAME phase 2 + phase 3 path as a
+    // fresh reservation winner — only the reservation source differs.
+    const recovered = await this.deps.repository.recoverStaleFinalizingExperiment(
+      experimentId, this.finalizingLeaseTtlMs,
+    );
+    // Phase 1 — RESERVATION (exactly-once CAS, fresh path). Only the
+    // winner may run integrity validation + the finalization CAS. The
+    // loser (null) no-ops. Skipped if phase 0 already reclaimed a stale
+    // reservation (`recovered` is non-null).
+    const claimed = recovered ?? await this.deps.repository.claimExperimentCompletion(
+      experimentId, this.finalizingLeaseTtlMs,
+    );
     if (!claimed) return;
     // Phase 2 — INTEGRITY VALIDATION (winner only). validate() returns a
     // record with `valid` (it does NOT throw on integrity failure — it
@@ -717,7 +765,32 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   async getExperiment(experimentId: string): Promise<BenchmarkExperiment | null> {
-    return this.deps.repository.getExperiment(experimentId);
+    const experiment = await this.deps.repository.getExperiment(experimentId);
+    if (!experiment) return null;
+    // PR #36 review fix #3: LAZY RECOVERY on read. If the experiment is
+    // stuck in `finalizing` (a previous worker won the reservation but
+    // died before finalizing), trigger checkExperimentCompletion to run
+    // the recovery path (phase 0: recoverStaleFinalizingExperiment). The
+    // recovery CAS guards on `finalizing_lease_expires_at < NOW()`, so an
+    // ACTIVE worker (lease not yet expired) is never preempted — the CAS
+    // returns null + checkExperimentCompletion no-ops. This is the safety
+    // net that ensures no experiment is permanently stuck: the moment
+    // anyone reads a stuck experiment (the natural way to discover it),
+    // it gets recovered. NO polling sweep, NO second execution engine (§34
+    // invariant intact). Best-effort in the read path — a recovery failure
+    // logs + the read returns the stuck `finalizing` row (a visible,
+    // debuggable stuck-state, NOT a false completion).
+    if (experiment.status === 'finalizing') {
+      try {
+        await this.checkExperimentCompletion(experimentId);
+      } catch (err) {
+        this.deps.logger.error('benchmark.experiment-finalizing-recovery-failed', {
+          experimentId, error: (err as Error).message,
+        });
+      }
+      return this.deps.repository.getExperiment(experimentId);
+    }
+    return experiment;
   }
 
   async listTrials(experimentId: string, opts: { limit?: number; offset?: number } = {}): Promise<{ trials: BenchmarkTrial[]; total: number }> {

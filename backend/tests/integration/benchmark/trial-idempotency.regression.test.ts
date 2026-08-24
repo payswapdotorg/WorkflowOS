@@ -561,10 +561,12 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     // Phase 1 — RESERVATION CAS exclusivity. Two concurrent
     // claimExperimentCompletion calls: exactly one wins (running→finalizing),
     // one loses (null). This is the exactly-once guarantee that only one
-    // worker proceeds to integrity validation.
+    // worker proceeds to integrity validation. The 30s lease TTL is enough
+    // for the test to finalize without the lease expiring mid-test (the
+    // recovery regression below exercises the expired-lease path).
     const [a, b] = await Promise.all([
-      stack.benchmarkRepository.claimExperimentCompletion(experimentId),
-      stack.benchmarkRepository.claimExperimentCompletion(experimentId),
+      stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000),
+      stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000),
     ]);
     // Exactly one winner (non-null) + one loser (null). XOR.
     expect(a === null || b === null).toBe(true);
@@ -581,8 +583,9 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
 
     // A THIRD claim attempt (now that the experiment is 'finalizing') also
     // returns null — the reservation CAS guard (WHERE status='running')
-    // rejects it.
-    const third = await stack.benchmarkRepository.claimExperimentCompletion(experimentId);
+    // rejects it. (The lease is also NOT stale — only 30s old — so the
+    // recovery CAS would reject it too; both paths are exclusive.)
+    const third = await stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000);
     expect(third).toBeNull();
 
     // Phase 3a — success finalization CAS. finalizeExperimentCompletion
@@ -607,5 +610,162 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     // experiment cannot be invalidated after it's already completed.
     const invalidationAttempt = await stack.benchmarkRepository.finalizeExperimentInvalidation(experimentId);
     expect(invalidationAttempt).toBeNull();
+  });
+
+  it('lost `finalizing` worker is recovered to exactly one terminal state + exactly one terminal audit (success path)', async () => {
+    // PR #36 review fix #3: the third + final PR #36 review blocker. The
+    // two-phase completion protocol (migration 0028) introduced a durable
+    // `running → finalizing` reservation, but if the worker that WON the
+    // reservation DIED before finalizing (process crash, container kill,
+    // DB timeout between claim + finalize), the experiment was permanently
+    // stuck in `finalizing`:
+    //   * claimExperimentCompletion only matches WHERE status='running',
+    //     so no other worker could re-enter the protocol via the fresh path.
+    //   * checkExperimentCompletion is only triggered when a trial reaches
+    //     terminal — but ALL trials were already terminal (the precondition
+    //     for entering the protocol), so no trial would finish again to
+    //     re-trigger the check.
+    // The fix: a persisted `finalizing_lease_expires_at` (migration 0029) +
+    // a `recoverStaleFinalizingExperiment` CAS that reclaims expired-lease
+    // `finalizing` rows + renews the lease (so the recovering worker has
+    // exclusive ownership) + lazy recovery on `getExperiment` reads. This
+    // test proves a lost worker is recovered to EXACTLY ONE terminal state
+    // (`completed`, since integrity passes) + EXACTLY ONE terminal audit
+    // event (BENCHMARK_COMPLETED — the lost worker wrote NONE because it
+    // died before the audit step; the recovering worker wrote exactly one).
+    const { experimentId } = await makeExperiment('lost-worker-recovery-success', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    // Put the experiment + trial into the state checkExperimentCompletion
+    // expects: experiment 'running', trial terminal ('completed').
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'completed', lifecycle_phase = 'completed', completed_at = NOW()
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Simulate a worker winning the reservation (running → finalizing) +
+    // then DYING before validation/finalization. The reservation sets a
+    // 30s lease; the worker never calls finalizeExperimentCompletion.
+    const claimed = await stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000);
+    expect(claimed).not.toBeNull();
+    expect(claimed?.status).toBe('finalizing');
+
+    // The lost worker wrote NO terminal audit event (it died before the
+    // audit step). The reservation is durable (`finalizing`) but no audit.
+    let expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
+
+    // Simulate the lease EXPIRING (the worker has been dead for longer
+    // than the lease TTL). Set the expiry to the past so the recovery CAS
+    // (`WHERE finalizing_lease_expires_at < NOW()`) will match.
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_experiments
+         SET finalizing_lease_expires_at = NOW() - INTERVAL '1 second'
+       WHERE id = $1`,
+      [experimentId],
+    );
+
+    // Trigger LAZY RECOVERY via getExperiment (the natural way a stuck
+    // experiment is discovered — an operator/dashboard reads the status).
+    // The read sees `finalizing`, calls checkExperimentCompletion which
+    // runs phase 0 (recoverStaleFinalizingExperiment reclaims + renews
+    // the lease), phase 2 (integrity validation — passes, the snapshot +
+    // trial digests match), phase 3a (finalizeExperimentCompletion:
+    // finalizing → completed) + the BENCHMARK_COMPLETED audit.
+    const recovered = await stack.benchmarkService.getExperiment(experimentId);
+    expect(recovered?.status).toBe('completed');
+
+    // ASSERTION 1 — exactly ONE terminal audit event. The lost worker
+    // wrote NONE (died before audit); the recovering worker wrote exactly
+    // one BENCHMARK_COMPLETED. No duplicate, no BENCHMARK_INVALIDATED.
+    // This is the reviewer's required invariant: "a lost worker can be
+    // safely recovered to exactly one terminal state and exactly one
+    // terminal audit event."
+    expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(1);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
+
+    // ASSERTION 2 — the recovery CAS is idempotent. A SECOND getExperiment
+    // call does NOT produce a second audit (the experiment is `completed`,
+    // not `finalizing` — the lazy-recovery guard no-ops; + even if it did
+    // re-enter, the fresh-claim CAS would reject `completed`). Exactly-once.
+    await stack.benchmarkService.getExperiment(experimentId);
+    expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(1);
+  });
+
+  it('lost `finalizing` worker is recovered to exactly one terminal state + exactly one terminal audit (integrity-failure path)', async () => {
+    // PR #36 review fix #3 (companion to the success-path recovery test):
+    // the recovery MUST also handle the INTEGRITY-FAILURE path. If the
+    // experiment's integrity was corrupt (e.g. a trial's prompt_digest
+    // mismatches the snapshot — §27), the recovering worker runs phase 2
+    // (validation returns valid===false) + phase 3b
+    // (finalizeExperimentInvalidation: finalizing → invalidated) + the
+    // BENCHMARK_INVALIDATED audit. This proves the recovery reaches the
+    // CORRECT terminal state for the data (invalidated, NOT a false
+    // completed) + writes exactly one terminal audit.
+    const { experimentId } = await makeExperiment('lost-worker-recovery-invalidation', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'completed', lifecycle_phase = 'completed', completed_at = NOW()
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // CORRUPT the trial's prompt_digest so §27 integrity validation
+    // fails. The recovering worker MUST observe this + finalize to
+    // `invalidated` (NOT `completed` — the corruption means the
+    // experiment cannot honestly read successful).
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials SET prompt_digest = 'corrupted-digest-that-mismatches-snapshot'
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Simulate a worker winning the reservation + then dying.
+    const claimed = await stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000);
+    expect(claimed?.status).toBe('finalizing');
+
+    let expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(0);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
+
+    // Expire the lease + trigger lazy recovery via getExperiment.
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_experiments
+         SET finalizing_lease_expires_at = NOW() - INTERVAL '1 second'
+       WHERE id = $1`,
+      [experimentId],
+    );
+    const recovered = await stack.benchmarkService.getExperiment(experimentId);
+
+    // ASSERTION 1 — the recovery reached the CORRECT terminal state for
+    // the corrupt data: `invalidated` (NOT a false `completed`).
+    expect(recovered?.status).toBe('invalidated');
+
+    // ASSERTION 2 — exactly ONE terminal audit event: BENCHMARK_INVALIDATED
+    // (NOT BENCHMARK_COMPLETED). The lost worker wrote NONE; the recovering
+    // worker wrote exactly one. Exactly-one terminal state + exactly-one
+    // terminal audit event, even on the failure path.
+    expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(1);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
   });
 });

@@ -6138,5 +6138,133 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // PR #36 review fix #2b: exactly-once finalization under concurrent
     // checkExperimentCompletion calls.
     expect(src).toMatch(/concurrent experiment completion finalizes exactly once/);
+    // PR #36 review fix #3: lost `finalizing` worker recovery — both the
+    // success path (recovered to `completed` + one BENCHMARK_COMPLETED)
+    // + the integrity-failure path (recovered to `invalidated` + one
+    // BENCHMARK_INVALIDATED). The reviewer required a regression test
+    // proving a lost worker can be safely recovered to exactly one
+    // terminal state and exactly one terminal audit event.
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(success path\)/);
+    expect(src).toMatch(/lost `finalizing` worker is recovered to exactly one terminal state \+ exactly one terminal audit \(integrity-failure path\)/);
+  });
+
+  it('benchmark migration 0029 adds the persisted finalizing lease + stale-reservation index (crash-safe recovery)', () => {
+    // PR #36 review fix #3: the two-phase completion protocol (migration
+    // 0028) introduced a durable `running → finalizing` reservation, but
+    // there was NO recovery path if the worker that won the reservation
+    // DIED before finalizing — the experiment would be permanently stuck
+    // in `finalizing` (claimExperimentCompletion only matches
+    // WHERE status='running'; checkExperimentCompletion is only triggered
+    // when a trial reaches terminal, but all trials were already
+    // terminal). Migration 0029 fixes this by adding a persisted lease
+    // (`finalizing_lease_expires_at`) that the recovery CAS reclaims when
+    // it expires.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0029_benchmark_experiment_finalizing_lease.sql');
+    expect(existsSync(migrationPath), '0029_benchmark_experiment_finalizing_lease.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The column MUST exist (nullable — only set when status='finalizing').
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS finalizing_lease_expires_at TIMESTAMPTZ/);
+    // A partial index scoped to status='finalizing' for the stale-lease
+    // sweep query (keeps the index small — finalizing is transient).
+    expect(src).toMatch(/CREATE INDEX IF NOT EXISTS idx_benchmark_experiments_finalizing_stale/);
+    expect(src).toMatch(/WHERE status = 'finalizing'/);
+  });
+
+  it('benchmark recoverStaleFinalizingExperiment is an atomic CAS guarded on status=finalizing + an expired lease (NOT running)', () => {
+    // PR #36 review fix #3: the recovery CAS MUST (a) guard on
+    // status='finalizing' (NOT 'running' — the fresh-claim path owns
+    // 'running'), (b) guard on finalizing_lease_expires_at < NOW() (the
+    // previous winner's lease has expired = the previous winner is
+    // presumed dead — an active worker is never preempted mid-validation),
+    // (c) RENEW the lease (set finalizing_lease_expires_at = NOW()+ttl) so
+    // the recovering worker has exclusive ownership — if it also dies, the
+    // renewed lease eventually expires and another recovery attempt can
+    // claim it again (forward progress), (d) use RETURNING * so the winner
+    // proceeds to phase 2 (validation + finalization) + the loser no-ops.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async recoverStaleFinalizingExperiment[\s\S]*?RETURNING \*/);
+    expect(fn, 'recoverStaleFinalizingExperiment must exist + use RETURNING *').not.toBeNull();
+    // Guard on status='finalizing' (NOT 'running' — that is the fresh-claim path).
+    expect(fn![0]).toMatch(/status = 'finalizing'/);
+    expect(fn![0]).not.toMatch(/status = 'running'/);
+    // Guard on the expired lease (the previous winner is presumed dead).
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at < NOW\(\)/);
+    // RENEW the lease (forward progress if the recovering worker also dies).
+    expect(fn![0]).toMatch(/SET\s+finalizing_lease_expires_at = \$2/);
+    // The recovery MUST NOT touch `status` (the reservation stays
+    // `finalizing` — only the finalization CASes advance to
+    // completed/invalidated) + MUST NOT touch `completed_at` (no terminal
+    // timestamp until the finalization).
+    expect(fn![0]).not.toMatch(/SET status/);
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark claimExperimentCompletion sets the persisted lease (NOT just status=finalizing)', () => {
+    // PR #36 review fix #3: the reservation MUST set
+    // finalizing_lease_expires_at alongside the running → finalizing CAS,
+    // so a crashed worker's reservation is eventually reclaimable by the
+    // recovery CAS. Without the lease, the recovery CAS has nothing to
+    // check for staleness — the experiment would be permanently stuck.
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(fn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    // The reservation sets BOTH status='finalizing' AND the lease.
+    expect(fn![0]).toMatch(/SET status = 'finalizing'/);
+    expect(fn![0]).toMatch(/finalizing_lease_expires_at = \$2/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization — carried over from the PR #36 fix #2 check).
+    expect(fn![0]).not.toMatch(/completed_at/);
+  });
+
+  it('benchmark checkExperimentCompletion runs RECOVERY BEFORE the fresh reservation (recovery-first ordering)', () => {
+    // PR #36 review fix #3: checkExperimentCompletion MUST try the
+    // recovery CAS (recoverStaleFinalizingExperiment) BEFORE the
+    // fresh-claim CAS (claimExperimentCompletion). If a previous worker
+    // died with a stale lease, the recovery reclaims it; only if there is
+    // no stale reservation does the fresh claim run (which is the normal
+    // path for an experiment still in 'running'). The recovery winner
+    // reuses the SAME phase 2 (validation) + phase 3 (finalization) path
+    // — only the reservation source differs.
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    const recoverIdx = body.indexOf('recoverStaleFinalizingExperiment');
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    expect(recoverIdx, 'must call recoverStaleFinalizingExperiment').toBeGreaterThan(-1);
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    // Recovery MUST come before the fresh claim (recovery-first ordering).
+    expect(recoverIdx).toBeLessThan(claimIdx);
+    // The `claimed` variable MUST be the recovery winner OR the fresh-claim
+    // winner (nullish coalescing) — both paths feed the SAME phase 2/3.
+    expect(body).toMatch(/recovered \?\? .*claimExperimentCompletion/);
+  });
+
+  it('benchmark getExperiment triggers lazy recovery on a stale `finalizing` status (NO polling sweep, NO second execution engine)', () => {
+    // PR #36 review fix #3: the recovery trigger is LAZY — on
+    // getExperiment reads, NOT a background polling sweep. This preserves
+    // the §34 invariant (no second execution engine, no bounded poll): the
+    // moment anyone reads a stuck experiment (the natural way to discover
+    // it), the lazy-recovery guard runs checkExperimentCompletion which
+    // runs the recovery CAS. If the lease is NOT stale (an active worker
+    // is mid-validation), the recovery CAS returns null + the read returns
+    // `finalizing` (no preemption). Best-effort — recovery failures are
+    // caught + logged so the read still returns the stuck row (a visible,
+    // debuggable stuck-state, NOT a false completion).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/async getExperiment[\s\S]*?\n  \}/);
+    expect(fn, 'getExperiment must exist').not.toBeNull();
+    const body = fn![0];
+    // The lazy-recovery guard MUST check for status === 'finalizing'.
+    expect(body).toMatch(/status === 'finalizing'/);
+    // It MUST call checkExperimentCompletion (the recovery entry point).
+    expect(body).toMatch(/checkExperimentCompletion/);
+    // Recovery failures MUST be caught (best-effort — the read still
+    // returns the stuck row, NOT a thrown error).
+    expect(body).toMatch(/catch/);
+    expect(body).toMatch(/benchmark.experiment-finalizing-recovery-failed/);
+    // It MUST re-read after recovery (so the caller sees the recovered
+    // terminal state, not the stale `finalizing` row).
+    expect(body).toMatch(/getExperiment/);
   });
 });

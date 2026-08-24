@@ -86,10 +86,11 @@ export interface BenchmarkRepository {
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
   /**
-   * PR #36 review fix #2: ATOMIC experiment-completion RESERVATION (phase 1
-   * of the two-phase completion protocol). Compare-and-swap:
-   * `UPDATE wfos_benchmark_experiments SET status='finalizing'
-   * WHERE id=$1 AND status='running' RETURNING *`.
+   * PR #36 review fix #2 + #3: ATOMIC experiment-completion RESERVATION
+   * (phase 1 of the two-phase completion protocol). Compare-and-swap:
+   * `UPDATE wfos_benchmark_experiments SET status='finalizing',
+   * finalizing_lease_expires_at = NOW() + ttl WHERE id=$1 AND
+   * status='running' RETURNING *`.
    *
    * Only the worker that wins (returns a row) may proceed to integrity
    * validation (phase 2). The loser (null) no-ops — exactly-once
@@ -100,11 +101,44 @@ export interface BenchmarkRepository {
    * `finalizeExperimentCompletion` (validation passed → `finalizing →
    * completed`) or `finalizeExperimentInvalidation` (validation failed →
    * `finalizing → invalidated`) AFTER `integrityService.validate` returns.
-   * Without the finalization call the experiment is stuck in `finalizing`
-   * (non-terminal) — a visible, debuggable stuck-state, NOT a false
-   * successful completion.
+   *
+   * PR #36 review fix #3 — CRASH-SAFE LEASE: the reservation also sets
+   * `finalizing_lease_expires_at` (a persisted lease). If the winner dies
+   * before finalizing, the lease eventually expires and a recovery worker
+   * can reclaim the reservation via `recoverStaleFinalizingExperiment`
+   * (which re-enters the protocol at phase 2). Without the lease, the
+   * experiment would be permanently stuck in `finalizing` — the durable
+   * reservation the reviewer flagged. The `leaseTtlMs` MUST be long enough
+   * for integrity validation + the finalization CAS under normal
+   * conditions (default 2 minutes — see DefaultBenchmarkService).
    */
-  claimExperimentCompletion(id: string): Promise<BenchmarkExperiment | null>;
+  claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #3: CRASH-SAFE RECOVERY for the `finalizing`
+   * reservation. Compare-and-swap:
+   * `UPDATE wfos_benchmark_experiments SET finalizing_lease_expires_at =
+   * NOW() + ttl WHERE id=$1 AND status='finalizing' AND
+   * finalizing_lease_expires_at IS NOT NULL AND
+   * finalizing_lease_expires_at < NOW() RETURNING *`.
+   *
+   * Only the worker that wins (returns a row) may re-enter the protocol at
+   * phase 2 (integrity validation + the finalization CAS). The lease is
+   * RENEWED (set to NOW()+ttl) so the recovering worker has exclusive
+   * ownership — if it ALSO dies before finalizing, the renewed lease
+   * eventually expires and another recovery attempt can claim it again.
+   * Forward progress is preserved.
+   *
+   * The recovery CAS guards on `status='finalizing'` (NOT `running` — the
+   * fresh-claim path owns `running`) AND `finalizing_lease_expires_at <
+   * NOW()` (the previous winner's lease has expired = the previous winner
+   * is presumed dead). This closes the stuck-`finalizing` failure the
+   * reviewer flagged: a crashed worker's reservation is eventually
+   * reclaimable, so no experiment is permanently stuck. The recovery is
+   * triggered lazily on `getExperiment` reads (NO polling sweep, NO second
+   * execution engine — §34 invariant intact).
+   */
+  recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
 
   /**
    * PR #36 review fix #2: phase 3a — ATOMIC completion FINALIZATION (success
@@ -561,6 +595,19 @@ export interface DefaultBenchmarkServiceDeps {
    * observes the terminal transition.
    */
   readonly workflowEngine: WorkflowEngine;
+  /**
+   * PR #36 review fix #3: TTL (ms) for the `finalizing` reservation lease.
+   * A worker that wins `claimExperimentCompletion` (running → finalizing)
+   * sets `finalizing_lease_expires_at = NOW() + ttl`. If the worker dies
+   * before finalizing, the lease eventually expires and a recovery worker
+   * can reclaim the reservation via `recoverStaleFinalizingExperiment`.
+   * Optional — defaults to 120_000 (2 minutes), enough for integrity
+   * validation + the finalization CAS under normal conditions. Tests may
+   * override (e.g. a very short TTL to exercise expiry without waiting);
+   * the recovery regression test manipulates `finalizing_lease_expires_at`
+   * directly via raw SQL instead, so the default is fine for tests.
+   */
+  readonly finalizingLeaseTtlMs?: number;
 }
 
 export type {
