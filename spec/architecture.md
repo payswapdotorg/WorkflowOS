@@ -901,223 +901,199 @@ External providers should receive only the minimum information needed for their 
 
 ---
 
-# 33. Secrets
+# 33. Forward Architecture Evolution — Project Lifecycle and Execution Fabric
 
-Provider credentials and sensitive tokens must not be stored as ordinary application data.
+> **Status:** Forward-looking architectural addendum. This section records the accepted direction for subsequent architecture versions and does not retroactively mutate the frozen v1.0 workflow or authority rules above. Any implementation that changes the frozen state machine or module ownership must still be introduced through an approved Architecture Change Request and a new immutable architecture version.
 
-The architecture uses a secret-management abstraction.
-
-Application code accesses secrets through that abstraction.
-
-Provider-specific credentials must not be embedded in domain objects or workflow records.
-
----
-
-# 34. Multi-Tenancy
-
-All tenant-owned data belongs to an Organization.
-
-Project-level resources inherit organizational ownership.
-
-Authorization is enforced server-side.
-
-No request may access a resource solely because the client supplied its identifier.
-
-Resource ownership must be resolved through authorized organization/project relationships.
-
----
-
-# 35. Observability
-
-The system must provide:
-
-* structured logging
-* application metrics
-* workflow/job metrics
-* error tracking
-* distributed tracing where practical
-
-Long-running workflow executions must have traceable identifiers so a user can follow:
+WorkflowOS evolves from a project-build workflow into a continuous software-development operating system with three product lifecycle modes:
 
 ```text
-Work Item
-→ Agent Run
-→ Commit
-→ PR
-→ CI
-→ Verification
-→ Architect Review
-→ Merge
+BUILD        → greenfield project development
+CONTINUE     → ongoing development of an existing project
+MAINTAIN     → continuous maintenance and health management of an existing project
 ```
 
----
+All three modes use the same authoritative Work Item → Work Order → Execution → Verification → Review → Merge/Release machinery. They must not create separate implementation engines.
 
-# 36. Deployment
+## 33.1 Unified Execution Fabric
 
-The initial system is containerized.
-
-The initial deployment consists conceptually of:
+Every implementation task supports both:
 
 ```text
-Web Application
-Backend API
-Background Worker
-PostgreSQL
-Redis
-Object Storage
+NATIVE
+  WorkflowOS → ExecutionService → AgentGateway → provider API/local agent
+
+EXTERNAL
+  WorkflowOS → ExecutionService → Companion → user's native provider product
 ```
 
-Infrastructure should be deployable independently of the customer's application repositories.
+Native/API and external execution are first-class, not fallback tiers. A task may begin in one mode and continue in the other without losing the logical Work Item, Work Order, implementation context, evidence, or audit trail.
 
-The exact cloud provider is intentionally not part of this architectural version.
+## 33.2 Full-Capability Principle
 
----
+WorkflowOS must not deliberately weaken a capable model or remove its native capabilities merely to reduce observed differences between providers. Providers should run at their normal eligible capability ceiling.
 
-# 37. Domain Boundary Summary
+WorkflowOS standardizes:
 
-The primary domain relationships are:
+* task definition
+* architecture
+* requirements
+* context
+* verification
+* review
+* policy
+* evidence
+
+It does not artificially cap model quality. Benchmarking must preserve measured capability differences.
+
+## 33.3 Execution Eligibility and Selection
+
+Execution selection is a constrained optimization problem:
 
 ```text
-Organization
-    ↓
-Project
-    ↓
-Architecture Version
-    ↓
-Requirement
-    ↓
-Acceptance Criteria
-    ↓
-Work Item
-    ↓
-Agent Run
-    ↓
-Pull Request
-    ↓
-Verification
-    ↓
-Architect Review
-    ↓
-Merge
+Hard constraints
+  ↓
+Eligible candidates
+  ↓
+Historical benchmark performance
+  ↓
+Cost / latency / reliability
+  ↓
+User and project preferences
+  ↓
+Recommendation or automatic selection
 ```
 
-These relationships are central to WorkflowOS and must remain explicit.
+Hard constraints may include:
 
----
+* required execution capability
+* user/provider subscription limits
+* model availability
+* API quota/rate limits
+* project policy
+* organization policy
+* privacy requirements
+* native-only or external-only requirements
+* security constraints
 
-# 38. Core Architectural Invariants
+Subscription and availability constraints are eligibility inputs, not quality scores.
 
-The following invariants are mandatory:
+## 33.4 Fair Benchmarking
 
-1. PostgreSQL is the authoritative WorkflowOS state.
-2. GitHub is the authoritative repository state.
-3. LLM output is never automatically treated as proof of implementation.
-4. Acceptance criteria require evidence.
-5. Workflow state transitions are controlled by the Workflow Engine.
-6. Frozen architecture versions are immutable.
-7. Every work item references an architecture version.
-8. Every implementation PR references at least one work item.
-9. Verification occurs before architectural approval.
-10. Architecture review occurs before merge unless explicitly overridden by project policy.
-11. Implementation agents cannot silently modify architecture.
-12. External providers are isolated behind adapters.
-13. Tenant boundaries are enforced server-side.
-14. Secrets are never treated as ordinary business data.
-15. Long-running work executes asynchronously.
-16. Workflow/event processing is idempotent.
-17. Conversation history is not a system of record.
-18. All important workflow transitions are auditable.
+Benchmark comparisons must use the same:
 
----
+* architecture version
+* requirements
+* acceptance criteria
+* Work Item
+* Work Order
+* implementation context
+* prompt digest
+* repository baseline commit
+* verification requirements
 
-# 39. Explicit Non-Goals for Version 1
+Benchmarking must expose capability differences rather than suppressing them.
 
-The following are not part of the frozen architecture:
+WorkflowOS may maintain separate benchmark modes for:
 
-* running arbitrary customer code inside WorkflowOS infrastructure
-* replacing GitHub as the source-control system
-* requiring a specific LLM vendor
-* requiring a specific coding-agent vendor
-* autonomous architectural modification
-* fully autonomous production deployment
-* microservices as a requirement
-* customer Kubernetes management
-* building an independent CI platform
-* treating chat history as persistent project state
+* maximum-capability comparison
+* controlled comparison
+* cost-constrained execution
+* latency-constrained execution
+* subscription-constrained execution
 
----
+## 33.5 Existing-Project Onboarding
 
-# 40. Architectural Change Process
+WorkflowOS must support projects not originally created by WorkflowOS.
 
-Any change to this architecture requires:
+Onboarding should establish a Project Baseline containing:
+
+* repository and baseline commit
+* observed technology stack
+* inferred architecture
+* dependency graph
+* test/CI health
+* deployment/runtime state
+* security findings
+* technical debt
+* current risks
+
+Inferred information must carry explicit provenance such as `observed`, `inferred`, `confirmed`, or `proposed`. WorkflowOS must not falsely represent inferred architecture as the historical source of truth.
+
+## 33.6 Continuous Development and Maintenance
+
+WorkflowOS should proactively identify and pursue:
+
+* product features
+* refactors
+* technical debt
+* dependency upgrades
+* security vulnerabilities
+* runtime compatibility changes
+* CI regressions
+* browser compatibility issues
+* performance regressions
+* architecture drift
+* operational issues
+
+Actionable signals become governed Work Items and follow the same execution/verification/review path as planned product work.
+
+## 33.7 Cross-Mode Handoff
+
+A logical execution may move between native and external environments:
 
 ```text
-Architecture Change Request
-        ↓
-Impact Analysis
-        ↓
-Architect Review
-        ↓
-Human Approval
-        ↓
-New Architecture Version
-        ↓
-Updated Requirements / Work Items
+Native Qwen
+   ↓
+blocked / capability gap
+   ↓
+External Claude Code
+   ↓
+continue same logical execution
 ```
 
-No implementation agent may bypass this process.
-
----
-
-# 41. End-to-End Workflow
-
-The canonical WorkflowOS development lifecycle is:
+or:
 
 ```text
-1. Create Project
-2. Connect GitHub Repository
-3. Create Architecture
-4. Freeze Architecture
-5. Generate Requirements
-6. Generate Work Items
-7. Determine Eligible Work Item
-8. Generate Work Order
-9. Execute Implementation Agent
-10. Create / Update Pull Request
-11. Run CI / Verification
-12. Evaluate Acceptance Criteria
-13. Request Architect Review
-14. Architect Reviews Actual Evidence
-15. APPROVE
-      OR
-    REQUEST_CHANGES
-      OR
-    ARCHITECTURE_CHANGE_REQUIRED
-16. Repeat correction cycle when required
-17. Merge Approved Pull Request
-18. Mark Work Item VERIFIED
-19. Determine Next Eligible Work Item
-20. Repeat
+External Z.ai
+   ↓
+needs unavailable capability
+   ↓
+Native agent
+   ↓
+continue same Work Order
 ```
 
-This workflow is the primary behavior that the WorkflowOS architecture exists to support.
+The handoff preserves the logical execution identity and accumulated authoritative context. A handoff is not a new Work Item and must not create a second workflow state machine.
 
----
+## 33.8 Agent Runtime Direction
 
-# 42. Architecture Boundary Rule
+Future native execution should provide a controlled execution environment with:
 
-Future implementation decisions must preserve the distinction between:
+* isolated Git worktrees
+* filesystem access
+* terminal/process execution
+* git tooling
+* package/test runners
+* browser tooling where required
+* network policy
+* secret policy
+* checkpoints and resumability
+* observation capture
 
-```text
-Persistent project state
-Workflow orchestration
-External provider integrations
-Implementation execution
-Deterministic verification
-LLM-based architectural reasoning
-User authorization
-```
+These capabilities are execution infrastructure, not workflow authority.
 
-These responsibilities must not be collapsed into a single generic "AI service."
+## 33.9 Agent Intelligence Direction
 
-The platform's reliability depends on these boundaries remaining explicit.
+A future Agent Intelligence layer may recommend or select roles, providers, models, modes, and fallback strategies using:
+
+* task characteristics
+* project constraints
+* benchmark evidence
+* provider availability
+* historical success
+* cost
+* latency
+* human-intervention requirements
+
+This layer must select among eligible candidates and must never override hard authorization, security, or capability constraints.
