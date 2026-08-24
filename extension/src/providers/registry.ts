@@ -23,7 +23,8 @@ import { fakeProviderAdapter } from './fake/fake-provider-adapter.js';
 import { zaiProviderAdapter } from './zai/zai-provider-adapter.js';
 // WORK-030: the REAL ChatGPT adapter (chatgpt.com, user's existing session).
 import { chatgptProviderAdapter } from './chatgpt/chatgpt-provider-adapter.js';
-// WORK-031: the REAL Claude adapter (claude.ai, user's existing session).
+// WORK-031: the REAL Claude adapter (claude.com/code canonical current
+// host + claude.ai legacy/redirect host — PR #34).
 import { claudeProviderAdapter } from './claude/claude-provider-adapter.js';
 
 /** Placeholder metadata for providers whose adapters ship in later work items. */
@@ -48,7 +49,8 @@ export class ExternalProviderAdapterRegistry {
     this.register(zaiProviderAdapter);
     // WORK-030: the real ChatGPT web-product adapter (chatgpt.com).
     this.register(chatgptProviderAdapter);
-    // WORK-031: the real Claude web-product adapter (claude.ai).
+    // WORK-031: the real Claude web-product adapter (claude.com/code
+    // canonical + claude.ai legacy/redirect — PR #34).
     this.register(claudeProviderAdapter);
   }
 

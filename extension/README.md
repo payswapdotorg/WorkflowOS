@@ -96,7 +96,9 @@ extension/
                               registry, fake/ (deterministic test adapter),
                               zai/ (REAL chat.z.ai adapter), chatgpt/
                               (REAL chatgpt.com/codex adapter), claude/
-                              (REAL claude.ai/code adapter) — each with
+                              (REAL claude.com/code adapter — canonical
+                              current host; claude.ai legacy/redirect host
+                              also matched — PR #34) — each with
                               selectors + page runtime + observed-contract
                               README
     background/               MV3 service worker: sessions, handoff
@@ -187,4 +189,4 @@ routes).
 | `activeTab` | Future prompt injection into the ACTIVE provider tab (WORK-029). |
 | `scripting` | `chrome.scripting.executeScript` for prompt injection (WORK-029). |
 | Host: WorkflowOS origin | Content-script handoff bridge + API calls (redeem/events). |
-| Host: `*.z.ai` (covers the actual `chat.z.ai` chat application), `*.chatgpt.com`, `*.claude.ai` | Provider detection + (WORK-029+) adapters on those pages (+ subdomains) only — mirroring the detector's domain recognition exactly. |
+| Host: `*.z.ai` (covers the actual `chat.z.ai` chat application), `*.chatgpt.com`, `*.claude.com` (canonical CURRENT Claude host), `*.claude.ai` (legacy/redirect host) | Provider detection + (WORK-029+) adapters on those pages (+ subdomains) only — mirroring the detector's domain recognition exactly. PR #34: Claude's canonical host is now `claude.com` (`claude.ai` redirects there); both are granted so the bridge attaches before AND after the redirect. |

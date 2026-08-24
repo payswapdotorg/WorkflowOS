@@ -1,5 +1,7 @@
 /**
- * WORK-031: Claude page runtime — executes INSIDE the claude.ai page
+ * WORK-031: Claude page runtime — executes INSIDE the Claude page
+ * (PR #34: canonical current host claude.com — claude.ai redirects here;
+ * the runtime matches BOTH because the manifest + matchesPage own both)
  * (isolated-world content script). All Claude DOM interaction lives here.
  *
  * Flow (§5–§19):

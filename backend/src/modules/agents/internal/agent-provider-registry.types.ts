@@ -223,8 +223,9 @@ export const EXTERNAL_UI_CATALOG: readonly {
     name: 'Claude',
     provider: 'claude',
     capabilities: {
-      // claude.ai chat is well-established (HIGH confidence); the coding
-      // surface (Claude Code on the web, claude.ai/code) exists per official
+      // claude.com chat is well-established (HIGH confidence); the coding
+      // surface (Claude Code on the web, claude.com/code — PR #34 canonical
+      // CURRENT host; claude.ai legacy/redirect host) exists per official
       // docs but stays 'unverified' until a live signed-in pass — WORK-031.
       conversationalChat: 'ready',
       codingAgent: 'unverified',

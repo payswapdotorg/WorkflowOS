@@ -1,13 +1,15 @@
 /**
  * WORK-031: Claude bridge content script.
  *
- * Runs on Claude pages (https://*.claude.ai/*) + the documented local
- * test fixture origin (http://127.0.0.1:3778). Deliberately THIN and
- * selector-free — all Claude DOM knowledge lives in providers/claude/.
- * Responsibilities mirror the WORK-029 bridge: generic detection
- * announcement, session fetch (token-free view) + page-runtime attach,
- * START/STOP command relay, BRIDGE_READY announcement. It contains NO
- * ChatGPT selectors, NO DOM queries, and NO credentials.
+ * Runs on Claude pages (PR #34: BOTH canonical current host
+ * https://*.claude.com/* AND legacy/redirect host https://*.claude.ai/* —
+ * claude.ai redirects to claude.com so the bridge must attach on both)
+ * + the documented local test fixture origin (http://127.0.0.1:3779).
+ * Deliberately THIN and selector-free — all Claude DOM knowledge lives in
+ * providers/claude/. Responsibilities mirror the WORK-029 bridge: generic
+ * detection announcement, session fetch (token-free view) + page-runtime
+ * attach, START/STOP command relay, BRIDGE_READY announcement. It contains
+ * NO ChatGPT selectors, NO DOM queries, and NO credentials.
  */
 import { detectProvider } from '../providers/detector.js';
 import { claudePageRuntime, bindTransport } from '../providers/claude/claude-page-runtime.js';

@@ -19,16 +19,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const EXT_SRC = join(HERE, '..', '..', 'src');
 
 describe('ClaudeProviderAdapter (background side)', () => {
-  it('matches the real Claude domains; rejects others', () => {
+  it('matches BOTH Claude hosts (canonical current + legacy/redirect); rejects others', () => {
     const adapter = new ClaudeProviderAdapter();
+    // PR #34: canonical CURRENT host = claude.com (claude.ai redirects here).
+    expect(adapter.matchesPage(new URL('https://claude.com/'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.com/code'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.com/chat/abc'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://ab.claude.com/chat/x'))).toBe(true);
+    // PR #34: legacy/redirect host claude.ai still matched (brief pre-redirect
+    // page + bookmarked sessions).
     expect(adapter.matchesPage(new URL('https://claude.ai/'))).toBe(true);
     expect(adapter.matchesPage(new URL('https://claude.ai/chat/abc'))).toBe(true);
     expect(adapter.matchesPage(new URL('https://claude.ai/code'))).toBe(true);
     expect(adapter.matchesPage(new URL('https://ab.claude.ai/chat/x'))).toBe(true);
-    expect(adapter.matchesPage(new URL('https://claude.com/'))).toBe(true); // redirect host
+    // Other providers are NOT Claude.
     expect(adapter.matchesPage(new URL('https://chat.z.ai/'))).toBe(false);
     expect(adapter.matchesPage(new URL('https://chatgpt.com/'))).toBe(false);
     expect(adapter.matchesPage(new URL('https://example.com/'))).toBe(false);
+  });
+
+  it('PR #34: matchesPage is symmetric across redirect — both hosts return true', () => {
+    // The redirect source (claude.ai) and the redirect target (claude.com)
+    // must BOTH be owned by matchesPage; otherwise the bridge would attach
+    // pre-redirect and immediately lose the page when it navigates to
+    // claude.com (the host-permission-less target the PR #34 finding).
+    const adapter = new ClaudeProviderAdapter();
+    expect(adapter.matchesPage(new URL('https://claude.ai/code'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://claude.com/code'))).toBe(true);
+    // Subdomain redirects (rare but possible) are also covered on both hosts.
+    expect(adapter.matchesPage(new URL('https://app.claude.ai/code'))).toBe(true);
+    expect(adapter.matchesPage(new URL('https://app.claude.com/code'))).toBe(true);
   });
 
   it('fixture matching is config-driven and OFF by default', async () => {
@@ -36,13 +56,13 @@ describe('ClaudeProviderAdapter (background side)', () => {
     expect(await adapter.matchesFixture(new URL('http://127.0.0.1:3779/'))).toBe(false);
     const staged = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ claudeOrigin: 'https://claude.ai', fixtureOrigin: 'http://127.0.0.1:3779' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.com', fixtureOrigin: 'http://127.0.0.1:3779' }),
     );
     expect(await staged.matchesFixture(new URL('http://127.0.0.1:3779/?x=1'))).toBe(true);
     expect(await staged.matchesFixture(new URL('http://127.0.0.1:9999/'))).toBe(false);
   });
 
-  it('openTask targets the CODING surface: claude.ai/code (or the staged fixture)', async () => {
+  it('PR #34: openTask targets the CODING surface on the CANONICAL current host (claude.com/code)', async () => {
     const opened: string[] = [];
     const runtime = {
       openTab: async (url: string) => {
@@ -53,20 +73,36 @@ describe('ClaudeProviderAdapter (background side)', () => {
       getActiveTabId: async () => null,
       extensionPageUrl: (p: string) => p,
     };
+    // Production config (no fixture): opens the canonical claude.com/code
+    // — targeting the canonical host directly avoids a redirect hop and
+    // ensures the content script (granted host permission on claude.com)
+    // actually runs on the page the prompt lands on.
     const prod = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ claudeOrigin: 'https://claude.ai' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.com' }),
     );
     await prod.openTask({} as never, runtime);
-    // PR #33 review: implementation targets Codex — never the Chat root.
-    expect(opened[0]).toBe('https://claude.ai/code');
+    expect(opened[0]).toBe('https://claude.com/code');
+    // The adapter must NOT target the legacy/redirect host — that would
+    // trigger a redirect where the content script may not have permission
+    // on the post-redirect canonical host (the PR #34 finding).
+    expect(opened[0]).not.toMatch(/claude\.ai/);
 
+    // Staged fixture: opens the fixture origin (127.0.0.1:3779).
     const staged = new ClaudeProviderAdapter(
       { sendMessage: async () => null },
-      Promise.resolve({ claudeOrigin: 'https://claude.ai', fixtureOrigin: 'http://127.0.0.1:3779' }),
+      Promise.resolve({ claudeOrigin: 'https://claude.com', fixtureOrigin: 'http://127.0.0.1:3779' }),
     );
     await staged.openTask({} as never, runtime);
     expect(opened[1]).toBe('http://127.0.0.1:3779');
+  });
+
+  it('PR #34: resolveClaudeConfig returns the canonical claude.com origin', async () => {
+    // No fixture staged — production origin is the canonical current host.
+    delete (globalThis as { chrome?: unknown }).chrome;
+    const cfg = await resolveClaudeConfig();
+    expect(cfg.claudeOrigin).toBe('https://claude.com');
+    expect(cfg.fixtureOrigin).toBeUndefined();
   });
 
   it('injectPrompt REFUSES when the prompt was already submitted (duplicate guard)', async () => {
@@ -104,6 +140,8 @@ describe('ClaudeProviderAdapter (background side)', () => {
     expect(providerRegistry.get('chatgpt')).not.toBeNull(); // preserved (WORK-030)
     expect(providerRegistry.get('zai')).toBeInstanceOf(ZaiProviderAdapter); // preserved (WORK-029)
     expect(providerRegistry.get('fake')).not.toBeNull(); // preserved (WORK-028)
+    // PR #34: detector recognizes BOTH Claude hosts.
+    expect(detectProvider(new URL('https://claude.com/code')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://claude.ai/code')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chatgpt.com/c/x')).adapterAvailable).toBe(true);
     expect(detectProvider(new URL('https://chat.z.ai/')).adapterAvailable).toBe(true);

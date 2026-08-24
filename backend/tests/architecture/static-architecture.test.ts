@@ -4689,10 +4689,12 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
     expect(hosts, 'no <all_urls> host permission').not.toContain('<all_urls>');
     // Host permissions are limited to the WorkflowOS dev/test origin + the
     // supported provider domains (apex + subdomains — the least-privileged
-    // wildcard form mirroring the detector's recognition rules).
+    // wildcard form mirroring the detector's recognition rules). PR #34:
+    // Claude's canonical host is now claude.com (claude.ai redirects here);
+    // both are granted so the bridge attaches before AND after the redirect.
     for (const host of manifest.host_permissions) {
       expect(host).toMatch(
-        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):(5173|3777|3778|3779)\/\*$/,
+        /^https:\/\/\*\.(z\.ai|chatgpt\.com|claude\.com|claude\.ai)\/\*$|^http:\/\/(localhost|127\.0\.0\.1):(5173|3777|3778|3779)\/\*$/,
       );
     }
   });
@@ -4753,7 +4755,14 @@ describe('WORK-028 invariants — Companion extension boundaries', () => {
       ...detectorSrc.matchAll(/providerId: '([a-z]+)', domain: '([a-z.]+)'/g),
     ].map((m) => m[2]!);
     expect(domains, 'detector should declare provider domains').toEqual(
-      expect.arrayContaining(['z.ai', 'chatgpt.com', 'claude.ai']),
+      expect.arrayContaining([
+        'z.ai',
+        'chatgpt.com',
+        // PR #34: BOTH Claude domains are recognized by the detector
+        // (canonical current host + legacy/redirect host).
+        'claude.com',
+        'claude.ai',
+      ]),
     );
     for (const domain of domains) {
       for (const host of [domain, `chat.${domain}`, `app.${domain}`]) {
@@ -5265,9 +5274,160 @@ describe('WORK-030 invariants — ChatGPT adapter boundaries', () => {
       cs.js.some((j) => j.includes('claude-bridge')),
     );
     expect(claudeBridge, 'claude-bridge registered').toBeTruthy();
+    // PR #34: the claude bridge runs on BOTH the canonical current host
+    // (claude.com) AND the legacy/redirect host (claude.ai) — claude.ai
+    // redirects to claude.com so the bridge must attach before AND after.
+    expect(claudeBridge!.matches).toContain('https://*.claude.com/*');
     expect(claudeBridge!.matches).toContain('https://*.claude.ai/*');
     // The claude bridge does NOT run on other providers.
     expect(claudeBridge!.matches.join(' ')).not.toMatch(/z\.ai|chatgpt/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #34 review: claude.ai → claude.com redirect — the detector, manifest,
+  // AND adapter MUST all agree on the supported Claude Code hosts. Without
+  // the canonical claude.com host grant, the extension could pass local
+  // fixtures while failing in the real browser after the redirect because
+  // the Claude content script would have no permission to run on the
+  // canonical host.
+  // -------------------------------------------------------------------------
+
+  it('PR #34 fix: detector recognizes BOTH Claude hosts (claude.com canonical + claude.ai legacy/redirect)', () => {
+    const detector = readFileSync(join(EXT_SRC, 'providers', 'detector.ts'), 'utf8');
+    // Both domains are listed (canonical current + legacy/redirect).
+    expect(detector).toMatch(/providerId: 'claude', domain: 'claude\.com'/);
+    expect(detector).toMatch(/providerId: 'claude', domain: 'claude\.ai'/);
+    // Claude is the only provider with multiple recognized domains — no
+    // accidental duplicate of z.ai or chatgpt.com.
+    const zaiMatches = [...detector.matchAll(/providerId: 'zai', domain: '([a-z.]+)'/g)];
+    expect(zaiMatches.length, 'z.ai has exactly one domain entry').toBe(1);
+    const chatgptMatches = [...detector.matchAll(/providerId: 'chatgpt', domain: '([a-z.]+)'/g)];
+    expect(chatgptMatches.length, 'chatgpt has exactly one domain entry').toBe(1);
+    const claudeMatches = [...detector.matchAll(/providerId: 'claude', domain: '([a-z.]+)'/g)];
+    expect(claudeMatches.map((m) => m[1]!).sort()).toEqual(['claude.ai', 'claude.com']);
+  });
+
+  it('PR #34 fix: manifest grants host permissions to BOTH Claude hosts AND matches the detector', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(EXT_ROOT, 'public', 'manifest.json'), 'utf8'),
+    ) as {
+      host_permissions: string[];
+      content_scripts: { matches: string[]; js: string[] }[];
+    };
+    // The manifest MUST grant host permissions to BOTH Claude hosts.
+    expect(manifest.host_permissions).toContain('https://*.claude.com/*');
+    expect(manifest.host_permissions).toContain('https://*.claude.ai/*');
+    // The apex-only form (the PR #34 finding) must NOT be the Claude grant.
+    expect(manifest.host_permissions).not.toContain('https://claude.com/*');
+    expect(manifest.host_permissions).not.toContain('https://claude.ai/*');
+
+    /**
+     * Chrome host-pattern matcher (subset sufficient for these patterns):
+     * `https://*.domain/*` covers the domain itself AND any subdomain
+     * (exactly mirroring the detector's hostname === domain ||
+     * hostname.endsWith('.' + domain) recognition).
+     */
+    function covers(pattern: string, url: URL): boolean {
+      const m = pattern.match(/^(\*|https?):\/\/([^/]+)\//);
+      if (!m || !m[1] || !m[2]) return false;
+      if (m[1] !== '*' && url.protocol.replace(':', '') !== m[1]) return false;
+      const host = url.hostname.toLowerCase();
+      if (m[2].startsWith('*.')) {
+        const base = m[2].slice(2).toLowerCase();
+        return host === base || host.endsWith('.' + base);
+      }
+      return host === m[2].toLowerCase();
+    }
+
+    // The canonical current Claude Code entry point — claude.com/code —
+    // must be covered by BOTH host_permissions AND provider-detect matches.
+    // This is the PR #34 finding: detector-only recognition of claude.ai is
+    // insufficient because the content script cannot run on claude.com
+    // (where the prompt actually lands after the redirect) without the host
+    // permission.
+    const canonicalCodeUrl = new URL('https://claude.com/code');
+    expect(
+      manifest.host_permissions.some((p) => covers(p, canonicalCodeUrl)),
+      'host_permissions must cover https://claude.com/code (canonical Claude Code entry)',
+    ).toBe(true);
+    const providerDetectMatches =
+      manifest.content_scripts.find((cs) => cs.js.some((j) => j.includes('provider-detect')))
+        ?.matches ?? [];
+    expect(
+      providerDetectMatches.some((p) => covers(p, canonicalCodeUrl)),
+      'provider-detect content-script matches must cover https://claude.com/code',
+    ).toBe(true);
+
+    // The claude-bridge content-script matches MUST cover BOTH hosts (the
+    // bridge attaches before AND after the redirect).
+    const claudeBridge = manifest.content_scripts.find((cs) =>
+      cs.js.some((j) => j.includes('claude-bridge')),
+    )!;
+    expect(
+      claudeBridge.matches.some((p) => covers(p, canonicalCodeUrl)),
+      'claude-bridge matches must cover https://claude.com/code',
+    ).toBe(true);
+    const legacyCodeUrl = new URL('https://claude.ai/code');
+    expect(
+      claudeBridge.matches.some((p) => covers(p, legacyCodeUrl)),
+      'claude-bridge matches must cover https://claude.ai/code (legacy/redirect host)',
+    ).toBe(true);
+
+    // Detector ↔ manifest consistency: every Claude domain the detector
+    // recognizes (apex + subdomains) must be covered by the manifest on
+    // BOTH host_permissions AND the claude-bridge matches AND
+    // provider-detect matches.
+    for (const domain of ['claude.com', 'claude.ai']) {
+      for (const host of [domain, `app.${domain}`]) {
+        const url = new URL(`https://${host}/code`);
+        expect(
+          manifest.host_permissions.some((p) => covers(p, url)),
+          `host_permissions must cover https://${host}/code`,
+        ).toBe(true);
+        expect(
+          claudeBridge.matches.some((p) => covers(p, url)),
+          `claude-bridge matches must cover https://${host}/code`,
+        ).toBe(true);
+        expect(
+          providerDetectMatches.some((p) => covers(p, url)),
+          `provider-detect matches must cover https://${host}/code`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('PR #34 fix: the Claude adapter accepts BOTH hosts via matchesPage AND targets the canonical claude.com/code', () => {
+    const adapter = readFileSync(join(EXT_SRC, 'providers', 'claude', 'claude-provider-adapter.ts'), 'utf8');
+    // Canonical production origin is the canonical current host claude.com.
+    expect(adapter).toMatch(/const CLAUDE_ORIGIN = 'https:\/\/claude\.com'/);
+    // matchesPage accepts BOTH claude.com (canonical) AND claude.ai (legacy).
+    expect(adapter).toMatch(/claude\.com/);
+    expect(adapter).toMatch(/claude\.ai/);
+    // openTask targets the canonical host's coding surface.
+    expect(adapter).toContain('`${claudeOrigin}/code`');
+    // The legacy host must NOT be the canonical origin (the PR #34 finding
+    // — targeting claude.ai/code would trigger a redirect where the content
+    // script may not have permission on the post-redirect canonical host).
+    expect(adapter).not.toMatch(/const CLAUDE_ORIGIN = 'https:\/\/claude\.ai'/);
+  });
+
+  it('PR #34 fix: surface detection is host-agnostic (path-only) — works on both claude.com and claude.ai', () => {
+    // The page-runtime detectSurface() must read ONLY location.pathname so
+    // the same detection works on claude.com (canonical current host) AND
+    // claude.ai (legacy/redirect host) — the redirect does not change the
+    // conversation path.
+    const runtime = readFileSync(join(EXT_SRC, 'providers', 'claude', 'claude-page-runtime.ts'), 'utf8');
+    expect(runtime).toMatch(/export function detectSurface\(\): DetectedSurface/);
+    expect(runtime).toMatch(/const path = location\.pathname;/);
+    // The detection must NOT consult location.host or location.hostname
+    // (host changes during redirect; path does not).
+    const detectFnMatch = runtime.match(/export function detectSurface\(\)[\s\S]*?^}/m);
+    expect(detectFnMatch, 'detectSurface function body found').toBeTruthy();
+    const detectBody = detectFnMatch![0]!;
+    expect(detectBody, 'detectSurface must not read location.host').not.toMatch(/location\.host\b/);
+    expect(detectBody, 'detectSurface must not read location.hostname').not.toMatch(/location\.hostname/);
+    expect(detectBody, 'detectSurface must not read location.origin').not.toMatch(/location\.origin/);
+    expect(detectBody, 'detectSurface must not read location.href').not.toMatch(/location\.href/);
   });
 });
 

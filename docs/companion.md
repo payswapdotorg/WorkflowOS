@@ -48,10 +48,16 @@ the user's own provider session — with WorkflowOS retaining every authority
 ### Claude (WORK-031)
 
 The real Claude adapter drives the **Claude Code on the web** coding surface at
-`https://claude.ai/code` — not conversational Chat. You must be **signed in
+`https://claude.com/code` (PR #34: canonical CURRENT host — Anthropic material
+now identifies `claude.com/code` as the Claude Code entry point; `claude.ai`
+redirects to `claude.com`, so the extension grants host permissions to BOTH
+domains and the bridge content script runs on both; the adapter opens
+`claude.com/code` directly to avoid a redirect hop and ensure the content
+script — granted permission on `claude.com` — actually runs on the page the
+prompt lands on) — not conversational Chat. You must be **signed in
 to Claude in the same browser** (the adapter uses your existing session; it
 never asks for or stores Claude credentials or API keys). Flow: the Companion
-opens the claude.ai/code root (a fresh task composer — never an existing
+opens the claude.com/code root (a fresh task composer — never an existing
 conversation), verifies the WorkflowOS prompt digest, injects the prompt
 exactly once into the ProseMirror contenteditable composer (with
 normalized read-back), sends it, and observes progress using the product's

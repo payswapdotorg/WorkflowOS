@@ -1,5 +1,5 @@
 /**
- * WORK-031: Claude DOM selectors — the ONLY place ChatGPT DOM knowledge
+ * WORK-031: Claude DOM selectors — the ONLY place Claude DOM knowledge
  * lives.
  *
  * CONTRACT CONFIDENCE (see README.md — observed 2026-08-24; live
@@ -8,22 +8,28 @@
  * public userscripts + official Claude Code docs):
  *
  *   HIGH confidence (multiple independent current sources):
- *     - composer: div.ProseMirror[contenteditable="true"] (claude.ai's
+ *     - composer: div.ProseMirror[contenteditable="true"] (Claude's
  *       ProseMirror editor; generic contenteditable fallbacks kept)
  *     - send: button[aria-label="Send message"] (case + substring variants)
  *     - generating: button[aria-label*="Stop"] ("Stop Claude response") —
  *       the streaming marker
- *     - conversations: https://claude.ai/chat/<uuid>
- *     - CODING SURFACE: https://claude.ai/code — "Claude Code on the web"
- *       (official docs: code.claude.com/docs/en/web-quickstart)
+ *     - conversations: https://claude.com/chat/<uuid> (canonical current
+ *       host; claude.ai redirects to claude.com — both matched by the
+ *       adapter; conversation URL paths are host-independent so the
+ *       runtime's path-based detection works on both)
+ *     - CODING SURFACE: https://claude.com/code — "Claude Code on the web"
+ *       (PR #34: Anthropic material now identifies claude.com/code as the
+ *       canonical Claude Code entry point; the /code path pattern is
+ *       host-independent so detection works on claude.ai too — the brief
+ *       pre-redirect page + bookmarked sessions)
  *   MEDIUM confidence (conventional, confidence-gated):
- *     - new chat: the claude.ai ROOT / new-chat surface + sidebar "New Chat"
+ *     - new chat: the claude.com ROOT / new-chat surface + sidebar "New Chat"
  *     - assistant messages: [data-testid="assistant-message"] +
  *       data-is-streaming attribute family
  *     - login wall: sign-in redirect · "Log in"/"Sign up" buttons
  *
  * Every finder walks strategies in order; low/none confidence BLOCKS safely
- * ("ChatGPT UI changed; automatic execution paused.") — the adapter never
+ * ("Claude UI changed; automatic execution paused.") — the adapter never
  * guesses at send/model/confirmation controls (§31). No nth-child, no
  * generated classes, no coordinates.
  */
@@ -41,15 +47,18 @@ export interface SelectorMatch<T extends HTMLElement = HTMLElement> {
 
 // --- Surface detection (WORK-030 PR #33 review) ------------------------------
 //
-// The product distinguishes Chat (conversational), Work, and Codex (the
-// coding environment at claude.ai/code — CONFIRMED from Anthropic's own
+// The product distinguishes Chat (conversational), Projects, and Claude
+// Code (the coding environment at /code — CONFIRMED from Anthropic's own
 // product pages; UI anchors below are confidence-graded in the README).
+// Surface detection reads ONLY location.pathname so it works on BOTH
+// claude.com (canonical current host) and claude.ai (legacy/redirect host)
+// — the redirect does not change the conversation path.
 
-/** HIGH confidence: the Codex web app path (official product URL). */
+/** HIGH confidence: the Claude Code web app path (official product URL). */
 export const CLAUDE_CODE_URL_PATTERN = /^\/code(\/|$)/;
 /** MEDIUM confidence: Work surface path. */
 export const WORK_URL_PATTERN = /^\/projects(\/|$)/;
-/** Chat conversations: /c/<uuid>; the root is the fresh Chat composer. */
+/** Chat conversations: /c/<uuid> or /chat/<uuid>; the root is the fresh Chat composer. */
 export const CHAT_URL_PATTERN = /^\/?$|^\/new$|^\/chat\//;
 
 /** Claude Code surface anchors (MEDIUM — cloud task flow per docs). */
@@ -87,7 +96,7 @@ function COMPOSER_STRATEGIES() {
 // --- Composer (prompt input) ---------------------------------------------
 
 export const COMPOSER: readonly SelectorStrategy[] = [
-  // Observed: claude.ai's ProseMirror composer (contenteditable div).
+  // Observed: Claude's ProseMirror composer (contenteditable div).
   {
     describe: 'div.ProseMirror[contenteditable=true]',
     find: (d) => [...d.querySelectorAll('div.ProseMirror[contenteditable="true"]')],
@@ -124,7 +133,7 @@ export const SEND_CONTROL: readonly SelectorStrategy[] = [
 // --- New conversation --------------------------------------------------------
 
 export const NEW_CHAT: readonly SelectorStrategy[] = [
-  // The claude.ai new-chat surface is the fresh composer (deterministic
+  // The claude.com new-chat surface is the fresh composer (deterministic
   // new-task path — the adapter opens the root, never an existing /c/…).
   {
     describe: 'link to composer root',

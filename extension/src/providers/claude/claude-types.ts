@@ -1,7 +1,7 @@
 /**
  * WORK-031: Claude adapter types.
  *
- * All ChatGPT-specific type surface lives here. Nothing may reference
+ * All Claude-specific type surface lives here. Nothing may reference
  * credentials — the adapter operates on a token-free session view fetched
  * from the background (GET_STATE) and reports observations through the
  * background's existing reporter.
@@ -9,13 +9,19 @@
 
 /** Adapter configuration (background side). */
 export interface ClaudeAdapterConfig {
-  /** Production Claude origin. */
+  /**
+   * PR #34: production Claude origin — the canonical CURRENT host
+   * `https://claude.com` (Anthropic material now identifies claude.com/code
+   * as the Claude Code entry point; claude.ai → claude.com redirect observed
+   * during live inspection). The legacy claude.ai host is still matched by
+   * `matchesPage` for the brief pre-redirect page + bookmarked sessions.
+   */
   readonly claudeOrigin: string;
   /**
    * TEST fixture origin (e.g. http://127.0.0.1:3779). When staged via
    * chrome.storage.session 'wfos.claude.fixtureOrigin' (E2E harness), the
    * adapter opens/matches the local fixture reproducing the observed
-   * ChatGPT DOM instead of the real site. Never set in production.
+   * Claude DOM instead of the real site. Never set in production.
    */
   readonly fixtureOrigin?: string;
 }

@@ -1,11 +1,18 @@
 /**
  * WORK-031: Claude provider adapter (background side).
  *
- * Orchestrates the REAL Claude web product (https://claude.ai) using the
- * user's EXISTING authenticated browser session (no cookies/tokens touched):
+ * Orchestrates the REAL Claude web product using the user's EXISTING
+ * authenticated browser session (no cookies/tokens touched):
  *
- *   openTask      → opens https://claude.ai/code (Claude Code on the web —
- *                   the coding surface; never the conversational root)
+ *   openTask      → opens https://claude.com/code (PR #34: canonical CURRENT
+ *                   Claude Code on the web host — Anthropic material now
+ *                   identifies claude.com/code as the Claude Code entry point;
+ *                   live inspection observed claude.ai → claude.com redirect).
+ *                   Never the conversational root.
+ *   matchesPage   → accepts BOTH https://claude.com/* AND https://claude.ai/*
+ *                   (canonical current + legacy/redirect host — the redirect
+ *                   source page must also be owned so the bridge attaches
+ *                   before/after the redirect).
  *   injectPrompt  → commands the page bridge (START_EXECUTION tab message);
  *                   the bridge runtime verifies the digest and submits
  *                   EXACTLY ONCE, or re-attaches observe-only after reload
@@ -31,7 +38,10 @@ export interface ClaudeTabPort {
   sendMessage(tabId: number, message: unknown): Promise<unknown>;
 }
 
-const CLAUDE_ORIGIN = 'https://claude.ai';
+/** PR #34: canonical CURRENT Claude host (claude.ai redirects here). */
+const CLAUDE_ORIGIN = 'https://claude.com';
+/** PR #34: legacy/redirect host — still matched for the brief pre-redirect page. */
+const CLAUDE_LEGACY_ORIGIN_HOST_RE = /(^|\.)claude\.ai$/;
 const FIXTURE_STORAGE_KEY = 'wfos.claude.fixtureOrigin';
 
 function createTabPort(): ClaudeTabPort {
@@ -72,15 +82,15 @@ export class ClaudeProviderAdapter implements ExternalProviderAdapter {
   }
 
   matchesPage(url: URL): boolean {
-    // Production domain: claude.ai apex + subdomains (the marketing host
-    // claude.com redirects to claude.ai — matched defensively for the
-    // redirect path; claude.ai is the app host).
-    if (
-      url.protocol === 'https:' &&
-      /(^|\.)claude\.ai$|(^|\.)claude\.com$/.test(url.hostname)
-    ) {
-      return true;
-    }
+    // PR #34: accept BOTH the canonical current host (claude.com) AND the
+    // legacy/redirect host (claude.ai). claude.ai redirects to claude.com;
+    // we must own both so the bridge attaches before AND after the redirect
+    // (the redirect source page may briefly exist before navigation, and
+    // the post-redirect canonical host is where the prompt lands).
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    if (host === 'claude.com' || host.endsWith('.claude.com')) return true;
+    if (CLAUDE_LEGACY_ORIGIN_HOST_RE.test(host)) return true;
     return false;
   }
 
@@ -98,9 +108,12 @@ export class ClaudeProviderAdapter implements ExternalProviderAdapter {
 
   async openTask(session: AdapterSession, runtime: AdapterRuntime): Promise<number | null> {
     const { claudeOrigin, fixtureOrigin } = await this.config();
-    // WORK-031: implementation Work Orders target the CODING surface —
-    // Claude Code on the web at claude.ai/code (official docs:
-    // code.claude.com/docs/en/web-quickstart). The page runtime verifies the
+    // PR #34: implementation Work Orders target the CODING surface — Claude
+    // Code on the web. Anthropic's CURRENT canonical entry point is
+    // claude.com/code (live inspection observed claude.ai → claude.com
+    // redirect; targeting claude.com/code avoids a redirect hop and ensures
+    // the content script — granted host permission on claude.com — actually
+    // runs on the page the prompt lands on). The page runtime verifies the
     // surface before submitting and BLOCKS when it cannot confidently
     // identify it (never silently falling back to conversational Claude).
     // The staged fixture origin may carry its own path (e.g.
@@ -112,7 +125,7 @@ export class ClaudeProviderAdapter implements ExternalProviderAdapter {
 
   /**
    * WORK-031 surface capabilities. Catalog-consistent: the coding agent
-   * (Claude Code on the web, claude.ai/code) is 'unverified' until a live
+   * (Claude Code on the web, claude.com/code) is 'unverified' until a live
    * signed-in verification pass — the runtime detects the actual page
    * surface and blocks otherwise, so fixture-only proof never reports
    * 'ready' here.
