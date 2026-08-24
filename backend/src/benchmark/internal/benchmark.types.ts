@@ -86,11 +86,12 @@ export interface BenchmarkRepository {
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
   /**
-   * PR #36 review fix #2 + #3: ATOMIC experiment-completion RESERVATION
+   * PR #36 review fix #2 + #3 + #4: ATOMIC experiment-completion RESERVATION
    * (phase 1 of the two-phase completion protocol). Compare-and-swap:
    * `UPDATE wfos_benchmark_experiments SET status='finalizing',
-   * finalizing_lease_expires_at = NOW() + ttl WHERE id=$1 AND
-   * status='running' RETURNING *`.
+   * finalizing_lease_expires_at = NOW() + ttl,
+   * finalizing_generation = COALESCE(finalizing_generation, 0) + 1 WHERE
+   * id=$1 AND status='running' RETURNING *`.
    *
    * Only the worker that wins (returns a row) may proceed to integrity
    * validation (phase 2). The loser (null) no-ops — exactly-once
@@ -100,7 +101,9 @@ export interface BenchmarkRepository {
    * NOT make `completed` authoritative. The winner MUST call
    * `finalizeExperimentCompletion` (validation passed → `finalizing →
    * completed`) or `finalizeExperimentInvalidation` (validation failed →
-   * `finalizing → invalidated`) AFTER `integrityService.validate` returns.
+   * `finalizing → invalidated`) AFTER `integrityService.validate` returns,
+   * AND it MUST pass the `finalizingGeneration` it received from this call
+   * (the fencing token — see fix #4 below).
    *
    * PR #36 review fix #3 — CRASH-SAFE LEASE: the reservation also sets
    * `finalizing_lease_expires_at` (a persisted lease). If the winner dies
@@ -111,14 +114,28 @@ export interface BenchmarkRepository {
    * reservation the reviewer flagged. The `leaseTtlMs` MUST be long enough
    * for integrity validation + the finalization CAS under normal
    * conditions (default 2 minutes — see DefaultBenchmarkService).
+   *
+   * PR #36 review fix #4 — FENCING GENERATION: the reservation also sets
+   * `finalizing_generation` (a monotonic ownership token). The returned
+   * row carries the new `finalizingGeneration` value — the winner MUST
+   * pass it to the finalization CAS. A stale worker holding an OLDER
+   * generation is fenced (the finalization CAS rejects; the row's
+   * `finalizing_generation` no longer matches the stale value). This
+   * closes the fencing hole the reviewer flagged: the prior recovery CAS
+   * reclaimed + renewed the lease but did NOT fence the original worker —
+   * the stale worker could still finalize using stale validation after a
+   * newer worker reclaimed. With the generation, the stale worker's
+   * finalization CAS fails the predicate + the newer worker retains
+   * exclusive ownership.
    */
   claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
 
   /**
-   * PR #36 review fix #3: CRASH-SAFE RECOVERY for the `finalizing`
+   * PR #36 review fix #3 + #4: CRASH-SAFE RECOVERY for the `finalizing`
    * reservation. Compare-and-swap:
    * `UPDATE wfos_benchmark_experiments SET finalizing_lease_expires_at =
-   * NOW() + ttl WHERE id=$1 AND status='finalizing' AND
+   * NOW() + ttl, finalizing_generation = COALESCE(finalizing_generation,
+   * 0) + 1 WHERE id=$1 AND status='finalizing' AND
    * finalizing_lease_expires_at IS NOT NULL AND
    * finalizing_lease_expires_at < NOW() RETURNING *`.
    *
@@ -137,31 +154,66 @@ export interface BenchmarkRepository {
    * reclaimable, so no experiment is permanently stuck. The recovery is
    * triggered lazily on `getExperiment` reads (NO polling sweep, NO second
    * execution engine — §34 invariant intact).
+   *
+   * PR #36 review fix #4 — FENCING GENERATION: the recovery CAS also
+   * INCREMENTS `finalizing_generation` (COALESCE(NULL, 0) + 1 to handle
+   * legacy pre-0030 `finalizing` rows whose generation is NULL). The
+   * returned row carries the new `finalizingGeneration` value — the
+   * recovering worker MUST pass it to the finalization CAS. A stale worker
+   * (the one whose lease expired) holds the OLD generation + is fenced:
+   * its finalization CAS rejects because the row's `finalizing_generation`
+   * has advanced past the stale value. This is the EXCLUSIVE-OWNERSHIP
+   * invariant the reviewer required: the recovering worker has exclusive
+   * ownership, NOT shared with a stale ghost.
    */
   recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null>;
 
   /**
-   * PR #36 review fix #2: phase 3a — ATOMIC completion FINALIZATION (success
-   * path). Compare-and-swap `finalizing → completed` (sets completed_at).
-   * Called by the reservation winner AFTER `integrityService.validate`
-   * returns a record with `valid === true`. Only after this CAS does the
-   * `completed` status become authoritative. Returns null if the
-   * experiment is no longer in `finalizing` (e.g. a concurrent invalidation
-   * already advanced it — should not happen given the reservation is
-   * exclusive, but the CAS makes it safe regardless).
+   * PR #36 review fix #2 + #4: phase 3a — ATOMIC completion FINALIZATION
+   * (success path). Compare-and-swap `finalizing → completed` (sets
+   * completed_at), guarded on `WHERE id=$1 AND status='finalizing' AND
+   * finalizing_generation=$2`. Called by the reservation winner (the worker
+   * that won `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+   * AFTER `integrityService.validate` returns a record with `valid === true`.
+   * The `expectedGeneration` parameter is the `finalizingGeneration` the
+   * caller received from the reservation/recovery CAS — passing it proves
+   * the caller is the CURRENT owner. Only after this CAS does the
+   * `completed` status become authoritative.
+   *
+   * Returns null if (a) the experiment is no longer in `finalizing` (e.g. a
+   * concurrent invalidation already advanced it — should not happen given
+   * the reservation is exclusive, but the CAS makes it safe regardless),
+   * OR (b) the row's `finalizing_generation` does not match the
+   * `expectedGeneration` — a stale worker holding an OLD generation is
+   * FENCED (its finalization CAS fails the predicate). This is the fencing
+   * invariant the PR #36 reviewer required: the recovering worker has
+   * exclusive ownership, NOT shared with a stale ghost.
    */
-  finalizeExperimentCompletion(id: string): Promise<BenchmarkExperiment | null>;
+  finalizeExperimentCompletion(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null>;
 
   /**
-   * PR #36 review fix #2: phase 3b — ATOMIC invalidation FINALIZATION
-   * (failure path). Compare-and-swap `finalizing → invalidated`. Called by
-   * the reservation winner AFTER `integrityService.validate` returns a
-   * record with `valid === false` (or throws — treated as a validation
-   * failure). This is the authoritative terminal state for a failed
-   * integrity check: the experiment is `invalidated`, NOT `completed`, so
-   * no consumer can read a false successful completion.
+   * PR #36 review fix #2 + #4: phase 3b — ATOMIC invalidation FINALIZATION
+   * (failure path). Compare-and-swap `finalizing → invalidated` (sets
+   * completed_at), guarded on `WHERE id=$1 AND status='finalizing' AND
+   * finalizing_generation=$2`. Called by the reservation winner (the worker
+   * that won `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+   * AFTER `integrityService.validate` returns a record with `valid === false`
+   * (or throws — treated as a validation failure). The `expectedGeneration`
+   * parameter is the `finalizingGeneration` the caller received from the
+   * reservation/recovery CAS — passing it proves the caller is the CURRENT
+   * owner. This is the authoritative terminal state for a failed integrity
+   * check: the experiment is `invalidated`, NOT `completed`, so no consumer
+   * can read a false successful completion.
+   *
+   * Returns null if (a) the experiment is no longer in `finalizing`, OR
+   * (b) the row's `finalizing_generation` does not match the
+   * `expectedGeneration` — a stale worker holding an OLD generation is
+   * FENCED. The same fencing invariant as `finalizeExperimentCompletion`
+   * applies on the failure path: a stale ghost cannot invalidate either
+   * (it might have read corrupt data + tried to finalize to invalidated
+   * after a newer worker already reclaimed + re-validated).
    */
-  finalizeExperimentInvalidation(id: string): Promise<BenchmarkExperiment | null>;
+  finalizeExperimentInvalidation(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null>;
 
   // Trials (§5, §6)
   createTrial(input: BenchmarkTrialInsert): Promise<BenchmarkTrial>;

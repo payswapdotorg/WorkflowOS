@@ -574,6 +574,12 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(!(a !== null && b !== null)).toBe(true);
     const winner = (a ?? b)!;
     expect(winner.status).toBe('finalizing');
+    // PR #36 review fix #4 (fencing): the winner receives a fencing
+    // generation (1 for the first claim on a fresh row). It MUST pass this
+    // generation to the finalization CAS — a stale worker holding an older
+    // generation is fenced.
+    expect(winner.finalizingGeneration).toBe(1);
+    const expectedGeneration = winner.finalizingGeneration!;
 
     // The experiment is now 'finalizing' (the reservation state — NOT
     // 'completed'). This is the key invariant: the reservation does NOT
@@ -589,9 +595,12 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(third).toBeNull();
 
     // Phase 3a — success finalization CAS. finalizeExperimentCompletion
-    // (finalizing → completed) makes the status authoritative. This is the
-    // ONLY path to 'completed'.
-    const finalized = await stack.benchmarkRepository.finalizeExperimentCompletion(experimentId);
+    // (finalizing → completed, fenced on the generation the winner
+    // received) makes the status authoritative. This is the ONLY path to
+    // 'completed'.
+    const finalized = await stack.benchmarkRepository.finalizeExperimentCompletion(
+      experimentId, expectedGeneration,
+    );
     expect(finalized).not.toBeNull();
     expect(finalized?.status).toBe('completed');
 
@@ -600,15 +609,21 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(exp?.status).toBe('completed');
 
     // Phase 3b — failure finalization CAS guard. A second
-    // finalizeExperimentCompletion returns null (the experiment is no longer
-    // 'finalizing' — it's 'completed'). The CAS is exclusive.
-    const duplicateFinalize = await stack.benchmarkRepository.finalizeExperimentCompletion(experimentId);
+    // finalizeExperimentCompletion with the SAME (now-stale) generation
+    // returns null — the experiment is no longer in 'finalizing' (it's
+    // 'completed'). The CAS is exclusive on status + generation.
+    const duplicateFinalize = await stack.benchmarkRepository.finalizeExperimentCompletion(
+      experimentId, expectedGeneration,
+    );
     expect(duplicateFinalize).toBeNull();
 
-    // The failure-path finalization (finalizeExperimentInvalidation) ALSO
-    // returns null (the experiment is 'completed', not 'finalizing') — the
-    // experiment cannot be invalidated after it's already completed.
-    const invalidationAttempt = await stack.benchmarkRepository.finalizeExperimentInvalidation(experimentId);
+    // The failure-path finalization (finalizeExperimentInvalidation) with
+    // the same generation ALSO returns null (the experiment is 'completed',
+    // not 'finalizing') — the experiment cannot be invalidated after it's
+    // already completed.
+    const invalidationAttempt = await stack.benchmarkRepository.finalizeExperimentInvalidation(
+      experimentId, expectedGeneration,
+    );
     expect(invalidationAttempt).toBeNull();
   });
 
@@ -767,5 +782,180 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED')).toHaveLength(1);
     expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
+  });
+
+  it('stale worker holding an old generation CANNOT finalize after a newer worker reclaims the reservation (fencing)', async () => {
+    // PR #36 review fix #4 (fencing): the recovery CAS (fix #3) renews the
+    // lease + INCREMENTS the generation. The finalization CAS requires the
+    // generation the caller received. A stale worker (holding an OLD
+    // generation from a crashed attempt) CANNOT finalize after a newer
+    // worker has reclaimed + advanced the generation — the finalization
+    // CAS rejects the stale generation. This is the fencing invariant the
+    // reviewer required: "the recovering worker has exclusive ownership"
+    // (NOT shared with a stale ghost).
+    //
+    // The failure sequence the reviewer described:
+    //
+    //   Worker A: running → finalizing, lease A, generation=1
+    //                 lease A expires
+    //   Worker B: finalizing → renew lease B, validate, generation=2
+    //   Worker A: still alive → finalizeExperimentCompletion()  ← BUG (pre-fix #4)
+    //              (passed because the CAS only checked `status='finalizing'`)
+    //
+    // With fix #4: Worker A's stale generation (1) ≠ row's generation (2),
+    // so the finalization CAS REJECTS Worker A. Worker B (the fresh owner
+    // with generation=2) is the only one that can finalize.
+    const { experimentId } = await makeExperiment('fencing-stale-worker', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    // Put the experiment + trial into the state checkExperimentCompletion
+    // expects: experiment 'running', trial terminal ('completed').
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'completed', lifecycle_phase = 'completed', completed_at = NOW()
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Worker A wins the reservation (running → finalizing, generation=1,
+    // 30s lease).
+    const claimA = await stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000);
+    expect(claimA).not.toBeNull();
+    expect(claimA?.status).toBe('finalizing');
+    expect(claimA?.finalizingGeneration).toBe(1);
+    const staleGeneration = claimA!.finalizingGeneration!;
+
+    // Worker A DIES (simulated — never calls finalize). Expire the lease so
+    // the recovery CAS can reclaim.
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_experiments
+         SET finalizing_lease_expires_at = NOW() - INTERVAL '1 second'
+       WHERE id = $1`,
+      [experimentId],
+    );
+
+    // Worker B reclaims the reservation via the recovery CAS. The lease is
+    // renewed + the generation is INCREMENTED to 2.
+    const recoverB = await stack.benchmarkRepository.recoverStaleFinalizingExperiment(experimentId, 30_000);
+    expect(recoverB).not.toBeNull();
+    expect(recoverB?.status).toBe('finalizing');
+    expect(recoverB?.finalizingGeneration).toBe(2);
+    const freshGeneration = recoverB!.finalizingGeneration!;
+
+    // FENCING — Worker A's stale ghost attempts to finalize with its OLD
+    // generation (1). The finalization CAS requires
+    // `finalizing_generation = $2` — the row has generation=2, so the CAS
+    // REJECTS the stale generation. Worker A is fenced.
+    const staleFinalizeAttempt = await stack.benchmarkRepository.finalizeExperimentCompletion(
+      experimentId, staleGeneration,
+    );
+    expect(staleFinalizeAttempt).toBeNull();
+
+    // The invalidation CAS ALSO rejects the stale generation — Worker A
+    // cannot invalidate either (it might have read corrupt data + tried to
+    // finalize to invalidated after a newer worker already reclaimed).
+    const staleInvalidateAttempt = await stack.benchmarkRepository.finalizeExperimentInvalidation(
+      experimentId, staleGeneration,
+    );
+    expect(staleInvalidateAttempt).toBeNull();
+
+    // Worker B (the fresh owner) finalizes with its CURRENT generation
+    // (2). The finalization CAS succeeds — Worker B has exclusive
+    // ownership.
+    const freshFinalize = await stack.benchmarkRepository.finalizeExperimentCompletion(
+      experimentId, freshGeneration,
+    );
+    expect(freshFinalize).not.toBeNull();
+    expect(freshFinalize?.status).toBe('completed');
+
+    // ASSERTION — the experiment reached `completed` (Worker B's
+    // finalization). Worker A's stale ghost did NOT finalize (the
+    // generation fence held). The experiment status reflects Worker B's
+    // exclusive ownership.
+    const exp = await stack.benchmarkService.getExperiment(experimentId);
+    expect(exp?.status).toBe('completed');
+    // (This test bypasses the service-layer audit by calling the repo CAS
+    // directly, so no BENCHMARK_COMPLETED audit is expected — the
+    // CAS-level fencing is what we're proving here. The end-to-end
+    // exactly-one-audit invariant is covered by the recovery-success test
+    // above, which goes through the service layer.)
+    const expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    expect(expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED')).toHaveLength(0);
+  });
+
+  it('active lease is NOT preempted by concurrent recovery CAS calls (active-lease non-preemption)', async () => {
+    // PR #36 review fix #4 (active-lease non-preemption): if the lease is
+    // NOT stale (an active worker is mid-validation), the recovery CAS
+    // MUST return null for ALL concurrent callers — no worker can preempt
+    // the active worker's reservation. Combined with the fencing test
+    // above, this proves: (a) a stale worker is fenced (cannot finalize
+    // after a newer reclaim), AND (b) an active worker is never preempted
+    // (concurrent recovery attempts all no-op). The reviewer required BOTH
+    // scenarios: "the regression suite needs to prove exactly that
+    // scenario, plus the normal active-lease non-preemption case."
+    const { experimentId } = await makeExperiment('fencing-active-lease', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    // Put the experiment + trial into the state checkExperimentCompletion
+    // expects: experiment 'running', trial terminal ('completed').
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'completed', lifecycle_phase = 'completed', completed_at = NOW()
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Worker A wins the reservation (running → finalizing, 30s lease —
+    // NOT stale). Worker A is mid-validation (the natural state of an
+    // active worker between the reservation + the finalization).
+    const claimA = await stack.benchmarkRepository.claimExperimentCompletion(experimentId, 30_000);
+    expect(claimA).not.toBeNull();
+    expect(claimA?.status).toBe('finalizing');
+    expect(claimA?.finalizingGeneration).toBe(1);
+    const activeGeneration = claimA!.finalizingGeneration!;
+
+    // Two CONCURRENT recovery CAS calls. Both MUST return null — the lease
+    // is NOT stale (only ~0s old), so the recovery CAS guard
+    // `finalizing_lease_expires_at < NOW()` rejects both. Worker A's
+    // reservation is NOT preempted; the generation stays at 1.
+    const [recoverB, recoverC] = await Promise.all([
+      stack.benchmarkRepository.recoverStaleFinalizingExperiment(experimentId, 30_000),
+      stack.benchmarkRepository.recoverStaleFinalizingExperiment(experimentId, 30_000),
+    ]);
+    expect(recoverB).toBeNull();
+    expect(recoverC).toBeNull();
+
+    // The experiment is STILL `finalizing` with generation=1 (no recovery
+    // advanced it — Worker A still owns the reservation). The
+    // getExperiment call triggers lazy recovery, but the lease is NOT
+    // stale so recoverStaleFinalizingExperiment returns null + the
+    // fresh-claim CAS also returns null (status is `finalizing`, not
+    // `running`) → checkExperimentCompletion no-ops → getExperiment
+    // re-reads → `finalizing`.
+    const exp = await stack.benchmarkService.getExperiment(experimentId);
+    expect(exp?.status).toBe('finalizing');
+    expect(exp?.finalizingGeneration).toBe(1);
+
+    // Worker A (the active owner) can still finalize with its generation
+    // (1) — the concurrent recovery attempts did NOT fence it (they
+    // no-op'd because the lease was not stale). Worker A retains exclusive
+    // ownership.
+    const finalized = await stack.benchmarkRepository.finalizeExperimentCompletion(
+      experimentId, activeGeneration,
+    );
+    expect(finalized).not.toBeNull();
+    expect(finalized?.status).toBe('completed');
   });
 });

@@ -1,0 +1,70 @@
+-- WORK-032 PR #36 review fix #4: fencing generation for the `finalizing`
+-- reservation (the fourth PR #36 review blocker).
+--
+-- PR #36 review fix #3 (migration 0029) added a persisted lease
+-- (`finalizing_lease_expires_at`) + a `recoverStaleFinalizingExperiment`
+-- CAS that reclaims an expired-lease `finalizing` row + RENEWS the lease so
+-- the recovering worker has exclusive ownership. That fixed the "stuck
+-- finalizing" failure (a crashed worker's reservation is eventually
+-- reclaimable) — BUT it did not FENCE the original worker.
+--
+-- The reviewer's remaining blocker: the finalization CASes
+-- (`finalizeExperimentCompletion` + `finalizeExperimentInvalidation`) only
+-- guard on `WHERE id=$1 AND status='finalizing'` — there is NO ownership
+-- token in that predicate. So a stale worker (the one whose lease expired +
+-- was reclaimed) can STILL call the finalization CAS using its stale
+-- validation after a NEWER worker has reclaimed + re-validated:
+--
+--   Worker A: running → finalizing, lease A
+--                 lease A expires
+--   Worker B: finalizing → renew lease B, validate (newer data)
+--   Worker A: still alive → finalizeExperimentCompletion()  ← BUG
+--                     (passes because the row is still `finalizing`)
+--
+-- Both A and B can currently finalize because the CAS only checks `status`.
+-- That violates the claimed invariant that the recovering worker has
+-- EXCLUSIVE ownership.
+--
+-- The fix is a FENCING GENERATION (a monotonic token) on the reservation:
+--
+--   Worker A: running → finalizing + generation=41
+--                 lease A expires
+--   Worker B: finalizing + expired generation=41 → finalizing + generation=42
+--   Worker A: finalizeExperimentCompletion(id, 41)  ← REJECTED
+--              (row generation is 42, not 41)
+--   Worker B: finalizeExperimentCompletion(id, 42)  ← ACCEPTED
+--
+-- This migration adds the `finalizing_generation` column. It is NULLABLE:
+--   * NULL for non-`finalizing` rows (it carries no meaning outside the
+--     reservation state).
+--   * NULL for legacy `finalizing` rows from migrations 0028/0029 (pre-0030)
+--     that were never reclaimed post-0030. The recovery CAS sets the
+--     generation on the first reclaim via `COALESCE(NULL, 0) + 1`, so a
+--     legacy row is gracefully fenced the moment it is reclaimed — it does
+--     NOT need a backfill.
+--
+-- No backfill is needed — the column is only meaningful for `finalizing`
+-- rows, and the recovery CAS handles NULL gracefully (COALESCE→1 on the
+-- first reclaim). A partial index is NOT needed for fencing (the
+-- finalization CAS queries by `id`, already primary-key indexed); the
+-- stale-lease sweep already has its own partial index from migration 0029.
+--
+-- The contract (enforced by static-architecture.test.ts):
+--   * `claimExperimentCompletion` sets `finalizing_generation =
+--     COALESCE(finalizing_generation, 0) + 1` alongside the
+--     `running → finalizing` CAS (the fresh-claim path starts the
+--     generation at 1 for a never-finalized row, or increments the
+--     existing value if a previous reservation was somehow abandoned
+--     without a lease being set — defensive).
+--   * `recoverStaleFinalizingExperiment` increments the generation
+--     alongside the lease renewal (`finalizing_generation =
+--     COALESCE(finalizing_generation, 0) + 1`). The recovering worker
+--     receives the NEW generation + must pass it to the finalization CAS.
+--   * `finalizeExperimentCompletion` + `finalizeExperimentInvalidation`
+--     require the generation the caller received:
+--     `WHERE id=$1 AND status='finalizing' AND finalizing_generation=$2`.
+--     A stale worker holding an OLD generation is fenced (the CAS rejects;
+--     `finalizing_generation` on the row no longer matches the stale value).
+
+ALTER TABLE wfos_benchmark_experiments
+  ADD COLUMN IF NOT EXISTS finalizing_generation BIGINT;

@@ -77,6 +77,13 @@ function toExperiment(r: Row): BenchmarkExperiment {
     createdAt: r.created_at instanceof Date ? r.created_at : new Date(String(r.created_at)),
     startedAt: r.started_at === null || r.started_at === undefined ? null : (r.started_at instanceof Date ? r.started_at : new Date(String(r.started_at))),
     completedAt: r.completed_at === null || r.completed_at === undefined ? null : (r.completed_at instanceof Date ? r.completed_at : new Date(String(r.completed_at))),
+    // PR #36 review fix #4 (fencing): the monotonic ownership token for the
+    // `finalizing` reservation. NULL for non-`finalizing` rows + for legacy
+    // pre-0030 `finalizing` rows that were never reclaimed post-0030 (the
+    // recovery CAS sets it via COALESCE(NULL, 0)+1 on the first reclaim).
+    finalizingGeneration: r.finalizing_generation === null || r.finalizing_generation === undefined
+      ? null
+      : Number(r.finalizing_generation),
   };
 }
 
@@ -335,7 +342,7 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
   }
 
   async claimExperimentCompletion(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
-    // PR #36 review fix #2 + #3: phase 1 — RESERVATION. Atomic running →
+    // PR #36 review fix #2 + #3 + #4: phase 1 — RESERVATION. Atomic running →
     // finalizing (NOT running → completed). Only the winner (RETURNING row)
     // may proceed to integrity validation (phase 2) + the finalization CAS
     // (phase 3). The loser (null) no-ops. `completed` is NOT set here — it
@@ -349,11 +356,24 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     // The expiry is computed in JS + passed as a TIMESTAMPTZ parameter
     // (driver-portable across pg + pglite — both accept Date objects for
     // TIMESTAMPTZ columns).
+    //
+    // PR #36 review fix #4 — FENCING GENERATION: the reservation also sets
+    // `finalizing_generation = COALESCE(finalizing_generation, 0) + 1`. The
+    // COALESCE handles legacy pre-0030 rows whose generation is NULL — the
+    // first claim on such a row sets the generation to 1 (COALESCE(NULL, 0)
+    // + 1 = 1). The returned row carries the new `finalizingGeneration`
+    // value; the winner MUST pass it to `finalizeExperimentCompletion` /
+    // `finalizeExperimentInvalidation` so a stale worker holding an OLDER
+    // generation is fenced. Without the generation, the recovery CAS would
+    // reclaim + renew the lease but NOT fence the original worker — the
+    // stale worker could still finalize using stale validation after a
+    // newer worker reclaimed (the fencing hole the reviewer flagged).
     const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
          SET status = 'finalizing',
-             finalizing_lease_expires_at = $2
+             finalizing_lease_expires_at = $2,
+             finalizing_generation = COALESCE(finalizing_generation, 0) + 1
        WHERE id = $1 AND status = 'running'
        RETURNING *`,
       [id, leaseExpiresAt],
@@ -362,7 +382,7 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
   }
 
   async recoverStaleFinalizingExperiment(id: string, leaseTtlMs: number): Promise<BenchmarkExperiment | null> {
-    // PR #36 review fix #3: CRASH-SAFE RECOVERY. Atomic CAS that reclaims
+    // PR #36 review fix #3 + #4: CRASH-SAFE RECOVERY. Atomic CAS that reclaims
     // a `finalizing` reservation whose lease has expired (the previous
     // winner is presumed dead). The lease is RENEWED (set to NOW()+ttl) so
     // the recovering worker has exclusive ownership — if it also dies, the
@@ -379,10 +399,24 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     // the protocol is idempotent). The `< NOW()` guard is the staleness
     // check — only expired leases are reclaimable, so an active worker is
     // never preempted mid-validation.
+    //
+    // PR #36 review fix #4 — FENCING GENERATION: the recovery CAS also
+    // INCREMENTS `finalizing_generation = COALESCE(finalizing_generation,
+    // 0) + 1`. The COALESCE handles legacy pre-0030 `finalizing` rows whose
+    // generation is NULL — the first reclaim on such a row sets the
+    // generation to 1 (COALESCE(NULL, 0) + 1 = 1). The returned row carries
+    // the new `finalizingGeneration` value; the recovering worker MUST pass
+    // it to the finalization CAS. The stale worker (the one whose lease
+    // expired) holds the OLD generation + is FENCED: its finalization CAS
+    // rejects because the row's `finalizing_generation` has advanced past
+    // the stale value. This is the EXCLUSIVE-OWNERSHIP invariant the
+    // reviewer required: the recovering worker has exclusive ownership,
+    // NOT shared with a stale ghost.
     const leaseExpiresAt = new Date(Date.now() + leaseTtlMs);
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
-         SET finalizing_lease_expires_at = $2
+         SET finalizing_lease_expires_at = $2,
+             finalizing_generation = COALESCE(finalizing_generation, 0) + 1
        WHERE id = $1
          AND status = 'finalizing'
          AND finalizing_lease_expires_at IS NOT NULL
@@ -393,37 +427,56 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
-  async finalizeExperimentCompletion(id: string): Promise<BenchmarkExperiment | null> {
-    // PR #36 review fix #2: phase 3a — success finalization. Atomic
-    // finalizing → completed (sets completed_at). Called by the reservation
-    // winner AFTER integrityService.validate returns valid===true. Only this
-    // CAS makes `completed` authoritative.
+  async finalizeExperimentCompletion(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #4: phase 3a — success finalization. Atomic
+    // finalizing → completed (sets completed_at), guarded on the fencing
+    // generation. Called by the reservation winner (the worker that won
+    // `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+    // AFTER integrityService.validate returns valid===true. The
+    // `expectedGeneration` is the `finalizingGeneration` the caller received
+    // from the reservation/recovery CAS. Only this CAS makes `completed`
+    // authoritative.
+    //
+    // The `finalizing_generation = $2` guard is the FENCING invariant: a
+    // stale worker holding an OLD generation cannot finalize after a newer
+    // worker reclaimed + advanced the generation. The stale worker's CAS
+    // rejects (the row's `finalizing_generation` no longer matches the stale
+    // value) — the newer worker retains exclusive ownership.
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
          SET status = 'completed',
              completed_at = COALESCE(completed_at, NOW())
-       WHERE id = $1 AND status = 'finalizing'
+       WHERE id = $1 AND status = 'finalizing' AND finalizing_generation = $2
        RETURNING *`,
-      [id],
+      [id, expectedGeneration],
     );
     return rows[0] ? toExperiment(rows[0]) : null;
   }
 
-  async finalizeExperimentInvalidation(id: string): Promise<BenchmarkExperiment | null> {
-    // PR #36 review fix #2: phase 3b — failure finalization. Atomic
+  async finalizeExperimentInvalidation(id: string, expectedGeneration: number): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2 + #4: phase 3b — failure finalization. Atomic
     // finalizing → invalidated (sets completed_at — the experiment reached
-    // a terminal state, just not a successful one). Called by the
-    // reservation winner AFTER integrityService.validate returns valid===false
-    // (or throws). This is the authoritative terminal state for a failed
-    // integrity check — the experiment reads `invalidated`, NOT `completed`,
-    // so no consumer can read a false successful completion.
+    // a terminal state, just not a successful one), guarded on the fencing
+    // generation. Called by the reservation winner (the worker that won
+    // `claimExperimentCompletion` OR `recoverStaleFinalizingExperiment`)
+    // AFTER integrityService.validate returns valid===false (or throws).
+    // The `expectedGeneration` is the `finalizingGeneration` the caller
+    // received from the reservation/recovery CAS. This is the authoritative
+    // terminal state for a failed integrity check — the experiment reads
+    // `invalidated`, NOT `completed`, so no consumer can read a false
+    // successful completion.
+    //
+    // The `finalizing_generation = $2` guard is the FENCING invariant on the
+    // failure path: a stale ghost cannot invalidate either (it might have
+    // read corrupt data + tried to finalize to invalidated after a newer
+    // worker already reclaimed + re-validated).
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
          SET status = 'invalidated',
              completed_at = COALESCE(completed_at, NOW())
-       WHERE id = $1 AND status = 'finalizing'
+       WHERE id = $1 AND status = 'finalizing' AND finalizing_generation = $2
        RETURNING *`,
-      [id],
+      [id, expectedGeneration],
     );
     return rows[0] ? toExperiment(rows[0]) : null;
   }

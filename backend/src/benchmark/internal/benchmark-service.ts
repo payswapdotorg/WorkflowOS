@@ -604,35 +604,47 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
 
   /**
    * Two-phase experiment completion protocol (PR #36 review fix #2) with a
-   * crash-safe recovery path (PR #36 review fix #3):
+   * crash-safe recovery path (PR #36 review fix #3) + fencing generation
+   * (PR #36 review fix #4):
    *
-   *   0. RECOVERY (PR #36 review fix #3): if the experiment is already in
-   *      `finalizing` with a STALE (expired) lease, a previous worker won
-   *      the reservation but died before finalizing. The recovery CAS
-   *      (recoverStaleFinalizingExperiment) reclaims + renews the lease so
-   *      the recovering worker re-enters the protocol at phase 2. Without
+   *   0. RECOVERY (PR #36 review fix #3 + #4): if the experiment is already
+   *      in `finalizing` with a STALE (expired) lease, a previous worker
+   *      won the reservation but died before finalizing. The recovery CAS
+   *      (recoverStaleFinalizingExperiment) reclaims + renews the lease +
+   *      INCREMENTS the fencing generation so the recovering worker re-enters
+   *      the protocol at phase 2 with a NEW generation. The stale worker's
+   *      old generation is FENCED (its finalization CAS rejects). Without
    *      this, the experiment would be permanently stuck in `finalizing`
-   *      (the durable reservation the reviewer flagged).
+   *      (the durable reservation the reviewer flagged) OR a stale worker
+   *      could finalize after a newer worker reclaimed (the fencing hole
+   *      the reviewer flagged).
    *   1. RESERVATION (exactly-once CAS): claimExperimentCompletion
-   *      running → finalizing (sets a fresh lease). Only the winner
-   *      proceeds; the loser (null) no-ops. `completed` is NOT made
-   *      authoritative here.
+   *      running → finalizing (sets a fresh lease + a fresh generation).
+   *      Only the winner proceeds; the loser (null) no-ops. `completed` is
+   *      NOT made authoritative here. The winner receives the new
+   *      `finalizingGeneration` value + MUST pass it to the finalization CAS.
    *   2. INTEGRITY VALIDATION (winner only): integrityService.validate.
    *      Returns BenchmarkIntegrityRecord { valid }. Thrown errors are
    *      treated as a validation failure (the experiment must not read
    *      `completed`).
-   *   3. FINALIZATION (CAS, makes the status authoritative):
+   *   3. FINALIZATION (CAS, makes the status authoritative, FENCED on the
+   *      generation the caller received):
    *      valid===true  → finalizeExperimentCompletion (finalizing → completed)
    *                      + audit BENCHMARK_COMPLETED
    *      valid===false → finalizeExperimentInvalidation (finalizing → invalidated)
    *                      + audit BENCHMARK_INVALIDATED
+   *      The `WHERE finalizing_generation = $2` guard fences stale workers
+   *      holding an OLDER generation — they cannot finalize after a newer
+   *      worker reclaimed + advanced the generation.
    *
    * This closes the PR #36 review findings: (a) the prior version flipped
    * the experiment to `completed` BEFORE validation ran, so a failed
    * integrity check exposed a false successful completion. Now `completed`
    * is authoritative ONLY after integrity passes. (b) The `finalizing`
    * reservation is durable + a crashed worker's lease is reclaimable, so
-   * no experiment is permanently stuck.
+   * no experiment is permanently stuck. (c) The recovering worker has
+   * EXCLUSIVE ownership — a stale ghost holding an older generation is
+   * fenced + cannot finalize.
    *
    * The `finalizing` reservation state is non-terminal, so no concurrent
    * worker re-enters the protocol while the winner is validating (the
@@ -640,7 +652,9 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
    * reservation CAS is exclusive (WHERE status='running'), so exactly one
    * worker wins — exactly-once validation + exactly-once audit. The
    * recovery CAS is also exclusive (WHERE status='finalizing' AND
-   * lease < NOW()), so exactly one recovery worker wins.
+   * lease < NOW()), so exactly one recovery worker wins. The finalization
+   * CAS is fenced (WHERE status='finalizing' AND finalizing_generation=$2),
+   * so a stale worker cannot finalize after a newer reclaim.
    *
    * Only called when every trial is terminal. If any trial is still in a
    * non-terminal phase, this is a no-op (the worker re-checks when the
@@ -678,6 +692,24 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       experimentId, this.finalizingLeaseTtlMs,
     );
     if (!claimed) return;
+    // PR #36 review fix #4 — FENCING GENERATION. The reservation (whether
+    // the fresh-claim path OR the recovery path) set `finalizing_generation`
+    // + returned the new value on `claimed.finalizingGeneration`. The winner
+    // MUST pass it to the finalization CAS so a stale worker holding an
+    // OLDER generation is fenced. A null generation means the row was a
+    // legacy pre-0030 `finalizing` row that somehow reached here without
+    // being reclaimed (should not happen — the recovery CAS sets the
+    // generation on the first reclaim via COALESCE(NULL, 0) + 1). Defensive:
+    // log + return WITHOUT finalizing (do NOT finalize without fencing — a
+    // missing generation means we cannot prove exclusive ownership).
+    const expectedGeneration = claimed.finalizingGeneration;
+    if (expectedGeneration === null) {
+      this.deps.logger.error('benchmark.experiment-finalizing-missing-generation', {
+        experimentId,
+        reservationSource: recovered ? 'recovery' : 'fresh-claim',
+      });
+      return;
+    }
     // Phase 2 — INTEGRITY VALIDATION (winner only). validate() returns a
     // record with `valid` (it does NOT throw on integrity failure — it
     // calls invalidateIntegrity internally + returns valid===false). A
@@ -694,12 +726,19 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       });
       valid = false;
     }
-    // Phase 3 — FINALIZATION (CAS, makes the status authoritative).
+    // Phase 3 — FINALIZATION (CAS, makes the status authoritative). The
+    // `expectedGeneration` is the fencing token — a stale worker holding
+    // an older generation is fenced by the finalization CAS's
+    // `WHERE finalizing_generation = $2` guard.
     if (valid) {
-      const finalized = await this.deps.repository.finalizeExperimentCompletion(experimentId);
+      const finalized = await this.deps.repository.finalizeExperimentCompletion(
+        experimentId, expectedGeneration,
+      );
       if (!finalized) {
-        // Should not happen (the reservation is exclusive), but the CAS
-        // makes it safe — another worker already advanced the experiment.
+        // Should not happen (the reservation is exclusive + the
+        // generation matches), but the CAS makes it safe — another worker
+        // already advanced the experiment (e.g. a recovery that fenced us
+        // because our lease expired mid-validation).
         return;
       }
       await this.deps.auditService.write({
@@ -713,7 +752,9 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       });
       return;
     }
-    const invalidated = await this.deps.repository.finalizeExperimentInvalidation(experimentId);
+    const invalidated = await this.deps.repository.finalizeExperimentInvalidation(
+      experimentId, expectedGeneration,
+    );
     if (!invalidated) {
       // Should not happen; another worker already advanced. No audit (the
       // winner that advanced wrote it).

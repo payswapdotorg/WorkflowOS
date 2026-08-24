@@ -90,6 +90,25 @@ export interface BenchmarkExperiment {
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly completedAt: Date | null;
+  /**
+   * PR #36 review fix #4 (fencing): the monotonic ownership token for the
+   * `finalizing` reservation. Set by `claimExperimentCompletion`
+   * (`COALESCE(finalizing_generation, 0) + 1` on the running → finalizing
+   * CAS) + INCREMENTED by `recoverStaleFinalizingExperiment` (on the
+   * expired-lease reclaim). The reservation winner MUST pass its received
+   * generation to `finalizeExperimentCompletion` /
+   * `finalizeExperimentInvalidation` so a stale worker holding an OLD
+   * generation is fenced (the finalization CAS rejects; the row's
+   * `finalizing_generation` no longer matches the stale value).
+   *
+   * `null` for non-`finalizing` rows (the column carries no meaning outside
+   * the reservation state) + for legacy `finalizing` rows from migrations
+   * 0028/0029 (pre-0030) that have never been reclaimed post-0030. The
+   * recovery CAS sets the generation on the first reclaim
+   * (`COALESCE(NULL, 0) + 1 = 1`), so a legacy row is gracefully fenced the
+   * moment it is reclaimed — it does NOT need a backfill.
+   */
+  readonly finalizingGeneration: number | null;
 }
 
 export type BenchmarkExperimentStatus =
