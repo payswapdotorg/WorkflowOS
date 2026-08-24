@@ -74,6 +74,25 @@ export type {
   ExecutionService,
 } from './internal/execution.types.js';
 
+// WORK-034 (first slice): Persistent Session Core — the provider-independent
+// session contracts. An ExecutionSession is the CONTINUATION CONTEXT for
+// exactly ONE ExecutionRecord (WorkItem → WorkOrder → ExecutionRecord →
+// ExecutionSession → append-only events). All state transitions are
+// repository-level CAS (lost CAS → null); terminal states are immutable;
+// `interrupted` is resumable; events are append-only with per-session unique
+// sequences. Provider-specific session details are NOT exposed — the
+// implementations live under internal/ (this slice wires nothing into the
+// execution flow; later slices compose sessions with the existing
+// ExecutionService.submit() path — no second engine, no second
+// ExecutionService).
+export type {
+  ExecutionSession,
+  ExecutionSessionStatus,
+  ExecutionSessionEvent,
+  ExecutionSessionEventType,
+  ExecutionSessionRepository,
+} from './internal/execution-session.types.js';
+
 export interface AgentsModuleApi {}
 
 export const agentsModule: ModuleContract & AgentsModuleApi = { name: '/agents' };
