@@ -4,12 +4,30 @@ import type { WorkflowAuditEmitter } from '@modules/audit/index.js';
 import type {
   WorkflowEngine,
   WorkflowExecution,
+  WorkflowState,
   WorkflowTransition,
   TransitionRequest,
   TransitionResult,
 } from './workflow.types.js';
 import { LEGAL_TRANSITIONS } from './workflow.types.js';
 import { PgWorkflowExecutionRepository, PgWorkflowTransitionRepository } from './pg-workflow-repository.js';
+
+/**
+ * PR #35 review fix v2 / Blocker B: best-effort composition hook invoked
+ * AFTER a real NEW transition is persisted (NOT for idempotent no-ops —
+ * only when `transRepo.create` ran). The composition root (app.ts) wires
+ * this to call `benchmarkService.advanceTrialsForWorkItem(workItemId)` so
+ * any benchmark trial awaiting the work item's terminal transition
+ * (`verified` / `verification_failed` / `implementation_blocked`) is
+ * re-enqueued onto `benchmark.trial` and finalized. Wrap in try/catch +
+ * log on error — a hook failure MUST NEVER break the core transition
+ * operation (the state transition is already authoritative).
+ */
+export type WorkflowTransitionCallback = (
+  workItemId: string,
+  fromState: WorkflowState,
+  toState: WorkflowState,
+) => Promise<void>;
 
 /**
  * Default {@link WorkflowEngine} — the exclusive owner of canonical workflow
@@ -34,6 +52,17 @@ export class DefaultWorkflowEngine implements WorkflowEngine {
     private readonly logger: Logger,
     private readonly canBeginImplementation?: (workItemId: string) => Promise<boolean>,
     private readonly auditEmitter?: WorkflowAuditEmitter,
+    /**
+     * PR #35 review fix v2 / Blocker B: best-effort transition callback
+     * (composition hook). Invoked AFTER a real NEW transition is
+     * persisted (NOT for idempotent no-ops or same-state transitions).
+     * The composition root (app.ts) wires this so the benchmark service
+     * can re-advance any trial pointing at the work item when the work
+     * item reaches `verified` or a terminal failure state. Wrap in
+     * try/catch + log on error — a callback failure MUST NEVER break the
+     * core transition (the state transition is already authoritative).
+     */
+    private readonly onTransition?: WorkflowTransitionCallback,
   ) {
     this.execRepo = new PgWorkflowExecutionRepository(db);
     this.transRepo = new PgWorkflowTransitionRepository(db);
@@ -183,6 +212,28 @@ export class DefaultWorkflowEngine implements WorkflowEngine {
           executionId: request.executionId ?? null,
           metadata: request.metadata ?? {},
         });
+      }
+
+      // PR #35 review fix v2 / Blocker B: best-effort transition callback
+      // (composition hook). Invoked AFTER a real NEW transition is
+      // persisted (the transRepo.create call above ran). NOT invoked for
+      // idempotent no-ops (the early return at the top of `transition` skips
+      // this code path) + NOT for same-state transitions (the
+      // `already-in-target-state` early return skips this code path). Wrap
+      // in try/catch + log on error so a callback failure NEVER breaks the
+      // core transition (the state transition is already authoritative +
+      // the audit event already emitted).
+      if (this.onTransition) {
+        try {
+          await this.onTransition(request.workItemId, fromState, request.toState);
+        } catch (err) {
+          this.logger.warn('workflow.on-transition-callback-failed', {
+            workItemId: request.workItemId,
+            fromState,
+            toState: request.toState,
+            error: (err as Error).message,
+          });
+        }
       }
 
       return {

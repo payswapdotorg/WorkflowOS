@@ -45,6 +45,7 @@ export type {
 export type {
   ImplementationContext,
   ImplementationContextContent,
+  ImplementationContextPreview,
   ImplementationContextRepository,
   ImplementationContextBuilder,
 } from './internal/implementation-context.types.js';

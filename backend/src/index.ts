@@ -277,6 +277,17 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-032: Native vs External Execution Benchmark routes.
+      // Backend-authorized (project.read / project.write). The frontend is a
+      // consumer, never an authority (§34 static check).
+      ...(app.deps.authorizationService && app.deps.benchmarkService
+        ? {
+            benchmark: {
+              authorizationService: app.deps.authorizationService,
+              benchmarkService: app.deps.benchmarkService,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&
