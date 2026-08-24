@@ -14,6 +14,11 @@ import SettingsPage from './pages/SettingsPage';
 import IntegrationsPage from './pages/IntegrationsPage';
 import ProviderSettingsPage from './pages/ProviderSettingsPage';
 import CompanionHandoffPage from './pages/CompanionHandoffPage';
+import BenchmarkListPage from './pages/BenchmarkListPage';
+import BenchmarkCreatePage from './pages/BenchmarkCreatePage';
+import BenchmarkDetailPage from './pages/BenchmarkDetailPage';
+import BenchmarkComparisonPage from './pages/BenchmarkComparisonPage';
+import BenchmarkTrialPage from './pages/BenchmarkTrialPage';
 
 export default function App() {
   const { hasApiKey } = useAuth();
@@ -109,6 +114,48 @@ export default function App() {
         element={
           <AppShell>
             <ProviderSettingsPage />
+          </AppShell>
+        }
+      />
+      {/* WORK-032: Native vs External Execution Benchmark. Top-level
+          (non-project) routes wrapped in AppShell for the persistent frame. */}
+      <Route
+        path="/benchmarks"
+        element={
+          <AppShell>
+            <BenchmarkListPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/benchmarks/new"
+        element={
+          <AppShell>
+            <BenchmarkCreatePage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/benchmarks/:benchmarkId"
+        element={
+          <AppShell>
+            <BenchmarkDetailPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/benchmarks/:benchmarkId/compare"
+        element={
+          <AppShell>
+            <BenchmarkComparisonPage />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/benchmarks/trials/:trialId"
+        element={
+          <AppShell>
+            <BenchmarkTrialPage />
           </AppShell>
         }
       />

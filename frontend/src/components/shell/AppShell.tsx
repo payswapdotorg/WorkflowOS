@@ -12,6 +12,7 @@ import {
   LogOut,
   CircleUser,
   PanelsTopLeft,
+  Gauge,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useAuth } from '@/hooks/useAuth';
@@ -53,6 +54,15 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   match: (pathname: string) => boolean;
 }
+
+/**
+ * WORK-032: top-level (non-project) navigation. The Benchmarks nav is a
+ * cross-cutting harness outside any single project's lifecycle — it lives
+ * above the project nav so it is reachable from anywhere in the product.
+ */
+const GLOBAL_NAV: NavItem[] = [
+  { to: '/benchmarks', label: 'Benchmarks', icon: Gauge, match: (p) => p.startsWith('/benchmarks') },
+];
 
 const PROJECT_NAV: NavItem[] = [
   { to: '', label: 'Overview', icon: FolderKanban, match: (p) => p === '' || p === '/' },
@@ -98,6 +108,31 @@ function SidebarNav({ _pid, project, onNavigate }: SidebarNavProps) {
         <FolderKanban className="h-4 w-4" />
         All Projects
       </Link>
+      <div className="mt-2 px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        Global
+      </div>
+      <div className="flex flex-col gap-0.5">
+        {GLOBAL_NAV.map((item) => {
+          const active = item.match(location.pathname);
+          return (
+            <Link
+              key={item.label}
+              to={item.to}
+              onClick={onNavigate}
+              aria-current={active ? 'page' : undefined}
+              className={cn(
+                'flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors',
+                active
+                  ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
+                  : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground',
+              )}
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
       <div className="mt-2 px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         Project
       </div>
@@ -188,6 +223,31 @@ function useBreadcrumbs(): { items: { label: string; to?: string }[] } {
   if (workItemMatch) {
     items.push({ label: 'Projects', to: '/' });
     items.push({ label: `Work Item ${workItemMatch[1]!.slice(0, 8)}` });
+    return { items };
+  }
+  // WORK-032: Benchmarks top-level nav section. The benchmarks harness
+  // is a cross-cutting consumer that lives outside any single project.
+  if (path.startsWith('/benchmarks')) {
+    items.push({ label: 'Projects', to: '/' });
+    items.push({ label: 'Benchmarks', to: '/benchmarks' });
+    const newMatch = path.match(/^\/benchmarks\/new$/);
+    if (newMatch) {
+      items.push({ label: 'New' });
+      return { items };
+    }
+    const trialMatch = path.match(/^\/benchmarks\/trials\/([^/]+)/);
+    if (trialMatch) {
+      items.push({ label: `Trial ${trialMatch[1]!.slice(0, 8)}` });
+      return { items };
+    }
+    const detailMatch = path.match(/^\/benchmarks\/([^/]+)(?:\/(compare))?$/);
+    if (detailMatch && detailMatch[1] !== 'new') {
+      items.push({ label: detailMatch[1]!.slice(0, 8), to: `/benchmarks/${detailMatch[1]}` });
+      if (detailMatch[2] === 'compare') {
+        items.push({ label: 'Compare' });
+      }
+      return { items };
+    }
     return { items };
   }
   return { items };

@@ -168,6 +168,21 @@ import { DefaultExecutionService } from './modules/agents/internal/execution-ser
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
+// WORK-032: Native vs External Execution Benchmark — application-layer
+// orchestrator at src/benchmark/ (outside src/modules/ — a cross-cutting
+// harness that CONSUMES the 17 frozen domain modules via their public
+// barrels). It does NOT create another workflow/verification/review/CI engine.
+import {
+  DefaultBenchmarkService,
+  DefaultBenchmarkSnapshotService,
+  DefaultBenchmarkIntegrityService,
+  DefaultBenchmarkMetricCollector,
+  DefaultBenchmarkTrialOrchestrator,
+  DefaultBenchmarkExportService,
+  DefaultBenchmarkRecommendationService,
+  PgBenchmarkRepository,
+} from './benchmark/index.js';
+import type { BenchmarkService } from './benchmark/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -330,6 +345,9 @@ export interface AppDeps {
   executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
+  /** WORK-032: Native vs External Execution Benchmark service. Present when
+   *  DB + execution + workflow + verification + review are configured. */
+  benchmarkService?: BenchmarkService;
 }
 
 export interface BuildAppOptions {
@@ -509,6 +527,7 @@ export async function buildApp(
   let executionRecordRepository: ExecutionRecordRepository | undefined;
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
+  let benchmarkService: BenchmarkService | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -857,6 +876,80 @@ export async function buildApp(
       logger,
     });
 
+    // --- WORK-032: Native vs External Execution Benchmark. ---
+    // The benchmark is a cross-cutting application-layer orchestrator at
+    // src/benchmark/ that CONSUMES the 17 frozen domain modules via their
+    // public barrels. It does NOT create another workflow/verification/review/
+    // CI engine (static check in tests/architecture/static-architecture.test.ts).
+    // It delegates execution to ExecutionService (owned by /agents) and reads
+    // authoritative state from /workflows, /verification, /reviews, /github,
+    // /agents, /audit. NEVER stores credentials.
+    const benchmarkRepository = new PgBenchmarkRepository(database);
+    const benchmarkSnapshotService = new DefaultBenchmarkSnapshotService({
+      repository: benchmarkRepository,
+      workItemRepository: workItemRepository!,
+      workOrderRepository: workOrderRepository!,
+      architectureVersionRepository: architectureVersionRepository!,
+      architectureRepository: architectureRepository!,
+      projectRepository: projectRepository!,
+      implementationContextBuilder: implementationContextBuilder!,
+      contextRepository: implementationContextRepository,
+      promptBuilder: executionPromptBuilder,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter: githubAdapter!,
+      logger,
+    });
+    const benchmarkIntegrityService = new DefaultBenchmarkIntegrityService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    const benchmarkMetricCollector = new DefaultBenchmarkMetricCollector({
+      repository: benchmarkRepository,
+      workflowEngine: workflowEngine!,
+      verificationService: verificationService!,
+      reviewService: reviewService!,
+      pullRequestAssociationRepository: pullRequestAssociationRepository!,
+      ciEvidenceIngestionRepository: new PgCiEvidenceIngestionRepository(database),
+      agentRunRepository: agentRunRepository!,
+      logger,
+    });
+    const benchmarkTrialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
+      repository: benchmarkRepository,
+      executionService: executionService!,
+      executionTaskService: executionTaskService!,
+      agentRunRepository: agentRunRepository!,
+      workItemRepository: workItemRepository!,
+      workOrderRepository: workOrderRepository!,
+      workItemRequirementRepository: workItemRequirementRepository!,
+      workItemCriterionRepository: workItemCriterionRepository!,
+      workItemDependencyRepository: workItemDependencyRepository!,
+      workflowEngine: workflowEngine!,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter: githubAdapter!,
+      logger,
+    });
+    const benchmarkExportService = new DefaultBenchmarkExportService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    const benchmarkRecommendationService = new DefaultBenchmarkRecommendationService({
+      repository: benchmarkRepository,
+      logger,
+    });
+    benchmarkService = new DefaultBenchmarkService({
+      db: database,
+      logger,
+      repository: benchmarkRepository,
+      snapshotService: benchmarkSnapshotService,
+      integrityService: benchmarkIntegrityService,
+      metricCollector: benchmarkMetricCollector,
+      trialOrchestrator: benchmarkTrialOrchestrator,
+      exportService: benchmarkExportService,
+      recommendationService: benchmarkRecommendationService,
+      auditService: auditService!,
+      authorizationService: authorizationService!,
+    });
+
     // --- /work-items module: DefaultStartImplementationService (PR #29 fix #1,
     //     WORK-027 refactor). Wires the persisted ImplementationContext to the
     //     native execution path through the ExecutionService boundary. In
@@ -1034,6 +1127,8 @@ export async function buildApp(
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,
+      // WORK-032: benchmark service (present when DB + execution configured).
+      benchmarkService,
     },
     start: async () => {
       if (options.startWorker !== false) {

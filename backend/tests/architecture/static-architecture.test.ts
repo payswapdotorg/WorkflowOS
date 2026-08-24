@@ -5544,3 +5544,324 @@ describe('PRODUCTION READINESS invariants', () => {
     expect(existsSync(scriptPath), 'scripts/bootstrap-production.ts not found').toBe(true);
   });
 });
+
+// ============================================================================
+// WORK-032 — Native vs External Execution Benchmark architecture checks (§34)
+// ============================================================================
+// The benchmark domain lives at src/benchmark/ (application-layer orchestrator
+// OUTSIDE src/modules/). It CONSUMES the 17 frozen domain modules via their
+// public barrels. It does NOT create another workflow/verification/review/CI
+// engine. These checks prove the boundary is intact.
+// ============================================================================
+
+describe('WORK-032 — benchmark architecture checks (§34)', () => {
+  const BENCHMARK_DIR = join(BACKEND_ROOT, 'src', 'benchmark');
+  const BENCHMARK_INTERNAL = join(BENCHMARK_DIR, 'internal');
+
+  function readBenchmarkFiles(): { path: string; src: string }[] {
+    if (!existsSync(BENCHMARK_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(BENCHMARK_DIR);
+    return out;
+  }
+
+  it('benchmark domain exists at src/benchmark/ (outside src/modules/)', () => {
+    expect(existsSync(BENCHMARK_DIR), 'src/benchmark/ must exist').toBe(true);
+    expect(existsSync(join(BENCHMARK_DIR, 'index.ts')), 'src/benchmark/index.ts must exist').toBe(true);
+    expect(existsSync(join(BENCHMARK_DIR, 'types.ts')), 'src/benchmark/types.ts must exist').toBe(true);
+    expect(existsSync(BENCHMARK_INTERNAL), 'src/benchmark/internal/ must exist').toBe(true);
+  });
+
+  it('benchmark does not create another workflow engine (no wfos_workflow_executions INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_workflow_executions/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_executions`);
+      }
+      if (/INSERT\s+INTO\s+wfos_workflow_transitions/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_workflow_transitions`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not create another verification engine (no wfos_verification_runs INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_verification_runs/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_verification_runs`);
+      }
+      if (/INSERT\s+INTO\s+wfos_evidence/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_evidence`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not create another review engine (no wfos_reviews INSERT)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      if (/INSERT\s+INTO\s+wfos_reviews/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_reviews`);
+      }
+      if (/INSERT\s+INTO\s+wfos_review_findings/i.test(f.src)) {
+        violations.push(`${f.path}: INSERT INTO wfos_review_findings (authoritative /reviews table)`);
+      }
+    }
+    // NOTE: wfos_benchmark_review_findings is a benchmark-scoped projection
+    // table (denormalized from /reviews for comparison views). It is NOT the
+    // authoritative /reviews findings table. The check above only flags the
+    // authoritative wfos_review_findings table.
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not calculate authoritative workflow state (reads workflowEngine.getState/getHistory only)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      // The benchmark may call workflowEngine.getOrCreate + transition for
+      // trial initialization (draft → ready) but must NOT call the workflow
+      // ORCHESTRATOR (the authority that drives pr_open → verifying →
+      // approved → merged → verified).
+      if (/orchestrator\./i.test(f.src) && !/benchmark/i.test(f.path)) {
+        // skip — this is just the word "orchestrator" in a non-benchmark file
+      }
+    }
+    // The benchmark trial orchestrator IS allowed to call workflowEngine.getOrCreate
+    // + transition({toState:'ready'}) to initialize a cloned work item. But it
+    // must NOT call transition({toState:'merged'|'verified'}) — those are the
+    // /workflows orchestrator's authority.
+    for (const f of files) {
+      if (/toState:\s*['"]merged['"]/.test(f.src) || /toState:\s*['"]verified['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition to merged/verified (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]approved['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition to approved (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark does not mutate MERGED / VERIFIED (no transition WRITE to those states)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      // Only flag WRITE calls: transition({ toState: 'merged'|'verified' }).
+      // Reads (firstTransitionTo('merged'), h.toState) are allowed — the
+      // metric collector reads workflow history to compute time-to-VERIFIED.
+      if (/toState:\s*['"]merged['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition WRITE to 'merged' (forbidden — /workflows authority)`);
+      }
+      if (/toState:\s*['"]verified['"]/.test(f.src)) {
+        violations.push(`${f.path}: transition WRITE to 'verified' (forbidden — /workflows authority)`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark uses ExecutionService (delegates execution, no second engine)', () => {
+    const files = readBenchmarkFiles();
+    const hasExecutionServiceImport = files.some((f) =>
+      f.src.includes('ExecutionService') && f.src.includes('@modules/agents'),
+    );
+    expect(hasExecutionServiceImport, 'benchmark must import ExecutionService from @modules/agents').toBe(true);
+    // The trial orchestrator must call executionService.submit
+    const orchestratorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-trial-orchestrator.ts'), 'utf8');
+    expect(orchestratorSrc).toMatch(/executionService\.submit/);
+  });
+
+  it('benchmark uses existing GitHub authority (GitHubAdapter + ProjectGitHubRepositoryRepository)', () => {
+    const files = readBenchmarkFiles();
+    const hasGithubImport = files.some((f) =>
+      f.src.includes('GitHubAdapter') && f.src.includes('@modules/github'),
+    );
+    expect(hasGithubImport, 'benchmark must import GitHubAdapter from @modules/github').toBe(true);
+  });
+
+  it('benchmark uses existing Verification authority (VerificationService)', () => {
+    const files = readBenchmarkFiles();
+    const hasVerificationImport = files.some((f) =>
+      f.src.includes('VerificationService') && f.src.includes('@modules/verification'),
+    );
+    expect(hasVerificationImport, 'benchmark must import VerificationService from @modules/verification').toBe(true);
+    // The metric collector must call verificationService.listRunsForWorkItem
+    const collectorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-metric-collector.ts'), 'utf8');
+    expect(collectorSrc).toMatch(/verificationService\.listRunsForWorkItem/);
+  });
+
+  it('benchmark uses existing Review authority (ReviewService)', () => {
+    const files = readBenchmarkFiles();
+    const hasReviewImport = files.some((f) =>
+      f.src.includes('ReviewService') && f.src.includes('@modules/reviews'),
+    );
+    expect(hasReviewImport, 'benchmark must import ReviewService from @modules/reviews').toBe(true);
+    const collectorSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-metric-collector.ts'), 'utf8');
+    expect(collectorSrc).toMatch(/reviewService\.listReviewsForWorkItem/);
+    expect(collectorSrc).toMatch(/reviewService\.listFindingsForReview/);
+  });
+
+  it('benchmark stores promptDigest (§27 equality key)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/prompt_digest/);
+    // The trial table copies promptDigest from the snapshot.
+    expect(migrationSrc).toMatch(/wfos_benchmark_trials/);
+    // The snapshot table stores the canonical promptDigest.
+    expect(migrationSrc).toMatch(/wfos_benchmark_task_snapshots.*prompt_digest/s);
+  });
+
+  it('benchmark requires baseline commit identity (§28 — NOT NULL base_commit)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/base_commit\s+TEXT\s+NOT\s+NULL/);
+    // Trial table also has baseline_commit NOT NULL (copied from snapshot).
+    expect(migrationSrc).toMatch(/baseline_commit\s+TEXT\s+NOT\s+NULL/);
+  });
+
+  it('benchmark trials are isolated (§6 — per-trial branch + cloned work item)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    // Each trial has its own trial_branch.
+    expect(migrationSrc).toMatch(/trial_branch\s+TEXT\s+NOT\s+NULL/);
+    // Each trial has its own work_item_id (the cloned work item).
+    expect(migrationSrc).toMatch(/work_item_id\s+UUID\s+REFERENCES\s+wfos_work_items/);
+    // Unique cell: (experiment, provider, mode, repetition) — no duplicate trials.
+    expect(migrationSrc).toMatch(/UNIQUE\s*\(experiment_id,\s*provider,\s*execution_mode,\s*repetition_index\)/);
+  });
+
+  it('benchmark never stores credentials (§33 — no secret/token/key/cookie columns)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    // No column name may match the credential pattern. The external_session_ref
+    // is an opaque provider-side reference (NOT a credential — the user's own
+    // browser session already holds it; it is not an auth token).
+    const violations: string[] = [];
+    const lines = migrationSrc.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim().toLowerCase();
+      if (trimmed.startsWith('--')) continue; // comment line
+      if (/(?:secret|password|api_key|apikey|credential|private_key|cookie|access_token|refresh_token|callback_token|handoff_token)\b/.test(trimmed)) {
+        // external_session_ref is allowed (opaque reference, not a credential)
+        if (trimmed.includes('external_session_ref') && !trimmed.includes('token')) continue;
+        violations.push(`credential-like column: ${trimmed}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+    // Also check the benchmark source files for credential writes.
+    const files = readBenchmarkFiles();
+    const srcViolations: string[] = [];
+    for (const f of files) {
+      // The export service has a sanitizeMetrics that CHECKS for these patterns
+      // (defense in depth) — that's allowed. The check is: no code writes a
+      // value that IS a credential.
+      if (/localStorage\.setItem.*api_?key/i.test(f.src)) {
+        srcViolations.push(`${f.path}: localStorage API key write`);
+      }
+    }
+    expect(srcViolations, srcViolations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark snapshot is immutable (§4 — DB trigger rejects UPDATE/DELETE)', () => {
+    const migrationSrc = readFileSync(
+      join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'),
+      'utf8',
+    );
+    expect(migrationSrc).toMatch(/wfos_reject_benchmark_snapshot_mutation/);
+    expect(migrationSrc).toMatch(/BEFORE UPDATE OR DELETE ON wfos_benchmark_task_snapshots/);
+  });
+
+  it('benchmark audit events use BENCHMARK_/TRIAL_ prefixes (§47 — do not duplicate workflow transition events)', () => {
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    // The benchmark emits its own audit event types — never WORKFLOW_TRANSITION.
+    expect(serviceSrc).toMatch(/BENCHMARK_CREATED/);
+    expect(serviceSrc).toMatch(/BENCHMARK_STARTED/);
+    expect(serviceSrc).toMatch(/BENCHMARK_COMPLETED/);
+    expect(serviceSrc).toMatch(/TRIAL_COMPLETED|TRIAL_FAILED/);
+    // Must NOT emit WORKFLOW_TRANSITION (that's /workflows' authority).
+    expect(serviceSrc).not.toMatch(/eventType:\s*['"]WORKFLOW_TRANSITION['"]/);
+  });
+
+  it('benchmark imports only @modules/* public barrels + @platform/* (never internal/)', () => {
+    const files = readBenchmarkFiles();
+    const violations: string[] = [];
+    for (const f of files) {
+      const importSpecifiers = f.src.match(/from\s+['"]([^'"]+)['"]/g) ?? [];
+      for (const spec of importSpecifiers) {
+        const path = spec.replace(/from\s+['"]/, '').replace(/['"]$/, '');
+        if (path.includes('@modules/') && path.includes('/internal/')) {
+          violations.push(`${f.path}: imports ${path} (forbidden — must use public barrel)`);
+        }
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('benchmark route is wired in server.ts + index.ts', () => {
+    const serverSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverSrc).toMatch(/benchmarkRoutes/);
+    expect(serverSrc).toMatch(/BenchmarkRouteDeps/);
+    const indexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/benchmark:/);
+  });
+
+  it('benchmark service is constructed in app.ts', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/DefaultBenchmarkService/);
+    expect(appSrc).toMatch(/PgBenchmarkRepository/);
+    expect(appSrc).toMatch(/benchmarkService/);
+  });
+
+  it('benchmark migration 0025 exists + db.reset truncates benchmark tables', () => {
+    expect(existsSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0025_benchmark.sql'))).toBe(true);
+    const testDbSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'helpers', 'test-database.ts'), 'utf8');
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_task_snapshots/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_experiments/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_trials/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_trial_metrics/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_review_findings/);
+    expect(testDbSrc).toMatch(/TRUNCATE wfos_benchmark_integrity/);
+  });
+
+  it('frontend has no direct provider API access (§34 — no fetch to z.ai/openai/anthropic URLs)', () => {
+    const FRONTEND_ROOT = join(BACKEND_ROOT, '..', '..', 'frontend');
+    if (!existsSync(FRONTEND_ROOT)) return; // skip if frontend not present
+    const violations: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === 'dist' || entry === '.git') continue;
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) {
+          const src = readFileSync(full, 'utf8');
+          if (/https?:\/\/[^'"]*(?:api\.openai|api\.anthropic|chat\.z\.ai|chatgpt\.com|claude\.(?:ai|com))/i.test(src)) {
+            violations.push(`${full}: direct provider API URL`);
+          }
+        }
+      }
+    };
+    walk(join(FRONTEND_ROOT, 'src'));
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+});
