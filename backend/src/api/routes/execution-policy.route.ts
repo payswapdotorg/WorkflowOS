@@ -93,6 +93,13 @@ export async function executionPolicyRoutes(app: FastifyInstance, deps: Executio
         if (msg.includes('execution-policy-frozen-mode')) {
           return reply.code(409).send({ error: 'policy-frozen-mode', message: msg });
         }
+        // PR #37 review fix (TOCTOU): the policy mutated (or froze) while
+        // the recommendation was being computed — the decision insert was
+        // atomically rejected. Retryable conflict with the current policy
+        // state → 409 (the client retries with the fresh policy).
+        if (msg.includes('execution-policy-snapshot-stale')) {
+          return reply.code(409).send({ error: 'policy-snapshot-stale', message: msg });
+        }
         return reply.code(500).send({ error: 'execution-policy-recommend-failed', message: msg });
       }
     });

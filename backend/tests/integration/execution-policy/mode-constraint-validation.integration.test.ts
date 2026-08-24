@@ -274,4 +274,190 @@ describe('PR #37 review fix — constrained benchmark modes require their caps (
       ).rejects.not.toThrow(/execution-policy-invalid-mode-constraint/);
     });
   });
+
+// ============================================================================
+// PR #37 review fix (TOCTOU) — ATOMIC SNAPSHOT VALIDATION of the decision
+// write. The read-time frozen-mode guard is correct for a single request
+// but NOT race-safe:
+//
+//     recommend() reads policy vN (frozen=false)
+//         ↓ validate mode (passes — valid for unfrozen)
+//         ↓ compute candidates / evidence
+//         ↓ [CONCURRENT: policy mutates to vN+1 and/or freezes]
+//         ↓ persist decision claiming vN        ← the stale-write race
+//
+// The decision record is the authoritative audit of policyVersion /
+// benchmarkMode / candidates / why / evidence — it must describe ONE
+// COHERENT policy snapshot. The fix: the decision INSERT is atomically
+// conditioned on the CURRENT policy row (same version + not-frozen-or-
+// same-mode). A mutation/freeze during the recommendation → no row → the
+// retryable stale-snapshot error. The race is simulated by a
+// taskProfileBuilder hook that mutates the policy MID-recommendation
+// (task profile building runs AFTER the policy read + BEFORE the decision
+// insert — exactly the reviewer's window).
+// ============================================================================
+
+describe('PR #37 review fix — atomic decision snapshot validation (TOCTOU elimination)', () => {
+  /** Build a recommend()-shaped service with a MID-RECOMMENDATION policy-mutation hook. */
+  function buildRacingService(mutateMidRecommendation: () => Promise<void>): DefaultExecutionPolicyService {
+    return new DefaultExecutionPolicyService({
+      db: stack.db.client,
+      logger: stack.db.logger,
+      repository,
+      eligibilityService: { evaluate: () => ({ status: 'eligible', eligible: true, blockingReasons: [], satisfiedConstraints: [] }) } as never,
+      recommendationService: { rank: () => ({ ranked: [], recommended: null, why: { recommendedCandidateId: null, headline: '', reasons: [], alternatives: [] } }) } as never,
+      taskProfileBuilder: {
+        // Runs AFTER the policy read + BEFORE the decision insert — the
+        // TOCTOU window. Mutating the policy here simulates the concurrent
+        // request that races the recommendation.
+        build: async () => {
+          await mutateMidRecommendation();
+          return {};
+        },
+      } as never,
+      agentProviderRegistry: { getExecutionProviders: () => Promise.resolve([]) } as never,
+      benchmarkEvidenceProvider: { historicalPerformanceForCell: () => Promise.resolve(null as never), aggregateForProject: () => Promise.resolve(null as never) } as never,
+    });
+  }
+
+  let toctouWorkItemId: string;
+
+  beforeAll(async () => {
+    // One shared work item for the TOCTOU tests (the decisions table has a
+    // UUID FK to wfos_work_items, so a real row is required; a single id is
+    // shared — the decision's work_item_id need only be a valid work item).
+    const project = await stack.projectRepository.create({ organizationId, name: 'TOCTOU Fixture Project' });
+    const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'TOCTOU Arch' });
+    const version = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: '# TOCTOU' });
+    const workItem = await stack.workItemRepository.create({
+      architectureVersionId: version.id,
+      workItemId: 'WORK-TOCTOU-001',
+      title: 'TOCTOU fixture', objective: 'fixture', scope: 'src/x.ts', outOfScope: 'none',
+      metadata: { baseCommit: 'toctou-baseline-commit-000000000000000001' },
+    });
+    toctouWorkItemId = workItem.id;
+  });
+
+  async function countDecisions(projectId: string): Promise<number> {
+    const res = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_execution_policy_decisions WHERE project_id = $1`,
+      [projectId],
+    );
+    return Number(res.rows[0]?.c ?? 0);
+  }
+
+  it('policy MUTATED during the recommendation → the decision insert is REJECTED (no stale policyVersion persists) → retryable', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'TOCTOU Mutate Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+    const before = await repository.getProjectPolicy(project.id);
+    expect(before?.policyVersion).toBe(1);
+
+    // The concurrent request mutates the policy (any substantive UPDATE
+    // bumps the version) while the recommendation is in flight.
+    const racing = buildRacingService(async () => {
+      await repository.updateProjectPolicy(project.id, { externalExecutionAllowed: false });
+    });
+    await expect(
+      racing.recommend({ organizationId, projectId: project.id, workItemId: toctouWorkItemId, userId }),
+    ).rejects.toThrow(/execution-policy-snapshot-stale: the project policy changed during the recommendation \(snapshot v1 is no longer the current authoritative version\)/);
+
+    // ASSERTION — NO decision persisted (the atomic guard rejected the
+    // stale-snapshot write; the decision audit never claims v1).
+    expect(await countDecisions(project.id)).toBe(0);
+    // The mutation itself committed (v2).
+    const after = await repository.getProjectPolicy(project.id);
+    expect(after?.policyVersion).toBe(2);
+  });
+
+  it('policy FROZEN during the recommendation (with a request-scoped mode) → the decision insert is REJECTED', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'TOCTOU Freeze Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+
+    // The request uses a request-scoped override (valid at read time — the
+    // policy is unfrozen); a concurrent experiment start freezes the policy
+    // mid-recommendation. The freeze bumps the version (the touch trigger)
+    // → the version clause rejects; the frozen/mode clause is the
+    // belt-and-braces backstop.
+    const racing = buildRacingService(async () => {
+      await repository.freezeProjectPolicy(project.id);
+    });
+    await expect(
+      racing.recommend({ organizationId, projectId: project.id, workItemId: toctouWorkItemId, userId, benchmarkMode: 'controlled_comparison' }),
+    ).rejects.toThrow('execution-policy-snapshot-stale');
+    expect(await countDecisions(project.id)).toBe(0);
+
+    // The RETRY (the reviewer's recovery path) reads the fresh policy — now
+    // frozen — and the frozen-mode guard rejects the differing override
+    // with the precise frozen-mode error (not a silent success).
+    const retry = buildRacingService(async () => {});
+    await expect(
+      retry.recommend({ organizationId, projectId: project.id, workItemId: toctouWorkItemId, userId, benchmarkMode: 'controlled_comparison' }),
+    ).rejects.toThrow('execution-policy-frozen-mode');
+    expect(await countDecisions(project.id)).toBe(0);
+  });
+
+  it('NO mutation during the recommendation → the decision persists with the CURRENT version (the happy path survives the guard)', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'TOCTOU Happy Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+
+    const service = buildRacingService(async () => {});
+    const rec = await service.recommend({ organizationId, projectId: project.id, workItemId: toctouWorkItemId, userId });
+    expect(rec.decisionId).toBeTruthy();
+    expect(await countDecisions(project.id)).toBe(1);
+    // The persisted decision claims the version that was — and still is —
+    // authoritative.
+    const decisions = await repository.listDecisions(toctouWorkItemId);
+    expect(decisions[0]?.policyVersion).toBe(1);
+  });
+
+  it('repository-level guard: each clause in isolation (version stale / frozen+differing mode / both pass)', async () => {
+    const project = await stack.projectRepository.create({ organizationId, name: 'TOCTOU Guard Clauses Project' });
+    await repository.insertDefaultProjectPolicy(organizationId, project.id);
+    // Freeze the policy (the touch trigger bumps the version to 2).
+    await repository.freezeProjectPolicy(project.id);
+    const frozen = await repository.getProjectPolicy(project.id);
+    expect(frozen?.frozen).toBe(true);
+    expect(frozen?.policyVersion).toBe(2);
+
+    const rowFor = (mode: string) => ({
+      policyVersion: 2,
+      benchmarkMode: mode,
+      taskProfile: {},
+      eligibleCandidates: [],
+      excludedCandidates: [],
+      recommendedCandidate: null,
+      whyExplanation: 'fixture',
+      scores: {},
+      benchmarkEvidence: {},
+    });
+
+    // (a) VERSION CLAUSE alone: snapshot v1 (stale — the current row is v2)
+    // + the frozen default mode → rejected by the version predicate.
+    expect(await repository.insertDecision(
+      organizationId, project.id, toctouWorkItemId, userId,
+      { ...rowFor('maximum_capability'), policyVersion: 1 },
+      { snapshotPolicyVersion: 1 },
+    )).toBeNull();
+
+    // (b) FROZEN/MODE CLAUSE alone: snapshot v2 (CURRENT — version matches)
+    // + a DIFFERING effective mode → rejected by the frozen/mode predicate
+    // even though the version is exact (the belt-and-braces clause).
+    expect(await repository.insertDecision(
+      organizationId, project.id, toctouWorkItemId, userId,
+      rowFor('cost_constrained'),
+      { snapshotPolicyVersion: 2 },
+    )).toBeNull();
+
+    // (c) BOTH pass: snapshot v2 (current) + the frozen default mode →
+    // the decision persists claiming the exact current version.
+    const allowed = await repository.insertDecision(
+      organizationId, project.id, toctouWorkItemId, userId,
+      rowFor('maximum_capability'),
+      { snapshotPolicyVersion: 2 },
+    );
+    expect(allowed).not.toBeNull();
+    expect(allowed?.policyVersion).toBe(2);
+    expect(await countDecisions(project.id)).toBe(1);
+  });
+});
 });

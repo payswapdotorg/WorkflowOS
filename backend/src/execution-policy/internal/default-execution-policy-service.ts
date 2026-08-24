@@ -156,7 +156,17 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
 
     const why: RecommendationWhy = rank.why;
 
-    // --- persist the §22 append-only decision ---
+    // --- persist the §22 append-only decision (ATOMIC SNAPSHOT VALIDATION) ---
+    // PR #37 review fix (TOCTOU): the decision write is conditioned on the
+    // CURRENT authoritative policy row still matching the snapshot this
+    // recommendation was computed from (same version + not frozen-with-a-
+    // differing-mode). A policy mutation or §9 freeze that raced the
+    // recommendation → the insert yields NO row → the retryable
+    // stale-snapshot error (the caller retries with the fresh policy; the
+    // retry then either succeeds against the new version or hits the
+    // frozen-mode guard). This eliminates the window where a decision could
+    // be persisted claiming a stale policyVersion or a mode that was valid
+    // only before a concurrent freeze.
     const decisionRow = {
       policyVersion: policy.policyVersion,
       benchmarkMode: policySnapshot.benchmarkMode,
@@ -168,7 +178,15 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
       scores: Object.fromEntries(rank.ranked.map((r) => [r.candidate.provider, r.score])),
       benchmarkEvidence: evidence,
     };
-    const decision = await this.deps.repository.insertDecision(organizationId, projectId, workItemId, userId, decisionRow);
+    const decision = await this.deps.repository.insertDecision(
+      organizationId, projectId, workItemId, userId, decisionRow,
+      { snapshotPolicyVersion: policy.policyVersion },
+    );
+    if (!decision) {
+      throw new Error(
+        `execution-policy-snapshot-stale: the project policy changed during the recommendation (snapshot v${policy.policyVersion} is no longer the current authoritative version${input.benchmarkMode ? ` — the request-scoped benchmark mode '${input.benchmarkMode}' may no longer be valid` : ''}) — retry with the fresh policy`,
+      );
+    }
 
     return {
       workItemId,

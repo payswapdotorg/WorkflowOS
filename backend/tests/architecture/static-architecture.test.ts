@@ -7410,4 +7410,68 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
     expect(e2eSrc).toMatch(/frozen-mode override → 409/);
   });
+
+  it('execution-policy decision write is an ATOMIC SNAPSHOT VALIDATION (TOCTOU eliminated — every persisted decision claims one exact, currently authoritative policy version)', () => {
+    // PR #37 review final concurrency gap: the read-time frozen-mode guard
+    // was not race-safe — recommend() could read policy vN (unfrozen),
+    // a concurrent request could mutate/freeze the policy to vN+1, and the
+    // recommendation could still persist a decision claiming vN (with a
+    // request-scoped mode valid only before the freeze). The decision
+    // record is the authoritative audit of policyVersion / benchmarkMode /
+    // candidates / why / evidence — it must describe ONE COHERENT policy
+    // snapshot. The fix: the decision INSERT is ONE atomic statement
+    // conditioned on the CURRENT policy row:
+    //   current policy_version == snapshot version
+    //   AND (current frozen = false OR decision mode == current default mode)
+    // A mutation/freeze during the recommendation → no row → the retryable
+    // stale-snapshot error (409) → the caller retries with the fresh policy.
+    const repoSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'pg-execution-policy-repository.ts'), 'utf8');
+    const fn = repoSrc.match(/async insertDecision[\s\S]*?\n  \}/);
+    expect(fn, 'insertDecision must exist').not.toBeNull();
+    const body = fn![0];
+    // ONE atomic statement: the INSERT is gated by a CTE over the CURRENT
+    // policy row (no separate check-then-insert window).
+    expect(body).toMatch(/WITH current_policy AS \(/);
+    expect(body).toMatch(/SELECT policy_version, frozen, default_benchmark_mode\s+FROM wfos_execution_policies/);
+    // The version predicate (stale snapshot → no insert).
+    expect(body).toMatch(/WHERE cp\.policy_version = \$14/);
+    // The frozen/mode predicate (frozen + differing effective mode → no
+    // insert — the belt-and-braces clause that holds even if a future
+    // change made freezing version-neutral).
+    expect(body).toMatch(/AND \(cp\.frozen = false OR \$6::text = cp\.default_benchmark_mode\)/);
+    // Null (not a throw) on rejection — the SERVICE surfaces the retryable
+    // error (separation of concerns: the repository guards, the service
+    // decides the contract).
+    expect(body).toMatch(/return res\.rows\[0\] \? mapDecision\(res\.rows\[0\]\) : null;/);
+    // The interface requires the guard parameter (callers cannot bypass
+    // the validation — there is NO unvalidated insert path).
+    const typesInternalSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8');
+    expect(typesInternalSrc).toMatch(/insertDecision\([^)]*row: DecisionRow, guard: DecisionSnapshotGuard\): Promise<ExecutionPolicyDecisionRecord \| null>/);
+    expect(typesInternalSrc).toMatch(/export interface DecisionSnapshotGuard/);
+    // The service passes the snapshot version + throws the retryable
+    // stale-snapshot error on null (with the request-scoped-mode note).
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    expect(recommendFn).toMatch(/\{ snapshotPolicyVersion: policy\.policyVersion \}/);
+    expect(recommendFn).toMatch(/if \(!decision\)/);
+    expect(recommendFn).toMatch(/execution-policy-snapshot-stale: the project policy changed during the recommendation/);
+    expect(recommendFn).toMatch(/retry with the fresh policy/);
+    // The route maps it to a retryable HTTP 409.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-snapshot-stale/);
+    expect(routeSrc).toMatch(/'policy-snapshot-stale'/);
+    // Regression coverage: the concurrent mutation race, the freeze race
+    // (with the retry hitting the frozen-mode guard), the happy path, and
+    // the repository-level clause isolation.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/atomic decision snapshot validation \(TOCTOU elimination\)/);
+    expect(testSrc).toMatch(/policy MUTATED during the recommendation → the decision insert is REJECTED/);
+    expect(testSrc).toMatch(/policy FROZEN during the recommendation \(with a request-scoped mode\) → the decision insert is REJECTED/);
+    expect(testSrc).toMatch(/NO mutation during the recommendation → the decision persists with the CURRENT version/);
+    expect(testSrc).toMatch(/repository-level guard: each clause in isolation/);
+    // The race is genuinely simulated MID-recommendation (the mutating
+    // task-profile hook runs after the policy read + before the insert).
+    expect(testSrc).toMatch(/buildRacingService/);
+  });
 });

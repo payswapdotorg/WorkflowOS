@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import type {
   DecisionRow,
+  DecisionSnapshotGuard,
   ExecutionPolicyRepository,
 } from './execution-policy.types.js';
 
@@ -238,18 +239,57 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
   async insertDecision(
     organizationId: string, projectId: string, workItemId: string,
     requestedBy: string | null, row: DecisionRow,
-  ): Promise<ExecutionPolicyDecisionRecord> {
+    guard: DecisionSnapshotGuard,
+  ): Promise<ExecutionPolicyDecisionRecord | null> {
+    // PR #37 review fix (TOCTOU): the decision write is an ATOMIC SNAPSHOT
+    // VALIDATION. One statement (a CTE) checks the CURRENT authoritative
+    // policy row at insert time and inserts ONLY when the snapshot the
+    // recommendation was computed from is still exact:
+    //
+    //   current_policy = the project's policy row as of NOW
+    //   inserted       = the decision INSERT ... SELECT FROM current_policy
+    //                    WHERE current_policy.policy_version = snapshot version
+    //                      AND (current_policy.frozen = false
+    //                           OR effective mode = current_policy.default mode)
+    //
+    // The two guard clauses eliminate the reviewer's race windows:
+    //   * a policy MUTATION (any UPDATE — including the §9 freeze, which
+    //     bumps policy_version via the touch trigger) during the
+    //     recommendation → version differs → no row → null → the caller
+    //     retries with the fresh policy;
+    //   * the policy BECOMING (or being) FROZEN while the decision uses a
+    //     request-scoped mode that differs from the frozen default → the
+    //     frozen/mode clause rejects → null (belt-and-braces: the freeze
+    //     also bumps the version, but this clause holds even if a future
+    //     change ever made freezing version-neutral).
+    //
+    // Invariant enforced: every PERSISTED decision corresponds to one exact,
+    // currently authoritative policy version — the decision can never claim
+    // a stale policyVersion (or a mode that was valid only before a
+    // concurrent freeze). A missing policy row (deleted mid-recommendation)
+    // also yields no insert. Statement atomicity means there is no window
+    // between the check and the insert.
     const res = await this.db.query<DecisionRowDb>(
-      `INSERT INTO wfos_execution_policy_decisions
-          (organization_id, project_id, work_item_id, requested_by,
-           policy_version, benchmark_mode, task_profile, eligible_candidates,
-           excluded_candidates, recommended_candidate, why_explanation, scores,
-           benchmark_evidence)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING id, organization_id, project_id, work_item_id, requested_by,
-                 policy_version, benchmark_mode, task_profile, eligible_candidates,
-                 excluded_candidates, recommended_candidate, why_explanation, scores,
-                 benchmark_evidence, created_at`,
+      `WITH current_policy AS (
+         SELECT policy_version, frozen, default_benchmark_mode
+           FROM wfos_execution_policies
+          WHERE project_id = $2
+       ), inserted AS (
+         INSERT INTO wfos_execution_policy_decisions
+           (organization_id, project_id, work_item_id, requested_by,
+            policy_version, benchmark_mode, task_profile, eligible_candidates,
+            excluded_candidates, recommended_candidate, why_explanation, scores,
+            benchmark_evidence)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+           FROM current_policy cp
+          WHERE cp.policy_version = $14
+            AND (cp.frozen = false OR $6::text = cp.default_benchmark_mode)
+         RETURNING id, organization_id, project_id, work_item_id, requested_by,
+                   policy_version, benchmark_mode, task_profile, eligible_candidates,
+                   excluded_candidates, recommended_candidate, why_explanation, scores,
+                   benchmark_evidence, created_at
+       )
+       SELECT * FROM inserted`,
       [
         organizationId, projectId, workItemId, requestedBy,
         row.policyVersion, row.benchmarkMode,
@@ -260,11 +300,13 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
         row.whyExplanation,
         JSON.stringify(row.scores),
         JSON.stringify(row.benchmarkEvidence),
+        guard.snapshotPolicyVersion,
       ],
     );
-    const inserted = res.rows[0];
-    if (!inserted) throw new Error('execution-policy: decision insert returned no row');
-    return mapDecision(inserted);
+    // Zero rows = the guard rejected the insert (stale snapshot and/or a
+    // frozen-mode violation). Null (not a throw): the SERVICE decides how
+    // to surface it (the retryable stale-snapshot error).
+    return res.rows[0] ? mapDecision(res.rows[0]) : null;
   }
 
   async listDecisions(workItemId: string, limit = 50): Promise<ExecutionPolicyDecisionRecord[]> {

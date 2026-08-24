@@ -42,8 +42,35 @@ export interface ExecutionPolicyRepository {
   upsertAccessProfile(organizationId: string, userId: string, input: UpsertAccessProfileInput): Promise<ProviderAccessProfileRecord>;
 
   // --- append-only decision audit (§22) ---
-  insertDecision(organizationId: string, projectId: string, workItemId: string, requestedBy: string | null, row: DecisionRow): Promise<ExecutionPolicyDecisionRecord>;
+  /**
+   * PR #37 review fix (TOCTOU): ATOMIC SNAPSHOT-VALIDATED decision insert.
+   * ONE statement checks the CURRENT authoritative policy row at insert
+   * time and inserts ONLY when the snapshot the recommendation was
+   * computed from is still exact:
+   *
+   *   current policy_version == guard.snapshotPolicyVersion
+   *   AND (current frozen = false OR row.benchmarkMode == current default
+   *        benchmark mode)
+   *
+   * Returns NULL when the guard rejects the insert (the policy mutated —
+   * including a §9 freeze, which bumps the version — or the policy is
+   * frozen with a differing effective mode): the caller retries with a
+   * fresh policy read. Invariant: every PERSISTED decision corresponds to
+   * one exact, currently authoritative policy version.
+   */
+  insertDecision(organizationId: string, projectId: string, workItemId: string, requestedBy: string | null, row: DecisionRow, guard: DecisionSnapshotGuard): Promise<ExecutionPolicyDecisionRecord | null>;
   listDecisions(workItemId: string, limit?: number): Promise<ExecutionPolicyDecisionRecord[]>;
+}
+
+/**
+ * PR #37 review fix (TOCTOU): the atomic decision-write guard — the policy
+ * snapshot the recommendation was computed from (its version) + the
+ * effective benchmark mode of the decision, both validated against the
+ * CURRENT policy row inside the insert statement.
+ */
+export interface DecisionSnapshotGuard {
+  /** The policy_version the recommendation read (the snapshot version). */
+  readonly snapshotPolicyVersion: number;
 }
 
 export interface DecisionRow {

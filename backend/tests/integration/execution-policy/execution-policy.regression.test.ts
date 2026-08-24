@@ -772,7 +772,7 @@ describe('PR #37 review fix 1 — preferences are ADVISORY (never hard eligibili
           accessRecord('nativeprov'),
           accessRecord('extprov'),
         ],
-        insertDecision: async () => ({ id: 'decision-1' }),
+        insertDecision: async (_org: string, _proj: string, _wi: string, _user: string, _row: unknown, _guard: unknown) => ({ id: 'decision-1' }),
         listDecisions: async () => [],
       } as never,
       eligibilityService: new DefaultExecutionEligibilityService(),
