@@ -313,3 +313,193 @@ WORK-015 and WORK-016 can proceed in parallel after their input contracts exist.
 ### Phase 8 — Deployment and end-to-end verification
 23. WORK-023
 24. WORK-024
+
+## 3. AUTONOMOUS EXECUTION EXTENSIONS — IMPLEMENTED
+
+### WORK-025 — Autonomous Architecture Workspace
+Objective: Let users interact with an architect LLM, iteratively refine architecture, and persist architecture/requirements/criteria/work-item plans without copy/paste.
+Dependencies: WORK-014, WORK-022, WORK-024
+Status: implemented
+
+### WORK-026 — Autonomous Runtime, GitHub/Vercel Integration, Implementation Context
+Objective: Provision project repositories, connect runtime/deployment providers, generate authoritative implementation context, configure agent providers, and drive real implementation execution.
+Dependencies: WORK-025, WORK-008, WORK-012, WORK-023
+Status: implemented
+
+### WORK-027 — Execution Provider Abstraction
+Objective: Unify native/API and external execution behind provider-independent ExecutionTask/ExecutionService contracts with secure external handoff.
+Dependencies: WORK-026
+Status: implemented
+
+### WORK-028 — WorkflowOS Companion Extension
+Objective: Eliminate manual copy/paste between WorkflowOS and external AI products through a secure browser extension and scoped callback flow.
+Dependencies: WORK-027
+Status: implemented
+
+### WORK-029 — Z.ai Companion Adapter
+Objective: Execute implementation tasks through the user's real Z.ai coding experience while preserving WorkflowOS authority and evidence boundaries.
+Dependencies: WORK-028
+Status: implemented
+
+### WORK-030 — ChatGPT/Codex Companion Adapter
+Objective: Execute implementation tasks through ChatGPT's coding-agent/Codex surface with no silent fallback to conversational chat.
+Dependencies: WORK-029
+Status: implemented
+
+### WORK-031 — Claude Code Companion Adapter
+Objective: Execute implementation tasks through Claude Code on the web using the user's existing authenticated session.
+Dependencies: WORK-030
+Status: implemented
+
+## 4. EXECUTION AND INTELLIGENCE ROADMAP
+
+### WORK-032 — Native vs External Execution Benchmark
+Objective: Build a fair, evidence-driven benchmark that compares native/API and external execution for the exact same engineering task while preserving true provider capability differences.
+Requirements: benchmark task snapshots, isolated trials, authoritative CI/verification/review metrics, comparison/export, benchmark integrity.
+Dependencies: WORK-031
+Execution modes: native and external are both mandatory benchmark dimensions.
+Definition of done: Comparable trials prove identical task inputs, prompt digest, and repository baseline, and collect authoritative outcome metrics.
+
+### WORK-033 — Execution Policy and Fair Benchmarking
+Objective: Define capability ceilings, benchmark modes, execution policies, and constraint-aware selection without artificially reducing a provider's capabilities.
+Dependencies: WORK-032
+Core rules: hard constraints first; benchmark quality only ranks eligible candidates; subscription/plan limitations are eligibility constraints; no provider is deliberately handicapped.
+Execution modes: native and external remain first-class.
+
+### WORK-034 — Persistent Agent Sessions
+Objective: Evolve execution from request/result jobs into resumable Agent Sessions with turns, tool calls, observations, checkpoints, interruptions, and terminal outcomes.
+Dependencies: WORK-033, WORK-027
+Execution modes: both native and external session state must remain observable through the same logical execution identity.
+
+### WORK-035 — Agent Workspace and Git Worktrees
+Objective: Give native agents isolated reproducible workspaces with repository, worktree, branch, baseline commit, filesystem, and execution metadata.
+Dependencies: WORK-034, WORK-008
+Execution modes: native uses WorkflowOS-managed workspaces; external continues to use provider-native workspaces while preserving the same Work Item/Execution identity.
+
+### WORK-036 — Tool Runtime
+Objective: Provide governed tool interfaces for filesystem, terminal, git, package/test execution, browser, HTTP, and related development capabilities.
+Dependencies: WORK-035
+Execution modes: tool outcomes remain observable for both native and external execution; external adapters report provider-side observations without bypassing WorkflowOS authority.
+
+### WORK-037 — Agent Policy and Permissions
+Objective: Add execution-specific policy controls distinct from project authorization: allow, deny, ask, and constrained capabilities for tools, network, secrets, and deployment actions.
+Dependencies: WORK-036, WORK-002
+Execution modes: policies apply to native execution and to external handoff eligibility/observability.
+
+## 5. EXISTING PROJECTS, CONTINUOUS DEVELOPMENT, AND MAINTENANCE
+
+### WORK-038 — Existing Project Onboarding
+Objective: Allow users to connect software that WorkflowOS did not build and establish an explicit Project Baseline from repository evidence.
+Dependencies: WORK-035, WORK-036, WORK-037, WORK-008
+Required baseline provenance: observed, inferred, confirmed, proposed.
+Execution modes: onboarding-triggered implementation work must support native and external execution.
+
+### WORK-039 — Repository and Context Intelligence
+Objective: Build persistent repository, dependency, architecture, symbol, API, test, runtime, and historical context used to assemble better implementation and maintenance contexts.
+Dependencies: WORK-038, WORK-034
+Execution modes: context is shared across native and external execution; providers receive the same authoritative task context subject to provider-specific limits.
+
+### WORK-040 — Continuous Development Planner
+Objective: Continuously turn product goals, technical debt, refactors, performance opportunities, developer requests, and dependency-aware priorities into governed Work Items.
+Dependencies: WORK-039, WORK-032
+Execution modes: recommended/selected execution may be native or external per eligibility and policy.
+
+### WORK-041 — Maintenance and Project Health Engine
+Objective: Detect dependency vulnerabilities, CI regressions, runtime changes, security advisories, compatibility issues, performance regressions, architecture drift, technical debt, and operational risks; create and prioritize maintenance Work Items.
+Dependencies: WORK-039, WORK-040
+Execution modes: maintenance Work Items must support native and external execution and the same verification/review lifecycle as feature work.
+
+## 6. ADAPTIVE EXECUTION
+
+### WORK-042 — Cross-Mode Execution Handoff
+Objective: Allow one logical engineering execution to move from native/API execution to external execution or from external to native without creating a second Work Item or workflow state machine.
+Dependencies: WORK-034, WORK-027
+Requirements: preserve logical execution identity, implementation context, evidence, audit, branch/workspace state, and correction history.
+
+### WORK-043 — Execution Eligibility and Constraint Engine
+Objective: Determine which execution candidates are actually eligible before performance ranking.
+Dependencies: WORK-033, WORK-037, WORK-042
+Hard constraints may include: model capability, user subscription plan, quota, rate limits, provider availability, privacy, organization/project policy, native/external restrictions, and security requirements.
+
+### WORK-044 — Adaptive Execution Router
+Objective: Recommend or automatically select among eligible native/API and external candidates using benchmark outcomes, quality, reliability, cost, latency, human intervention, and user/project preferences.
+Dependencies: WORK-032, WORK-033, WORK-043
+Principle: never lower a provider's capability merely to equalize benchmark outcomes.
+
+## 7. MULTI-AGENT INTELLIGENCE
+
+### WORK-045 — Agent Roles
+Objective: Model reusable engineering roles such as Architect, Planner, Implementer, Tester, Security Reviewer, Performance Reviewer, UX Reviewer, and Release Engineer independently from any specific provider.
+Dependencies: WORK-034, WORK-036, WORK-044
+Execution modes: each role may use native or external execution when eligible.
+
+### WORK-046 — Multi-Agent Delegation
+Objective: Allow one logical Work Item to coordinate multiple specialized agents while preserving one authoritative workflow and evidence chain.
+Dependencies: WORK-045, WORK-035, WORK-037
+Execution modes: heterogeneous mixes of native and external agents are supported.
+
+### WORK-047 — Agent Intelligence
+Objective: Use historical WorkflowOS evidence to recommend roles, providers, models, execution modes, fallback strategies, and task decomposition.
+Dependencies: WORK-032, WORK-044, WORK-046
+Hard constraints remain authoritative; intelligence may rank eligible candidates but cannot bypass policy, authorization, verification, review, or GitHub authority.
+
+## 8. DEVELOPER PRODUCT EXPERIENCE
+
+### WORK-048 — Developer Workbench
+Objective: Create the primary Stripe-quality developer workspace centered on Project, Work Graph, Work Item, Execution, Changes, Verification, Reviews, Deployments, Maintenance, and Activity.
+Dependencies: WORK-040, WORK-041, WORK-042, WORK-044
+UX requirements: developer-first information density, fast navigation, inspectable decisions, command-oriented actions, Apple-level polish where useful, backend-owned authority.
+
+### WORK-049 — Project Health and Maintenance UX
+Objective: Give developers an always-current project health view covering CI, security, dependencies, architecture stability, performance, runtime, maintenance debt, and recommended Work Items.
+Dependencies: WORK-041, WORK-048
+Execution modes: every recommended maintenance action can enter native or external execution.
+
+### WORK-050 — Unified Execution UX
+Objective: Make native/API and external execution feel interchangeable at the Work Item level, including recommendations, eligibility explanations, provider capability, subscription constraints, and one-click cross-mode handoff.
+Dependencies: WORK-042, WORK-043, WORK-048
+Required user experience: developers see the engineering task first and execution strategy second; advanced users can inspect and override the recommendation.
+
+## 9. IMPLEMENTATION ORDER — FORWARD ROADMAP
+
+### Phase 9 — Autonomous execution foundation
+25. WORK-025
+26. WORK-026
+27. WORK-027
+28. WORK-028
+29. WORK-029
+30. WORK-030
+31. WORK-031
+
+### Phase 10 — Evidence and execution policy
+32. WORK-032
+33. WORK-033
+
+### Phase 11 — Execution substrate
+34. WORK-034
+35. WORK-035
+36. WORK-036
+37. WORK-037
+
+### Phase 12 — Existing software and continuous operation
+38. WORK-038
+39. WORK-039
+40. WORK-040
+41. WORK-041
+
+### Phase 13 — Adaptive execution
+42. WORK-042
+43. WORK-043
+44. WORK-044
+
+### Phase 14 — Multi-agent intelligence
+45. WORK-045
+46. WORK-046
+47. WORK-047
+
+### Phase 15 — Developer product experience
+48. WORK-048
+49. WORK-049
+50. WORK-050
+
+All forward work items must preserve the frozen v1.0 authority rules unless an approved architecture change creates a new immutable architecture version.
