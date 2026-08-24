@@ -99,3 +99,8 @@ export type { BenchmarkEvidenceProviderDeps } from './internal/default-benchmark
 export { ProviderCapabilityNormalizer } from './internal/provider-capability-normalizer.js';
 export { PgExecutionPolicyRepository } from './internal/pg-execution-policy-repository.js';
 export { DefaultExecutionPolicyService } from './internal/default-execution-policy-service.js';
+// PR #37 review fix: the constrained-mode semantic validation (a constrained
+// benchmark mode requires its cap — rejected at the policy boundary rather
+// than silently falling back to unconstrained behavior). Exported for the
+// route layer's 400 mapping + direct testing.
+export { validateBenchmarkModeConstraint } from './internal/default-execution-policy-service.js';

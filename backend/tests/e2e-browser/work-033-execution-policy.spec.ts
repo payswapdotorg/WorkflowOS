@@ -54,6 +54,7 @@ let server: FastifyInstance;
 let queue: InMemoryQueue;
 let worker: WorkerHost;
 let policyProjectId: string;
+let freshPolicyProjectId: string;
 let policyWorkItemId: string;
 
 const API_KEY = 'raw-key-policy-e2e';
@@ -95,6 +96,11 @@ test.beforeAll(async () => {
   });
   policyProjectId = project.id;
   policyWorkItemId = workItem.id;
+
+  // PR #37 review fix e2e: a second project with NO experiments started —
+  // its (unfrozen) policy exercises the constrained-mode validation.
+  const freshProject = await stack.projectRepository.create({ organizationId: org.id, name: 'Fresh Policy Project' });
+  freshPolicyProjectId = freshProject.id;
 
   // --- wire the execution-policy service (the WORK-033 surface) ---
   const authorizationService = new DefaultAuthorizationService(
@@ -250,6 +256,37 @@ test('§31 project policy: ensure → get → update (policyVersion bumps) → f
   // update after freeze → 409 (§9 enforced)
   ({ status } = await api(`/projects/${policyProjectId}/execution-policy`, 'PATCH', { externalExecutionAllowed: true }));
   expect(status).toBe(409);
+});
+
+test('PR #37 review fix — constrained mode without its cap → 400 (rejected, not a silent unconstrained fallback)', async () => {
+  // A fresh project (the policyProjectId policy is frozen from the previous
+  // test): the default policy is maximum_capability with NO caps.
+  const { data } = await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'POST');
+  const policy = (data as { policy: Record<string, unknown> }).policy;
+  expect(policy.defaultBenchmarkMode).toBe('maximum_capability');
+  expect(policy.maxCostPerTaskCents).toBeNull();
+
+  // COST_CONSTRAINED without a cost cap → 400 (invalid-mode-constraint).
+  let res = await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'PATCH', { defaultBenchmarkMode: 'cost_constrained' });
+  expect(res.status).toBe(400);
+  expect((res.data as { error: string }).error).toBe('invalid-mode-constraint');
+
+  // LATENCY_CONSTRAINED without a duration cap → 400.
+  res = await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'PATCH', { defaultBenchmarkMode: 'latency_constrained' });
+  expect(res.status).toBe(400);
+  expect((res.data as { error: string }).error).toBe('invalid-mode-constraint');
+
+  // Valid: cap + mode in one PATCH → 200.
+  res = await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'PATCH', { defaultBenchmarkMode: 'cost_constrained', maxCostPerTaskCents: 500 });
+  expect(res.status).toBe(200);
+  expect((res.data as { policy: { defaultBenchmarkMode: string } }).policy.defaultBenchmarkMode).toBe('cost_constrained');
+
+  // Recommendation with an explicit constrained mode on a capless project → 400.
+  // (Reset to capless first.)
+  await api(`/projects/${freshPolicyProjectId}/execution-policy`, 'PATCH', { defaultBenchmarkMode: 'maximum_capability', maxCostPerTaskCents: null });
+  res = await api(`/work-items/${policyWorkItemId}/execution/recommendation?benchmarkMode=cost_constrained`);
+  expect(res.status).toBe(400);
+  expect((res.data as { error: string }).error).toBe('invalid-mode-constraint');
 });
 
 // ---------------------------------------------------------------------------

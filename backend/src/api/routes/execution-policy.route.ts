@@ -79,7 +79,14 @@ export async function executionPolicyRoutes(app: FastifyInstance, deps: Executio
         });
         return { recommendation: rec };
       } catch (err) {
-        return reply.code(500).send({ error: 'execution-policy-recommend-failed', message: (err as Error).message });
+        const msg = (err as Error).message;
+        // PR #37 review fix: an explicit ?benchmarkMode=constrained against
+        // a capless project is a client-supplied semantics error → 400
+        // (rejected, NOT a silent fallback to unconstrained behavior).
+        if (msg.includes('execution-policy-invalid-mode-constraint')) {
+          return reply.code(400).send({ error: 'invalid-mode-constraint', message: msg });
+        }
+        return reply.code(500).send({ error: 'execution-policy-recommend-failed', message: msg });
       }
     });
   });
@@ -142,6 +149,11 @@ export async function executionPolicyRoutes(app: FastifyInstance, deps: Executio
         return { policy };
       } catch (err) {
         const msg = (err as Error).message;
+        // PR #37 review fix: a constrained mode without its cap is a
+        // client-supplied semantics error → 400 (not 409/404/500).
+        if (msg.includes('execution-policy-invalid-mode-constraint')) {
+          return reply.code(400).send({ error: 'invalid-mode-constraint', message: msg });
+        }
         if (msg.includes('frozen')) return reply.code(409).send({ error: 'policy-frozen', message: msg });
         return reply.code(404).send({ error: 'not-found', message: msg });
       }

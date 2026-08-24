@@ -7300,4 +7300,67 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     expect(regSrc).toMatch(/preferences are ADVISORY \(never hard eligibility constraints\)/);
     expect(regSrc).toMatch(/constrained modes FAIL CLOSED on unknown cost\/latency evidence/);
   });
+
+  it('execution-policy constrained modes REQUIRE their caps at the policy boundary (§8 — no meaningless constrained policy can persist or evaluate)', () => {
+    // PR #37 review final correction: fail-closed eligibility was not
+    // enough — the system could still persist + return
+    // COST_CONSTRAINED with maxCostCents=NULL (or LATENCY_CONSTRAINED with
+    // maxDurationMs=NULL): labeled constrained while imposing no
+    // constraint. The invariant is enforced at TWO boundaries:
+    //   * the SERVICE (validateBenchmarkModeConstraint — merged-view on
+    //     policy update + resolved-mode on recommendation);
+    //   * the DATABASE (migration 0033's CHECK — no write path can persist
+    //     a meaningless combination, including removing the cap while the
+    //     mode stays constrained).
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0033_execution_policy_constrained_mode_requires_cap.sql',
+    );
+    expect(existsSync(migrationPath), '0033_execution_policy_constrained_mode_requires_cap.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    // The CHECK constraint: both modes require their caps.
+    expect(src).toMatch(/wfos_execution_policy_constrained_mode_requires_cap/);
+    expect(src).toMatch(/default_benchmark_mode <> 'cost_constrained' OR max_cost_per_task_cents IS NOT NULL/);
+    expect(src).toMatch(/default_benchmark_mode <> 'latency_constrained' OR max_time_to_pr_ms IS NOT NULL/);
+    // The service validator exists + throws the domain error for both modes.
+    const serviceSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts'), 'utf8');
+    const fn = serviceSrc.match(/export function validateBenchmarkModeConstraint[\s\S]*?\n\}/);
+    expect(fn, 'validateBenchmarkModeConstraint must exist').not.toBeNull();
+    expect(fn![0]).toMatch(/'cost_constrained' && maxCostCents == null/);
+    expect(fn![0]).toMatch(/'latency_constrained' && maxDurationMs == null/);
+    expect(fn![0]).toMatch(/execution-policy-invalid-mode-constraint/);
+    // Applied at POLICY UPDATE time (the MERGED view — existing + patch).
+    const updateFn = serviceSrc.match(/async updateProjectPolicy[\s\S]*?\n  \}/)![0];
+    expect(updateFn).toMatch(/validateBenchmarkModeConstraint\(/);
+    expect(updateFn).toMatch(/input\.defaultBenchmarkMode \?\? existing\.defaultBenchmarkMode/);
+    // Applied at RECOMMENDATION time (the RESOLVED mode vs the policy caps
+    // — before the snapshot is built).
+    const recommendFn = serviceSrc.match(/async recommend[\s\S]*?\n  \}/)![0];
+    const modeIdx = recommendFn.indexOf('input.benchmarkMode ?? policy.defaultBenchmarkMode');
+    const validateIdx = recommendFn.indexOf('validateBenchmarkModeConstraint(benchmarkMode');
+    const snapshotIdx = recommendFn.indexOf('buildPolicySnapshot(policy, benchmarkMode)');
+    expect(modeIdx).toBeGreaterThanOrEqual(0);
+    expect(validateIdx).toBeGreaterThan(modeIdx);
+    expect(snapshotIdx).toBeGreaterThan(validateIdx);
+    // Exported from the domain barrel + mapped to HTTP 400 on BOTH routes.
+    const indexSrc = readFileSync(join(EXEC_POLICY_DIR, 'index.ts'), 'utf8');
+    expect(indexSrc).toMatch(/export \{ validateBenchmarkModeConstraint \}/);
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts'), 'utf8');
+    expect(routeSrc).toMatch(/execution-policy-invalid-mode-constraint/);
+    expect(routeSrc).toMatch(/'invalid-mode-constraint'/);
+    // Regression coverage: the reviewer's three required scenarios + the
+    // merged directions + the recommendation-time rejection + the DB
+    // backstop + the HTTP-level 400 mapping.
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'mode-constraint-validation.integration.test.ts');
+    expect(existsSync(testPath), 'mode-constraint-validation.integration.test.ts must exist').toBe(true);
+    const testSrc = readFileSync(testPath, 'utf8');
+    expect(testSrc).toMatch(/COST_CONSTRAINED \+ null maxCost → rejected/);
+    expect(testSrc).toMatch(/LATENCY_CONSTRAINED \+ null maxDuration → rejected/);
+    expect(testSrc).toMatch(/valid constrained mode \+ cap → accepted/);
+    expect(testSrc).toMatch(/removing the cap while the mode is COST_CONSTRAINED → rejected/);
+    expect(testSrc).toMatch(/explicit constrained mode on a capless project → rejected/);
+    expect(testSrc).toMatch(/DB CHECK rejects/);
+    const e2eSrc = readFileSync(join(BACKEND_ROOT, 'tests', 'e2e-browser', 'work-033-execution-policy.spec.ts'), 'utf8');
+    expect(e2eSrc).toMatch(/constrained mode without its cap → 400/);
+  });
 });

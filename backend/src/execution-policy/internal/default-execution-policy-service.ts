@@ -70,6 +70,14 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     // --- resolve benchmark mode (explicit > project default > user pref) ---
     const benchmarkMode: BenchmarkMode = input.benchmarkMode ?? policy.defaultBenchmarkMode;
 
+    // PR #37 review fix (constrained modes must be MEANINGFUL): reject the
+    // request rather than silently producing an unconstrained-but-labeled-
+    // constrained policy snapshot. COST_CONSTRAINED requires a cost cap;
+    // LATENCY_CONSTRAINED requires a duration cap. An explicit
+    // ?benchmarkMode=cost_constrained against a capless project is a
+    // client error, not a fallback to unconstrained behavior.
+    validateBenchmarkModeConstraint(benchmarkMode, policy.maxCostPerTaskCents, policy.maxTimeToPrMs);
+
     // --- build the policy snapshot at decision time (§9) ---
     const policySnapshot = this.buildPolicySnapshot(policy, benchmarkMode);
 
@@ -177,6 +185,20 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
   }
 
   async updateProjectPolicy(projectId: string, input: UpdateProjectPolicyInput): Promise<ProjectPolicyRecord> {
+    // PR #37 review fix (constrained modes must be MEANINGFUL): validate
+    // the MERGED result (existing policy + patch), not just the patch —
+    // setting the mode without a cap AND removing the cap while the mode
+    // stays constrained are both rejected. The migration-0033 DB CHECK is
+    // the backstop; this gives the caller a clear domain error instead of
+    // a raw constraint violation.
+    const existing = await this.deps.repository.getProjectPolicy(projectId);
+    if (existing) {
+      validateBenchmarkModeConstraint(
+        input.defaultBenchmarkMode ?? existing.defaultBenchmarkMode,
+        input.maxCostPerTaskCents !== undefined ? input.maxCostPerTaskCents : existing.maxCostPerTaskCents,
+        input.maxTimeToPrMs !== undefined ? input.maxTimeToPrMs : existing.maxTimeToPrMs,
+      );
+    }
     const updated = await this.deps.repository.updateProjectPolicy(projectId, input);
     if (!updated) throw new Error(`execution-policy: project ${projectId} not found (or frozen)`);
     return updated;
@@ -370,6 +392,39 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * PR #37 review fix (constrained modes must be MEANINGFUL): a benchmark
+ * mode is not allowed to persist or evaluate while its constraint is
+ * absent. Enforced at the POLICY BOUNDARY — both at policy WRITE time
+ * (updateProjectPolicy, with the migration-0033 DB CHECK as the backstop)
+ * and at RECOMMENDATION time (the resolved mode vs the project policy's
+ * caps) — so the system rejects the combination rather than silently
+ * falling back to unconstrained behavior:
+ *
+ *   COST_CONSTRAINED    → requires maxCostCents    (maxCostPerTaskCents) != null
+ *   LATENCY_CONSTRAINED → requires maxDurationMs   (maxTimeToPrMs)      != null
+ *
+ * The thrown error message starts with 'execution-policy-invalid-mode' —
+ * the route layer maps it to HTTP 400 (a client-supplied semantics error,
+ * distinct from 409 frozen / 404 missing / 500 internal).
+ */
+export function validateBenchmarkModeConstraint(
+  benchmarkMode: BenchmarkMode,
+  maxCostCents: number | null,
+  maxDurationMs: number | null,
+): void {
+  if (benchmarkMode === 'cost_constrained' && maxCostCents == null) {
+    throw new Error(
+      'execution-policy-invalid-mode-constraint: COST_CONSTRAINED requires a cost cap (maxCostPerTaskCents) — set the cap or choose a different benchmark mode; a constrained mode without its constraint is meaningless',
+    );
+  }
+  if (benchmarkMode === 'latency_constrained' && maxDurationMs == null) {
+    throw new Error(
+      'execution-policy-invalid-mode-constraint: LATENCY_CONSTRAINED requires a duration cap (maxTimeToPrMs) — set the cap or choose a different benchmark mode; a constrained mode without its constraint is meaningless',
+    );
+  }
+}
 
 function computeAvailability(
   p: ExecutionProviderInfo,
