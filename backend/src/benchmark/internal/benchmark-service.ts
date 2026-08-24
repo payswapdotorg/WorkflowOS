@@ -584,19 +584,37 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
   }
 
   /**
-   * Mark the experiment 'completed' + validate integrity + audit
-   * BENCHMARK_COMPLETED — but ONLY when every trial is terminal. If any
-   * trial is still in a non-terminal phase (queued/starting/
-   * execution_wait/delivery_wait), this is a no-op (the worker will
-   * re-check when the last trial finishes).
+   * Two-phase experiment completion protocol (PR #36 review fix #2):
    *
-   * PR #35 follow-up (idempotency): the experiment-completion transition is
-   * an ATOMIC claim (`claimExperimentCompletion`: running→completed
-   * compare-and-swap). Only the worker that wins (returns a row) may run
-   * integrity validation + write the BENCHMARK_COMPLETED audit event. The
-   * loser (null) skips — exactly-once experiment finalization (closes the
-   * duplicate BENCHMARK_COMPLETED audit + duplicate integrity-validation
-   * race that mirrors the trial-finalization race).
+   *   1. RESERVATION (exactly-once CAS): claimExperimentCompletion
+   *      running → finalizing. Only the winner proceeds; the loser (null)
+   *      no-ops. `completed` is NOT made authoritative here.
+   *   2. INTEGRITY VALIDATION (winner only): integrityService.validate.
+   *      Returns BenchmarkIntegrityRecord { valid }. Thrown errors are
+   *      treated as a validation failure (the experiment must not read
+   *      `completed`).
+   *   3. FINALIZATION (CAS, makes the status authoritative):
+   *      valid===true  → finalizeExperimentCompletion (finalizing → completed)
+   *                      + audit BENCHMARK_COMPLETED
+   *      valid===false → finalizeExperimentInvalidation (finalizing → invalidated)
+   *                      + audit BENCHMARK_INVALIDATED
+   *
+   * This closes the PR #36 review finding: the prior version flipped the
+   * experiment to `completed` BEFORE validation ran, so a failed integrity
+   * check exposed a false successful completion (the row read `completed` +
+   * BENCHMARK_COMPLETED was already audited). Now `completed` is
+   * authoritative ONLY after integrity passes; a failed check leaves the
+   * experiment in `invalidated` (the existing terminal state for that).
+   *
+   * The `finalizing` reservation state is non-terminal, so no concurrent
+   * worker re-enters the protocol while the winner is validating (the
+   * all-terminal guard treats `finalizing` as not-yet-terminal). The
+   * reservation CAS is exclusive (WHERE status='running'), so exactly one
+   * worker wins — exactly-once validation + exactly-once audit.
+   *
+   * Only called when every trial is terminal. If any trial is still in a
+   * non-terminal phase, this is a no-op (the worker re-checks when the
+   * last trial finishes).
    */
   private async checkExperimentCompletion(experimentId: string): Promise<void> {
     const { trials } = await this.deps.repository.listTrials(experimentId, { limit: 1000 });
@@ -608,14 +626,54 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       (t) => t.lifecyclePhase === 'completed' || t.lifecyclePhase === 'failed',
     );
     if (!allTerminal) return;
-    // ATOMIC experiment-completion claim. Only the winner may run integrity
-    // validation + write BENCHMARK_COMPLETED. The loser (null) no-ops.
+    // Phase 1 — RESERVATION (exactly-once CAS). Only the winner may run
+    // integrity validation + the finalization CAS. The loser (null) no-ops.
     const claimed = await this.deps.repository.claimExperimentCompletion(experimentId);
     if (!claimed) return;
-    await this.deps.integrityService.validate(experimentId);
+    // Phase 2 — INTEGRITY VALIDATION (winner only). validate() returns a
+    // record with `valid` (it does NOT throw on integrity failure — it
+    // calls invalidateIntegrity internally + returns valid===false). A
+    // thrown error (e.g. snapshot/experiment not found, DB failure) is
+    // treated as a validation failure: the experiment MUST NOT read
+    // `completed`.
+    let valid = false;
+    try {
+      const record = await this.deps.integrityService.validate(experimentId);
+      valid = record.valid;
+    } catch (err) {
+      this.deps.logger.error('benchmark.experiment-integrity-validation-failed', {
+        experimentId, error: (err as Error).message,
+      });
+      valid = false;
+    }
+    // Phase 3 — FINALIZATION (CAS, makes the status authoritative).
+    if (valid) {
+      const finalized = await this.deps.repository.finalizeExperimentCompletion(experimentId);
+      if (!finalized) {
+        // Should not happen (the reservation is exclusive), but the CAS
+        // makes it safe — another worker already advanced the experiment.
+        return;
+      }
+      await this.deps.auditService.write({
+        projectId: claimed.projectId,
+        eventType: 'BENCHMARK_COMPLETED',
+        actor: 'system',
+        source: 'benchmark-service',
+        resourceType: 'benchmark_experiment',
+        resourceId: experimentId,
+        metadata: {},
+      });
+      return;
+    }
+    const invalidated = await this.deps.repository.finalizeExperimentInvalidation(experimentId);
+    if (!invalidated) {
+      // Should not happen; another worker already advanced. No audit (the
+      // winner that advanced wrote it).
+      return;
+    }
     await this.deps.auditService.write({
       projectId: claimed.projectId,
-      eventType: 'BENCHMARK_COMPLETED',
+      eventType: 'BENCHMARK_INVALIDATED',
       actor: 'system',
       source: 'benchmark-service',
       resourceType: 'benchmark_experiment',

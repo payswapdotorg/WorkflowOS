@@ -86,16 +86,48 @@ export interface BenchmarkRepository {
   listExperiments(projectId: string, opts?: { limit?: number; offset?: number }): Promise<{ experiments: BenchmarkExperiment[]; total: number }>;
   updateExperimentStatus(id: string, status: BenchmarkExperiment['status'], opts?: { startedAt?: Date; completedAt?: Date }): Promise<BenchmarkExperiment | null>;
   /**
-   * PR #35 follow-up (idempotency): ATOMIC experiment-completion claim.
-   * Compare-and-swap: `UPDATE wfos_benchmark_experiments SET status='completed',
-   * completed_at=COALESCE(completed_at, NOW()) WHERE id=$1 AND status='running'
-   * RETURNING *`. Only the worker that wins (returns a row) may run integrity
-   * validation + write the BENCHMARK_COMPLETED audit event. The loser (null)
-   * skips — exactly-once experiment finalization (closes the duplicate
-   * BENCHMARK_COMPLETED audit + duplicate integrity-validation race that
-   * mirrors the trial-finalization race).
+   * PR #36 review fix #2: ATOMIC experiment-completion RESERVATION (phase 1
+   * of the two-phase completion protocol). Compare-and-swap:
+   * `UPDATE wfos_benchmark_experiments SET status='finalizing'
+   * WHERE id=$1 AND status='running' RETURNING *`.
+   *
+   * Only the worker that wins (returns a row) may proceed to integrity
+   * validation (phase 2). The loser (null) no-ops — exactly-once
+   * validation + audit.
+   *
+   * CRITICAL: this reserves the experiment (`running → finalizing`) but does
+   * NOT make `completed` authoritative. The winner MUST call
+   * `finalizeExperimentCompletion` (validation passed → `finalizing →
+   * completed`) or `finalizeExperimentInvalidation` (validation failed →
+   * `finalizing → invalidated`) AFTER `integrityService.validate` returns.
+   * Without the finalization call the experiment is stuck in `finalizing`
+   * (non-terminal) — a visible, debuggable stuck-state, NOT a false
+   * successful completion.
    */
   claimExperimentCompletion(id: string): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #2: phase 3a — ATOMIC completion FINALIZATION (success
+   * path). Compare-and-swap `finalizing → completed` (sets completed_at).
+   * Called by the reservation winner AFTER `integrityService.validate`
+   * returns a record with `valid === true`. Only after this CAS does the
+   * `completed` status become authoritative. Returns null if the
+   * experiment is no longer in `finalizing` (e.g. a concurrent invalidation
+   * already advanced it — should not happen given the reservation is
+   * exclusive, but the CAS makes it safe regardless).
+   */
+  finalizeExperimentCompletion(id: string): Promise<BenchmarkExperiment | null>;
+
+  /**
+   * PR #36 review fix #2: phase 3b — ATOMIC invalidation FINALIZATION
+   * (failure path). Compare-and-swap `finalizing → invalidated`. Called by
+   * the reservation winner AFTER `integrityService.validate` returns a
+   * record with `valid === false` (or throws — treated as a validation
+   * failure). This is the authoritative terminal state for a failed
+   * integrity check: the experiment is `invalidated`, NOT `completed`, so
+   * no consumer can read a false successful completion.
+   */
+  finalizeExperimentInvalidation(id: string): Promise<BenchmarkExperiment | null>;
 
   // Trials (§5, §6)
   createTrial(input: BenchmarkTrialInsert): Promise<BenchmarkTrial>;

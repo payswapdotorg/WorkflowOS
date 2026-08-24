@@ -385,4 +385,227 @@ describe('PR #35 follow-up — benchmark trial idempotency / concurrency', () =>
     expect(claimed?.lifecyclePhase).toBe('starting');
     expect(claimed?.status).toBe('running');
   });
+
+  it('migration 0027 backfill classifies native running→delivery_wait + external running→execution_wait', async () => {
+    // PR #36 review fix #1: a native `running` trial is past execution
+    // (native is synchronous-completed by the orchestrator) + awaiting
+    // delivery, so it MUST backfill to `delivery_wait`. An external
+    // `running` trial is awaiting external execution completion, so it
+    // backfills to `execution_wait`. The prior single backfill (all running
+    // → execution_wait) misclassified native trials — runTrialJob would
+    // then re-read a non-existent execution record + finalize them as
+    // 'execution-record-not-found'.
+    //
+    // The pre-migration state (status='running', lifecycle_phase='queued')
+    // is now FORBIDDEN by the `wfos_benchmark_trials_status_phase_invariant`
+    // CHECK (added after the backfill in migration 0027). To test the
+    // backfill SQL at runtime we must TEMPORARILY drop the CHECK — exactly
+    // mirroring the migration's own ordering (backfill runs BEFORE the
+    // CHECK is added). The CHECK is re-added in a finally block so the
+    // invariant is always restored.
+    const { experimentId } = await makeExperiment('backfill-mode-split', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+      { provider: 'fake', mode: 'external', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    expect(trials).toHaveLength(2);
+    const nativeTrial = trials.find((t) => t.executionMode === 'native')!;
+    const externalTrial = trials.find((t) => t.executionMode === 'external')!;
+
+    const db = stack.authStack.db.client;
+    // Temporarily drop the invariant CHECK so we can recreate the
+    // pre-migration divergent state the backfill is designed to fix.
+    await db.query(`ALTER TABLE wfos_benchmark_trials DROP CONSTRAINT wfos_benchmark_trials_status_phase_invariant`);
+    try {
+      // Simulate pre-migration state: both trials at status='running' +
+      // lifecycle_phase='queued' (the column default before the backfill).
+      await db.query(`UPDATE wfos_benchmark_trials SET status = 'running', lifecycle_phase = 'queued' WHERE id = $1`, [nativeTrial.id]);
+      await db.query(`UPDATE wfos_benchmark_trials SET status = 'running', lifecycle_phase = 'queued' WHERE id = $1`, [externalTrial.id]);
+
+      // Run the two mode-split backfill UPDATEs from migration 0027
+      // (verbatim — these are the statements the reviewer asked to split).
+      await db.query(`UPDATE wfos_benchmark_trials SET lifecycle_phase = 'delivery_wait' WHERE status = 'running' AND execution_mode = 'native' AND lifecycle_phase = 'queued'`);
+      await db.query(`UPDATE wfos_benchmark_trials SET lifecycle_phase = 'execution_wait' WHERE status = 'running' AND execution_mode = 'external' AND lifecycle_phase = 'queued'`);
+
+      // ASSERTION: native trial → delivery_wait (NOT execution_wait).
+      const nativeAfter = await stack.benchmarkRepository.getTrial(nativeTrial.id);
+      expect(nativeAfter?.lifecyclePhase).toBe('delivery_wait');
+      expect(nativeAfter?.status).toBe('running');
+      // ASSERTION: external trial → execution_wait (NOT delivery_wait).
+      const externalAfter = await stack.benchmarkRepository.getTrial(externalTrial.id);
+      expect(externalAfter?.lifecyclePhase).toBe('execution_wait');
+      expect(externalAfter?.status).toBe('running');
+    } finally {
+      // Always restore the invariant CHECK (even if the assertions failed).
+      await db.query(`ALTER TABLE wfos_benchmark_trials ADD CONSTRAINT wfos_benchmark_trials_status_phase_invariant CHECK (lifecycle_phase = 'queued' AND status = 'queued' OR lifecycle_phase = 'starting' AND status = 'running' OR lifecycle_phase = 'execution_wait' AND status = 'running' OR lifecycle_phase = 'delivery_wait' AND status = 'running' OR lifecycle_phase = 'completed' AND status = 'completed' OR lifecycle_phase = 'failed' AND status IN ('failed','unavailable'))`);
+    }
+  });
+
+  it('integrity failure does NOT expose a false completed experiment (two-phase protocol: invalidated instead)', async () => {
+    // PR #36 review fix #2a: if integrity validation fails, the experiment
+    // MUST end in 'invalidated' (NOT 'completed'), + BENCHMARK_INVALIDATED
+    // must be audited, + BENCHMARK_COMPLETED must NOT be audited. The prior
+    // version flipped the experiment to 'completed' BEFORE validation ran,
+    // so a failed integrity check exposed a false successful completion.
+    const { experimentId } = await makeExperiment('integrity-failure-native', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    // Run the orchestrator once → trial advances to delivery_wait (native:
+    // starting → delivery_wait). The cloned work item is at 'ready'.
+    await stack.benchmarkService.runTrialJob(trialId);
+    let trial = await stack.benchmarkRepository.getTrial(trialId);
+    expect(trial?.lifecyclePhase).toBe('delivery_wait');
+    expect(trial?.workItemId).toBeTruthy();
+
+    // Drive the cloned work item through the legal workflow path to
+    // 'verified' (the delivery-success terminal state).
+    const path: WorkflowState[] = [
+      'assigned', 'implementing', 'pr_open', 'verifying',
+      'architect_review', 'approved', 'merged', 'verified',
+    ];
+    let current = (await stack.workflowEngine.getState(trial!.workItemId!))!.currentState;
+    for (const target of path) {
+      if (current === target || current === 'verified') break;
+      const res = await stack.workflowEngine.transition({
+        workItemId: trial!.workItemId!,
+        toState: target,
+        transitionType: 'benchmark-trial-delivery',
+        actor: 'benchmark-test-driver',
+      });
+      if (res.success) {
+        current = target;
+      } else {
+        const fresh = await stack.workflowEngine.getState(trial!.workItemId!);
+        if (!fresh) break;
+        current = fresh.currentState;
+        if (current === 'verified') break;
+      }
+    }
+    expect(current).toBe('verified');
+
+    // CORRUPT the trial's prompt_digest so it mismatches the snapshot —
+    // integrity validation (§27) MUST fail when the digest set diverges
+    // from the snapshot's digest. This is the corruption that, under the
+    // OLD protocol, would have produced a false 'completed' experiment.
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials SET prompt_digest = 'corrupted-digest-that-mismatches-snapshot'
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Final runTrialJob: finalizes the trial to 'completed' (the trial-level
+    // CAS, claimTerminal, is independent of the experiment-level integrity
+    // check) + then calls checkExperimentCompletion. The two-phase protocol:
+    //   claimExperimentCompletion (running → finalizing)  [reservation]
+    //   integrityService.validate → valid===false          [§27 digest mismatch]
+    //   finalizeExperimentInvalidation (finalizing → invalidated)  [failure path]
+    //   audit BENCHMARK_INVALIDATED
+    await stack.benchmarkService.runTrialJob(trialId);
+
+    // ASSERTION 1: the experiment is 'invalidated' (NOT 'completed'). This
+    // is the core of the fix — a failed integrity check cannot expose a
+    // false successful completion.
+    const exp = await stack.benchmarkService.getExperiment(experimentId);
+    expect(exp?.status).toBe('invalidated');
+
+    // ASSERTION 2: BENCHMARK_INVALIDATED was audited (the failure path).
+    const expAudit = await stack.auditService.listForResource('benchmark_experiment', experimentId);
+    const invalidatedAudits = expAudit.filter((e) => e.eventType === 'BENCHMARK_INVALIDATED');
+    expect(invalidatedAudits).toHaveLength(1);
+
+    // ASSERTION 3: BENCHMARK_COMPLETED was NOT audited (the false-success
+    // audit the old protocol would have written).
+    const completedAudits = expAudit.filter((e) => e.eventType === 'BENCHMARK_COMPLETED');
+    expect(completedAudits).toHaveLength(0);
+
+    // ASSERTION 4: the trial itself DID reach 'completed' (the trial-level
+    // finalization is independent of the experiment-level integrity check —
+    // the trial's execution genuinely succeeded; it's the experiment's
+    // integrity that failed because the digest was corrupted).
+    trial = await stack.benchmarkRepository.getTrial(trialId);
+    expect(trial?.lifecyclePhase).toBe('completed');
+    expect(trial?.status).toBe('completed');
+  });
+
+  it('concurrent experiment completion finalizes exactly once (reservation + finalization)', async () => {
+    // PR #36 review fix #2b: the two-phase completion protocol (reservation
+    // running→finalizing, then finalization finalizing→completed) MUST
+    // preserve exactly-once behavior under concurrent workers. This test
+    // isolates the repository-level CAS exclusivity that underpins the
+    // end-to-end exactly-once (test #2 above covers the end-to-end
+    // audit count; this test isolates the two new CAS transitions).
+    const { experimentId } = await makeExperiment('concurrent-completion-cas', [
+      { provider: 'fake', mode: 'native', repetitions: 1 },
+    ]);
+    const { trials } = await stack.benchmarkService.listTrials(experimentId);
+    const trialId = trials[0]!.id;
+
+    // Put the experiment + trial into the state checkExperimentCompletion
+    // expects: experiment 'running', trial terminal ('completed').
+    await stack.benchmarkRepository.updateExperimentStatus(
+      experimentId, 'running', { startedAt: new Date() },
+    );
+    await stack.authStack.db.client.query(
+      `UPDATE wfos_benchmark_trials
+         SET status = 'completed', lifecycle_phase = 'completed', completed_at = NOW()
+       WHERE id = $1`,
+      [trialId],
+    );
+
+    // Phase 1 — RESERVATION CAS exclusivity. Two concurrent
+    // claimExperimentCompletion calls: exactly one wins (running→finalizing),
+    // one loses (null). This is the exactly-once guarantee that only one
+    // worker proceeds to integrity validation.
+    const [a, b] = await Promise.all([
+      stack.benchmarkRepository.claimExperimentCompletion(experimentId),
+      stack.benchmarkRepository.claimExperimentCompletion(experimentId),
+    ]);
+    // Exactly one winner (non-null) + one loser (null). XOR.
+    expect(a === null || b === null).toBe(true);
+    expect(a !== null || b !== null).toBe(true);
+    expect(!(a !== null && b !== null)).toBe(true);
+    const winner = (a ?? b)!;
+    expect(winner.status).toBe('finalizing');
+
+    // The experiment is now 'finalizing' (the reservation state — NOT
+    // 'completed'). This is the key invariant: the reservation does NOT
+    // make 'completed' authoritative.
+    let exp = await stack.benchmarkService.getExperiment(experimentId);
+    expect(exp?.status).toBe('finalizing');
+
+    // A THIRD claim attempt (now that the experiment is 'finalizing') also
+    // returns null — the reservation CAS guard (WHERE status='running')
+    // rejects it.
+    const third = await stack.benchmarkRepository.claimExperimentCompletion(experimentId);
+    expect(third).toBeNull();
+
+    // Phase 3a — success finalization CAS. finalizeExperimentCompletion
+    // (finalizing → completed) makes the status authoritative. This is the
+    // ONLY path to 'completed'.
+    const finalized = await stack.benchmarkRepository.finalizeExperimentCompletion(experimentId);
+    expect(finalized).not.toBeNull();
+    expect(finalized?.status).toBe('completed');
+
+    // The experiment is now 'completed' (authoritative, post-integrity).
+    exp = await stack.benchmarkService.getExperiment(experimentId);
+    expect(exp?.status).toBe('completed');
+
+    // Phase 3b — failure finalization CAS guard. A second
+    // finalizeExperimentCompletion returns null (the experiment is no longer
+    // 'finalizing' — it's 'completed'). The CAS is exclusive.
+    const duplicateFinalize = await stack.benchmarkRepository.finalizeExperimentCompletion(experimentId);
+    expect(duplicateFinalize).toBeNull();
+
+    // The failure-path finalization (finalizeExperimentInvalidation) ALSO
+    // returns null (the experiment is 'completed', not 'finalizing') — the
+    // experiment cannot be invalidated after it's already completed.
+    const invalidationAttempt = await stack.benchmarkRepository.finalizeExperimentInvalidation(experimentId);
+    expect(invalidationAttempt).toBeNull();
+  });
 });

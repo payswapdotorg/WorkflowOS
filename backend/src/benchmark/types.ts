@@ -96,6 +96,13 @@ export type BenchmarkExperimentStatus =
   | 'created'
   | 'running'
   | 'paused'
+  // PR #36 review fix #2: the reservation state in the two-phase
+  // completion protocol. `claimExperimentCompletion` CAS-exclusively
+  // transitions running → finalizing (only the winner runs integrity
+  // validation); the winner then CAS-transitions finalizing → completed
+  // (validation passed) | invalidated (validation failed). `completed` is
+  // NOT authoritative until integrity passes.
+  | 'finalizing'
   | 'completed'
   | 'cancelled'
   | 'invalidated';

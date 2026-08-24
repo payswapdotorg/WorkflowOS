@@ -5974,22 +5974,132 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(claimFn![0]).toMatch(/WHERE id = \$1 AND lifecycle_phase = \$2/);
   });
 
-  it('benchmark experiment completion is ATOMIC (claimExperimentCompletion: running→completed compare-and-swap)', () => {
-    // The experiment-completion transition (checkExperimentCompletion) MUST
-    // use claimExperimentCompletion (atomic WHERE status='running' RETURNING
-    // *). Only the winner runs integrity validation + writes the
-    // BENCHMARK_COMPLETED audit event (exactly-once experiment finalization).
-    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
-    expect(serviceSrc).toMatch(/claimExperimentCompletion/);
-    // checkExperimentCompletion must NOT use an unconditional
-    // updateExperimentStatus(experimentId, 'completed', ...) (the old
-    // pattern that caused the duplicate BENCHMARK_COMPLETED audit race).
-    expect(serviceSrc).not.toMatch(/updateExperimentStatus\(experimentId,\s*'completed'/);
-
+  it('benchmark experiment completion is a TWO-PHASE protocol (reservation running→finalizing, then finalization after integrity)', () => {
+    // PR #36 review fix #2: `claimExperimentCompletion` MUST be a RESERVATION
+    // (running → finalizing), NOT a direct completion. `completed` must
+    // become authoritative ONLY via `finalizeExperimentCompletion`, called
+    // AFTER integrity validation passes. This closes the false-completion
+    // race the reviewer found (the prior version flipped the experiment to
+    // `completed` before validation ran).
     const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+
+    // Phase 1 — RESERVATION. claimExperimentCompletion MUST set
+    // status='finalizing' (NOT 'completed') + guard on status='running'.
     const claimFn = repoSrc.match(/async claimExperimentCompletion[\s\S]*?RETURNING \*/);
     expect(claimFn, 'claimExperimentCompletion must exist + use RETURNING *').not.toBeNull();
     expect(claimFn![0]).toMatch(/WHERE id = \$1 AND status = 'running'/);
+    expect(claimFn![0]).toMatch(/SET status = 'finalizing'/);
+    // The reservation MUST NOT set 'completed' (that is the finalization's
+    // job, after integrity passes).
+    expect(claimFn![0]).not.toMatch(/SET status = 'completed'/);
+    // The reservation MUST NOT set completed_at (no terminal timestamp
+    // until the finalization).
+    expect(claimFn![0]).not.toMatch(/completed_at/);
+
+    // Phase 3a — success finalization. finalizeExperimentCompletion MUST
+    // guard on status='finalizing' + set status='completed'.
+    const finalizeFn = repoSrc.match(/async finalizeExperimentCompletion[\s\S]*?RETURNING \*/);
+    expect(finalizeFn, 'finalizeExperimentCompletion must exist + use RETURNING *').not.toBeNull();
+    expect(finalizeFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing'/);
+    expect(finalizeFn![0]).toMatch(/SET status = 'completed'/);
+
+    // Phase 3b — failure finalization. finalizeExperimentInvalidation MUST
+    // guard on status='finalizing' + set status='invalidated'.
+    const invalidateFn = repoSrc.match(/async finalizeExperimentInvalidation[\s\S]*?RETURNING \*/);
+    expect(invalidateFn, 'finalizeExperimentInvalidation must exist + use RETURNING *').not.toBeNull();
+    expect(invalidateFn![0]).toMatch(/WHERE id = \$1 AND status = 'finalizing'/);
+    expect(invalidateFn![0]).toMatch(/SET status = 'invalidated'/);
+  });
+
+  it('benchmark checkExperimentCompletion ORDERING: reservation → integrity validation → finalization → audit (NOT completed-then-validate)', () => {
+    // PR #36 review fix #2: the integrity validation MUST run BETWEEN the
+    // reservation + the finalization. The audit MUST run AFTER the
+    // finalization (so BENCHMARK_COMPLETED is only written when the
+    // experiment actually reached `completed`, + BENCHMARK_INVALIDATED is
+    // written on the failure path). This is the ordering the reviewer
+    // required: "the claim must occur before any of those side effects"
+    // (the reservation claims before validation; the finalization claims
+    // before the audit).
+    const serviceSrc = readFileSync(join(BENCHMARK_INTERNAL, 'benchmark-service.ts'), 'utf8');
+    // Match the full method body up to its closing brace at 2-space indent.
+    const fn = serviceSrc.match(/private async checkExperimentCompletion[\s\S]*?\n  \}/);
+    expect(fn, 'checkExperimentCompletion must exist').not.toBeNull();
+    const body = fn![0];
+    // Phase 1 — reservation is the FIRST CAS.
+    const claimIdx = body.indexOf('claimExperimentCompletion');
+    const validateIdx = body.indexOf('integrityService.validate');
+    const finalizeIdx = body.indexOf('finalizeExperimentCompletion');
+    const invalidateFinIdx = body.indexOf('finalizeExperimentInvalidation');
+    const auditCompletedIdx = body.indexOf("'BENCHMARK_COMPLETED'");
+    const auditInvalidatedIdx = body.indexOf("'BENCHMARK_INVALIDATED'");
+    expect(claimIdx, 'must call claimExperimentCompletion').toBeGreaterThan(-1);
+    expect(validateIdx, 'must call integrityService.validate').toBeGreaterThan(-1);
+    expect(finalizeIdx, 'must call finalizeExperimentCompletion').toBeGreaterThan(-1);
+    expect(invalidateFinIdx, 'must call finalizeExperimentInvalidation').toBeGreaterThan(-1);
+    expect(auditCompletedIdx, 'must emit BENCHMARK_COMPLETED').toBeGreaterThan(-1);
+    expect(auditInvalidatedIdx, 'must emit BENCHMARK_INVALIDATED').toBeGreaterThan(-1);
+    // Ordering: reservation BEFORE validation BEFORE finalization BEFORE audit.
+    expect(claimIdx).toBeLessThan(validateIdx);
+    expect(validateIdx).toBeLessThan(finalizeIdx);
+    expect(validateIdx).toBeLessThan(invalidateFinIdx);
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // The success-path audit (BENCHMARK_COMPLETED) must come AFTER the
+    // success finalization; the failure-path audit (BENCHMARK_INVALIDATED)
+    // must come AFTER the failure finalization.
+    expect(finalizeIdx).toBeLessThan(auditCompletedIdx);
+    expect(invalidateFinIdx).toBeLessThan(auditInvalidatedIdx);
+    // A thrown validation error MUST be treated as a failure (caught +
+    // valid=false), NOT propagated (which would leave the experiment stuck
+    // in 'finalizing' with no audit — but at least not a false completion).
+    expect(body).toMatch(/valid = false/);
+  });
+
+  it('benchmark migration 0028 adds the finalizing reservation status to the experiment CHECK (two-phase completion)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0028_benchmark_experiment_completion_protocol.sql');
+    expect(existsSync(migrationPath), '0028_benchmark_experiment_completion_protocol.sql must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/DROP CONSTRAINT IF EXISTS wfos_benchmark_experiments_status_check/);
+    expect(src).toMatch(/ADD CONSTRAINT wfos_benchmark_experiments_status_check/);
+    // The new CHECK must include 'finalizing' (the reservation state) +
+    // preserve all prior statuses.
+    expect(src).toMatch(/'created'/);
+    expect(src).toMatch(/'running'/);
+    expect(src).toMatch(/'paused'/);
+    expect(src).toMatch(/'finalizing'/);
+    expect(src).toMatch(/'completed'/);
+    expect(src).toMatch(/'cancelled'/);
+    expect(src).toMatch(/'invalidated'/);
+  });
+
+  it('benchmark migration 0027 backfill splits running trials by execution_mode (native→delivery_wait, external→execution_wait)', () => {
+    // PR #36 review fix #1: a native `running` trial is past execution
+    // (native is synchronous-completed) + awaiting delivery, so it MUST
+    // backfill to `delivery_wait`. An external `running` trial is awaiting
+    // external execution completion, so it backfills to `execution_wait`.
+    // The prior single backfill (all running → execution_wait)
+    // misclassified native trials + would cause runTrialJob to re-read a
+    // non-existent execution record + finalize them as
+    // 'execution-record-not-found'.
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0027_benchmark_trial_lifecycle_phase.sql');
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src).toMatch(/execution_mode = 'native'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'delivery_wait'/);
+    expect(src).toMatch(/execution_mode = 'external'\s+AND lifecycle_phase = 'queued'/);
+    expect(src).toMatch(/lifecycle_phase = 'execution_wait'/);
+    // The native backfill MUST set delivery_wait (NOT execution_wait) +
+    // pair it with execution_mode='native' in the same UPDATE statement.
+    // Assert the full SET→WHERE line adjacency directly (capture-group
+    // approaches cross UPDATE statements because [\s\S]*? spans them).
+    expect(src).toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
+    // The external backfill MUST set execution_wait (NOT delivery_wait) +
+    // pair it with execution_mode='external'.
+    expect(src).toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    // The native backfill MUST NOT pair delivery_wait with external, + the
+    // external backfill MUST NOT pair execution_wait with native (the
+    // misclassification the review found).
+    expect(src).not.toMatch(/SET lifecycle_phase = 'delivery_wait'\s+WHERE status = 'running' AND execution_mode = 'external'/);
+    expect(src).not.toMatch(/SET lifecycle_phase = 'execution_wait'\s+WHERE status = 'running' AND execution_mode = 'native'/);
   });
 
   it('benchmark trial runTrialJob routes by lifecycle_phase (NOT coarse status)', () => {
@@ -6020,5 +6130,13 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(src).toMatch(/concurrent finalization on a DELIVERY_WAIT trial finalizes exactly once/);
     expect(src).toMatch(/claimTrialForSetup compare-and-swap: exactly one winner/);
     expect(src).toMatch(/mid-orchestration redelivery NO-OPS on the starting phase/);
+    // PR #36 review fix #1: migration 0027 backfill mode-split regression.
+    expect(src).toMatch(/migration 0027 backfill classifies native running/);
+    // PR #36 review fix #2a: integrity failure MUST NOT expose a false
+    // `completed` experiment.
+    expect(src).toMatch(/integrity failure does NOT expose a false completed experiment/);
+    // PR #36 review fix #2b: exactly-once finalization under concurrent
+    // checkExperimentCompletion calls.
+    expect(src).toMatch(/concurrent experiment completion finalizes exactly once/);
   });
 });

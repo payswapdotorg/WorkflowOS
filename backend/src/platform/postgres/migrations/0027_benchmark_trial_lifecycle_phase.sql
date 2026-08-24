@@ -83,16 +83,33 @@ ALTER TABLE wfos_benchmark_trials
 
 -- Backfill: existing rows map their current `status` to the closest phase.
 --   queued      → queued
---   running     → execution_wait  (the orchestrator already submitted; the
---                                  row is awaiting either external
---                                  completion or workflow delivery)
 --   completed   → completed
 --   failed      → failed
 --   unavailable → failed           (terminal configuration failure)
+--
+--   running     → MODE-DEPENDENT (PR #36 review fix #1):
+--     native    → delivery_wait     (native execution is synchronous-completed
+--                                    by the orchestrator — a `running` native
+--                                    trial has ALREADY submitted + is awaiting
+--                                    the verified workflow delivery, NOT
+--                                    awaiting external execution completion.
+--                                    Backfilling it to execution_wait would
+--                                    misclassify it as still-external-pending,
+--                                    so runTrialJob would re-read a non-existent
+--                                    execution record + finalize it as
+--                                    'execution-record-not-found'.)
+--     external  → execution_wait   (external execution is async — the
+--                                    orchestrator advanced starting →
+--                                    execution_wait + is awaiting the
+--                                    onExecutionTerminal ingestion hook. A
+--                                    `running` external trial IS genuinely
+--                                    awaiting external execution completion.)
 UPDATE wfos_benchmark_trials SET lifecycle_phase = 'queued'
   WHERE status = 'queued' AND lifecycle_phase = 'queued';
+UPDATE wfos_benchmark_trials SET lifecycle_phase = 'delivery_wait'
+  WHERE status = 'running' AND execution_mode = 'native' AND lifecycle_phase = 'queued';
 UPDATE wfos_benchmark_trials SET lifecycle_phase = 'execution_wait'
-  WHERE status = 'running' AND lifecycle_phase = 'queued';
+  WHERE status = 'running' AND execution_mode = 'external' AND lifecycle_phase = 'queued';
 UPDATE wfos_benchmark_trials SET lifecycle_phase = 'completed'
   WHERE status = 'completed' AND lifecycle_phase = 'queued';
 UPDATE wfos_benchmark_trials SET lifecycle_phase = 'failed'

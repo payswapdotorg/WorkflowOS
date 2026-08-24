@@ -335,15 +335,51 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
   }
 
   async claimExperimentCompletion(id: string): Promise<BenchmarkExperiment | null> {
-    // PR #35 follow-up (idempotency): atomic experiment-completion claim.
-    // Compare-and-swap running → completed. Only the winner (RETURNING row)
-    // may run integrity validation + write the BENCHMARK_COMPLETED audit
-    // event. The loser (null) skips — exactly-once experiment finalization.
+    // PR #36 review fix #2: phase 1 — RESERVATION. Atomic running → finalizing
+    // (NOT running → completed). Only the winner (RETURNING row) may proceed
+    // to integrity validation (phase 2) + the finalization CAS (phase 3).
+    // The loser (null) no-ops. `completed` is NOT set here — it becomes
+    // authoritative only after `finalizeExperimentCompletion` succeeds (i.e.
+    // only after integrity validation passes).
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'finalizing'
+       WHERE id = $1 AND status = 'running'
+       RETURNING *`,
+      [id],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async finalizeExperimentCompletion(id: string): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2: phase 3a — success finalization. Atomic
+    // finalizing → completed (sets completed_at). Called by the reservation
+    // winner AFTER integrityService.validate returns valid===true. Only this
+    // CAS makes `completed` authoritative.
     const { rows } = await this.db.query<Row>(
       `UPDATE wfos_benchmark_experiments
          SET status = 'completed',
              completed_at = COALESCE(completed_at, NOW())
-       WHERE id = $1 AND status = 'running'
+       WHERE id = $1 AND status = 'finalizing'
+       RETURNING *`,
+      [id],
+    );
+    return rows[0] ? toExperiment(rows[0]) : null;
+  }
+
+  async finalizeExperimentInvalidation(id: string): Promise<BenchmarkExperiment | null> {
+    // PR #36 review fix #2: phase 3b — failure finalization. Atomic
+    // finalizing → invalidated (sets completed_at — the experiment reached
+    // a terminal state, just not a successful one). Called by the
+    // reservation winner AFTER integrityService.validate returns valid===false
+    // (or throws). This is the authoritative terminal state for a failed
+    // integrity check — the experiment reads `invalidated`, NOT `completed`,
+    // so no consumer can read a false successful completion.
+    const { rows } = await this.db.query<Row>(
+      `UPDATE wfos_benchmark_experiments
+         SET status = 'invalidated',
+             completed_at = COALESCE(completed_at, NOW())
+       WHERE id = $1 AND status = 'finalizing'
        RETURNING *`,
       [id],
     );
