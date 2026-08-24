@@ -447,6 +447,27 @@ export class PgBenchmarkRepository implements BenchmarkRepository {
     return rows.map(toStartDelivery);
   }
 
+  async listExperimentsWithIncompleteStartDeliveries(): Promise<string[]> {
+    // WORK-032 start-delivery durability (outbox relay liveness): the
+    // BOOT-SWEEP query — every experiment that has at least one incomplete
+    // start delivery, i.e. every experiment whose start obligations are
+    // not fully delivered yet (the claim committed but the audit and/or
+    // some trial jobs were never delivered, and nothing has repaired it
+    // since). The generic OutboxRelay (BenchmarkStartDeliveryOutboxRelay)
+    // runs this exactly once per worker-process start via the WorkerHost
+    // boot sweep + enqueues one relay job per experiment — this is what
+    // makes an orphaned outbox AUTONOMOUSLY recoverable after total
+    // process death (a supervised restart re-attempts delivery without
+    // requiring a user read or a surviving trial job). Uses the same
+    // partial index as the per-experiment lookup
+    // (wfos_benchmark_start_deliveries_incomplete_idx).
+    const { rows } = await this.db.query<{ experiment_id: string }>(
+      `SELECT DISTINCT experiment_id FROM wfos_benchmark_start_deliveries
+        WHERE completed_at IS NULL`,
+    );
+    return rows.map((r) => String(r.experiment_id));
+  }
+
   async deliverStartAudit(deliveryId: string): Promise<BenchmarkStartDelivery | null> {
     // WORK-032 start-delivery durability: the EXACTLY-ONCE BENCHMARK_STARTED
     // audit write — ONE atomic statement (CTE):

@@ -38,12 +38,14 @@ import type {
 import type {
   DefaultBenchmarkServiceDeps,
   BenchmarkTrialRunner,
+  BenchmarkStartDeliveryReplayer,
 } from './benchmark.types.js';
 import {
   BENCHMARK_HARNESS_VERSION,
   BENCHMARK_SCORING_VERSION,
   buildTrialBranchName,
 } from './benchmark-helpers.js';
+import { BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE } from './start-delivery-relay.js';
 
 /**
  * PR #36 review fix #3: default TTL (ms) for the `finalizing` reservation
@@ -59,7 +61,7 @@ import {
  */
 const DEFAULT_FINALIZING_LEASE_TTL_MS = 120_000;
 
-export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrialRunner {
+export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrialRunner, BenchmarkStartDeliveryReplayer {
   constructor(private readonly deps: DefaultBenchmarkServiceDeps) {}
 
   /** PR #36 review fix #3: the finalizing-lease TTL (dep override or default). */
@@ -221,13 +223,29 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       const current = await this.deps.repository.getExperiment(experimentId);
       throw new Error(`benchmark-experiment-invalid-state: ${current?.status ?? 'unknown'}`);
     }
-    // WINNER ONLY: deliver the durable obligations (exactly one
-    // BENCHMARK_STARTED audit + one benchmark.trial job per obligation)
-    // through the SAME replayable path a recovery touch uses — the happy
-    // path and the crash-recovery path are one code path. Best-effort
-    // here: the obligations are DURABLE, so a delivery failure (e.g. the
-    // queue is briefly down) does NOT fail the start — the next touch
-    // replays them. The start itself succeeded (the claim committed).
+    // WINNER ONLY: deliver the durable obligations. FIRST, enqueue the
+    // DURABLE RELAY JOB onto the (durable, Redis-backed in production)
+    // queue — the outbox-relay integration with WorkflowOS's existing
+    // durable job infrastructure. This is the liveness guarantee for a
+    // crash at ANY point after this line: a live worker drains the relay
+    // job from the durable queue and replays the incomplete obligations
+    // WITHOUT requiring a process restart. Best-effort (the obligations
+    // themselves are durable): a failed enqueue is caught + logged, and
+    // the WorkerHost boot sweep at the next process start re-enqueues it
+    // from the durable outbox rows.
+    try {
+      await this.deps.queue.enqueue(BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE, { experimentId });
+    } catch (err) {
+      this.deps.logger.error('benchmark.start-delivery-relay-enqueue-failed', {
+        experimentId, error: (err as Error).message,
+      });
+    }
+    // Then the immediate best-effort delivery through the SAME replayable
+    // path a recovery touch uses — the happy path and the crash-recovery
+    // path are one code path. A delivery failure (e.g. the queue is
+    // briefly down) does NOT fail the start — the obligations are DURABLE
+    // and the relay job / the next touch replays them. The start itself
+    // succeeded (the claim committed).
     try {
       await this.replayStartDeliveries(experimentId);
     } catch (err) {
@@ -281,10 +299,19 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
    *      replay list; replaying it is a no-op that just sets the marker.
    *
    * This method is a SINGLE PASS over durable rows — NOT a retry loop,
-   * NOT a scheduler, NOT a poller (§34). It is invoked only by the
-   * existing touch points; it never schedules itself.
+   * NOT a scheduler, NOT a poller (§34). Its invocation sites are the
+   * existing touch points (startExperiment's immediate delivery,
+   * runTrialJob's worker touch, recoverExperimentIfStale's post-auth
+   * read path) plus the `benchmark.start-delivery.relay` job handler —
+   * the outbox-relay integration that the WorkerHost boot sweep
+   * guarantees (see start-delivery-relay.ts).
+   *
+   * Returns the number of deliveries STILL incomplete after the pass
+   * (normally 0; non-zero means a concurrent delivery is mid-flight or
+   * a transient failure interrupted the pass — the next touch or boot
+   * sweep finishes it).
    */
-  async replayStartDeliveries(experimentId: string): Promise<void> {
+  async replayStartDeliveries(experimentId: string): Promise<number> {
     const deliveries = await this.deps.repository.listIncompleteStartDeliveries(experimentId);
     for (const delivery of deliveries) {
       // (1) The exactly-once BENCHMARK_STARTED audit.
@@ -298,6 +325,11 @@ export class DefaultBenchmarkService implements BenchmarkService, BenchmarkTrial
       // (3) The best-effort completion marker.
       await this.deps.repository.completeStartDeliveryIfDone(delivery.id);
     }
+    // The remaining count (for the relay handler + diagnostics): a clean
+    // pass completes every delivery it touched; anything still incomplete
+    // was created concurrently or interrupted mid-flight.
+    const remaining = await this.deps.repository.listIncompleteStartDeliveries(experimentId);
+    return remaining.length;
   }
 
   /**

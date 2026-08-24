@@ -58,6 +58,7 @@ export type {
 export { buildHandlerRegistry } from './worker/job-handler.js';
 export { WorkerHost } from './worker/worker-host.js';
 export type { WorkerHostOptions } from './worker/worker-host.js';
+export type { OutboxRelay } from './worker/outbox-relay.js';
 
 export {
   createEchoJobHandler,

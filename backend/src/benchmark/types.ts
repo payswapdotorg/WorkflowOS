@@ -373,8 +373,11 @@ export interface BenchmarkService {
    * WORK-032 start-delivery durability: REPLAY the incomplete durable
    * start obligations for an experiment — the single delivery code path
    * shared by the happy path (startExperiment, right after the atomic
-   * claim) and every recovery touch (runTrialJob worker touches + the
-   * post-authorization recoverExperimentIfStale read path).
+   * claim + the claim-time relay job), every recovery touch (runTrialJob
+   * worker touches + the post-authorization recoverExperimentIfStale
+   * read path), and the `benchmark.start-delivery.relay` job handler (the
+   * generic OutboxRelay integration whose delivery the WorkerHost boot
+   * sweep guarantees — see start-delivery-relay.ts).
    *
    * Per incomplete delivery: the exactly-once BENCHMARK_STARTED audit
    * (atomic flag-CAS + deterministic-id INSERT), then each undelivered
@@ -384,9 +387,14 @@ export interface BenchmarkService {
    *
    * This is a SINGLE PASS over durable obligation rows — NOT a retry
    * loop, NOT a scheduler, NOT a poller (§34). It never schedules
-   * itself; it is only invoked by the existing touch points.
+   * itself.
+   *
+   * Returns the number of deliveries STILL incomplete after the pass
+   * (normally 0; non-zero means a concurrent delivery is mid-flight or a
+   * transient failure interrupted the pass — the next touch or the boot
+   * sweep finishes it).
    */
-  replayStartDeliveries(experimentId: string): Promise<void>;
+  replayStartDeliveries(experimentId: string): Promise<number>;
   /** §45: Pause a running experiment. */
   pauseExperiment(experimentId: string): Promise<BenchmarkExperiment>;
   /** §45: Cancel an experiment. */

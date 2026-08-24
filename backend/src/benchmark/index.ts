@@ -105,6 +105,23 @@ export {
   createBenchmarkTrialJobHandler,
 } from './internal/benchmark-trial-job-handler.js';
 
+// WORK-032 start-delivery durability (outbox relay liveness): the generic
+// OutboxRelay implementation for the benchmark start-delivery outbox +
+// the `benchmark.start-delivery.relay` job handler. Injected into the
+// WorkerHost at composition time (app.ts) — the relay guarantees
+// autonomous delivery of durable start obligations after total process
+// death (boot sweep + claim-time relay job), WITHOUT a polling loop or a
+// second execution engine (§34).
+export {
+  BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE,
+  BenchmarkStartDeliveryOutboxRelay,
+  createStartDeliveryRelayJobHandler,
+} from './internal/start-delivery-relay.js';
+export type {
+  BenchmarkStartDeliveryRelayJobPayload,
+  BenchmarkStartDeliveryRelayDeps,
+} from './internal/start-delivery-relay.js';
+
 export {
   PgBenchmarkRepository,
 } from './internal/pg-benchmark-repository.js';

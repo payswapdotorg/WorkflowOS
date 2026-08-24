@@ -6513,7 +6513,7 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     expect(typesSrc).toMatch(/claimExperimentStart\(id: string\): Promise<ClaimedExperimentStart \| null>/);
   });
 
-  it('benchmark startExperiment delegates delivery to the REPLAYABLE path (NO ad-hoc inline side effects after the claim)', () => {
+  it('benchmark startExperiment delegates delivery to the REPLAYABLE path + enqueues the durable RELAY JOB first (no ad-hoc trial side effects)', () => {
     // WORK-032 start-delivery durability: startExperiment performs NO
     // ad-hoc side effects of its own — the audit write + the trial
     // enqueues live ONLY in the durable replay path
@@ -6521,6 +6521,15 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // shared by the happy path AND every recovery touch. This is what
     // makes a crash between the claim and full delivery recoverable: there
     // is no in-memory delivery intent left to lose.
+    //
+    // OUTBOX RELAY (the liveness correction): startExperiment's FIRST
+    // action after the claim is enqueueing the DURABLE RELAY JOB (the
+    // generic OutboxRelay integration with the existing queue) — BEFORE
+    // the immediate replay — so a crash at ANY point after the claim
+    // leaves a live worker able to drain the relay job from the durable
+    // queue (recovery WITHOUT a restart). The relay-job enqueue is the
+    // one permitted enqueue in this method; trial-job enqueues remain
+    // exclusive to the replay path.
     //
     // The PR #35 invariant still holds: only the CAS winner reaches the
     // delivery path; the loser re-reads + throws the invalid-state error
@@ -6531,15 +6540,27 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // Strip comments — the assertions are about the CODE.
     const body = fn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
     const claimIdx = body.indexOf('claimExperimentStart(experimentId)');
+    const relayIdx = body.indexOf('BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE');
     const replayIdx = body.indexOf('replayStartDeliveries(experimentId)');
     expect(claimIdx).toBeGreaterThanOrEqual(0);
+    expect(relayIdx).toBeGreaterThanOrEqual(0);
     expect(replayIdx).toBeGreaterThanOrEqual(0);
-    // ORDER: the atomic claim → the replayable delivery.
-    expect(claimIdx).toBeLessThan(replayIdx);
-    // NO ad-hoc inline side effects — the audit write + enqueue live ONLY
-    // in the replay path (a second copy would reintroduce the crash hole).
+    // ORDER: the atomic claim → the durable relay job → the immediate
+    // replay (the relay job must exist in the durable queue BEFORE any
+    // delivery begins, so a mid-replay crash is recoverable without a
+    // restart).
+    expect(claimIdx).toBeLessThan(relayIdx);
+    expect(relayIdx).toBeLessThan(replayIdx);
+    // NO ad-hoc inline side effects — the audit write + the TRIAL-job
+    // enqueues live ONLY in the replay path (a second copy would
+    // reintroduce the crash hole). The relay-job enqueue is the one
+    // permitted enqueue (the outbox-relay integration itself).
     expect(body).not.toMatch(/auditService\.write/);
-    expect(body).not.toMatch(/queue\.enqueue/);
+    expect(body).not.toMatch(/queue\.enqueue\('benchmark\.trial'/);
+    // The relay-job enqueue MUST be best-effort (a failed enqueue is
+    // caught + logged — the obligations are durable; the boot sweep
+    // re-enqueues at the next process start).
+    expect(fn![0]).toMatch(/benchmark\.start-delivery-relay-enqueue-failed/);
     // The loser MUST throw the invalid-state error (no side effects, no
     // second start obligation).
     expect(body).toMatch(/benchmark-experiment-invalid-state/);
@@ -6670,15 +6691,39 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // The replay is a bounded single pass (for...of over the durable rows).
     const replayCode = replayFn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
     expect(replayCode).toMatch(/for \(const delivery of deliveries\)/);
-    // The ONLY invocation sites of replayStartDeliveries are the existing
-    // touch points: startExperiment (happy path), runTrialJob (worker
-    // touch), recoverExperimentIfStale (post-auth read path). Counting the
-    // call sites (excluding the method's own declaration + interface docs)
-    // keeps the replay touch-driven — a new scheduler would have to add a
-    // site, which this count makes visible in review.
+    // The ONLY invocation sites of replayStartDeliveries are the touch
+    // points: startExperiment (happy path), runTrialJob (worker touch),
+    // recoverExperimentIfStale (post-auth read path) — in THIS file — plus
+    // the start-delivery relay job handler (start-delivery-relay.ts, the
+    // outbox-relay integration whose delivery the boot sweep guarantees).
+    // Counting the call sites in the service file keeps the replay
+    // touch-driven — a new scheduler would have to add a site, which this
+    // count makes visible in review.
     const callSites = serviceSrc.split('replayStartDeliveries(').length - 1;
     // 1 (declaration) + 3 (startExperiment + runTrialJob + recoverExperimentIfStale)
     expect(callSites).toBe(4);
+    // The FOURTH touch point — the relay job handler — lives in its own
+    // file + must itself own NO scheduler machinery (no timers, no
+    // self-perpetuation: the handler is fire-once; a failed attempt is
+    // re-attempted by the next boot sweep or touch, NOT by the handler
+    // re-enqueueing itself).
+    const relaySrc = readFileSync(join(BENCHMARK_INTERNAL, 'start-delivery-relay.ts'), 'utf8');
+    const relayHandlerFn = relaySrc.match(/export function createStartDeliveryRelayJobHandler[\s\S]*?\n\}/);
+    expect(relayHandlerFn, 'createStartDeliveryRelayJobHandler must exist').not.toBeNull();
+    const relayHandlerCode = relayHandlerFn![0].replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(relayHandlerCode).not.toMatch(/setInterval|setTimeout|setImmediate/);
+    expect(relayHandlerCode).not.toMatch(/while\s*\(\s*true\s*\)/);
+    // Fire-once: the handler must NOT enqueue ANYTHING (in particular not
+    // its own job type — that would be a self-perpetuating retry loop).
+    expect(relayHandlerCode).not.toMatch(/\.enqueue\(/);
+    // The relay class (the sweep) enqueues its job type — but ONLY inside
+    // enqueuePendingRelayJobs (the boot-sweep entry point the WorkerHost
+    // calls once per process start), never anywhere else.
+    const sweepFn = relaySrc.match(/async enqueuePendingRelayJobs[\s\S]*?\n  \}/);
+    expect(sweepFn, 'enqueuePendingRelayJobs must exist').not.toBeNull();
+    const outsideSweep = relaySrc.replace(sweepFn![0], '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const handlerOnly = outsideSweep.replace(relayHandlerFn![0], '');
+    expect(handlerOnly).not.toMatch(/\.enqueue\(/);
     // NO WorkerHost / queue-consumer construction in the benchmark domain
     // (the replay enqueues onto the EXISTING queue; it never consumes).
     const benchmarkFiles = readBenchmarkFiles();
@@ -6687,23 +6732,109 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     }
   });
 
-  it('benchmark start-delivery durability regression tests exist (the six crash-matrix scenarios)', () => {
+  it('benchmark start-delivery durability regression tests exist (the crash matrix + the autonomous-liveness scenarios)', () => {
     // WORK-032 start-delivery durability: the reviewer required regression
     // coverage for the full crash matrix — a start must be recoverable
     // after ANY crash point, + repeated delivery must produce one logical
-    // start / one audit / one enqueue obligation per trial.
+    // start / one audit / one enqueue obligation per trial. The outbox
+    // relay re-review additionally required the AUTOONOMOUS-liveness
+    // scenarios (the exact orphaned-outbox failure the reviewer flagged).
     const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'benchmark', 'start-delivery-durability.regression.test.ts');
     expect(existsSync(testPath), 'start-delivery-durability.regression.test.ts must exist').toBe(true);
     const src = readFileSync(testPath, 'utf8');
-    // The six scenarios, by their test titles.
+    // The six crash-matrix scenarios, by their test titles.
     expect(src).toMatch(/concurrent start → exactly one winner/);
     expect(src).toMatch(/crash after CAS → recovery resumes delivery/);
     expect(src).toMatch(/crash after audit → no duplicate audit/);
     expect(src).toMatch(/crash during trial enqueue → missing jobs are replayed/);
     expect(src).toMatch(/replay after complete delivery → zero duplicate logical deliveries/);
     expect(src).toMatch(/experiment already running → no second start obligation/);
+    // The three outbox-relay liveness scenarios: (a) the orphaned outbox
+    // is AUTONOMOUSLY recovered by a new worker process boot (the boot
+    // sweep — the reviewer's exact blocking scenario), (b) the claim-time
+    // relay job recovers a crash WITHOUT a restart (durable queue + live
+    // worker), (c) duplicate relay jobs converge to exactly-once.
+    expect(src).toMatch(/orphaned outbox after total process death is AUTONOMOUSLY recovered by a new worker process boot \(relay boot sweep\)/);
+    expect(src).toMatch(/claim-time relay job recovers a crash after the claim WITHOUT a restart/);
+    expect(src).toMatch(/duplicate relay jobs \(claim-time \+ boot sweep\) converge to exactly-once logical delivery/);
     // The tests must be built on the no-worker stack (deterministic
     // enqueue counting).
     expect(src).toMatch(/startWorker: false/);
+  });
+
+  it('platform OutboxRelay contract exists + WorkerHost runs the BOOT SWEEP exactly once per process start (NOT a periodic poll)', () => {
+    // WORK-032 start-delivery durability (outbox relay liveness), the
+    // reviewer's required hierarchy:
+    //
+    //   existing WorkflowOS durable job infrastructure (Queue + WorkerHost)
+    //       ↓
+    //   generic outbox relay / delivery mechanism (OutboxRelay + boot sweep)
+    //       ↓
+    //   Benchmark start-delivery obligation (replayStartDeliveries)
+    //
+    // The generic contract lives in the PLATFORM worker infrastructure;
+    // domain relays implement it + are injected at composition time. The
+    // WorkerHost invokes each relay's sweep exactly ONCE per process
+    // start — process-startup recovery (like a DB crash-recovery pass),
+    // NOT a periodic poll.
+    const relayContractPath = join(BACKEND_ROOT, 'src', 'platform', 'worker', 'outbox-relay.ts');
+    expect(existsSync(relayContractPath), 'platform/worker/outbox-relay.ts must exist').toBe(true);
+    const contractSrc = readFileSync(relayContractPath, 'utf8');
+    expect(contractSrc).toMatch(/export interface OutboxRelay/);
+    expect(contractSrc).toMatch(/readonly jobType: string/);
+    expect(contractSrc).toMatch(/enqueuePendingRelayJobs\(\): Promise<number>/);
+    // The platform barrel exports the contract (domains import it from
+    // @platform — the frozen boundary).
+    const platformIndexSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'index.ts'), 'utf8');
+    expect(platformIndexSrc).toMatch(/OutboxRelay/);
+    // WorkerHost: the options accept relays + start() runs the sweep.
+    const workerHostSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'worker-host.ts'), 'utf8');
+    expect(workerHostSrc).toMatch(/outboxRelays\?: readonly OutboxRelay\[\]/);
+    expect(workerHostSrc).toMatch(/await this\.sweepOutboxRelays\(\)/);
+    // The sweep is in start() ONLY — the poll loop must NOT re-sweep
+    // (that would be a periodic poll). Extract the loop body + assert it
+    // never touches the relays.
+    const loopFn = workerHostSrc.match(/private async loop\(\)[\s\S]*?\n  \}/);
+    expect(loopFn, 'WorkerHost.loop must exist').not.toBeNull();
+    expect(loopFn![0]).not.toMatch(/outboxRelays|enqueuePendingRelayJobs|sweepOutboxRelays/);
+    // A failing sweep MUST be caught (a relay's DB/queue failure must
+    // never prevent the worker — or the other relays — from starting).
+    const sweepFn = workerHostSrc.match(/private async sweepOutboxRelays\(\)[\s\S]*?\n  \}/);
+    expect(sweepFn, 'WorkerHost.sweepOutboxRelays must exist').not.toBeNull();
+    expect(sweepFn![0]).toMatch(/catch/);
+  });
+
+  it('benchmark start-delivery relay implements the generic OutboxRelay + is wired into the existing worker infrastructure (app.ts)', () => {
+    // WORK-032 start-delivery durability (outbox relay liveness): the
+    // benchmark relay implements the PLATFORM contract, its job handler is
+    // registered in the SAME existing WorkerHost registry as
+    // benchmark.trial, and the relay is injected via the WorkerHost
+    // options — no new scheduler, no second execution engine (§34).
+    const relaySrc = readFileSync(join(BENCHMARK_INTERNAL, 'start-delivery-relay.ts'), 'utf8');
+    // The class implements the generic contract.
+    expect(relaySrc).toMatch(/class BenchmarkStartDeliveryOutboxRelay implements OutboxRelay/);
+    // The relay job type is namespaced under benchmark.
+    expect(relaySrc).toMatch(/'benchmark\.start-delivery\.relay'/);
+    // The sweep queries the DURABLE obligations (the repository owns the
+    // delivery record) + enqueues one relay job per experiment.
+    expect(relaySrc).toMatch(/listExperimentsWithIncompleteStartDeliveries/);
+    expect(relaySrc).toMatch(/queue\.enqueue\(this\.jobType/);
+    // The handler delegates to the idempotent consumer-side repair.
+    expect(relaySrc).toMatch(/replayer\.replayStartDeliveries\(experimentId\)/);
+    // The repository MUST own the boot-sweep query (the reviewer: "The
+    // repository should own the atomic state transition and durable
+    // delivery record" — the sweep reads those same durable rows).
+    const repoSrc = readFileSync(join(BENCHMARK_INTERNAL, 'pg-benchmark-repository.ts'), 'utf8');
+    expect(repoSrc).toMatch(/SELECT DISTINCT experiment_id FROM wfos_benchmark_start_deliveries/);
+    expect(repoSrc).toMatch(/WHERE completed_at IS NULL/);
+    // app.ts composition: the relay handler is registered NEXT TO the
+    // trial handler in the SAME registry...
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/createStartDeliveryRelayJobHandler\(benchmarkService, logger\)/);
+    // ...the relay is constructed from the benchmark repository + the
+    // existing queue...
+    expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
+    // ...and injected into the WorkerHost options (the boot sweep).
+    expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
   });
 });

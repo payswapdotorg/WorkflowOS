@@ -126,6 +126,17 @@ export interface BenchmarkRepository {
   listIncompleteStartDeliveries(experimentId: string): Promise<BenchmarkStartDelivery[]>;
 
   /**
+   * WORK-032 start-delivery durability (outbox relay liveness): the
+   * BOOT-SWEEP query — every experiment with at least one incomplete
+   * start delivery. The generic OutboxRelay runs this exactly once per
+   * worker-process start (the WorkerHost boot sweep) + enqueues one relay
+   * job per experiment, making an orphaned outbox AUTONOMOUSLY
+   * recoverable after total process death (supervised restart ⇒ sweep ⇒
+   * delivery attempt — no user read or surviving trial job required).
+   */
+  listExperimentsWithIncompleteStartDeliveries(): Promise<string[]>;
+
+  /**
    * WORK-032 start-delivery durability: the EXACTLY-ONCE BENCHMARK_STARTED
    * audit write. ONE atomic CTE statement:
    *
@@ -741,6 +752,23 @@ export interface BenchmarkTrialRunner {
    * re-enters `runTrialJob` and finalizes the trial.
    */
   advanceTrialsForWorkItem(workItemId: string): Promise<void>;
+}
+
+/**
+ * WORK-032 start-delivery durability (outbox relay liveness): the narrow
+ * contract the `benchmark.start-delivery.relay` job handler consumes —
+ * the idempotent replay of an experiment's incomplete durable start
+ * obligations. Implemented by DefaultBenchmarkService (same pattern as
+ * {@link BenchmarkTrialRunner} for the `benchmark.trial` handler).
+ *
+ * Returns the number of deliveries STILL incomplete after the pass
+ * (normally 0 — a clean pass marks every obligation + the completion
+ * marker; a non-zero value means a concurrent delivery is mid-flight or
+ * a transient failure interrupted the pass, which the next touch /
+ * boot sweep will finish).
+ */
+export interface BenchmarkStartDeliveryReplayer {
+  replayStartDeliveries(experimentId: string): Promise<number>;
 }
 
 /** Exports experiment results as JSON or CSV (§40). */

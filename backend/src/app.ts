@@ -182,8 +182,11 @@ import {
   DefaultBenchmarkRecommendationService,
   PgBenchmarkRepository,
   createBenchmarkTrialJobHandler,
+  BenchmarkStartDeliveryOutboxRelay,
+  createStartDeliveryRelayJobHandler,
 } from './benchmark/index.js';
 import type { BenchmarkService, BenchmarkTrialRunner } from './benchmark/index.js';
+import type { OutboxRelay } from '@platform/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -529,6 +532,11 @@ export async function buildApp(
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
   let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
+  // WORK-032 start-delivery durability: the generic OutboxRelay for the
+  // benchmark start-delivery outbox. Injected into the WorkerHost below —
+  // the boot sweep (once per process start) is what makes an orphaned
+  // outbox autonomously recoverable after total process death.
+  let benchmarkStartDeliveryRelay: OutboxRelay | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -917,6 +925,16 @@ export async function buildApp(
     // authoritative state from /workflows, /verification, /reviews, /github,
     // /agents, /audit. NEVER stores credentials.
     const benchmarkRepository = new PgBenchmarkRepository(database);
+    // WORK-032 start-delivery durability: the outbox relay for the benchmark
+    // start-delivery obligations. Constructed next to its repository (it
+    // needs the boot-sweep query + the queue); consumed by the WorkerHost
+    // wiring below (outboxRelays) — the generic platform contract lives at
+    // platform/worker/outbox-relay.ts.
+    benchmarkStartDeliveryRelay = new BenchmarkStartDeliveryOutboxRelay({
+      repository: benchmarkRepository,
+      queue,
+      logger,
+    });
     const benchmarkSnapshotService = new DefaultBenchmarkSnapshotService({
       repository: benchmarkRepository,
       workItemRepository: workItemRepository!,
@@ -1103,11 +1121,23 @@ export async function buildApp(
   // WORK-032 (PR #35 review fix #4): benchmark trial job handler — drives
   // the async trial lifecycle (clone → branch → submit → poll external →
   // collect metrics → check experiment completion).
+  // WORK-032 start-delivery durability: the start-delivery relay job
+  // handler — the consumer-side repair the relay job (boot sweep /
+  // claim-time enqueue) invokes. Registered NEXT TO the trial handler in
+  // the SAME existing WorkerHost registry.
   if (benchmarkService) {
     handlerList.push(createBenchmarkTrialJobHandler(benchmarkService, logger));
+    handlerList.push(createStartDeliveryRelayJobHandler(benchmarkService, logger));
   }
   const handlers = buildHandlerRegistry(handlerList);
-  const worker = new WorkerHost(queue, handlers, logger, options.workerOptions);
+  const worker = new WorkerHost(queue, handlers, logger, {
+    ...options.workerOptions,
+    // WORK-032 start-delivery durability: the outbox relay boot sweep —
+    // every worker-process start re-enqueues relay jobs for ALL
+    // incomplete durable start obligations (process-startup recovery,
+    // NOT a periodic poll; see platform/worker/outbox-relay.ts).
+    outboxRelays: benchmarkStartDeliveryRelay ? [benchmarkStartDeliveryRelay] : [],
+  });
 
   const handle: AppHandle = {
     deps: {

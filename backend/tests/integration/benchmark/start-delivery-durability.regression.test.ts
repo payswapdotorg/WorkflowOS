@@ -43,11 +43,26 @@
  * enqueued jobs stay in the queue + the enqueue counts are deterministic.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { WorkerHost, buildHandlerRegistry } from '@platform/index.js';
 import {
   buildBenchmarkStack,
   teardownBenchmarkStack,
   type BenchmarkStack,
 } from './benchmark-stack.js';
+import {
+  BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE,
+  createStartDeliveryRelayJobHandler,
+} from '../../../src/benchmark/index.js';
+
+/** Poll until `cond` resolves true (bounded — throws on timeout). */
+async function waitFor(cond: () => Promise<boolean>, timeoutMs = 5_000, stepMs = 20): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await cond()) return;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+}
 
 describe('WORK-032 — start-delivery durability (crash-safe experiment start)', () => {
   let stack: BenchmarkStack;
@@ -342,5 +357,181 @@ describe('WORK-032 — start-delivery durability (crash-safe experiment start)',
     expect(await countDeliveries(experimentId)).toBe(1);
     expect(await countObligations(experimentId)).toBe(2);
     expect(await countStartAudits(experimentId)).toBe(auditsAfterFirst);
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. ORPHANED OUTBOX after total process death → AUTONOMOUS recovery
+  //    (the relay boot sweep) — the reviewer's blocking liveness scenario
+  // -------------------------------------------------------------------------
+  it('orphaned outbox after total process death is AUTONOMOUSLY recovered by a new worker process boot (relay boot sweep)', async () => {
+    const { experimentId, trialIds } = await makeExperiment('orphan-boot-sweep');
+    const enqueuesBefore = enqueueLog.length;
+
+    // The reviewer's EXACT failure scenario (pre-relay, the outbox was
+    // recoverable but NOT autonomously recoverable):
+    //
+    //     CAS + outbox commit
+    //         ↓
+    //     process dies before any queue job is delivered
+    //         ↓
+    //     NO trial job exists
+    //     NO worker touches the experiment
+    //     NO user reads the experiment
+    //         ↓
+    //     outbox remains permanently incomplete
+    //
+    // Simulate it: the atomic claim + outbox rows commit (one repository
+    // statement), then the process dies — no relay job enqueued, no
+    // audit, no trial job, and NO read of the experiment.
+    const claimed = await stack.benchmarkRepository.claimExperimentStart(experimentId);
+    expect(claimed).not.toBeNull();
+    expect(await countStartAudits(experimentId)).toBe(0);
+    expect(enqueueLog.length - enqueuesBefore).toBe(0);
+
+    // ...nothing touches the experiment. The durable outbox row is the
+    // ONLY record that something needs to happen.
+
+    // A NEW worker process boots. Its WorkerHost.start() runs the generic
+    // OutboxRelay BOOT SWEEP (exactly once per process start —
+    // process-startup recovery, NOT a periodic poll): one relay job is
+    // enqueued for the orphaned experiment, the existing poll loop drains
+    // it, and the relay handler runs the idempotent consumer-side repair.
+    // Delivery happens with NO user read + NO surviving trial job — the
+    // autonomous-liveness invariant:
+    //
+    //     outbox row exists ⇒ some existing durable mechanism is
+    //     guaranteed to eventually attempt delivery.
+    //
+    // NOTE: the recovery worker registers ONLY the relay handler — the
+    // delivered trial jobs are (faithfully) left in the queue, but not
+    // consumed here, keeping the enqueue-count assertions deterministic
+    // (trial-lifecycle processing is covered by the async-lifecycle /
+    // native-vs-external suites; this test isolates the RELAY).
+    const relayOnlyHandlers = buildHandlerRegistry([
+      createStartDeliveryRelayJobHandler(stack.benchmarkService as never, stack.authStack.db.logger as never),
+    ]);
+    const worker2 = new WorkerHost(stack.queue, relayOnlyHandlers, stack.authStack.db.logger as never, {
+      pollIntervalMs: 5,
+      outboxRelays: [stack.startDeliveryRelay],
+    });
+    try {
+      await worker2.start();
+      await waitFor(async () => {
+        const incomplete = await stack.benchmarkRepository.listIncompleteStartDeliveries(experimentId);
+        return incomplete.length === 0;
+      });
+    } finally {
+      await worker2.stop();
+    }
+
+    // ASSERTION — exactly-once logical delivery, autonomously recovered:
+    // one BENCHMARK_STARTED audit + one enqueue per trial obligation.
+    expect(await countStartAudits(experimentId)).toBe(1);
+    expect(enqueuesFor(trialIds[0]!)).toBe(1);
+    expect(enqueuesFor(trialIds[1]!)).toBe(1);
+    expect(enqueueLog.length - enqueuesBefore).toBe(2);
+    // ...and the delivery is complete (the sweep's relay job finished it).
+    const incomplete = await stack.benchmarkRepository.listIncompleteStartDeliveries(experimentId);
+    expect(incomplete).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. claim-time relay job → a mid-replay crash is recovered by a LIVE
+  //    worker WITHOUT a restart (the durable relay job in the queue)
+  // -------------------------------------------------------------------------
+  it('claim-time relay job recovers a crash after the claim WITHOUT a restart (durable queue + live worker)', async () => {
+    const { experimentId, trialIds } = await makeExperiment('claim-time-relay-job');
+    const enqueuesBefore = enqueueLog.length;
+
+    // startExperiment's FIRST action after the atomic claim is enqueueing
+    // the durable relay job — BEFORE the immediate replay begins. Simulate
+    // the crash right after that enqueue (the immediate replay never
+    // runs): the relay job sits durably in the queue.
+    const claimed = await stack.benchmarkRepository.claimExperimentStart(experimentId);
+    expect(claimed).not.toBeNull();
+    await stack.queue.enqueue(BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE, { experimentId });
+    // (crash — nothing delivered yet)
+    expect(await countStartAudits(experimentId)).toBe(0);
+    expect(enqueueLog.length - enqueuesBefore).toBe(0);
+
+    // A LIVE worker (already-booted processes included — no restart, no
+    // boot sweep) drains the durable relay job through the EXISTING poll
+    // loop + registry → the relay handler delivers. NOTE: this worker is
+    // constructed WITHOUT outboxRelays (isolating the durable-relay-job
+    // path from the boot sweep — scenario 7 covers the sweep) + with a
+    // relay-only handler registry (the delivered trial jobs stay in the
+    // queue unconsumed — deterministic enqueue counts).
+    const relayOnlyHandlers = buildHandlerRegistry([
+      createStartDeliveryRelayJobHandler(stack.benchmarkService as never, stack.authStack.db.logger as never),
+    ]);
+    const liveWorker = new WorkerHost(stack.queue, relayOnlyHandlers, stack.authStack.db.logger as never, {
+      pollIntervalMs: 5,
+    });
+    try {
+      await liveWorker.start();
+      await waitFor(async () => {
+        const incomplete = await stack.benchmarkRepository.listIncompleteStartDeliveries(experimentId);
+        return incomplete.length === 0;
+      });
+    } finally {
+      await liveWorker.stop();
+    }
+
+    // ASSERTION — exactly-once logical delivery via the relay job alone.
+    expect(await countStartAudits(experimentId)).toBe(1);
+    expect(enqueuesFor(trialIds[0]!)).toBe(1);
+    expect(enqueuesFor(trialIds[1]!)).toBe(1);
+    expect(enqueueLog.length - enqueuesBefore).toBe(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. duplicate relay jobs (claim-time + boot sweep) → exactly-once
+  // -------------------------------------------------------------------------
+  it('duplicate relay jobs (claim-time + boot sweep) converge to exactly-once logical delivery', async () => {
+    const { experimentId, trialIds } = await makeExperiment('duplicate-relay-jobs');
+    const enqueuesBefore = enqueueLog.length;
+
+    // Race everything a real deployment can race: the claim commits, the
+    // claim-time relay job is enqueued TWICE (e.g. a retrying client), and
+    // the boot sweep ALSO fires (a worker restarts concurrently) — three
+    // relay jobs for the same experiment. Duplicate relay jobs are
+    // harmless BY CONTRACT (the consumer-side replay is idempotent).
+    const claimed = await stack.benchmarkRepository.claimExperimentStart(experimentId);
+    expect(claimed).not.toBeNull();
+    await stack.queue.enqueue(BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE, { experimentId });
+    await stack.queue.enqueue(BENCHMARK_START_DELIVERY_RELAY_JOB_TYPE, { experimentId });
+    const swept = await stack.startDeliveryRelay.enqueuePendingRelayJobs();
+    expect(swept).toBe(1);
+    expect(await countStartAudits(experimentId)).toBe(0);
+
+    // A worker (no relays — the three queued relay jobs drive it; a
+    // relay-only registry keeps the counts deterministic) drains them
+    // sequentially: the first delivers everything; the rest no-op.
+    const relayOnlyHandlers = buildHandlerRegistry([
+      createStartDeliveryRelayJobHandler(stack.benchmarkService as never, stack.authStack.db.logger as never),
+    ]);
+    const worker2 = new WorkerHost(stack.queue, relayOnlyHandlers, stack.authStack.db.logger as never, {
+      pollIntervalMs: 5,
+    });
+    try {
+      await worker2.start();
+      await waitFor(async () => {
+        const incomplete = await stack.benchmarkRepository.listIncompleteStartDeliveries(experimentId);
+        return incomplete.length === 0;
+      });
+      // Let the remaining duplicate relay jobs drain too (they must no-op).
+      await new Promise((r) => setTimeout(r, 150));
+    } finally {
+      await worker2.stop();
+    }
+
+    // ASSERTION — repeated relay delivery still produces ONE logical
+    // start: one audit, one enqueue per trial, one delivery row.
+    expect(await countStartAudits(experimentId)).toBe(1);
+    expect(enqueuesFor(trialIds[0]!)).toBe(1);
+    expect(enqueuesFor(trialIds[1]!)).toBe(1);
+    expect(enqueueLog.length - enqueuesBefore).toBe(2);
+    expect(await countDeliveries(experimentId)).toBe(1);
+    expect(await countObligations(experimentId)).toBe(2);
   });
 });

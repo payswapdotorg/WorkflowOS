@@ -32,8 +32,11 @@ import {
   DeterministicNativeBenchmarkProvider,
   DeterministicExternalBenchmarkProvider,
   createBenchmarkTrialJobHandler,
+  BenchmarkStartDeliveryOutboxRelay,
+  createStartDeliveryRelayJobHandler,
 } from '../../../src/benchmark/index.js';
 import { InMemoryQueue, WorkerHost, buildHandlerRegistry } from '@platform/index.js';
+import type { HandlerRegistry } from '@platform/index.js';
 import { DefaultExecutionService } from '../../../src/modules/agents/internal/execution-service.js';
 import { DefaultExecutionTaskService } from '../../../src/modules/work-items/internal/execution-task-service.js';
 import { DefaultImplementationContextBuilder } from '../../../src/modules/work-items/internal/implementation-context-builder.js';
@@ -66,6 +69,15 @@ export interface BenchmarkStack {
   readonly benchmarkRepository: PgBenchmarkRepository;
   readonly queue: InMemoryQueue;
   readonly worker: WorkerHost;
+  /**
+   * WORK-032 start-delivery durability: the benchmark start-delivery
+   * outbox relay (the generic OutboxRelay implementation). Exposed so
+   * tests can construct a SECOND WorkerHost (simulating a new worker
+   * process boot → its boot sweep fires) against the same queue.
+   */
+  readonly startDeliveryRelay: BenchmarkStartDeliveryOutboxRelay;
+  /** The handler registry (trial + start-delivery relay handlers). */
+  readonly handlers: HandlerRegistry;
   readonly executionEventIngestionService: DefaultExecutionEventIngestionService;
   readonly workflowEngine: WorkflowEngine;
   readonly auditService: DefaultAuditService;
@@ -241,8 +253,23 @@ export async function buildBenchmarkStack(opts: {
   });
   const handlers = buildHandlerRegistry([
     createBenchmarkTrialJobHandler(benchmarkService as never, logger as never),
+    // WORK-032 start-delivery durability: the relay job handler, next to
+    // the trial handler — mirroring the app.ts composition.
+    createStartDeliveryRelayJobHandler(benchmarkService as never, logger as never),
   ]);
-  const worker = new WorkerHost(queue, handlers, logger as never, { pollIntervalMs: 5 });
+  // WORK-032 start-delivery durability: the outbox relay, constructed the
+  // same way app.ts does. Passed to this stack's WorkerHost (its boot
+  // sweep runs when the stack starts the worker) + exposed so tests can
+  // build additional WorkerHosts simulating further process boots.
+  const startDeliveryRelay = new BenchmarkStartDeliveryOutboxRelay({
+    repository: benchmarkRepository,
+    queue,
+    logger: logger as never,
+  });
+  const worker = new WorkerHost(queue, handlers, logger as never, {
+    pollIntervalMs: 5,
+    outboxRelays: [startDeliveryRelay],
+  });
   if (opts.startWorker !== false) {
     await worker.start();
   }
@@ -254,6 +281,8 @@ export async function buildBenchmarkStack(opts: {
     benchmarkRepository,
     queue,
     worker,
+    startDeliveryRelay,
+    handlers,
     executionEventIngestionService,
     workflowEngine,
     auditService,

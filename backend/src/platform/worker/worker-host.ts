@@ -1,5 +1,6 @@
 import type { Queue, JobRecord } from '../queue/queue.js';
 import type { HandlerRegistry } from './job-handler.js';
+import type { OutboxRelay } from './outbox-relay.js';
 import type { Logger } from '../logger.js';
 import { runWithExecutionContext, type ExecutionContext } from '../execution-context.js';
 import { errorTracker } from '../error-tracker.js';
@@ -21,6 +22,14 @@ import { metrics } from '../metrics.js';
 export interface WorkerHostOptions {
   /** Polling interval (ms) when the queue is empty. Defaults to 25ms. */
   pollIntervalMs?: number;
+  /**
+   * OUTBOX RELAY (transactional-outbox liveness): durable outbox
+   * obligations whose enqueuer died before delivery. Each relay is
+   * swept exactly ONCE per worker-process start (see
+   * {@link OutboxRelay}) — process-startup recovery, NOT a periodic
+   * poll. Defaults to none.
+   */
+  outboxRelays?: readonly OutboxRelay[];
 }
 
 export class WorkerHost {
@@ -29,6 +38,7 @@ export class WorkerHost {
   private readonly logger: Logger;
   private readonly queue: Queue;
   private readonly handlers: HandlerRegistry;
+  private readonly outboxRelays: readonly OutboxRelay[];
   private loopPromise: Promise<void> | null = null;
 
   constructor(
@@ -41,6 +51,7 @@ export class WorkerHost {
     this.handlers = handlers;
     this.logger = logger;
     this.pollIntervalMs = options.pollIntervalMs ?? 25;
+    this.outboxRelays = options.outboxRelays ?? [];
   }
 
   /**
@@ -48,13 +59,24 @@ export class WorkerHost {
    * Node event loop). Use {@link stopped} to await loop exit, or {@link stop}
    * to request shutdown.
    */
-  start(): Promise<void> {
-    if (this.running) return Promise.resolve();
+  async start(): Promise<void> {
+    if (this.running) return;
     this.running = true;
     this.logger.info('worker.host.starting', {
       handlerTypes: [...this.handlers.keys()],
       pollIntervalMs: this.pollIntervalMs,
     });
+    // OUTBOX RELAY BOOT SWEEP — exactly once per process start, BEFORE the
+    // poll loop begins. This is process-startup recovery (the same class
+    // of action as a database's crash-recovery pass at boot), NOT a
+    // periodic poll: the sweep never re-runs inside the loop. It
+    // guarantees the transactional-outbox liveness invariant — an outbox
+    // row that exists is re-enqueued as a relay job the moment any
+    // worker process boots, so a supervised restart after total process
+    // death always re-attempts delivery. Each relay is swept
+    // independently; a failing sweep is caught + logged and NEVER
+    // prevents the worker (or the other relays) from starting.
+    await this.sweepOutboxRelays();
     // Detach the loop so callers do not block on `start()`.
     this.loopPromise = this.loop();
     // Surface any unexpected loop rejection on the process, but do NOT make
@@ -63,7 +85,29 @@ export class WorkerHost {
       this.logger.error('worker.host.loop_rejected', { error: errorMessage(err) });
       errorTracker().capture(toError(err));
     });
-    return Promise.resolve();
+  }
+
+  /**
+   * The one-time-per-start outbox relay sweep. See {@link OutboxRelay}.
+   * Private + only called from {@link start} — the sweep is deliberately
+   * NOT reachable from the poll loop (no periodic re-sweep).
+   */
+  private async sweepOutboxRelays(): Promise<void> {
+    for (const relay of this.outboxRelays) {
+      try {
+        const enqueued = await relay.enqueuePendingRelayJobs();
+        this.logger.info('worker.host.outbox_relay_swept', {
+          jobType: relay.jobType,
+          enqueued,
+        });
+      } catch (err) {
+        this.logger.error('worker.host.outbox_relay_sweep_failed', {
+          jobType: relay.jobType,
+          error: errorMessage(err),
+        });
+        errorTracker().capture(toError(err));
+      }
+    }
   }
 
   /**
