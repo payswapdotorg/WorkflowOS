@@ -44,6 +44,7 @@ export class RedisQueue implements Queue {
       payload,
       executionId,
       correlationId: options?.correlationId ?? executionId,
+      attempt: options?.attempt,
       enqueuedAt: Date.now(),
     };
     const serialized = JSON.stringify(record);

@@ -811,6 +811,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
     // allowlist enumerates these known pure-data catalogs.
     const PURE_DATA_CATALOG_EXPORTS = new Set<string>([
       'EXTERNAL_UI_CATALOG', // @modules/agents — display + validation metadata
+      // WORK-034: the session-domain typed error. A discriminated error
+      // CLASS is the sanctioned exception to the types-only barrel rule —
+      // consumers must instanceof-check it (a type-only export cannot
+      // carry a runtime prototype), and it is domain logic, not a concrete
+      // implementation: it wires nothing, constructs nothing, and holds
+      // only (code, message, context). The same reasoning applies to the
+      // frozen pure-data error-code list.
+      'ExecutionSessionError',      // @modules/agents — the typed domain error
+      'EXECUTION_SESSION_ERROR_CODES', // @modules/agents — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -6845,7 +6854,7 @@ describe('WORK-032 — benchmark architecture checks (§34)', () => {
     // existing queue...
     expect(appSrc).toMatch(/new BenchmarkStartDeliveryOutboxRelay\(/);
     // ...and injected into the WorkerHost options (the boot sweep).
-    expect(appSrc).toMatch(/outboxRelays: benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]/);
+    expect(appSrc).toMatch(/\.\.\.\(benchmarkStartDeliveryRelay \? \[benchmarkStartDeliveryRelay\] : \[\]\)/);
   });
 });
 
@@ -7494,5 +7503,562 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     expect(testSrc).toMatch(/holds the row lock → the guarded decision insert WAITS/);
     expect(testSrc).toMatch(/'still-blocked'/);
     expect(testSrc).toMatch(/ROLLED BACK → the \(previously blocked\) insert unblocks against the ORIGINAL row/);
+  });
+});
+
+describe('WORK-034 invariants — persistent agent session core (first slice)', () => {
+  const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
+  const SESSION_TYPES = join(AGENTS_INTERNAL, 'execution-session.types.ts');
+  const SESSION_REPO = join(AGENTS_INTERNAL, 'pg-execution-session-repository.ts');
+  const MIGRATION_PATH = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0034_execution_sessions.sql',
+  );
+
+  function strip(src: string): string {
+    return src
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*--.*$/gm, '');
+  }
+
+  it('session-core migration exists with the durable-core schema (UNIQUE execution, composite FK, version >= 0)', () => {
+    // The slice's persistence contract, mechanically enforced:
+    //   UNIQUE(execution_id) — exactly one session per ExecutionRecord;
+    //   composite FK — project/work-item/work-order linkage consistent with
+    //     the execution record;
+    //   version >= 0 — the CAS token.
+    expect(existsSync(MIGRATION_PATH), '0034_execution_sessions.sql must exist').toBe(true);
+    const src = readFileSync(MIGRATION_PATH, 'utf8');
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_sessions/);
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_session_events/);
+    // Exactly one session per ExecutionRecord.
+    expect(src).toMatch(/CONSTRAINT wfos_execution_sessions_execution_unique UNIQUE \(execution_id\)/);
+    // The linkage-consistency composite FK.
+    expect(src).toMatch(/FOREIGN KEY \(execution_id, project_id, work_item_id, work_order_id\)/);
+    expect(src).toMatch(/REFERENCES wfos_executions\(id, project_id, work_item_id, work_order_id\)/);
+    // The CAS token constraint.
+    expect(src).toMatch(/version INTEGER NOT NULL DEFAULT 0 CHECK \(version >= 0\)/);
+    // The strict status vocabulary.
+    expect(src).toMatch(/'created', 'running', 'interrupted', 'completed', 'failed', 'cancelled'/);
+    // The event vocabulary (the 9 provider-independent types).
+    expect(src).toMatch(/'turn_started', 'model_interaction', 'tool_call', 'observation',\s*'checkpoint', 'interrupted', 'resumed', 'completed', 'failed', 'cancelled'/);
+    // UNIQUE(session_id, sequence_number).
+    expect(src).toMatch(/CONSTRAINT wfos_execution_session_events_sequence_unique\s+UNIQUE \(session_id, sequence_number\)/);
+  });
+
+  it('session events are APPEND-ONLY (migration triggers reject UPDATE + DELETE + terminal appends)', () => {
+    const src = readFileSync(MIGRATION_PATH, 'utf8');
+    // Historical events are never updated or deleted.
+    expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_event_immutable/);
+    expect(src).toMatch(/BEFORE UPDATE OR DELETE ON wfos_execution_session_events/);
+    // Terminal sessions accept no further events.
+    expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_event_terminal_guard/);
+    expect(src).toMatch(/BEFORE INSERT ON wfos_execution_session_events/);
+  });
+
+  it('the session state machine is STRICT + terminal states are FULLY immutable + the identity tuple is immutable (migration guards)', () => {
+    const src = readFileSync(MIGRATION_PATH, 'utf8');
+    expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_transition_guard/);
+    // Terminal FULL immutability (the audit correction): every authoritative
+    // field is compared — status, version, current_turn, interrupted_at,
+    // terminal_at, AND the identity tuple — not just the status.
+    expect(src).toMatch(/execution-session-terminal-immutable/);
+    expect(src).toMatch(/NEW\.version IS DISTINCT FROM OLD\.version/);
+    expect(src).toMatch(/NEW\.current_turn IS DISTINCT FROM OLD\.current_turn/);
+    expect(src).toMatch(/NEW\.interrupted_at IS DISTINCT FROM OLD\.interrupted_at/);
+    expect(src).toMatch(/NEW\.terminal_at IS DISTINCT FROM OLD\.terminal_at/);
+    // The no-op terminal update is explicitly allowed (harmless bookkeeping).
+    expect(src).toMatch(/-- A terminal row with NO authoritative change: harmless/);
+    // IDENTITY-TUPLE immutability (the audit correction): the execution
+    // identity can never be re-targeted — a database invariant, not an
+    // application convention. Applies to EVERY row state.
+    expect(src).toMatch(/CREATE OR REPLACE FUNCTION wfos_execution_session_identity_guard/);
+    expect(src).toMatch(/execution-session-identity-immutable/);
+    expect(src).toMatch(/BEFORE UPDATE ON wfos_execution_sessions\s+FOR EACH ROW EXECUTE FUNCTION wfos_execution_session_identity_guard/);
+    // The strict legal edges (created→running/cancelled; running→interrupted/
+    // completed/failed/cancelled; interrupted→running/cancelled).
+    expect(src).toMatch(/OLD\.status = 'created'\s+AND NEW\.status IN \('running', 'cancelled'\)/);
+    expect(src).toMatch(/OLD\.status = 'running'\s+AND NEW\.status IN \('interrupted', 'completed', 'failed', 'cancelled'\)/);
+    expect(src).toMatch(/OLD\.status = 'interrupted'\s+AND NEW\.status IN \('running', 'cancelled'\)/);
+    // Monotonic version + timestamp consistency.
+    expect(src).toMatch(/execution-session-version-regression/);
+    expect(src).toMatch(/execution-session-terminal-timestamp/);
+    expect(src).toMatch(/execution-session-interrupted-timestamp/);
+  });
+
+  it('session state transitions use CAS (version + status predicate, version increment) — no read-check-write', () => {
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const transitionFn = repoSrc.match(/async transitionSession[\s\S]*?\n  \}/)!;
+    // The CAS predicate: version AND status.
+    expect(transitionFn[0]).toMatch(/WHERE id = \$1\s+AND version = \$2\s+AND status = \$4/);
+    // The version increment.
+    expect(transitionFn[0]).toMatch(/version = version \+ 1/);
+    // Lost CAS → null (NOT a throw, NOT a read-check-write).
+    expect(transitionFn[0]).toMatch(/return res\.rows\[0\] \? mapSession\(res\.rows\[0\]\) : null;/);
+    // The turn CAS is version + status='running' guarded too.
+    const turnFn = repoSrc.match(/async advanceTurn[\s\S]*?\n  \}/)!;
+    expect(turnFn[0]).toMatch(/AND version = \$2\s+AND status = 'running'/);
+    expect(turnFn[0]).toMatch(/version = version \+ 1/);
+    // NO read-check-write transition anywhere: the repository never SELECTs a
+    // session status and then UPDATEs unconditionally — every mutation in
+    // the file is a guarded UPDATE ... WHERE (create/append are inserts).
+    expect(repoSrc).not.toMatch(/getSession[\s\S]{0,200}UPDATE wfos_execution_sessions/);
+  });
+
+  it('a session has exactly ONE ExecutionRecord (repository never creates executions)', () => {
+    // The session REFERENCES an existing execution — it never INSERTs into
+    // wfos_executions (no second execution engine: executions remain owned
+    // by the existing ExecutionService path).
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const typesSrc = strip(readFileSync(SESSION_TYPES, 'utf8'));
+    expect(repoSrc).not.toMatch(/INSERT INTO wfos_executions\b/);
+    expect(repoSrc).not.toMatch(/UPDATE wfos_executions\b/);
+    expect(typesSrc).not.toMatch(/INSERT INTO wfos_executions\b/);
+    // The session's continuation identity is the ExecutionRecord id.
+    expect(typesSrc).toMatch(/executionId: string/);
+    // The one-session-per-execution contract is documented on the type.
+    expect(readFileSync(SESSION_TYPES, 'utf8')).toMatch(/UNIQUE\(execution_id\)/);
+  });
+
+  it('session core never mutates workflow / verification / review state', () => {
+    for (const [name, path] of [['types', SESSION_TYPES], ['repository', SESSION_REPO]] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no workflow mutation`).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+      expect(src, `${name}: no verification mutation`).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+      expect(src, `${name}: no review mutation`).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+    }
+  });
+
+  it('session core imports no provider SDKs and creates no second ExecutionService/execution engine', () => {
+    for (const [name, path] of [['types', SESSION_TYPES], ['repository', SESSION_REPO]] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no provider SDKs`).not.toMatch(/from ['"]@octokit|from ['"]openai|from ['"]anthropic|zai-sdk/);
+      // No second ExecutionService: the session core never constructs or
+      // declares one (it persists continuation state; execution stays the
+      // existing ExecutionService's authority).
+      expect(src, `${name}: no ExecutionService construction`).not.toMatch(/new \w*ExecutionService|implements ExecutionService|extends ExecutionService/);
+      expect(src, `${name}: no class named *ExecutionService`).not.toMatch(/class \w*ExecutionService/);
+    }
+    // The migration stores no credentials (safe payload columns only —
+    // strip comments first so doc words like "token" don't trip it).
+    const migrationSrc = strip(readFileSync(MIGRATION_PATH, 'utf8'));
+    expect(migrationSrc).not.toMatch(/secret|token|cookie|api_key/i);
+  });
+
+  it('the /agents barrel exposes exactly the provider-independent session contract (no provider specifics)', () => {
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    // The five public contract names.
+    const sessionExport = barrelSrc.match(/export type \{[\s\S]*?\} from '\.\/internal\/execution-session\.types\.js';/);
+    expect(sessionExport, 'the session contract export block must exist').not.toBeNull();
+    const block = sessionExport![0];
+    expect(block).toMatch(/\bExecutionSession\b/);
+    expect(block).toMatch(/\bExecutionSessionStatus\b/);
+    expect(block).toMatch(/\bExecutionSessionEvent\b/);
+    expect(block).toMatch(/\bExecutionSessionEventType\b/);
+    expect(block).toMatch(/\bExecutionSessionRepository\b/);
+    // Provider-INDEPENDENT: no provider names in the contract files or the
+    // export block.
+    for (const path of [SESSION_TYPES, SESSION_REPO]) {
+      const src = readFileSync(path, 'utf8');
+      expect(src, `${path}: no provider-specific session details`).not.toMatch(/\bopenai\b|\banthropic\b|\bzai\b|\bcodex\b|\bclaude\b|\bchatgpt\b/i);
+    }
+    // The barrel does NOT export the Pg implementation (repositories stay
+    // under internal/).
+    expect(barrelSrc).not.toMatch(/PgExecutionSessionRepository/);
+    // The implementation lives under internal/.
+    expect(existsSync(SESSION_REPO), 'pg-execution-session-repository.ts under internal/').toBe(true);
+  });
+
+  it('session-core regression tests exist (the required durable-core matrix)', () => {
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'execution-session-core.regression.test.ts');
+    expect(existsSync(testPath), 'execution-session-core.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/create session — status created, version 0, turn 0/);
+    expect(src).toMatch(/duplicate execution → rejected/);
+    expect(src).toMatch(/CAS transition winner → succeeds/);
+    expect(src).toMatch(/CAS transition loser → null/);
+    expect(src).toMatch(/append event → sequence increments/);
+    expect(src).toMatch(/duplicate sequence → rejected/);
+    expect(src).toMatch(/concurrent event append → unique sequences/);
+    expect(src).toMatch(/interrupt → resumable; resume → exactly one state transition/);
+    expect(src).toMatch(/terminal session → further mutation rejected/);
+    expect(src).toMatch(/wrong project\/work-item\/work-order linkage → rejected/);
+    // The audit-correction regressions: FULL terminal immutability (every
+    // authoritative field), identity re-target rejection, + REAL typed
+    // errors (instanceof + stable codes + structured context).
+    expect(src).toMatch(/mutation of ANY authoritative field is rejected/);
+    expect(src).toMatch(/execution identity tuple is IMMUTABLE/);
+    expect(src).toMatch(/typed errors are REAL/);
+    expect(src).toMatch(/expectSessionError/);
+  });
+
+  it('session-domain errors are REAL typed errors (discriminated class + stable codes + structured context — no string parsing)', () => {
+    // The audit correction: the repository contract documents typed errors;
+    // the implementation must deliver a discriminated ExecutionSessionError
+    // class with a stable machine-readable code. Consumers assert
+    // instanceof / switch on the code; they never parse message strings.
+    const typesSrc = readFileSync(SESSION_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/export class ExecutionSessionError extends Error/);
+    expect(typesSrc).toMatch(/readonly code: ExecutionSessionErrorCode;/);
+    expect(typesSrc).toMatch(/readonly context: Readonly<Record<string, unknown>>;/);
+    // The stable code list (the single source of truth).
+    expect(typesSrc).toMatch(/'execution-session-duplicate-execution'/);
+    expect(typesSrc).toMatch(/'execution-session-linkage-mismatch'/);
+    expect(typesSrc).toMatch(/'execution-session-illegal-transition'/);
+    expect(typesSrc).toMatch(/'execution-session-not-found'/);
+    expect(typesSrc).toMatch(/'execution-session-terminal'/);
+    expect(typesSrc).toMatch(/'execution-session-event-duplicate-sequence'/);
+    // The repository throws the TYPED errors (not plain Error).
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    expect(repoSrc).not.toMatch(/new Error\(\s*['"]execution-session-/);
+    expect(repoSrc).toMatch(/new ExecutionSessionError\(/);
+    // The class + code list are exported from the /agents barrel (the
+    // public contract for programmatic handling).
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/export \{ ExecutionSessionError, EXECUTION_SESSION_ERROR_CODES \}/);
+    expect(barrelSrc).toMatch(/export type \{ ExecutionSessionErrorCode \}/);
+  });
+});
+
+describe('WORK-034 invariants — session-aware execution integration', () => {
+  const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
+  const SESSION_TYPES = join(AGENTS_INTERNAL, 'execution-session.types.ts');
+  const SESSION_REPO = join(AGENTS_INTERNAL, 'pg-execution-session-repository.ts');
+  const SESSION_SERVICE = join(AGENTS_INTERNAL, 'execution-session-service.ts');
+  const EXECUTION_SERVICE = join(AGENTS_INTERNAL, 'execution-service.ts');
+  const NATIVE_PROVIDER = join(AGENTS_INTERNAL, 'native-execution-provider.ts');
+  const EXTERNAL_PROVIDER = join(AGENTS_INTERNAL, 'external-execution-provider.ts');
+
+  function strip(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  it('the providers are NOT session-aware (session lifecycle stays /agents-owned — no second session authority)', () => {
+    // The session integration must not turn a provider into a second
+    // session authority: the providers keep provider-owned execution
+    // behavior; the session lifecycle is owned by the ExecutionService
+    // integration + the session service (both /agents-owned).
+    for (const p of [NATIVE_PROVIDER, EXTERNAL_PROVIDER]) {
+      const src = readFileSync(p, 'utf8');
+      expect(src, `${p}: no session references`).not.toMatch(/sessionRepository|ExecutionSession|sessionService|transitionWithEvent/i);
+    }
+  });
+
+  it('the session service NEVER dispatches execution + never creates a second ExecutionService/engine', () => {
+    const src = strip(readFileSync(SESSION_SERVICE, 'utf8'));
+    // No execution dispatch (no provider submission, no AgentGateway).
+    expect(src).not.toMatch(/\.submit\(/);
+    expect(src).not.toMatch(/AgentGateway|agentGateway/);
+    expect(src).not.toMatch(/new \w*ExecutionService|implements ExecutionService\b|class \w*ExecutionService/);
+    // No ExecutionRecord creation (the session CONTINUES an existing
+    // record — it never INSERTs executions).
+    expect(src).not.toMatch(/INSERT INTO wfos_executions|\.create\(\s*\{[^}]*implementationContextId/);
+    // No workflow / verification / review mutation.
+    expect(src).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+    expect(src).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+    expect(src).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+  });
+
+  it('the ExecutionService session integration is OPTIONAL (pre-WORK-034 wiring keeps working) + uses only the session service boundary', () => {
+    const src = readFileSync(EXECUTION_SERVICE, 'utf8');
+    // The dep is optional.
+    expect(src).toMatch(/readonly sessionService\?: ExecutionSessionService;/);
+    // The integration goes through the session service boundary ONLY (no
+    // direct session-repository access from the execution service).
+    expect(src).not.toMatch(/sessionRepository|PgExecutionSessionRepository/);
+    // Session-aware steps are guarded by the optional dep.
+    const occurrences = src.split('this.deps.sessionService').length - 1;
+    expect(occurrences).toBeGreaterThanOrEqual(4); // the guard checks + the calls
+    // The submit() contract is unchanged (no second submit path).
+    expect(src).toMatch(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmitResult>/);
+  });
+
+  it('transitionWithEvent is a LOCKED-TRANSACTION atomic CAS + event append (loser writes NOTHING)', () => {
+    const src = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const fn = src.match(/async transitionWithEvent[\s\S]*?\n  \}/)!;
+    // The row lock (the same serialized pattern appendEvent uses).
+    expect(fn[0]).toMatch(/SELECT status, version FROM wfos_execution_sessions WHERE id = \$1 FOR UPDATE/);
+    // The CAS check under the lock (loser → null BEFORE any write).
+    expect(fn[0]).toMatch(/currentStatus !== expectedStatus \|\| currentVersion !== expectedVersion/);
+    expect(fn[0]).toMatch(/return null;/);
+    // The CAS UPDATE retains the version + status predicate.
+    expect(fn[0]).toMatch(/WHERE id = \$1\s+AND version = \$2\s+AND status = \$4/);
+    // The event append uses the existing store (MAX+1 under the lock).
+    expect(fn[0]).toMatch(/INSERT INTO wfos_execution_session_events/);
+    expect(fn[0]).toMatch(/COALESCE\(MAX\(e\.sequence_number\), 0\) \+ 1/);
+    // Illegal edges are typed errors.
+    expect(readFileSync(SESSION_REPO, 'utf8')).toMatch(/execution-session-illegal-transition/);
+    // ORDERING (PR #38 review — uniform): the CAS UPDATE runs FIRST and
+    // the event is appended ONLY when the update returned a row — a lost
+    // CAS writes NOTHING (no duplicate events under any interleaving).
+    expect(fn[0].match(/await casUpdate\(\)/g)).toHaveLength(1);
+    const updIdx2 = fn[0].indexOf('const updRes = await casUpdate();');
+    const guardIdx2 = fn[0].indexOf('if (!updRes.rows[0]) return null;');
+    expect(updIdx2).toBeGreaterThan(-1);
+    expect(guardIdx2).toBeGreaterThan(updIdx2);
+  });
+
+  it('the session service contract + implementation exist; the barrel exposes the provider-independent names', () => {
+    const typesSrc = readFileSync(SESSION_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/export interface ExecutionSessionService\b/);
+    for (const m of ['ensureSession', 'startSession', 'interruptSession', 'resumeSession', 'completeSession', 'failSession', 'getSessionForExecution', 'listSessionEvents']) {
+      expect(typesSrc, `the contract must declare ${m}`).toMatch(new RegExp(m + '\\('));
+    }
+    expect(existsSync(SESSION_SERVICE)).toBe(true);
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/ExecutionSessionService,/);
+    expect(barrelSrc).toMatch(/SessionTransitionResult,/);
+    // Provider-independent: no provider names in the service.
+    expect(readFileSync(SESSION_SERVICE, 'utf8')).not.toMatch(/\bopenai\b|\banthropic\b|\bzai\b|\bcodex\b|\bclaude\b|\bchatgpt\b/i);
+  });
+
+  it('the integration regression suite exists (the 14 required scenarios)', () => {
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'execution-session-integration.regression.test.ts');
+    expect(existsSync(testPath)).toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/native execution creates exactly ONE session bound to the SAME execution identity/);
+    expect(src).toMatch(/duplicate session creation for the same execution is rejected/);
+    expect(src).toMatch(/external execution uses the SAME session identity/);
+    expect(src).toMatch(/external terminal ingestion hook completes the session through the same identity/);
+    expect(src).toMatch(/session start is CAS-protected/);
+    expect(src).toMatch(/concurrent session start has exactly ONE winner/);
+    expect(src).toMatch(/interrupt → resume preserves the SAME executionId\/session\/identity; concurrent resume has ONE winner; no second ExecutionRecord/);
+    expect(src).toMatch(/session terminal state does NOT mutate workflow \/ verification \/ review state/);
+    expect(src).toMatch(/provider failure produces session FAILURE/);
+    expect(src).toMatch(/session identity remains stable across native\/external execution paths/);
+    expect(src).toMatch(/retry after interruption does not create duplicate sessions/);
+  });
+
+  it('PR #38 review: session-terminal reconciliation is DURABLE (obligation atomic with the record terminal transition + relay job + boot sweep — no scheduler)', () => {
+    // The blocking durability gap: terminalization was best-effort after
+    // the record became authoritative (catch + log), so a crash left
+    // ExecutionRecord=completed with ExecutionSession=running
+    // PERMANENTLY. The fix (the reviewer's prescribed architecture):
+    //   ExecutionRecord terminal → durable obligation (ATOMIC with the
+    //   record's transition) → existing Queue/WorkerHost → CAS
+    //   session terminalization.
+    const migrationPath = join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0035_session_terminal_obligations.sql',
+    );
+    expect(existsSync(migrationPath), '0035_session_terminal_obligations.sql must exist').toBe(true);
+    const m = readFileSync(migrationPath, 'utf8');
+    // The obligation table + the work-list index.
+    expect(m).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_session_terminal_obligations/);
+    expect(m).toMatch(/WHERE discharged_at IS NULL/);
+    // ATOMIC creation: the AFTER UPDATE trigger on the EXECUTIONS table
+    // (the record's terminal transition writes the obligation in the same
+    // statement's transaction — no window). The COMPLETE terminal-state
+    // mapping (round 2) is asserted in the round-2 invariant below.
+    expect(m).toMatch(/AFTER UPDATE ON wfos_executions/);
+    expect(m).toMatch(/NEW\.status IN \('completed', 'failed', 'cancelled', 'expired'\)/);
+    expect(m).toMatch(/ON CONFLICT \(execution_id\) DO NOTHING/);
+    // Append-only intent + at most one obligation per execution.
+    expect(m).toMatch(/UNIQUE \(execution_id\)/);
+    expect(m).toMatch(/session-terminal-obligation-immutable/);
+    // The relay (the existing generic OutboxRelay — NOT a scheduler).
+    const relaySrc = readFileSync(join(AGENTS_INTERNAL, 'session-terminal-relay.ts'), 'utf8');
+    expect(relaySrc).toMatch(/class SessionTerminalOutboxRelay implements OutboxRelay/);
+    expect(relaySrc).toMatch(/'agents\.session-terminal\.reconcile'/);
+    expect(relaySrc).toMatch(/listPendingTerminalObligations/);
+    const relayCode = relaySrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(relayCode).not.toMatch(/setInterval|setTimeout|setImmediate/);
+    // The handler delegates to the idempotent reconciliation (fire-once).
+    expect(relaySrc).toMatch(/reconcileTerminalForExecution/);
+    // The service: durable reconciliation + the claim-time enqueue.
+    const svcSrc = readFileSync(SESSION_SERVICE, 'utf8');
+    expect(svcSrc).toMatch(/reconcileTerminalForExecution/);
+    expect(svcSrc).toMatch(/reconcileAllPendingTerminals/);
+    expect(svcSrc).toMatch(/SESSION_TERMINAL_RELAY_JOB_TYPE/);
+    // The repository contract: the obligation queries + idempotent discharge.
+    const repoTypes = readFileSync(SESSION_TYPES, 'utf8');
+    expect(repoTypes).toMatch(/listPendingTerminalObligations/);
+    expect(repoTypes).toMatch(/dischargeTerminalObligation/);
+    // app.ts: the relay + handler + boot sweep wiring.
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/new SessionTerminalOutboxRelay\(/);
+    expect(appSrc).toMatch(/createSessionTerminalRelayJobHandler\(/);
+    expect(appSrc).toMatch(/\.\.\.\(sessionTerminalRelay \? \[sessionTerminalRelay\] : \[\]\)/);
+    // The regression suite (the five required scenarios).
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts');
+    expect(existsSync(testPath)).toBe(true);
+    const t = readFileSync(testPath, 'utf8');
+    expect(t).toMatch(/execution completes \+ the session write fails \(crash window\) → the durable obligation \+ relay recover → session completed/);
+    expect(t).toMatch(/execution fails \+ the session write fails \(crash window\) → recovery → session failed/);
+    expect(t).toMatch(/recovery repeated/);
+    expect(t).toMatch(/concurrent recovery/);
+    expect(t).toMatch(/non-terminal execution → no obligation, no terminal session/);
+  });
+
+  it('PR #38 review: transitionWithEvent uses UNIFORM CAS-FIRST ordering (a loser writes NOTHING — no duplicate terminal events under any interleaving)', () => {
+    const src = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const fn = src.match(/async transitionWithEvent[\s\S]*?\n  \}/)!;
+    // The CAS UPDATE runs FIRST (once — no per-kind branches).
+    expect(fn[0].match(/await casUpdate\(\)/g)).toHaveLength(1);
+    const updIdx = fn[0].indexOf('const updRes = await casUpdate();');
+    const evIdx = fn[0].indexOf('await appendEvent();');
+    const terminalEvIdx = fn[0].indexOf(`isTerminal`);
+    expect(updIdx).toBeGreaterThan(-1);
+    // The guard: the event is appended ONLY when the update returned a row.
+    const guardIdx = fn[0].indexOf('if (!updRes.rows[0]) return null;');
+    expect(guardIdx).toBeGreaterThan(updIdx);
+    expect(evIdx === -1 || evIdx > guardIdx).toBe(true);
+    // The terminal append's WHERE clause re-checks the UPDATED row's
+    // (version, status) — the event is keyed to exactly that transition.
+    expect(fn[0]).toMatch(/AND EXISTS \(\s*SELECT 1 FROM wfos_execution_sessions s\s*WHERE s\.id = \$1 AND s\.version = \$4 AND s\.status = \$5\s*\)/);
+    void terminalEvIdx;
+  });
+
+  it('PR #38 review round 2: the obligation lifecycle is CORRECT (missing session stays pending, complete terminal mapping, atomic fast-path discharge)', () => {
+    // Correction #1: a pending obligation with a MISSING session must
+    // REMAIN PENDING (never discharged) — the reconciliation ENSURES the
+    // session from the existing record so recovery is autonomous.
+    const svcSrc = strip(readFileSync(SESSION_SERVICE, 'utf8'));
+    const reconcileFn = svcSrc.match(/async reconcileTerminalForExecution[\s\S]*?\n  \}/)![0];
+    // The reconciliation ENSURES the session (never returns early on
+    // missing-session + discharge).
+    expect(reconcileFn).toMatch(/await this\.ensureSession\(executionId\)/);
+    expect(reconcileFn).not.toMatch(/if \(!session\)\s*\{\s*[\s\S]{0,200}dischargeTerminalObligation/);
+    // The reconcileObligation policy: no-session → pending (NO discharge).
+    const oblFn = svcSrc.match(/private async reconcileObligation[\s\S]*?\n  \}/)![0];
+    const noSessionIdx = oblFn.indexOf('if (!session) {');
+    expect(noSessionIdx).toBeGreaterThan(-1);
+    // The no-session branch returns null (stays pending) with NO
+    // discharge call anywhere inside the branch (up to the next 'if ('
+    // branch — stripped comments make brace-matching brittle).
+    const nextBranchIdx = oblFn.indexOf('if (session.status', noSessionIdx);
+    const noSessionBranch = oblFn.slice(noSessionIdx, nextBranchIdx);
+    expect(noSessionBranch).toMatch(/return null;/);
+    expect(noSessionBranch).not.toMatch(/dischargeTerminalObligation/);
+
+    // Correction #2: the COMPLETE execution terminal-state mapping — the
+    // migration's trigger covers completed, failed, cancelled AND expired
+    // (expired → failed).
+    const m35 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0035_session_terminal_obligations.sql'), 'utf8');
+    expect(m35).toMatch(/NEW\.status IN \('completed', 'failed', 'cancelled', 'expired'\)/);
+    expect(m35).toMatch(/CASE WHEN NEW\.status = 'expired' THEN 'failed' ELSE NEW\.status END/);
+    expect(m35).toMatch(/CHECK \(terminal_state IN \('completed', 'failed', 'cancelled'\)\)/);
+    // The contract exposes cancelSession + the cancelled mapping.
+    const typesSrc = readFileSync(SESSION_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/cancelSession\(executionId: string\)/);
+    expect(typesSrc).toMatch(/readonly terminalState: 'completed' \| 'failed' \| 'cancelled';/);
+
+    // Correction #3: the FAST PATH discharges atomically —
+    // transitionWithEvent accepts the obligation id + discharges in the
+    // SAME transaction; terminalForExecution resolves + passes it.
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const fn = repoSrc.match(/async transitionWithEvent[\s\S]*?\n  \}/)![0];
+    expect(fn).toMatch(/obligationId\?: string/);
+    const dischargeIdx = fn.indexOf('UPDATE wfos_execution_session_terminal_obligations');
+    expect(dischargeIdx).toBeGreaterThan(-1);
+    // The discharge is INSIDE the transaction (after the CAS win, before
+    // the return).
+    const casIdx = fn.indexOf('const updRes = await casUpdate();');
+    const returnIdx = fn.indexOf('return { session: mapSession(updRes.rows[0])');
+    expect(dischargeIdx).toBeGreaterThan(casIdx);
+    expect(dischargeIdx).toBeLessThan(returnIdx);
+    // The fast path passes the obligation id.
+    const terminalFn = svcSrc.match(/private async terminalForExecution[\s\S]*?\n  \}/)![0];
+    expect(terminalFn).toMatch(/obligation\?\.obligation\.id/);
+    // The reconciler also passes it (atomic discharge on recovery).
+    expect(oblFn).toMatch(/obligation\.id,\s*\);/);
+
+    // The round-2 regression existence.
+    const t = readFileSync(join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts'), 'utf8');
+    expect(t).toMatch(/the process dies BEFORE the session exists → the obligation REMAINS PENDING/);
+    expect(t).toMatch(/execution CANCELLED → the obligation maps to session cancelled/);
+    expect(t).toMatch(/execution EXPIRED → the obligation maps to session failed/);
+    expect(t).toMatch(/FAST-PATH terminalization discharges its obligation ATOMICALLY/);
+    expect(t).toMatch(/a session terminal with the WRONG outcome → the divergence is retained visibly/);
+  });
+
+  it('PR #38 review round 3: durable redelivery on the existing worker path (opt-in; unrelated handlers unchanged) + the expired distinction preserved', () => {
+    // The liveness blocker: WorkerHost acked EVERY job in finally — a
+    // failed relay job was lost until a process restart (the boot sweep
+    // only runs at start), so a healthy worker could leave a pending
+    // terminal obligation unattempted indefinitely. The fix: an OPT-IN
+    // handler redeliveryPolicy — on failure the WorkerHost re-enqueues the
+    // job (attempt+1, bounded) onto the SAME durable queue BEFORE the ack.
+    // Handlers WITHOUT the policy keep the historical ack-regardless
+    // semantics exactly.
+    const queueSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'queue', 'queue.ts'), 'utf8');
+    expect(queueSrc).toMatch(/readonly attempt\?: number;/);
+    const handlerSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'job-handler.ts'), 'utf8');
+    expect(handlerSrc).toMatch(/redeliveryPolicy\?: \{[\s\S]*?maxAttempts: number;/);
+    const hostSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'worker-host.ts'), 'utf8');
+    const hostCode = hostSrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The failure path re-enqueues (attempt+1) BEFORE the finally-ack.
+    const catchIdx = hostCode.indexOf('} catch (err) {');
+    const reenqueueIdx = hostCode.indexOf('await this.queue.enqueue(job.type, job.payload,');
+    const finallyIdx = hostCode.indexOf('} finally {', catchIdx);
+    expect(catchIdx).toBeGreaterThan(-1);
+    expect(reenqueueIdx).toBeGreaterThan(catchIdx);
+    expect(reenqueueIdx).toBeLessThan(finallyIdx);
+    expect(hostCode).toMatch(/attempt: attempt \+ 1/);
+    // OPT-IN ONLY: the redelivery is gated on the handler's policy.
+    expect(hostCode).toMatch(/const policy = handler\.redeliveryPolicy;/);
+    // ROUND 4 — the durable-retention fallback: when the retry enqueue
+    // fails, the ORIGINAL delivery is REQUEUED durably (the same attempt
+    // number — a queue blip must not consume the handler budget); when
+    // even the requeue fails, the original is NOT acknowledged
+    // (durability-lost; the boot sweep is the restart backstop). The ack
+    // is conditional.
+    expect(hostCode).toMatch(/worker\.job\.redelivery-requeued-original/);
+    expect(hostCode).toMatch(/worker\.job\.durability-lost/);
+    expect(hostCode).toMatch(/ackOriginal = false/);
+    expect(hostCode).toMatch(/if \(ackOriginal\) \{/);
+    // The session relay handler declares the policy.
+    const relaySrc = readFileSync(join(AGENTS_INTERNAL, 'session-terminal-relay.ts'), 'utf8');
+    expect(relaySrc).toMatch(/redeliveryPolicy: \{ maxAttempts: 5 \}/);
+    // Unrelated handlers (benchmark trial / start-delivery relay / echo)
+    // declare NO policy — their semantics are unchanged.
+    for (const [name, p] of [
+      ['benchmark trial handler', join(BACKEND_ROOT, 'src', 'benchmark', 'internal', 'benchmark-trial-job-handler.ts')],
+      ['benchmark start-delivery relay handler', join(BACKEND_ROOT, 'src', 'benchmark', 'internal', 'start-delivery-relay.ts')],
+      ['echo fixture handler', join(BACKEND_ROOT, 'src', 'platform', 'worker', 'fixtures', 'echo.job.ts')],
+    ] as const) {
+      if (existsSync(p)) {
+        expect(readFileSync(p, 'utf8'), `${name}: no redelivery policy (unchanged semantics)`).not.toMatch(/redeliveryPolicy/);
+      }
+    }
+    // The expired distinction: the obligation records the SOURCE execution
+    // status + the terminal event payload preserves it.
+    const m35 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0035_session_terminal_obligations.sql'), 'utf8');
+    expect(m35).toMatch(/source_execution_status TEXT NOT NULL CHECK \(source_execution_status IN \(/);
+    expect(m35).toMatch(/'completed', 'failed', 'cancelled', 'expired'/);
+    expect(m35).toMatch(/NEW\.status,\s*\)\s*ON CONFLICT|NEW\.status\)\s*ON CONFLICT|NEW\.status,\)[\s\S]*?ON CONFLICT/);
+    const svcSrc = strip(readFileSync(SESSION_SERVICE, 'utf8'));
+    expect(svcSrc).toMatch(/reason: `execution-\$\{obligation\.sourceExecutionStatus\}`/);
+    // The round-3 regression existence.
+    const t = readFileSync(join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts'), 'utf8');
+    expect(t).toMatch(/attempt 1 fails transiently → the job is NOT lost \(durable redelivery\)/);
+    expect(t).toMatch(/redelivery is BOUNDED/);
+    expect(t).toMatch(/UNRELATED handlers keep the historical ack-regardless semantics/);
+    expect(t).toMatch(/the expired distinction is PRESERVED in the terminal event payload/);
+    // Round 4: the durable-retention regressions.
+    expect(t).toMatch(/the original is REQUEUED durably → the subsequent delivery succeeds → obligation discharged/);
+    expect(t).toMatch(/durability-lost bound: the retry enqueue AND the requeue BOTH fail/);
+  });
+
+  it('PR #38 review: the terminal-event guard allows exactly the terminal event itself on a terminal row (the atomic transition+event composition)', () => {
+    const m34 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0034_execution_sessions.sql'), 'utf8');
+    // The refined guard: a terminal event whose event_type EQUALS the
+    // session's terminal status is allowed (the repository appends it in
+    // the same transaction as the CAS that terminalized the row); any
+    // OTHER event on a terminal session is still rejected.
+    expect(m34).toMatch(/IF NEW\.event_type = s THEN/);
+    expect(m34).toMatch(/RETURN NEW; -- the terminal event itself/);
+  });
+
+  it('app.ts wires the session service into the execution service + the external terminal hook', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    // The session service is constructed + injected.
+    expect(appSrc).toMatch(/new DefaultExecutionSessionService\(/);
+    expect(appSrc).toMatch(/sessionService: executionSessionService,/);
+    // The external terminal hook completes/fails the session through the
+    // same logical execution identity (best-effort).
+    expect(appSrc).toMatch(/executionSessionService\.completeSession\(execId\)/);
+    expect(appSrc).toMatch(/executionSessionService\.failSession\(execId/);
   });
 });
