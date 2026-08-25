@@ -305,21 +305,48 @@ export class AgentPolicyEngine implements ToolPolicyGate {
     };
   }
 
-  /** Look up the latest approval for a subject; lazily expire if past TTL. */
+  /** Look up the latest approval for a subject; enforce the binding contract. */
   private async consultApproval(
     scope: { organizationId: string; projectId: string },
     executionId: string,
     subjectKey: string,
     _subjectDomain: AgentPolicyDomain,
-    _match: MatchResult,
-    _version: number,
+    match: MatchResult,
+    version: number,
   ): Promise<AgentPolicyApproval | null> {
     void scope;
     const latest = await this.deps.repository.getLatestApproval(executionId, subjectKey);
     if (!latest) return null;
+    // TTL expiry (the lazy path for pending/approved past expiresAt). The
+    // markExpired UPDATE is CAS-guarded on status IN ('pending','approved')
+    // AND expires_at < NOW(); idempotent under concurrent consults.
     if (this.isExpired(latest) && (latest.status === 'pending' || latest.status === 'approved')) {
       await this.deps.repository.markExpired(latest.id);
-      // Treat as absent — a NEW pending will be created.
+      // Treat as absent — a NEW pending will be created (the unique index
+      // slot is freed by the CAS flip to 'expired').
+      return null;
+    }
+    // THE APPROVAL-BINDING CONTRACT (architect's PR-#41 review):
+    // an approval authorizes the CURRENT invocation ONLY when its
+    // (policyVersion, ruleId) match the policy decision the engine just
+    // produced. A material policy change (rule replacement, version bump,
+    // default-posture change) supersedes prior approvals for the same
+    // subject — the engine re-asks under the new policy rather than
+    // silently carrying a stale approval across the change.
+    const expectedRuleId = match.rule?.id ?? 'default';
+    if (latest.policyVersion !== version || latest.ruleId !== expectedRuleId) {
+      // Stale evidence under a prior policy. For a stale PENDING, supersede
+      // it so the partial unique index on (execution_id, subject_key) WHERE
+      // status='pending' frees the slot for the NEW (version, ruleId)
+      // pending the engine is about to create. The CAS predicate
+      // (status='pending') makes concurrent supersedes idempotent.
+      // Approved/denied stale rows are NOT mutated — they are terminal
+      // evidence under the prior policy; the engine treats them as
+      // not-authoritative for this invocation but does not rewrite their
+      // status (the audit history of the prior resolution stays intact).
+      if (latest.status === 'pending') {
+        await this.deps.repository.supersedePendingApproval(latest.id);
+      }
       return null;
     }
     return latest;
@@ -335,7 +362,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
     host: string | null,
   ): Promise<AgentPolicyApproval> {
     const expiresAt = this.approvalTtlMs > 0 ? new Date(this.now().getTime() + this.approvalTtlMs).toISOString() : null;
-    const approval = await this.deps.repository.ensurePendingApproval({
+    const { approval, created } = await this.deps.repository.ensurePendingApproval({
       organizationId: scope.organizationId,
       projectId: scope.projectId,
       executionId,
@@ -349,7 +376,19 @@ export class AgentPolicyEngine implements ToolPolicyGate {
       requestedReason: match.rule?.reason ?? null,
       expiresAt,
     });
-    await this.auditApprovalEvent('agent-policy.approval-requested', scope, approval);
+    // The architect's PR-#41 review: only the CREATOR of the pending row
+    // emits the 'agent-policy.approval-requested' audit event. A concurrent
+    // ask that found the existing pending (created=false) does NOT emit a
+    // duplicate — exactly ONE audit evidence row per pending DB row.
+    if (created) {
+      await this.auditApprovalEvent('agent-policy.approval-requested', scope, approval);
+    } else {
+      this.deps.logger.debug('agent-policy.pending-reused', {
+        executionId,
+        subjectKey,
+        approvalId: approval.id,
+      });
+    }
     return approval;
   }
 

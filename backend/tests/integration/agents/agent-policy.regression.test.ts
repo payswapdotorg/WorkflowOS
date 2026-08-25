@@ -61,6 +61,50 @@ const silentLogger: Logger = {
 } as unknown as Logger;
 
 // ---------------------------------------------------------------------------
+// A recording audit writer (captures every audit emission for the dedup proof).
+// ---------------------------------------------------------------------------
+//
+// The architect's PR-#41 review: the engine must emit exactly ONE
+// 'agent-policy.approval-requested' audit event per pending DB row, even
+// under concurrent asks for the same subject. This recorder captures every
+// write() call so the regression can assert the count precisely.
+class RecordingAuditWriter {
+  readonly events: import('../../../src/modules/audit/internal/audit.types.js').WriteAuditEventInput[] = [];
+  readonly written = new Map<string, number>(); // eventType → count
+  async write(input: import('../../../src/modules/audit/internal/audit.types.js').WriteAuditEventInput) {
+    this.events.push(input);
+    this.written.set(input.eventType, (this.written.get(input.eventType) ?? 0) + 1);
+    // Return a minimal AuditEvent shape (the engine does not consume the return value).
+    return {
+      id: `audit-${this.events.length}`,
+      organizationId: input.organizationId ?? null,
+      projectId: input.projectId ?? null,
+      eventType: input.eventType,
+      actor: input.actor,
+      source: input.source ?? '',
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
+      executionId: input.executionId ?? null,
+      correlationId: input.correlationId ?? null,
+      beforeState: input.beforeState ?? null,
+      afterState: input.afterState ?? null,
+      metadata: input.metadata ?? {},
+      workItemId: input.workItemId ?? null,
+      workOrderId: input.workOrderId ?? null,
+      architectureVersionId: input.architectureVersionId ?? null,
+      reviewId: input.reviewId ?? null,
+      verificationRunId: input.verificationRunId ?? null,
+      agentRunId: input.agentRunId ?? null,
+      pullRequestAssociationId: input.pullRequestAssociationId ?? null,
+      createdAt: new Date(),
+    };
+  }
+  count(eventType: string): number {
+    return this.written.get(eventType) ?? 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A stub repository for the decision-logic layer (no DB).
 // ---------------------------------------------------------------------------
 class StubPolicyRepository implements AgentPolicyRepository {
@@ -70,12 +114,34 @@ class StubPolicyRepository implements AgentPolicyRepository {
   };
   // null → the engine falls to the platform default document.
   effective: AgentPolicyResolution | null = null;
-  approvalsByKey = new Map<string, AgentPolicyApproval>();
+  // The stub models the real DB: an ARRAY of approvals per subject (so a
+  // v1 approved row + a v2 pending row can coexist when the policy changes).
+  // The latest is the LAST element (insertion order = requestedAt order in
+  // the stub since timestamps are sequential).
+  approvalsByKey = new Map<string, AgentPolicyApproval[]>();
   pendingCreations = 0;
   resolveCalls = 0;
   markExpiredCalls = 0;
+  supersedeCalls = 0;
   throwOnResolveScope = false;
   throwOnGetEffective = false;
+
+  /** Test helper: the latest approval for a subject (mirrors getLatestApproval). */
+  latestFor(subjectKey: string): AgentPolicyApproval | null {
+    const arr = this.approvalsByKey.get(subjectKey);
+    if (!arr || arr.length === 0) return null;
+    return arr[arr.length - 1]!;
+  }
+
+  /** Test helper: a specific approval for a subject by id (for binding assertions). */
+  approvalById(approvalId: string): AgentPolicyApproval | null {
+    for (const arr of this.approvalsByKey.values()) {
+      for (const a of arr) {
+        if (a.id === approvalId) return a;
+      }
+    }
+    return null;
+  }
 
   async resolveScope(): Promise<{ organizationId: string; projectId: string } | null> {
     if (this.throwOnResolveScope) throw new Error('stub: scope resolution failed');
@@ -104,32 +170,43 @@ class StubPolicyRepository implements AgentPolicyRepository {
     return false;
   }
   async getLatestApproval(_executionId: string, subjectKey: string): Promise<AgentPolicyApproval | null> {
-    return this.approvalsByKey.get(subjectKey) ?? null;
+    return this.latestFor(subjectKey);
   }
-  async getApproval(): Promise<AgentPolicyApproval | null> {
-    return null;
+  async getApproval(approvalId: string): Promise<AgentPolicyApproval | null> {
+    return this.approvalById(approvalId);
   }
   async ensurePendingApproval(input: {
     subjectKey: string;
     subjectDomain: AgentPolicyDomain;
+    subjectFamily: string | null;
+    subjectOperation: string | null;
+    subjectHost: string | null;
+    ruleId: string;
+    policyVersion: number;
     requestedReason: string | null;
     expiresAt: string | null;
-  }): Promise<AgentPolicyApproval> {
+  }): Promise<{ approval: AgentPolicyApproval; created: boolean }> {
+    // Honor the engine's (ruleId, policyVersion) so the binding contract
+    // (architect's PR-#41 review) is exercised: a stored approval carries
+    // the (policyVersion, ruleId) that produced it, NOT a fixed stub value.
+    const arr = this.approvalsByKey.get(input.subjectKey) ?? [];
+    const existingPending = arr.find((a) => a.status === 'pending');
+    if (existingPending) {
+      return { approval: existingPending, created: false };
+    }
     this.pendingCreations++;
-    const existing = this.approvalsByKey.get(input.subjectKey);
-    if (existing && existing.status === 'pending') return existing;
     const approval: AgentPolicyApproval = {
       id: `apr-stub-${this.pendingCreations}`,
       organizationId: 'org-1',
       projectId: 'proj-1',
       executionId: 'exec-1',
       subjectDomain: input.subjectDomain,
-      subjectFamily: null,
-      subjectOperation: null,
-      subjectHost: null,
+      subjectFamily: input.subjectFamily,
+      subjectOperation: input.subjectOperation,
+      subjectHost: input.subjectHost,
       subjectKey: input.subjectKey,
-      ruleId: 'stub-rule',
-      policyVersion: 1,
+      ruleId: input.ruleId,
+      policyVersion: input.policyVersion,
       status: 'pending',
       requestedAt: new Date().toISOString(),
       requestedReason: input.requestedReason,
@@ -138,34 +215,57 @@ class StubPolicyRepository implements AgentPolicyRepository {
       resolutionNote: null,
       expiresAt: input.expiresAt,
     };
-    this.approvalsByKey.set(input.subjectKey, approval);
-    return approval;
+    arr.push(approval);
+    this.approvalsByKey.set(input.subjectKey, arr);
+    return { approval, created: true };
+  }
+  async supersedePendingApproval(approvalId: string): Promise<void> {
+    this.supersedeCalls++;
+    for (const arr of this.approvalsByKey.values()) {
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i]!;
+        if (a.id === approvalId && a.status === 'pending') {
+          arr[i] = {
+            ...a,
+            status: 'expired',
+            resolutionNote: 'superseded by policy-version change',
+            resolvedAt: new Date().toISOString(),
+          };
+        }
+      }
+    }
   }
   async listApprovals(): Promise<readonly AgentPolicyApproval[]> {
     return [];
   }
   async resolve(input: { approvalId: string; action: 'approve' | 'deny'; userId: string; note?: string }): Promise<AgentPolicyApproval> {
     this.resolveCalls++;
-    for (const a of this.approvalsByKey.values()) {
-      if (a.id === input.approvalId && a.status === 'pending') {
-        const resolved: AgentPolicyApproval = {
-          ...a,
-          status: input.action === 'approve' ? 'approved' : 'denied',
-          resolvedBy: 'user-1',
-          resolvedAt: new Date().toISOString(),
-          resolutionNote: input.note ?? null,
-        };
-        this.approvalsByKey.set(a.subjectKey, resolved);
-        return resolved;
+    for (const arr of this.approvalsByKey.values()) {
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i]!;
+        if (a.id === input.approvalId && a.status === 'pending') {
+          const resolved: AgentPolicyApproval = {
+            ...a,
+            status: input.action === 'approve' ? 'approved' : 'denied',
+            resolvedBy: 'user-1',
+            resolvedAt: new Date().toISOString(),
+            resolutionNote: input.note ?? null,
+          };
+          arr[i] = resolved;
+          return resolved;
+        }
       }
     }
     return null as never;
   }
   async markExpired(approvalId: string): Promise<void> {
     this.markExpiredCalls++;
-    for (const a of this.approvalsByKey.values()) {
-      if (a.id === approvalId) {
-        this.approvalsByKey.set(a.subjectKey, { ...a, status: 'expired' });
+    for (const arr of this.approvalsByKey.values()) {
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i]!;
+        if (a.id === approvalId) {
+          arr[i] = { ...a, status: 'expired' };
+        }
       }
     }
   }
@@ -330,7 +430,7 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
     repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]));
     // First invocation creates the pending.
     await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
-    const pending = repo.approvalsByKey.get('tool:terminal:terminal.exec:')!;
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
     // Resolve it approved.
     await engine.resolveApproval({ approvalId: pending.id, action: 'approve', userId: "user-1" });
     // A NEW invocation (new invocationId) for the same subject → allow.
@@ -342,7 +442,7 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
   it('ask with a DENIED approval for the same subject → deny (a human denial is durable)', async () => {
     repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]));
     await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
-    const pending = repo.approvalsByKey.get('tool:terminal:terminal.exec:')!;
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
     await engine.resolveApproval({ approvalId: pending.id, action: 'deny', userId: "user-1" });
     const d = await engine.decide(req({ invocationId: 'inv-2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
     expect(d.decision).toBe('deny');
@@ -361,7 +461,7 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
     });
     repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]));
     await expiredEngine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
-    const pending = repo.approvalsByKey.get('tool:terminal:terminal.exec:')!;
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
     await repo.resolve({ approvalId: pending.id, action: 'approve', userId: 'user-1' });
     expect(repo.markExpiredCalls).toBe(0);
     // Advance the clock past the approval's expiry.
@@ -369,6 +469,196 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
     const d = await expiredEngine.decide(req({ invocationId: 'inv-2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
     expect(d.decision).toBe('ask');
     expect(repo.markExpiredCalls).toBe(1); // the expired approved row was lazily flipped
+  });
+
+  // --- the APPROVAL-BINDING CONTRACT (architect's PR-#41 review) ---
+  //
+  // An approval authorizes a CURRENT invocation ONLY when its (policyVersion,
+  // ruleId) match the policy decision the engine just produced. A material
+  // policy change (rule replacement, version bump, default-posture change)
+  // supersedes prior approvals for the same subject — the engine re-asks
+  // under the new policy rather than silently carrying a stale approval
+  // across the change.
+  //
+  // The five scenarios the architect required:
+  //   1. approved v1 → same subject under v1 → allow;
+  //   2. approved v1 → policy bumps to v2 → ASK, not allow;
+  //   3. approved v1/rule-A → same version but rule-A replaced → ASK;
+  //   4. expired approval → ASK (already covered above + re-asserted here
+  //      for completeness against the binding contract);
+  //   5. concurrent asks after a policy-version change → exactly ONE
+  //      pending approval.
+
+  it('binding #1: approved under v1 → same subject under v1 → allow (the binding matches)', async () => {
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    await engine.resolveApproval({ approvalId: pending.id, action: 'approve', userId: 'user-1' });
+    // Same policy version, same rule → the approval authorizes this invocation.
+    const d = await engine.decide(req({ invocationId: 'inv-2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    expect(d.decision).toBe('allow');
+    expect(d.reason).toMatch(/approved by user-1/);
+    expect(d.reason).toMatch(/v1\/ask-terminal/);
+  });
+
+  it('binding #2: approved under v1 → policy bumps to v2 → ASK (the v1 approval does NOT authorize the v2 invocation)', async () => {
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    await engine.resolveApproval({ approvalId: pending.id, action: 'approve', userId: 'user-1' });
+    // Bump the policy version (a material policy change — the rule id stays
+    // the same but the version moved, so the binding check fails).
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 2);
+    const d = await engine.decide(req({ invocationId: 'inv-v2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    expect(d.decision).toBe('ask');
+    expect(d.reason).toMatch(/v2\/ask-terminal/);
+    // The v1 approved row was NOT mutated (terminal evidence under v1
+    // stays intact); the engine treated it as not-authoritative for v2.
+    const v1Approval = repo.approvalById(pending.id)!;
+    expect(v1Approval.status).toBe('approved'); // untouched
+    expect(v1Approval.policyVersion).toBe(1);
+    // A new v2 pending was created (pendingCreations goes from 1 → 2).
+    expect(repo.pendingCreations).toBe(2);
+    // The latest approval for the subject is the new v2 pending.
+    const latestV2 = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(latestV2.status).toBe('pending');
+    expect(latestV2.policyVersion).toBe(2);
+  });
+
+  it('binding #3: approved under v1/rule-A → same version but rule-A replaced with rule-B → ASK (the ruleId binding supersedes)', async () => {
+    // Same version number (1), but the matched rule id changed
+    // (rule-A replaced with rule-B at the same version — a hypothetical
+    // the trigger wouldn't permit via the public API, but the engine's
+    // binding check covers it independently of the version dimension).
+    repo.effective = resolution(doc([{ id: 'rule-A', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(pending.ruleId).toBe('rule-A');
+    await engine.resolveApproval({ approvalId: pending.id, action: 'approve', userId: 'user-1' });
+    // Same version (1), but the rule id changed (rule-A → rule-B).
+    repo.effective = resolution(doc([{ id: 'rule-B', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    const d = await engine.decide(req({ invocationId: 'inv-ruleB', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    expect(d.decision).toBe('ask');
+    expect(d.reason).toMatch(/v1\/rule-B/);
+    // The v1/rule-A approved row was NOT mutated (terminal evidence stays).
+    const v1Approval = repo.approvalById(pending.id)!;
+    expect(v1Approval.status).toBe('approved');
+    expect(v1Approval.ruleId).toBe('rule-A');
+    // A new v1/rule-B pending was created.
+    expect(repo.pendingCreations).toBe(2);
+    // The latest approval for the subject is the new v1/rule-B pending.
+    const latestRuleB = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(latestRuleB.status).toBe('pending');
+    expect(latestRuleB.ruleId).toBe('rule-B');
+  });
+
+  it('binding (denied): a human denial does NOT carry across a policy-version change → ASK under v2 (not deny)', async () => {
+    // A denial is durable for the subject UNDER the (policyVersion, ruleId)
+    // that produced it. A material policy change supersedes the denial —
+    // the engine re-asks under v2 (the human denied v1's posture, not v2's).
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    await engine.resolveApproval({ approvalId: pending.id, action: 'deny', userId: 'user-1' });
+    // Bump to v2.
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 2);
+    const d = await engine.decide(req({ invocationId: 'inv-v2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    expect(d.decision).toBe('ask'); // NOT deny — the v1 denial is stale evidence under v2
+    expect(d.reason).toMatch(/v2\/ask-terminal/);
+    // The v1 denied row stays as terminal evidence (untouched).
+    const v1Approval = repo.approvalById(pending.id)!;
+    expect(v1Approval.status).toBe('denied');
+    expect(v1Approval.policyVersion).toBe(1);
+    // The latest approval for the subject is the new v2 pending (re-asked).
+    const latestV2 = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(latestV2.status).toBe('pending');
+    expect(latestV2.policyVersion).toBe(2);
+  });
+
+  it('binding (stale pending): a pending under v1 → policy bumps to v2 → the v1 pending is SUPERSEDED + a new v2 pending is created (exactly ONE pending for the subject)', async () => {
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const v1Pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(v1Pending.status).toBe('pending');
+    expect(v1Pending.policyVersion).toBe(1);
+    expect(repo.supersedeCalls).toBe(0);
+    // Bump to v2.
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 2);
+    const d = await engine.decide(req({ invocationId: 'inv-v2', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    expect(d.decision).toBe('ask');
+    expect(d.reason).toMatch(/v2\/ask-terminal/);
+    // The v1 pending was superseded (flipped to 'expired') so the partial
+    // unique index on (execution_id, subject_key) WHERE status='pending'
+    // freed the slot for the new v2 pending.
+    expect(repo.supersedeCalls).toBe(1);
+    const after = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(after.status).toBe('pending'); // the new v2 pending
+    expect(after.policyVersion).toBe(2);
+    expect(after.id).not.toBe(v1Pending.id); // a NEW row (the stub overwrites by subjectKey)
+    expect(repo.pendingCreations).toBe(2); // v1 + v2
+  });
+
+  it('binding #5: concurrent asks AFTER a policy-version change → exactly ONE new v2 pending (the v1 pending was superseded, freeing the unique-index slot)', async () => {
+    // v1 → pending P1 (v1, rule-A).
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await engine.decide(req({ family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const beforeConcurrent = repo.pendingCreations;
+    // Bump to v2 — two concurrent decide() calls.
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 2);
+    const [a, b] = await Promise.all([
+      engine.decide(req({ invocationId: 'inv-conc-a', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } })),
+      engine.decide(req({ invocationId: 'inv-conc-b', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } })),
+    ]);
+    expect(a.decision).toBe('ask');
+    expect(b.decision).toBe('ask');
+    // Exactly ONE new v2 pending was created (the v1 pending was
+    // superseded first, freeing the slot; the two concurrent ensurePending
+    // calls then dedupe to one via the partial unique index).
+    expect(repo.pendingCreations - beforeConcurrent).toBe(1);
+    // The latest approval for the subject is the v2 pending.
+    const latest = repo.latestFor('tool:terminal:terminal.exec:')!;
+    expect(latest.status).toBe('pending');
+    expect(latest.policyVersion).toBe(2);
+  });
+
+  it('audit dedup: two parallel asks for the same subject → exactly ONE approval-requested audit event (the creator emits; the observer does not)', async () => {
+    // A recording audit writer captures every emission.
+    const audit = new RecordingAuditWriter();
+    const auditEngine = new AgentPolicyEngine({
+      repository: repo,
+      auditWriter: audit,
+      logger: silentLogger,
+      approvalTtlMs: 0,
+    });
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    const [a, b] = await Promise.all([
+      auditEngine.decide(req({ invocationId: 'inv-aud-a', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } })),
+      auditEngine.decide(req({ invocationId: 'inv-aud-b', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } })),
+    ]);
+    expect(a.decision).toBe('ask');
+    expect(b.decision).toBe('ask');
+    // Exactly ONE approval-requested audit event — the durable pending row
+    // was created once (the partial unique index); the engine emitted the
+    // audit only for the creator (created=true), NOT for the observer
+    // (created=false). This is the architect's PR-#41 secondary finding:
+    // concurrent pending creation must not duplicate audit evidence.
+    expect(audit.count('agent-policy.approval-requested')).toBe(1);
+  });
+
+  it('audit emission on approval resolution (approve/deny) is per-resolution (terminal evidence)', async () => {
+    const audit = new RecordingAuditWriter();
+    const auditEngine = new AgentPolicyEngine({
+      repository: repo,
+      auditWriter: audit,
+      logger: silentLogger,
+      approvalTtlMs: 0,
+    });
+    repo.effective = resolution(doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]), 1);
+    await auditEngine.decide(req({ invocationId: 'inv-res-a', family: 'terminal', operation: 'terminal.exec', input: { argv: ['ls'] } }));
+    const pending = repo.latestFor('tool:terminal:terminal.exec:')!;
+    await auditEngine.resolveApproval({ approvalId: pending.id, action: 'approve', userId: 'user-1' });
+    expect(audit.count('agent-policy.approval-requested')).toBe(1);
+    expect(audit.count('agent-policy.approval-approved')).toBe(1);
   });
 
   // --- fail-closed ---
@@ -617,7 +907,7 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
 
   // --- approvals: idempotency + resolution CAS ---
 
-  it('ensurePendingApproval: twice for the same subject → the SAME row (idempotent)', async () => {
+  it('ensurePendingApproval: twice for the same subject → the SAME row (idempotent; created flag distinguishes the creator from the concurrent observer)', async () => {
     const a = await repo.ensurePendingApproval({
       organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
       subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
@@ -630,8 +920,14 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
       subjectKey: 'tool:terminal:terminal.exec:', ruleId: 'ask-terminal', policyVersion: 1,
       requestedReason: 'ask', expiresAt: null,
     });
-    expect(a.id).toBe(b.id);
-    expect(a.status).toBe('pending');
+    // Same row (the partial unique index dedupes).
+    expect(a.approval.id).toBe(b.approval.id);
+    expect(a.approval.status).toBe('pending');
+    // The FIRST call created the row; the SECOND found it. The created flag
+    // lets the engine emit exactly ONE approval-requested audit event per
+    // pending DB row (architect's PR-#41 review: no duplicate audit evidence).
+    expect(a.created).toBe(true);
+    expect(b.created).toBe(false);
   });
 
   it('getLatestApproval: returns the latest for a subject', async () => {
@@ -647,12 +943,12 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
       subjectKey: 'network:http:http.POST:api.evil.test', ruleId: 'ask-net', policyVersion: 1,
       requestedReason: 'ask', expiresAt: null,
     });
-    const approved = await repo.resolve({ approvalId: pending.id, action: 'approve', userId: userId, note: 'ok' });
+    const approved = await repo.resolve({ approvalId: pending.approval.id, action: 'approve', userId: userId, note: 'ok' });
     expect(approved.status).toBe('approved');
     expect(approved.resolvedBy).toBe(userId);
     expect(approved.resolutionNote).toBe('ok');
     // A second resolution is rejected — resolutions are immutable.
-    await expect(repo.resolve({ approvalId: pending.id, action: 'deny', userId: userId }))
+    await expect(repo.resolve({ approvalId: pending.approval.id, action: 'deny', userId: userId }))
       .rejects.toThrow(/already-resolved/);
   });
 
@@ -670,8 +966,9 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
       subjectKey: 'network:http:http.POST:api.evil.test', ruleId: 'ask-net', policyVersion: 1,
       requestedReason: 'ask again', expiresAt: null,
     });
-    expect(newPending.status).toBe('pending');
-    expect(newPending.id).not.toBe('');
+    expect(newPending.approval.status).toBe('pending');
+    expect(newPending.approval.id).not.toBe('');
+    expect(newPending.created).toBe(true); // a NEW row was created (the prior left 'pending')
     // getLatestApproval now returns the NEW pending (latest by requested_at).
     const latest = await repo.getLatestApproval(executionId, 'network:http:http.POST:api.evil.test');
     expect(latest!.status).toBe('pending');
@@ -684,8 +981,8 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
       subjectKey: 'deployment:git:git.push:', ruleId: 'deny-deploy', policyVersion: 1,
       requestedReason: 'ask', expiresAt: new Date(Date.now() - 1000).toISOString(),
     });
-    await repo.markExpired(pending.id);
-    const after = await repo.getApproval(pending.id);
+    await repo.markExpired(pending.approval.id);
+    const after = await repo.getApproval(pending.approval.id);
     expect(after!.status).toBe('expired');
   });
 
@@ -696,9 +993,9 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
       subjectKey: 'secrets:http:http.GET:api.secret.test', ruleId: 'ask-secrets', policyVersion: 1,
       requestedReason: 'ask', expiresAt: null,
     });
-    const fetched = await repo.getApproval(pending.id);
+    const fetched = await repo.getApproval(pending.approval.id);
     expect(fetched).not.toBeNull();
-    expect(fetched!.id).toBe(pending.id);
+    expect(fetched!.id).toBe(pending.approval.id);
     expect(fetched!.subjectDomain).toBe('secrets');
   });
 
@@ -708,6 +1005,145 @@ describe('WORK-037 — PgAgentPolicyRepository (durability, real pglite)', () =>
     expect(pending.every((a) => a.status === 'pending')).toBe(true);
     const all = await repo.listApprovals(projectId);
     expect(all.length).toBeGreaterThanOrEqual(pending.length);
+  });
+
+  // --- THE APPROVAL-BINDING CONTRACT (architect's PR-#41 review) ---
+  //
+  // The repository-level guarantees the engine's binding check relies on:
+  //   * ensurePendingApproval returns {approval, created} so the engine
+  //     can emit exactly ONE audit event per pending DB row (no duplicate
+  //     audit evidence under concurrent asks);
+  //   * supersedePendingApproval CAS-flips a stale pending to 'expired'
+  //     so the partial unique index frees the slot for a new (version,
+  //     ruleId) pending — concurrent supersedes are idempotent;
+  //   * approved/denied rows are NEVER superseded (terminal evidence stays
+  //     intact; the engine treats them as not-authoritative for a current
+  //     invocation under a different (policyVersion, ruleId) but does not
+  //     rewrite their status).
+
+  it('ensurePendingApproval: created flag distinguishes the creator from the concurrent observer (no duplicate audit evidence)', async () => {
+    const subjectKey = `tool:terminal:terminal.exec:audit-${Math.random().toString(36).slice(2)}`;
+    const a = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    const b = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    // The partial unique index dedupes the row.
+    expect(a.approval.id).toBe(b.approval.id);
+    // The FIRST call created the row; the SECOND found it. The engine uses
+    // this flag to emit exactly ONE approval-requested audit event per
+    // pending DB row.
+    expect(a.created).toBe(true);
+    expect(b.created).toBe(false);
+  });
+
+  it('supersedePendingApproval: CAS-flips a pending row to expired (frees the unique-index slot)', async () => {
+    const subjectKey = `tool:terminal:terminal.exec:super-${Math.random().toString(36).slice(2)}`;
+    const a = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    await repo.supersedePendingApproval(a.approval.id);
+    const after = await repo.getApproval(a.approval.id);
+    expect(after!.status).toBe('expired');
+    expect(after!.resolutionNote).toBe('superseded by policy-version change');
+    expect(after!.resolvedAt).not.toBeNull();
+  });
+
+  it('supersedePendingApproval: does NOT touch an approved row (terminal evidence stays intact)', async () => {
+    const subjectKey = `tool:terminal:terminal.exec:supapp-${Math.random().toString(36).slice(2)}`;
+    const pending = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    await repo.resolve({ approvalId: pending.approval.id, action: 'approve', userId: userId, note: 'human-approved' });
+    // Attempting to supersede an APPROVED row is a no-op (the CAS predicate
+    // is status='pending'). The approved row stays as terminal evidence.
+    await repo.supersedePendingApproval(pending.approval.id);
+    const after = await repo.getApproval(pending.approval.id);
+    expect(after!.status).toBe('approved');
+    expect(after!.resolutionNote).toBe('human-approved'); // the resolve note, NOT 'superseded…'
+  });
+
+  it('supersedePendingApproval: concurrent supersedes are idempotent (CAS — only the first flips)', async () => {
+    const subjectKey = `tool:terminal:terminal.exec:supconc-${Math.random().toString(36).slice(2)}`;
+    const pending = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    // Two concurrent supersedes — both target the same row.
+    await Promise.all([
+      repo.supersedePendingApproval(pending.approval.id),
+      repo.supersedePendingApproval(pending.approval.id),
+    ]);
+    const after = await repo.getApproval(pending.approval.id);
+    expect(after!.status).toBe('expired');
+    expect(after!.resolutionNote).toBe('superseded by policy-version change');
+  });
+
+  it('the binding end-to-end (real pglite): pending under v1 → bump document to v2 → the v1 pending is superseded + a new v2 pending is created (exactly ONE pending for the subject)', async () => {
+    const subjectKey = `tool:terminal:terminal.exec:e2e-${Math.random().toString(36).slice(2)}`;
+    // Set the project policy v1 (rule ask-terminal, version 1).
+    await repo.setProjectPolicy({
+      organizationId: orgId, projectId,
+      document: doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask' }]),
+      userId: userId,
+    });
+    const v1 = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 1,
+      requestedReason: 'ask', expiresAt: null,
+    });
+    expect(v1.approval.policyVersion).toBe(1);
+    expect(v1.created).toBe(true);
+    // Bump the document to v2 (the trigger bumps policy_version on UPDATE).
+    await repo.setProjectPolicy({
+      organizationId: orgId, projectId,
+      document: doc([{ id: 'ask-terminal', domain: 'tool', family: 'terminal', effect: 'ask', reason: 'v2 posture' }]),
+      userId: userId,
+    });
+    const effective = await repo.getEffectivePolicy(orgId, projectId);
+    expect(effective!.policyVersion).toBe(2);
+    // Supersede the v1 pending, then create a v2 pending for the SAME subject.
+    await repo.supersedePendingApproval(v1.approval.id);
+    const v2 = await repo.ensurePendingApproval({
+      organizationId: orgId, projectId, executionId, subjectDomain: 'tool',
+      subjectFamily: 'terminal', subjectOperation: 'terminal.exec', subjectHost: null,
+      subjectKey, ruleId: 'ask-terminal', policyVersion: 2,
+      requestedReason: 'v2 posture', expiresAt: null,
+    });
+    expect(v2.approval.policyVersion).toBe(2);
+    expect(v2.created).toBe(true);
+    expect(v2.approval.id).not.toBe(v1.approval.id);
+    // Exactly ONE pending row exists for the subject (the v1 row is expired).
+    const pendingRows = await stack.db.client.query<{ id: string; status: string; policy_version: number }>(
+      `SELECT id, status, policy_version FROM wfos_agent_policy_approvals
+        WHERE execution_id = $1 AND subject_key = $2
+        ORDER BY requested_at DESC`,
+      [executionId, subjectKey],
+    );
+    const pending = pendingRows.rows.filter((r) => r.status === 'pending');
+    expect(pending.length).toBe(1);
+    expect(pending[0]!.policy_version).toBe(2);
+    // The v1 row is now expired (terminal evidence under v1).
+    const v1Row = pendingRows.rows.find((r) => r.policy_version === 1);
+    expect(v1Row!.status).toBe('expired');
+    // Cleanup.
+    await repo.clearProjectPolicy(orgId, projectId);
   });
 });
 

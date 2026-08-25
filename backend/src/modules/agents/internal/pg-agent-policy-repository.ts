@@ -12,6 +12,16 @@
  *     index on (execution_id, subject_key) WHERE status='pending'
  *     (INSERT ... ON CONFLICT DO NOTHING RETURNING; on 0 rows, the SELECT
  *     returns the concurrent winner — exactly one pending row per subject);
+ *     ensurePendingApproval also returns whether THIS call created the row
+ *     so the engine can emit exactly ONE approval-requested audit event
+ *     per pending DB row (architect's PR-#41 review: no duplicate audit
+ *     evidence under concurrent asks);
+ *   * supersedePendingApproval CAS-flips a stale pending to 'expired' so a
+ *     new (policyVersion, ruleId) pending can be created for the same
+ *     subject (architect's PR-#41 review: approvals are BOUND to the
+ *     (policyVersion, ruleId) that produced them — a material policy
+ *     change supersedes the prior pending; approved/denied stale rows
+ *     stay as terminal evidence, untouched);
  *   * approval resolution is a CAS (status='pending' predicate; a resolved
  *     approval is terminal — the partial unique index permits a NEW pending
  *     row only after the prior row leaves 'pending');
@@ -202,7 +212,7 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     policyVersion: number;
     requestedReason: string | null;
     expiresAt: string | null;
-  }): Promise<AgentPolicyApproval> {
+  }): Promise<{ approval: AgentPolicyApproval; created: boolean }> {
     // Idempotent: ON CONFLICT DO NOTHING under the partial unique index on
     // (execution_id, subject_key) WHERE status='pending'. A concurrent ask
     // produces exactly one pending row.
@@ -230,20 +240,39 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
         input.expiresAt,
       ],
     );
-    if (res.rows[0]) return mapApproval(res.rows[0]);
+    if (res.rows[0]) return { approval: mapApproval(res.rows[0]), created: true };
     // A concurrent ask won the race — return the existing pending row.
+    // created=false so the engine does NOT emit a duplicate
+    // 'agent-policy.approval-requested' audit event (exactly ONE audit
+    // row per pending DB row, even under concurrent asks).
     const existing = await this.getLatestApproval(input.executionId, input.subjectKey);
-    if (existing && existing.status === 'pending') return existing;
+    if (existing && existing.status === 'pending') return { approval: existing, created: false };
     // Extremely unlikely: the pending row resolved between the INSERT and the
     // SELECT. Re-read returns the latest (resolved) — the engine treats a
     // non-pending latest as terminal evidence. Return it; the engine decides.
-    return existing ?? ((): AgentPolicyApproval => {
-      throw new AgentPolicyError(
-        'agent-policy-approval-not-found',
-        'ensurePendingApproval: the pending approval could not be read after a no-op insert (subject state is inconsistent)',
-        { executionId: input.executionId, subjectKey: input.subjectKey },
-      );
-    })();
+    if (existing) return { approval: existing, created: false };
+    throw new AgentPolicyError(
+      'agent-policy-approval-not-found',
+      'ensurePendingApproval: the pending approval could not be read after a no-op insert (subject state is inconsistent)',
+      { executionId: input.executionId, subjectKey: input.subjectKey },
+    );
+  }
+
+  async supersedePendingApproval(approvalId: string): Promise<void> {
+    // CAS UPDATE: only flips a 'pending' row to 'expired'. Concurrent
+    // supersedes are idempotent (the second UPDATE matches 0 rows). Does
+    // NOT touch approved/denied rows (terminal evidence stays intact).
+    // Does NOT require expires_at < NOW() (this is a policy-version
+    // supersession, not a TTL expiry — see markExpired for the TTL path).
+    await this.deps.db.query(
+      `UPDATE wfos_agent_policy_approvals
+          SET status = 'expired',
+              resolution_note = 'superseded by policy-version change',
+              resolved_at = NOW()
+        WHERE id = $1
+          AND status = 'pending'`,
+      [approvalId],
+    );
   }
 
   async listApprovals(

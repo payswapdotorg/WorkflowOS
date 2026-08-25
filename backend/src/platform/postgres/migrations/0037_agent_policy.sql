@@ -89,10 +89,33 @@ CREATE TRIGGER wfos_agent_policies_bump_version
 -- 'project.admin'). Resolution is immutable: a resolved approval is terminal
 -- evidence; a NEW ask for the same subject creates a new pending row only
 -- after the prior row is no longer 'pending' (the partial unique index
--- permits this). An APPROVED (unexpired) row makes subsequent invocations
--- of the same subject 'allow' (with the approval reference in the reason);
--- a DENIED row makes them 'deny' (a human denial is durable for that
--- execution+subject).
+-- permits this).
+--
+-- THE APPROVAL-BINDING CONTRACT (architect's PR-#41 review):
+-- An APPROVED (unexpired) row makes subsequent invocations of the same
+-- subject 'allow' ONLY when the row's (policy_version, rule_id) match the
+-- policy decision the engine just produced. A material policy change
+-- (rule replacement, version bump, default-posture change) supersedes prior
+-- approvals for the same subject — the engine re-asks under the new policy
+-- rather than silently carrying a stale approval across the change.
+--   * A stale PENDING is flipped to 'expired' (resolution_note='superseded
+--     by policy-version change') so the partial unique index frees the slot
+--     for the new (version, rule_id) pending. Concurrent supersedes are
+--     idempotent (CAS predicate: status='pending').
+--   * A stale APPROVED or DENIED row is NOT mutated — it is terminal
+--     evidence under the prior policy; the engine treats it as
+--     not-authoritative for the current invocation but does not rewrite
+--     its status (the audit history of the prior resolution stays intact).
+--   * A DENIED row makes subsequent invocations of the same subject 'deny'
+--     ONLY under the same (policy_version, rule_id) — a human denial does
+--     NOT carry across a policy change (the human denied v1's posture, not
+--     v2's).
+--
+-- The 'expired' status is overloaded: it covers BOTH TTL-passed (the
+-- markExpired lazy path, gated on expires_at < NOW()) AND policy-superseded
+-- (the supersedePendingApproval path, NOT gated on expires_at). The
+-- resolution_note distinguishes them ('superseded by policy-version change'
+-- vs the TTL path which leaves resolution_note NULL).
 CREATE TABLE IF NOT EXISTS wfos_agent_policy_approvals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES wfos_organizations(id) ON DELETE CASCADE,

@@ -63,19 +63,50 @@
  *      author owns precedence — no hidden deny/allow override semantics).
  *   3. No match → document.defaultEffect (∈ {allow, deny, ask}).
  *   4. If the decision is 'ask': resolve approvals for
- *      (execution_id, subject_key) —
- *        approved + unexpired → 'allow' (reason cites the approval id +
- *          resolver);
- *        denied → 'deny' (a human denial is durable for that subject;
- *          reason cites the denial);
- *        pending → 'ask' (the existing pending row; idempotent — no
- *          duplicate pending request under concurrent asks);
- *        absent → create a pending row (idempotent under the partial
- *          unique index) → 'ask'.
+ *      (execution_id, subject_key) WHERE the approval's (policyVersion,
+ *      ruleId) match the policy decision the engine just produced —
+ *        approved + unexpired + bound to the current (policyVersion,
+ *          ruleId) → 'allow' (reason cites the approval id + resolver);
+ *        denied + bound to the current (policyVersion, ruleId) → 'deny'
+ *          (a human denial is durable for that subject UNDER the policy
+ *          version/rule that produced it; reason cites the denial);
+ *        pending + bound to the current (policyVersion, ruleId) → 'ask'
+ *          (the existing pending row; idempotent — no duplicate pending
+ *          request under concurrent asks);
+ *        absent, OR an approval bound to a PRIOR (policyVersion, ruleId)
+ *          → STALE: supersede a stale pending (free the partial unique
+ *          index slot) + create a NEW pending row bound to the current
+ *          (policyVersion, ruleId) → 'ask'. A material policy change
+ *          (rule replacement, version bump, default-posture change)
+ *          NEVER silently carries a prior approval across the change;
+ *          the engine re-asks under the new policy.
  *   5. FAIL CLOSED: any repository error or unresolvable scope → 'deny'
  *      with reason 'agent-policy-unavailable' / 'agent-policy-scope-
  *      unresolvable'. The runtime records the blocked observation + audits.
  *      NEVER silently allow.
+ *
+ * THE APPROVAL-BINDING CONTRACT (the architect's review of PR #41):
+ *   An approval authorizes a CURRENT invocation ONLY when ALL of:
+ *     approval.status === 'approved'         (or 'denied' for the durable
+ *                                             denial branch)
+ *     approval.expiresAt > now               (the engine's TTL check)
+ *     approval.policyVersion === current     (the version the engine just
+ *                                             resolved against the document)
+ *     approval.ruleId === current matched   (the rule id the engine just
+ *      rule id                                matched, or 'default' for the
+ *                                             document's defaultEffect)
+ *     approval.subjectKey === current        (the stable subject identity)
+ *      subject key
+ *   Otherwise the approval is STALE evidence under a prior policy. The
+ *   engine re-asks. A stale PENDING is superseded (status='expired' +
+ *   resolution_note='superseded by policy-version change') so the partial
+ *   unique index on (execution_id, subject_key) WHERE status='pending'
+ *   frees the slot for the new (version, ruleId) pending. Approved/denied
+ *   stale rows are NOT mutated — they are terminal evidence under the
+ *   prior policy; the engine treats them as not-authoritative for the
+ *   current invocation (does not allow/deny based on them) but does not
+ *   rewrite their status (the audit history of the prior resolution stays
+ *   intact).
  *
  * Every decision reason carries the policy version + matched rule id (or
  * 'default') so the durable observation record (policy:{decision,reason})
@@ -245,7 +276,13 @@ export interface AgentPolicyRepository {
   getLatestApproval(executionId: string, subjectKey: string): Promise<AgentPolicyApproval | null>;
   /** A single approval by id (for the resolve-endpoint authorization check). */
   getApproval(approvalId: string): Promise<AgentPolicyApproval | null>;
-  /** Idempotent pending creation (partial unique index on pending). Returns the row (existing or new). */
+  /**
+   * Idempotent pending creation (partial unique index on pending). Returns
+   * the row (existing or new) AND whether THIS call created it. Only the
+   * creator of the row emits the 'agent-policy.approval-requested' audit
+   * event (so concurrent asks produce exactly ONE audit evidence row,
+   * matching exactly ONE pending DB row).
+   */
   ensurePendingApproval(input: {
     organizationId: string;
     projectId: string;
@@ -259,7 +296,19 @@ export interface AgentPolicyRepository {
     policyVersion: number;
     requestedReason: string | null;
     expiresAt: string | null;
-  }): Promise<AgentPolicyApproval>;
+  }): Promise<{ approval: AgentPolicyApproval; created: boolean }>;
+  /**
+   * Supersede a stale pending approval: CAS UPDATE to status='expired' +
+   * resolution_note='superseded by policy-version change'. Called by the
+   * engine when consultApproval detects the pending's (policyVersion,
+   * ruleId) no longer match the current policy decision. The CAS predicate
+   * (status='pending') makes concurrent supersedes idempotent — only the
+   * first flips the row, the others no-op. Frees the partial unique index
+   * slot for the new (version, ruleId) pending the engine is about to
+   * create. Approved/denied rows are NEVER superseded (terminal evidence
+   * stays intact).
+   */
+  supersedePendingApproval(approvalId: string): Promise<void>;
   /** List approvals (optionally filtered by status) for a project. */
   listApprovals(projectId: string, status?: AgentPolicyApprovalStatus): Promise<readonly AgentPolicyApproval[]>;
   /** Resolve (approve/deny) a pending approval; idempotent — a resolved approval is terminal. */

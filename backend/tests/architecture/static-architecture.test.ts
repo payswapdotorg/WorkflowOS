@@ -9131,5 +9131,91 @@ describe('WORK-037 invariants — Agent Policy and Permissions (the engine behin
     expect(src).toMatch(/policy failure cannot execute/);
     // The external handoff eligibility.
     expect(src).toMatch(/external handoff eligibility/);
+    // The architect's PR-#41 review: the approval-binding contract +
+    // the audit-dedup invariant + the supersession semantics.
+    expect(src).toMatch(/APPROVAL-BINDING CONTRACT/);
+    expect(src).toMatch(/approved under v1 → same subject under v1 → allow/);
+    expect(src).toMatch(/approved under v1 → policy bumps to v2 → ASK/);
+    expect(src).toMatch(/rule-A replaced with rule-B → ASK/);
+    expect(src).toMatch(/concurrent asks AFTER a policy-version change → exactly ONE new v2 pending/);
+    expect(src).toMatch(/exactly ONE approval-requested audit event/);
+    expect(src).toMatch(/supersedePendingApproval/);
+    expect(src).toMatch(/the v1 pending is SUPERSEDED/);
+  });
+
+  // ==========================================================================
+  // THE APPROVAL-BINDING CONTRACT + AUDIT-DEDUP INVARIANTS (architect's
+  // PR-#41 review: approvals are bound to (policyVersion, ruleId);
+  // concurrent asks emit exactly ONE audit event per pending DB row).
+  // ==========================================================================
+  it('the engine enforces the (policyVersion, ruleId) approval-binding contract in consultApproval', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // consultApproval reads BOTH latest.policyVersion AND latest.ruleId
+    // against the current (version, expectedRuleId) the engine just
+    // produced. A material policy change supersedes prior approvals.
+    expect(engineSrc).toMatch(/latest\.policyVersion/);
+    expect(engineSrc).toMatch(/latest\.ruleId/);
+    expect(engineSrc).toMatch(/expectedRuleId/);
+    expect(engineSrc).toMatch(/match\.rule\?\.id \?\? 'default'/);
+    // The stale-approval path: supersede a stale PENDING; leave
+    // approved/denied stale rows as terminal evidence (not mutated).
+    expect(engineSrc).toMatch(/supersedePendingApproval\(/);
+    expect(engineSrc).toMatch(/if \(latest\.status === 'pending'\)/);
+    // The binding comment is in the source (provenance for the invariant).
+    expect(engineSrc).toMatch(/APPROVAL-BINDING CONTRACT/);
+  });
+
+  it('ensurePending emits the approval-requested audit ONLY when the engine created the row (no duplicate audit evidence)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The { approval, created } destructure — the created flag drives the
+    // audit decision.
+    expect(engineSrc).toMatch(/\{ approval, created \}/);
+    expect(engineSrc).toMatch(/this\.deps\.repository\.ensurePendingApproval\(/);
+    // The audit is emitted ONLY when created=true (the row's creator). The
+    // concurrent observer (created=false) does NOT emit a duplicate.
+    expect(engineSrc).toMatch(/if \(created\)/);
+    expect(engineSrc).toMatch(/auditApprovalEvent\('agent-policy\.approval-requested'/);
+  });
+
+  it('the repository interface binds approvals to (policyVersion, ruleId) + exposes supersedePendingApproval', () => {
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    // ensurePendingApproval returns { approval, created } so the engine
+    // can dedupe the audit emission.
+    expect(typesSrc).toMatch(/Promise<{ approval: AgentPolicyApproval; created: boolean }>/);
+    // supersedePendingApproval is the sanctioned stale-pending path.
+    expect(typesSrc).toMatch(/supersedePendingApproval\(approvalId: string\): Promise<void>/);
+    // The binding contract is documented in the source (provenance).
+    expect(typesSrc).toMatch(/APPROVAL-BINDING CONTRACT/);
+  });
+
+  it('the repository implements supersedePendingApproval as a CAS UPDATE (concurrent supersedes are idempotent)', () => {
+    const repoSrc = readFileSync(AP_REPO, 'utf8');
+    expect(repoSrc).toMatch(/async supersedePendingApproval\(approvalId: string\): Promise<void>/);
+    // The CAS predicate is status='pending' (idempotent under concurrent
+    // calls — the second UPDATE matches 0 rows).
+    expect(repoSrc).toMatch(/WHERE id = \$1\s+AND status = 'pending'/);
+    // The resolution_note + resolved_at are set (audit evidence).
+    expect(repoSrc).toMatch(/superseded by policy-version change/);
+    // ensurePendingApproval returns { approval, created }.
+    expect(repoSrc).toMatch(/return \{ approval: mapApproval\(res\.rows\[0\]\), created: true \}/);
+    expect(repoSrc).toMatch(/return \{ approval: existing, created: false \}/);
+  });
+
+  it('the migration documents the binding contract + the supersession semantics', () => {
+    const sql = readFileSync(AP_MIGRATION, 'utf8');
+    // The binding contract comment is in the migration (provenance for the
+    // engine's runtime check; documents that approvals are bound to
+    // (policy_version, rule_id), not just (execution_id, subject_key)).
+    expect(sql).toMatch(/APPROVAL-BINDING CONTRACT/);
+    expect(sql).toMatch(/policy_version, rule_id/);
+    // The supersession path is documented (stale pending → 'expired';
+    // approved/denied stale rows are NOT mutated).
+    expect(sql).toMatch(/supersedePendingApproval/);
+    expect(sql).toMatch(/status='pending'/);
+    expect(sql).toMatch(/NOT mutated/);
+    // The 'expired' status overload is documented (TTL-passed OR
+    // policy-superseded; the resolution_note distinguishes them).
+    expect(sql).toMatch(/'expired' status is overloaded/);
+    expect(sql).toMatch(/superseded by policy-version change/);
   });
 });
