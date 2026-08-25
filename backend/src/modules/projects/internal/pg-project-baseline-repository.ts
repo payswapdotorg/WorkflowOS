@@ -158,6 +158,25 @@ function mapEnforcement(raw: Record<string, unknown> | null): RepositoryReadEnfo
     truncatedAtBytes: typeof v.truncatedAtBytes === 'number' ? v.truncatedAtBytes : null,
     pathAllowed: v.pathAllowed === true,
     reason: typeof v.reason === 'string' ? v.reason : null,
+    // PR #42 round-4 (the snapshot/fencing protocol): the revalidation
+    // metadata + the stale flag. Older evidence rows (persisted before
+    // round-4) will not have these fields — the mapper defaults them to
+    // null/false (revalidated=false, stale=false — honestly "this row was
+    // persisted before the fence existed"). New rows (persisted by the
+    // round-4 boundary) carry the real values.
+    revalidated: v.revalidated === true,
+    revalidatedPolicyVersion:
+      typeof v.revalidatedPolicyVersion === 'number' ? v.revalidatedPolicyVersion : null,
+    revalidatedRuleId:
+      typeof v.revalidatedRuleId === 'string' ? v.revalidatedRuleId : null,
+    revalidatedDecision:
+      v.revalidatedDecision === 'allow' ||
+      v.revalidatedDecision === 'constrained' ||
+      v.revalidatedDecision === 'deny' ||
+      v.revalidatedDecision === 'ask'
+        ? v.revalidatedDecision
+        : null,
+    stale: v.stale === true,
   };
 }
 

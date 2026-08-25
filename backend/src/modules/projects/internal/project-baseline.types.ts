@@ -192,16 +192,41 @@ export interface NewBaselineObservation {
 
 /**
  * The concrete enforcement effect a `constrained` (or boundary-enforced)
- * repository-read decision had on the actual read (PR #42 round-3). This is
- * the honest record of "what `constrained` actually did" — recorded on the
- * evidence row so the effect is OBSERVABLE, not just claimed.
+ * repository-read decision had on the actual read (PR #42 round-3 + round-4).
+ * This is the honest record of "what `constrained` actually did" — recorded
+ * on the evidence row so the effect is OBSERVABLE, not just claimed.
+ *
+ * PR #42 round-4 (the snapshot/fencing protocol): the boundary now ALSO
+ * revalidates the policy snapshot AFTER the read completes (the read is
+ * performed against the GitHub API, which cannot participate in the
+ * database transaction that the WORK-037 policy store uses). The
+ * revalidation fields record what the revalidation saw, and the `stale`
+ * flag records whether the snapshot that authorized the read was STILL
+ * current when the result was committed:
+ *
+ *   * `revalidated` — whether the boundary revalidated the snapshot after
+ *     the read (round-4 fencing — always true for reads that reached the
+ *     revalidation step).
+ *   * `revalidatedPolicyVersion` — the policy version the revalidation
+ *     saw (null = the gate did not surface one / the revalidation did not
+ *     run because the read was blocked before reaching it).
+ *   * `revalidatedRuleId` — the matched rule id the revalidation saw.
+ *   * `stale` — whether the snapshot that authorized the read was NO
+ *     LONGER current at revalidation (the version / rule / decision
+ *     changed between capture and revalidation). When `stale=true`, the
+ *     boundary DISCARDED the read result — the content is NOT persisted
+ *     (no evidence row, no observation for that path). The invariant
+ *     becomes: "a repository-read result is persisted only if the policy
+ *     snapshot that authorized it is still current when the result is
+ *     committed." That is achievable even though the GitHub API itself
+ *     cannot participate in the database transaction.
  */
 export interface RepositoryReadEnforcement {
   /** The WORK-037 policy version snapshot at decision time (drift detection). */
   readonly policyVersion: number | null;
   /** The matched rule id (null = default effect). */
   readonly ruleId: string | null;
-  /** Whether the read was actually performed (deny/ask/path-not-allowed -> false). */
+  /** Whether the read was actually performed (deny/ask/path-not-allowed/stale -> false). */
   readonly performed: boolean;
   /** Whether maxOutputBytes truncated the observed content. */
   readonly truncated: boolean;
@@ -213,6 +238,22 @@ export interface RepositoryReadEnforcement {
   readonly pathAllowed: boolean;
   /** The decision reason (the WORK-037 reason OR the boundary's refusal reason). */
   readonly reason: string | null;
+  // ----- PR #42 round-4: the snapshot/fencing protocol fields -----
+  /** Whether the boundary revalidated the snapshot after the read (round-4 fencing). */
+  readonly revalidated: boolean;
+  /** The policy version at REVALIDATION (null = the revalidation did not run). */
+  readonly revalidatedPolicyVersion: number | null;
+  /** The matched rule id at REVALIDATION (null = not surfaced / not revalidated). */
+  readonly revalidatedRuleId: string | null;
+  /** The decision at REVALIDATION (null = not revalidated). */
+  readonly revalidatedDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  /**
+   * Whether the snapshot that authorized the read was NO LONGER current at
+   * revalidation (the version / rule / decision changed between capture and
+   * revalidation). When `stale=true`, the boundary DISCARDED the read
+   * result — no evidence row, no observation is persisted for that path.
+   */
+  readonly stale: boolean;
 }
 
 /** A new evidence row to persist. */

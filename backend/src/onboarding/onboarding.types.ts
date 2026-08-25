@@ -213,13 +213,26 @@ export interface GovernedReadRequest {
 
 /**
  * The bound governance record for ONE governed repository read (PR #42
- * round-3). This is the honest, atomic record of the decision that
+ * round-3 + round-4). This is the honest, atomic record of the decision that
  * authorized the read AND the concrete enforcement effect the boundary
  * applied. It is NOT a Tool Runtime invocation record — there is no
  * tool_invocation_id here (the /github read path is not a ToolRuntime
  * invocation). It is recorded on the evidence row in its OWN columns
  * (repository_read_decision + repository_read_enforcement), distinct from
  * the Tool Runtime columns (tool_invocation_id + policy_decision stay NULL).
+ *
+ * PR #42 round-4 (the snapshot/fencing protocol): `stale=true` means the
+ * policy snapshot that authorized the read was NO LONGER current at
+ * revalidation (the version / rule / decision changed between capture and
+ * revalidation — a concurrent policy mutation committed DURING the read).
+ * When `stale=true`, the boundary DISCARDED the read result — `content` is
+ * null, `performed` is false, and the analyzer persists NO evidence row and
+ * NO observation for that path. The invariant: "a repository-read result is
+ * persisted only if the policy snapshot that authorized it is still current
+ * when the result is committed" — achievable even though the GitHub API
+ * itself cannot participate in the database transaction. The revalidation
+ * metadata (the version / rule / decision the revalidation saw) is in the
+ * `enforcement` record for forensic provenance.
  */
 export interface RepositoryReadGovernance {
   /** The WORK-037 decideForProjectScope decision (allow/constrained/deny/ask). */
@@ -230,17 +243,31 @@ export interface RepositoryReadGovernance {
   readonly policyVersion: number | null;
   /** The matched rule id (null = default effect). */
   readonly ruleId: string | null;
-  /** Whether the read was actually performed (deny/ask/path-not-allowed/operation-not-read -> false). */
+  /** Whether the read was actually performed (deny/ask/path-not-allowed/stale -> false). */
   readonly performed: boolean;
+  /**
+   * PR #42 round-4 (the snapshot/fencing protocol): whether the snapshot
+   * that authorized the read was NO LONGER current at revalidation. When
+   * `stale=true`, the boundary DISCARDED the read result — no evidence row,
+   * no observation is persisted for that path. The revalidation metadata is
+   * in {@link enforcement} (revalidatedPolicyVersion + revalidatedRuleId +
+   * revalidatedDecision).
+   */
+  readonly stale: boolean;
   /** The concrete enforcement effect (what `constrained` actually did — OBSERVABLE). */
   readonly enforcement: Readonly<RepositoryReadEnforcement>;
 }
 
 /**
  * The outcome of a governed repository read: the content (null when the read
- * was blocked OR the path was absent) + the bound governance record. The
- * decision and the content are returned by ONE boundary method — there is no
- * caller-interleavable check-then-act gap (PR #42 round-3).
+ * was blocked, the path was absent, OR the snapshot was stale) + the bound
+ * governance record. The decision and the content are returned by ONE
+ * boundary method — there is no caller-interleavable check-then-act gap (PR
+ * #42 round-3). PR #42 round-4 adds the snapshot/fencing protocol: the
+ * boundary revalidates the policy snapshot AFTER the read; if the snapshot
+ * was stale (a concurrent policy mutation committed during the read), the
+ * content is DISCARDED (null) and {@link governance.stale} is true — the
+ * analyzer persists NO evidence row and NO observation for that path.
  */
 export interface GovernedReadOutcome {
   readonly request: GovernedReadRequest;
@@ -249,7 +276,8 @@ export interface GovernedReadOutcome {
 }
 
 /**
- * PR #42 round-3 — the governed repository-read boundary for /github reads.
+ * PR #42 round-3 + round-4 — the governed repository-read boundary for
+ * /github reads.
  *
  * The architect's round-3 review identified that the round-2 path was a
  * check-then-act authorization window:
@@ -259,12 +287,58 @@ export interface GovernedReadOutcome {
  *       -> GitHubAdapter.getFileContent/listDir()  (read at T2 > T1)
  *
  * with NOTHING atomic tying the authorization decision to the actual read,
- * and `constrained` having no concrete enforcement effect. This boundary
- * makes the governance real: {@link governedRead} is a SINGLE authoritative
- * operation that captures the WORK-037 decision, enforces it (deny/ask/
- * path-not-allowed/operation-not-read -> no read), performs the read under
- * the captured decision, applies the `constrained` enforcement, and returns
- * the bound decision+effect+content.
+ * and `constrained` having no concrete enforcement effect. The round-3
+ * boundary made the governance real: {@link governedRead} is a SINGLE
+ * authoritative operation that captures the WORK-037 decision, enforces it
+ * (deny/ask/path-not-allowed/operation-not-read -> no read), performs the
+ * read under the captured decision, applies the `constrained` enforcement,
+ * and returns the bound decision+effect+content.
+ *
+ * The architect's round-4 review identified that the round-3 boundary STILL
+ * did not actually achieve atomicity with respect to policy changes:
+ * `decideForProjectScope()` (V7) and the GitHub read are two separate
+ * asynchronous operations against two different authorities. A concurrent
+ * policy update CAN commit between them:
+ *
+ *   T1  policy = ALLOW, version 7
+ *       ↓
+ *   T1  governedRead() captures V7
+ *       ↓
+ *   T2  policy mutates to DENY, version 8
+ *       ↓
+ *   T1  GitHubAdapter.getFileContent(...)
+ *       ↓
+ *   T1  read succeeds — UNDER A POLICY (V8) THAT WOULD HAVE DENIED IT
+ *
+ * Being inside one JavaScript method does not make those operations atomic.
+ * The round-3 `policyVersion` snapshot made the race OBSERVABLE, but did NOT
+ * prevent it. The round-4 fix is an explicit SNAPSHOT/FENCING PROTOCOL:
+ *
+ *   1. Resolve policy snapshot (capture decision + policyVersion + rule +
+ *      constraints)
+ *   2. Enforce the snapshot decision (deny/ask/path-not-allowed/operation-
+ *      not-read -> NO read; the decision is recorded honestly)
+ *   3. Perform the repository read under the captured snapshot
+ *   4. Apply the `constrained` enforcement (maxOutputBytes truncation) on
+ *      the captured snapshot's constraints
+ *   5. REVALIDATE the policy snapshot (call decideForProjectScope AGAIN,
+ *      compare the version + rule + decision)
+ *   6. If the snapshot is STALE (the version / rule / decision changed
+ *      between capture and revalidation):
+ *        discard the read result (content = null)
+ *        set stale = true, performed = false
+ *        record the revalidation metadata (the V8 the revalidation saw)
+ *        do NOT persist an evidence row or observation for that path
+ *      else (the snapshot is still current):
+ *        return the bound outcome (content + governance + enforcement)
+ *
+ * The invariant becomes: "a repository-read result is persisted only if
+ * the policy snapshot that authorized it is still current when the result
+ * is committed." That is achievable even though the GitHub API itself
+ * cannot participate in the database transaction the WORK-037 policy store
+ * uses. The boundary does NOT claim database-style atomicity across the
+ * policy engine and the GitHub API — it claims a fencing protocol that
+ * DETECTS + REJECTS stale snapshots before the result is persisted.
  *
  * WHY THE ALTERNATIVE PATH (not the preferred Tool Runtime adaptation):
  * the frozen WORK-036 `DefaultToolRuntime.invoke()` is structurally coupled
@@ -293,19 +367,21 @@ export interface GovernedReadOutcome {
  *   * read-only — the boundary only supports read/list operations; any
  *     other operation is refused (performed=false).
  *
- * Policy drift prevention: the decision is captured at the START of
- * governedRead() and IS the authorization for THAT read (the read happens
- * immediately under it, in the same method). The policy version is also
- * snapshotted into RepositoryReadGovernance.policyVersion so a later auditor
- * can verify "this content was read under policy version V" — drift made
- * OBSERVABLE, not just prevented-by-construction.
+ * Policy drift prevention (round-4 fencing): the snapshot is captured at the
+ * START of governedRead(), the read is performed under it, and the snapshot
+ * is REVALIDATED at the END. If the snapshot is stale, the result is
+ * DISCARDED — no evidence row, no observation is persisted for that path.
+ * The invariant: "a repository-read result is persisted only if the policy
+ * snapshot that authorized it is still current when the result is committed."
  */
 export interface GovernedRepositoryReadPolicy {
   /**
    * The single authoritative operation boundary for a /github read. Captures
    * the WORK-037 decision, enforces it, performs the read under the captured
-   * decision, applies the `constrained` enforcement, and returns the bound
-   * decision+effect+content. There is NO check-then-act window at this API.
+   * decision, applies the `constrained` enforcement, REVALIDATES the policy
+   * snapshot (round-4 fencing), and returns the bound decision+effect+content
+   * (or a stale outcome with the content discarded). There is NO check-then-
+   * act window at this API.
    *
    * Infrastructure failures (the content port throws — GitHub unavailable,
    * authentication failure, API failure, content retrieval infrastructure
@@ -316,6 +392,12 @@ export interface GovernedRepositoryReadPolicy {
    * round-2 Blocker B, preserved). Expected-missing (the port returns
    * null/[]) is NOT an infrastructure failure — the boundary returns
    * content=null + performed=true (the read happened; the path was absent).
+   *
+   * Snapshot staleness (round-4 fencing) is NOT an infrastructure failure —
+   * the boundary returns a stale outcome (content=null, performed=false,
+   * stale=true) and the analyzer skips the evidence row + observation for
+   * that path. The baseline still completes (the other reads' evidence is
+   * still valid under their own revalidated snapshots).
    */
   governedRead(
     request: GovernedReadRequest,

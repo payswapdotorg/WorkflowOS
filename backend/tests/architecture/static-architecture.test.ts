@@ -10153,9 +10153,12 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     );
     // maxOutputBytes truncation: the boundary slices the content + recomputes
     // the digest on the truncated slice (the digest reflects what was
-    // ACTUALLY observed, not the pre-truncation content).
+    // ACTUALLY observed, not the pre-truncation content). Round-4 refactored
+    // the local to `snapshot.maxOutputBytes` (the snapshot's constraint); the
+    // regex matches either form (the round-3 `maxOutputBytes` local OR the
+    // round-4 `snapshot.maxOutputBytes`).
     expect(boundary, 'the boundary applies maxOutputBytes truncation').toMatch(/maxOutputBytes/);
-    expect(boundary, 'the boundary truncates the content slice').toMatch(/\.slice\(0,\s*maxOutputBytes\)/);
+    expect(boundary, 'the boundary truncates the content slice').toMatch(/\.slice\(0,\s*(\w+\.)?maxOutputBytes\)/);
     expect(boundary, 'the boundary recomputes the digest on the truncated content').toMatch(/contentDigest:\s*sha256\(truncatedContent\)/);
     // path-allowlist: the boundary refuses reads outside the candidate set.
     expect(boundary, 'the boundary enforces the candidate allowlist').toMatch(/candidateAllowlist\.has\(request\.path\)/);
@@ -10163,6 +10166,95 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     // read-only: the boundary refuses non-read/list operations.
     expect(boundary, 'the boundary is structurally read-only').toMatch(/SUPPORTED_OPERATIONS/);
     expect(boundary, 'the boundary refuses non-read operations').toMatch(/is not supported/);
+  });
+
+  it('PR #42 r4: the snapshot/fencing protocol — the boundary REVALIDATES the policy snapshot after the read + DISCARDS stale results (the architect\'s round-4 requirement)', () => {
+    // The architect's round-4 review identified that the round-3 boundary
+    // claimed atomicity but was still a check-then-act window with respect
+    // to POLICY CHANGES. The round-4 fix is an explicit snapshot/fencing
+    // protocol: capture → read → REVALIDATE → discard-if-stale. This test
+    // verifies the boundary source implements the fence (the revalidation
+    // call + the staleness check + the discard + the stale outcome).
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    // The fence: the boundary calls decideForProjectScope a SECOND time after
+    // the read (the revalidation). The comment marks the fence step.
+    expect(boundary, 'the boundary revalidates the snapshot after the read').toMatch(/REVALIDATE THE POLICY SNAPSHOT/);
+    expect(boundary, 'the boundary calls decideForProjectScope for revalidation').toMatch(/decideForProjectScope/);
+    // The staleness check: the boundary compares the snapshot version + rule +
+    // decision against the revalidation (the isSnapshotStale function).
+    expect(boundary, 'the boundary has the staleness check function').toMatch(/function isSnapshotStale/);
+    expect(boundary, 'the staleness check compares policyVersion').toMatch(/snapshot\.policyVersion\s*!==\s*revalidation\.policyVersion/);
+    expect(boundary, 'the staleness check compares ruleId (defense-in-depth)').toMatch(/snapshot\.ruleId\s*!==\s*revalidation\.ruleId/);
+    expect(boundary, 'the staleness check compares decision (defense-in-depth)').toMatch(/snapshot\.decision\.decision\s*!==\s*revalidation\.decision/);
+    // The discard: when stale, the boundary returns content=null +
+    // performed=false + stale=true (the stale outcome).
+    expect(boundary, 'the boundary logs the stale snapshot').toMatch(/repository-read\.policy-snapshot-stale/);
+    expect(boundary, 'the boundary has the stale outcome builder').toMatch(/staleOutcome/);
+    // The revalidation-failure fail-closed path (a revalidation failure must
+    // NOT become an implicit persist).
+    expect(boundary, 'the boundary logs revalidation failures').toMatch(/repository-read\.policy-snapshot-revalidation-failed/);
+    // The enforcement record type (defined in project-baseline.types.ts)
+    // carries the round-4 fencing fields.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'RepositoryReadEnforcement carries revalidated').toMatch(/readonly revalidated: boolean/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedPolicyVersion').toMatch(/readonly revalidatedPolicyVersion: number \| null/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedRuleId').toMatch(/readonly revalidatedRuleId: string \| null/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedDecision').toMatch(/readonly revalidatedDecision:/);
+    expect(types, 'RepositoryReadEnforcement carries stale').toMatch(/readonly stale: boolean/);
+    // The RepositoryReadGovernance type (defined in onboarding.types.ts)
+    // carries the top-level stale flag for easy analyzer access.
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'RepositoryReadGovernance carries stale').toMatch(/readonly stale: boolean/);
+  });
+
+  it('PR #42 r4: the analyzer SKIPS evidence/observation persistence for stale reads (zero evidence + zero observation for discarded reads)', () => {
+    // The architect's round-4 invariant: "a repository-read result is
+    // persisted only if the policy snapshot that authorized it is still
+    // current when the result is committed." The analyzer must SKIP the
+    // evidence row + observation derivation when the boundary returns a
+    // stale outcome (the read result was discarded by the fence).
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    expect(analyzer, 'the analyzer checks the stale flag').toMatch(/outcome\.governance\.stale/);
+    expect(analyzer, 'the analyzer skips (continue) on stale').toMatch(/if \(outcome\.governance\.stale\)\s*\{[^}]*continue/s);
+  });
+
+  it('PR #42 r4: the migration documents the round-4 fencing jsonb shape + a forensic revalidated index', () => {
+    // The round-4 migration documents the new jsonb fields (revalidated +
+    // revalidatedPolicyVersion + revalidatedRuleId + revalidatedDecision +
+    // stale) + adds a forensic index for "show me every read that was
+    // successfully revalidated current under policy version V."
+    const sql = readFileSync(
+      join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0040_project_baseline_repository_read_fencing.sql'),
+      'utf8',
+    );
+    expect(sql, 'the migration documents the revalidated field').toMatch(/revalidated/);
+    expect(sql, 'the migration documents the revalidatedPolicyVersion field').toMatch(/revalidatedPolicyVersion/);
+    expect(sql, 'the migration documents the revalidatedRuleId field').toMatch(/revalidatedRuleId/);
+    expect(sql, 'the migration documents the stale field').toMatch(/stale/);
+    expect(sql, 'the migration adds the revalidated forensic index').toMatch(/wfos_project_baseline_evidence_read_revalidated_idx/);
+  });
+
+  it('PR #42 r4: the pg repository mapper reads the round-4 fencing fields (with null/false defaults for older rows)', () => {
+    // The pg repository's mapEnforcement must read the round-4 fields
+    // (revalidated + revalidatedPolicyVersion + revalidatedRuleId +
+    // revalidatedDecision + stale) so they flow through the persistence
+    // layer. Older rows (persisted before round-4) default to null/false
+    // (honestly "this row was persisted before the fence existed").
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'mapEnforcement reads revalidated').toMatch(/revalidated:\s*v\.revalidated === true/);
+    expect(repo, 'mapEnforcement reads revalidatedPolicyVersion').toMatch(/revalidatedPolicyVersion/);
+    expect(repo, 'mapEnforcement reads revalidatedRuleId').toMatch(/revalidatedRuleId/);
+    expect(repo, 'mapEnforcement reads revalidatedDecision').toMatch(/revalidatedDecision/);
+    expect(repo, 'mapEnforcement reads stale').toMatch(/stale:\s*v\.stale === true/);
   });
 
   it('PR #42 r3: the migration records the actual decision + enforcement in their OWN columns (distinct from the Tool Runtime columns)', () => {

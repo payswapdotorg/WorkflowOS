@@ -81,12 +81,17 @@ class FailingContentPort implements RepositoryContentPort {
   }
 }
 
-/** A configurable project-scoped policy gate (defaults to allow). */
+/**
+ * A configurable project-scoped policy gate (defaults to allow). PR #42 round-4:
+ * tracks the decideForProjectScope call count so the fencing tests can verify
+ * the boundary called the gate TWICE per governedRead() (capture + revalidate).
+ */
 class FakePolicyGate implements ProjectScopedPolicyGate {
   private denied = new Set<string>();
   private constrained: { paths: Set<string>; constraints: ToolPolicyConstraints } | null = null;
   private throwing = false;
   private policyVersion = 1;
+  private callCount = 0;
   denyPath(path: string): this {
     this.denied.add(path);
     return this;
@@ -99,7 +104,12 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
     this.throwing = true;
     return this;
   }
+  /** The number of times decideForProjectScope was called (round-4: capture + revalidate = 2 per governedRead). */
+  getCallCount(): number {
+    return this.callCount;
+  }
   async decideForProjectScope(request: ToolPolicyRequest) {
+    this.callCount++;
     if (this.throwing) throw new Error('simulated policy-gate failure');
     const path = request.input.path as string;
     const base = { policyVersion: this.policyVersion, ruleId: 'fake-rule', scopeSource: 'project' as const };
@@ -111,7 +121,124 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
   }
 }
 
-describe('WORK-038 PR #42 round-3 — GovernedRepositoryReadPolicy (the atomic governed-read boundary)', () => {
+/**
+ * PR #42 round-4: a policy gate that MUTATES its (version, decision) when the
+ * content port is called mid-read — simulates a concurrent policy mutation
+ * committing DURING the read (between the capture and the revalidation).
+ *
+ * The flow the architect's regression spec requires:
+ *   initial version = 7 (allow)
+ *     ↓
+ *   governedRead() captures V7 (capture call #1)
+ *     ↓
+ *   content port readFile/listDir fires -> mutates the gate to V8 (deny)
+ *     ↓
+ *   governedRead() revalidates (revalidation call #2) -> sees V8 (deny)
+ *     ↓
+ *   the snapshot (V7/allow) is STALE -> the read result is DISCARDED
+ *     -> content=null, performed=false, stale=true
+ */
+class MutatingPolicyGate implements ProjectScopedPolicyGate {
+  private policyVersion = 7;
+  private decision: 'allow' | 'deny' | 'constrained' = 'allow';
+  private ruleId = 'fake-rule-v7';
+  private callCount = 0;
+  private mutated = false;
+
+  /** Mutate the policy to V8/deny (called by the hooked content port mid-read). */
+  mutateToV8Deny(): void {
+    this.policyVersion = 8;
+    this.decision = 'deny';
+    this.ruleId = 'fake-rule-v8';
+    this.mutated = true;
+  }
+  /** Whether the gate was mutated mid-read. */
+  wasMutated(): boolean {
+    return this.mutated;
+  }
+  getCallCount(): number {
+    return this.callCount;
+  }
+  getPolicyVersion(): number {
+    return this.policyVersion;
+  }
+  async decideForProjectScope(_request: ToolPolicyRequest) {
+    this.callCount++;
+    return {
+      decision: this.decision,
+      policyVersion: this.policyVersion,
+      ruleId: this.ruleId,
+      scopeSource: 'project' as const,
+      reason: this.mutated ? 'denied by V8 mutation' : 'allowed by V7',
+    };
+  }
+}
+
+/**
+ * PR #42 round-4: a content port that fires a hook when readFile/listDir is
+ * called — the hook mutates the gate mid-read (between the capture and the
+ * revalidation). This is the test hook the architect's regression spec
+ * requires: "test hook mutates policy to v8 while read is in flight."
+ */
+class HookedContentPort implements RepositoryContentPort {
+  private files = new Map<string, string>();
+  private dirs = new Map<string, { name: string; type: 'file' | 'dir' }[]>();
+  private readFileCalls: string[] = [];
+  private listDirCalls: string[] = [];
+  constructor(private readonly onRead: () => void) {}
+  setFile(path: string, content: string): this {
+    this.files.set(path, content);
+    return this;
+  }
+  setDir(path: string, entries: { name: string; type: 'file' | 'dir' }[]): this {
+    this.dirs.set(path, entries);
+    return this;
+  }
+  getReadFileCalls(): readonly string[] {
+    return this.readFileCalls;
+  }
+  getListDirCalls(): readonly string[] {
+    return this.listDirCalls;
+  }
+  async readFile(_owner: string, _repo: string, _sha: string, path: string) {
+    this.readFileCalls.push(path);
+    this.onRead(); // mutate the policy mid-read (between capture + revalidation)
+    const content = this.files.get(path);
+    if (content === undefined) return null;
+    return { content, contentDigest: sha256(content) };
+  }
+  async listDir(_owner: string, _repo: string, _sha: string, path: string) {
+    this.listDirCalls.push(path);
+    this.onRead(); // mutate the policy mid-read
+    return this.dirs.get(path) ?? [];
+  }
+}
+
+/**
+ * PR #42 round-4: a policy gate that throws on the SECOND call (the
+ * revalidation) — simulates a revalidation-failure. The boundary must FAIL
+ * CLOSED (treat as stale; discard the result).
+ */
+class FailOnRevalidationGate implements ProjectScopedPolicyGate {
+  private callCount = 0;
+  getCallCount(): number {
+    return this.callCount;
+  }
+  async decideForProjectScope(_request: ToolPolicyRequest) {
+    this.callCount++;
+    if (this.callCount === 2) {
+      throw new Error('simulated revalidation failure');
+    }
+    return {
+      decision: 'allow' as const,
+      policyVersion: 7,
+      ruleId: 'fake-rule-v7',
+      scopeSource: 'project' as const,
+    };
+  }
+}
+
+describe('WORK-038 PR #42 round-3 + round-4 — GovernedRepositoryReadPolicy (the atomic governed-read boundary + the snapshot/fencing protocol)', () => {
   let capture: CaptureStream;
   let logger: ReturnType<typeof createLogger>;
 
@@ -379,5 +506,263 @@ describe('WORK-038 PR #42 round-3 — GovernedRepositoryReadPolicy (the atomic g
     // columns (repository_read_decision + repository_read_enforcement).
     expect(outcome.governance).not.toHaveProperty('toolInvocationId');
     expect(Object.keys(outcome.governance)).not.toContain('toolInvocationId');
+  });
+
+  // =========================================================================
+  // 7. PR #42 ROUND-4 — the snapshot/fencing protocol.
+  //
+  // The architect's round-4 review identified that the round-3 boundary
+  // claimed atomicity but was still a check-then-act window with respect to
+  // POLICY CHANGES: decideForProjectScope() (V7) and the GitHub read are two
+  // separate async operations against two different authorities, and a
+  // concurrent policy update CAN commit between them. The round-4 fix is an
+  // explicit snapshot/fencing protocol: capture → read → REVALIDATE →
+  // discard-if-stale. The invariant: "a repository-read result is persisted
+  // only if the policy snapshot that authorized it is still current when the
+  // result is committed."
+  // =========================================================================
+
+  it('16. ROUND-4 the normal case (v7 -> read -> revalidate v7 -> persist): the boundary calls decideForProjectScope TWICE (capture + revalidate), the snapshot is current, the result is persisted with revalidation metadata', async () => {
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"fence-ok"}');
+    const gate = new FakePolicyGate(); // policyVersion=1, ruleId='fake-rule', always allow
+    const boundary = buildBoundary(port, gate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The boundary called the gate TWICE: once for the capture, once for the
+    // revalidation (the fence ran).
+    expect(gate.getCallCount(), 'capture + revalidation = 2 calls').toBe(2);
+    // The snapshot was NOT stale (the policy did not change between capture
+    // and revalidation).
+    expect(outcome.governance.stale, 'the snapshot was current — not stale').toBe(false);
+    expect(outcome.governance.performed, 'the read was persisted').toBe(true);
+    // The content IS returned (the result was persisted — the fence cleared).
+    expect(outcome.content).not.toBeNull();
+    expect(outcome.content!.content).toBe('{"name":"fence-ok"}');
+    // The fence metadata is recorded honestly.
+    expect(outcome.governance.enforcement.revalidated, 'the fence ran').toBe(true);
+    expect(outcome.governance.enforcement.revalidatedPolicyVersion, 'the revalidation saw the same V1').toBe(1);
+    expect(outcome.governance.enforcement.revalidatedRuleId).toBe('fake-rule');
+    expect(outcome.governance.enforcement.revalidatedDecision).toBe('allow');
+    // The snapshot version (capture) and the revalidation version match.
+    expect(outcome.governance.policyVersion).toBe(1);
+    expect(outcome.governance.enforcement.policyVersion).toBe(1);
+    expect(outcome.governance.enforcement.revalidatedPolicyVersion).toBe(
+      outcome.governance.enforcement.policyVersion,
+    );
+    // The read DID happen (the content port was called — once).
+    expect(port.getReadFileCalls()).toEqual(['package.json']);
+  });
+
+  it('17. ROUND-4 the stale case (v7 capture -> mutation to v8 mid-read -> revalidate v8): the snapshot is STALE, the read result is DISCARDED (content=null, performed=false, stale=true), the revalidation metadata records V8', async () => {
+    // The architect's regression spec:
+    //   initial version = 7
+    //     ↓
+    //   governedRead captures v7
+    //     ↓
+    //   test hook mutates policy to v8 while read is in flight
+    //     ↓
+    //   read completes
+    //     ↓
+    //   governedRead rejects the stale result
+    //     ↓
+    //   zero baseline evidence/observation is persisted
+    const gate = new MutatingPolicyGate(); // starts at V7/allow
+    const port = new HookedContentPort(() => gate.mutateToV8Deny()).setFile(
+      'package.json',
+      '{"name":"stale-content"}',
+    );
+    const boundary = buildBoundary(port, gate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The boundary called the gate TWICE: capture (V7) + revalidation (V8).
+    expect(gate.getCallCount(), 'capture + revalidation = 2 calls').toBe(2);
+    expect(gate.wasMutated(), 'the gate was mutated mid-read').toBe(true);
+    // The snapshot is STALE — the read result is DISCARDED.
+    expect(outcome.governance.stale, 'the snapshot is stale (V7 -> V8 mid-read)').toBe(true);
+    expect(outcome.governance.performed, 'the result was discarded (not persisted)').toBe(false);
+    expect(outcome.content, 'the content is DISCARDED (null)').toBeNull();
+    // The SNAPSHOT decision (V7/allow) is recorded honestly — the read WAS
+    // authorized under V7, but V8 superseded it before the result could be
+    // committed.
+    expect(outcome.governance.decision, 'the snapshot decision was allow (V7)').toBe('allow');
+    expect(outcome.governance.policyVersion, 'the snapshot version was V7').toBe(7);
+    expect(outcome.governance.ruleId, 'the snapshot rule was fake-rule-v7').toBe('fake-rule-v7');
+    // The REVALIDATION metadata records what the fence saw (V8/deny).
+    expect(outcome.governance.enforcement.revalidated, 'the fence ran').toBe(true);
+    expect(
+      outcome.governance.enforcement.revalidatedPolicyVersion,
+      'the revalidation saw V8',
+    ).toBe(8);
+    expect(outcome.governance.enforcement.revalidatedRuleId).toBe('fake-rule-v8');
+    expect(outcome.governance.enforcement.revalidatedDecision).toBe('deny');
+    // The stale flag is on the enforcement record too.
+    expect(outcome.governance.enforcement.stale).toBe(true);
+    expect(outcome.governance.enforcement.performed).toBe(false);
+    // The reason explains the staleness.
+    expect(outcome.governance.reason).toContain('stale');
+    expect(outcome.governance.reason).toContain('version=7');
+    expect(outcome.governance.reason).toContain('version=8');
+    // The read DID happen (the content port was called — the result was
+    // read from GitHub, then discarded by the fence).
+    expect(port.getReadFileCalls(), 'the read happened (then was discarded)').toEqual(['package.json']);
+  });
+
+  it('18. ROUND-4 a revalidation FAILURE (the gate throws on the revalidation call) -> the boundary FAILS CLOSED (stale outcome; the result is discarded — a revalidation failure must NOT become an implicit persist)', async () => {
+    const gate = new FailOnRevalidationGate(); // allow/V7 on call 1, throws on call 2
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"reval-fail"}');
+    const boundary = buildBoundary(port, gate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The boundary called the gate TWICE: capture (succeeded) + revalidation
+    // (threw).
+    expect(gate.getCallCount(), 'capture + failed-revalidation = 2 calls').toBe(2);
+    // The boundary FAILS CLOSED: treats the revalidation failure as STALE
+    // (the result is discarded — a revalidation failure must NOT become an
+    // implicit persist).
+    expect(outcome.governance.stale, 'revalidation failure -> fail closed (stale)').toBe(true);
+    expect(outcome.governance.performed, 'the result was discarded').toBe(false);
+    expect(outcome.content, 'the content is DISCARDED (null)').toBeNull();
+    // The fence metadata: the revalidation did NOT produce a version (it
+    // threw). The revalidation fields are null (honestly "the revalidation
+    // failed — no version was seen").
+    expect(outcome.governance.enforcement.revalidated, 'the fence ran (and failed)').toBe(true);
+    expect(outcome.governance.enforcement.revalidatedPolicyVersion).toBeNull();
+    expect(outcome.governance.enforcement.revalidatedRuleId).toBeNull();
+    expect(outcome.governance.enforcement.revalidatedDecision).toBeNull();
+    expect(outcome.governance.enforcement.stale).toBe(true);
+    // The snapshot decision (V7/allow) is still recorded honestly.
+    expect(outcome.governance.decision).toBe('allow');
+    expect(outcome.governance.policyVersion).toBe(7);
+    // The reason explains the revalidation failure.
+    expect(outcome.governance.reason).toContain('revalidation failed');
+    expect(outcome.governance.reason).toContain('discarded');
+    // The read DID happen (the content port was called — the result was
+    // read from GitHub, then discarded because the fence could not
+    // revalidate).
+    expect(port.getReadFileCalls()).toEqual(['package.json']);
+  });
+
+  it('19. ROUND-4 a snapshot-rule change WITHOUT a version change (a rule replacement with the same version) -> the fence STILL catches it (defense-in-depth — the ruleId changed)', async () => {
+    // Simulates an engine bug (a rule replacement without a version bump).
+    // The fence catches it via the ruleId comparison (defense-in-depth).
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"rule-change"}');
+    let callCount = 0;
+    const ruleChangeGate: ProjectScopedPolicyGate = {
+      async decideForProjectScope() {
+        callCount++;
+        return {
+          decision: 'allow' as const,
+          policyVersion: 7, // version stays the same
+          ruleId: callCount === 1 ? 'rule-A' : 'rule-B', // changes on revalidation
+          scopeSource: 'project' as const,
+        };
+      },
+    };
+    const boundary = buildBoundary(port, ruleChangeGate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The fence caught the ruleId change (defense-in-depth) — the snapshot
+    // is stale even though the version stayed the same.
+    expect(outcome.governance.stale, 'ruleId change -> stale (defense-in-depth)').toBe(true);
+    expect(outcome.governance.performed).toBe(false);
+    expect(outcome.content).toBeNull();
+    expect(outcome.governance.ruleId, 'the snapshot rule was rule-A').toBe('rule-A');
+    expect(outcome.governance.enforcement.revalidatedRuleId, 'the revalidation saw rule-B').toBe('rule-B');
+  });
+
+  it('20. ROUND-4 a decision change WITHOUT a version/rule change (an allow->deny flip with no version bump) -> the fence STILL catches it (defense-in-depth — the decision changed)', async () => {
+    // Simulates an engine bug (a decision flip without a version/rule bump).
+    // The fence catches it via the decision comparison (last-resort signal).
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"decision-flip"}');
+    let callCount = 0;
+    const decisionFlipGate: ProjectScopedPolicyGate = {
+      async decideForProjectScope() {
+        callCount++;
+        // Version stays 7, rule stays 'rule-X', but the decision flips
+        // allow -> deny on the revalidation.
+        return {
+          decision: callCount === 1 ? ('allow' as const) : ('deny' as const),
+          policyVersion: 7,
+          ruleId: 'rule-X',
+          scopeSource: 'project' as const,
+        };
+      },
+    };
+    const boundary = buildBoundary(port, decisionFlipGate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The fence caught the decision flip (defense-in-depth) — the snapshot
+    // is stale even though the version AND the rule stayed the same.
+    expect(outcome.governance.stale, 'decision flip -> stale (defense-in-depth)').toBe(true);
+    expect(outcome.governance.performed).toBe(false);
+    expect(outcome.content).toBeNull();
+    expect(outcome.governance.decision, 'the snapshot decision was allow').toBe('allow');
+    expect(outcome.governance.enforcement.revalidatedDecision, 'the revalidation saw deny').toBe('deny');
+  });
+
+  it('21. ROUND-4 a gate that surfaces NO policyVersion (a test fake returning {decision:"allow"}) -> the fence still runs (revalidated=true), revalidatedPolicyVersion=null (honestly "not surfaced"), stale=false (no drift signal available — best-effort)', async () => {
+    // A minimal test fake that does not surface version/ruleId (the contract
+    // allows this — every field except `decision` is optional). The fence
+    // still runs (revalidated=true) but cannot detect version drift (the
+    // gate surfaces no version). The fence falls back to decision comparison
+    // — if the decision is the same on both calls, stale=false (best-effort).
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"minimal"}');
+    let callCount = 0;
+    const minimalGate: ProjectScopedPolicyGate = {
+      async decideForProjectScope() {
+        callCount++;
+        return { decision: 'allow' as const }; // no version, no ruleId
+      },
+    };
+    const boundary = buildBoundary(port, minimalGate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    expect(callCount, 'capture + revalidation = 2 calls').toBe(2);
+    expect(outcome.governance.stale, 'no drift signal -> not stale (best-effort)').toBe(false);
+    expect(outcome.governance.performed).toBe(true);
+    expect(outcome.content).not.toBeNull();
+    // The fence ran but the gate surfaced no version — honestly recorded as
+    // null (the production gate ALWAYS surfaces a real version, so the fence
+    // is fully effective in production).
+    expect(outcome.governance.enforcement.revalidated).toBe(true);
+    expect(outcome.governance.enforcement.revalidatedPolicyVersion).toBeNull();
+    expect(outcome.governance.enforcement.revalidatedRuleId).toBeNull();
+  });
+
+  it('22. ROUND-4 a deny decision does NOT trigger the fence (no revalidation runs — the read never happened, so there is nothing to fence); revalidated=false, stale=false', async () => {
+    // A denied read is blocked BEFORE the fence runs — the read never
+    // happened, so there is nothing to revalidate. The boundary records
+    // revalidated=false, stale=false honestly (the fence did NOT run).
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"denied"}');
+    const gate = new FakePolicyGate().denyPath('package.json');
+    const boundary = buildBoundary(port, gate);
+    const outcome = await boundary.governedRead(readPkg, ctx);
+    // The boundary called the gate ONCE (capture only — the deny short-
+    // circuited before the read + revalidation).
+    expect(gate.getCallCount(), 'capture only (deny short-circuits)').toBe(1);
+    expect(outcome.governance.decision).toBe('deny');
+    expect(outcome.governance.performed).toBe(false);
+    expect(outcome.content).toBeNull();
+    // The fence did NOT run (the read never happened).
+    expect(outcome.governance.enforcement.revalidated, 'the fence did NOT run').toBe(false);
+    expect(outcome.governance.enforcement.revalidatedPolicyVersion).toBeNull();
+    expect(outcome.governance.enforcement.stale, 'not stale (the fence did not run)').toBe(false);
+    expect(outcome.governance.stale).toBe(false);
+    // The read NEVER happened (the content port was never called).
+    expect(port.getReadFileCalls()).toEqual([]);
+  });
+
+  it('23. ROUND-4 a path-not-allowed refusal does NOT trigger the fence (boundary-level enforcement short-circuits before the gate is even consulted); revalidated=false, stale=false, policyVersion=null', async () => {
+    // A path outside the candidate allowlist is refused at the BOUNDARY
+    // level — before the policy gate is even consulted. The fence does NOT
+    // run (there is no snapshot to revalidate).
+    const port = new InMemoryContentPort().setFile('secret.env', 'SECRET=value');
+    const boundary = buildBoundary(port, new FakePolicyGate());
+    const outcome = await boundary.governedRead(
+      { path: 'secret.env', family: 'filesystem', operation: 'read' },
+      ctx,
+    );
+    expect(outcome.governance.decision).toBe('deny');
+    expect(outcome.governance.enforcement.pathAllowed).toBe(false);
+    expect(outcome.governance.enforcement.performed).toBe(false);
+    expect(outcome.governance.enforcement.revalidated, 'the fence did NOT run').toBe(false);
+    expect(outcome.governance.enforcement.policyVersion).toBeNull();
+    expect(outcome.governance.enforcement.stale).toBe(false);
+    expect(outcome.governance.stale).toBe(false);
+    expect(port.getReadFileCalls()).toEqual([]);
   });
 });

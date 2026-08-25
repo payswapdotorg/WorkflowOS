@@ -159,6 +159,99 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
   }
 }
 
+/**
+ * PR #42 round-4: a policy gate that starts at V7/allow and can be mutated
+ * mid-read to V8/allow (version + ruleId change, decision stays allow) —
+ * simulates a concurrent policy mutation committing DURING a read (between
+ * the capture and the revalidation). The fence must DETECT the stale
+ * snapshot (the version changed) and DISCARD the read result (zero evidence
+ * + zero observation for that path). The decision stays 'allow' so the
+ * SUBSEQUENT reads (which capture + revalidate V8) are NOT stale and DO
+ * produce evidence — this isolates the fence's behavior: only the read whose
+ * snapshot drifted is discarded; the other reads succeed under the new
+ * version.
+ */
+class MutatingPolicyGate implements ProjectScopedPolicyGate {
+  private policyVersion = 7;
+  private decision: 'allow' | 'deny' = 'allow';
+  private ruleId = 'fake-rule-v7';
+  private mutated = false;
+  /** Mutate the policy to V8 (version + ruleId change; decision stays allow so subsequent reads succeed). */
+  mutateToV8(): void {
+    this.policyVersion = 8;
+    this.ruleId = 'fake-rule-v8';
+    this.mutated = true;
+  }
+  wasMutated(): boolean {
+    return this.mutated;
+  }
+  async decideForProjectScope(
+    _request: ToolPolicyRequest,
+    _projectId: string,
+    _organizationId: string,
+  ) {
+    return {
+      decision: this.decision,
+      policyVersion: this.policyVersion,
+      ruleId: this.ruleId,
+      scopeSource: 'project' as const,
+      reason: this.mutated ? 'allowed by V8 (mutated)' : 'allowed by V7',
+    };
+  }
+}
+
+/**
+ * PR #42 round-4: a content port that fires a hook on the FIRST read call
+ * (readFile or listDir) — the hook mutates the gate mid-read (between the
+ * capture and the revalidation). This is the test hook the architect's
+ * regression spec requires: "test hook mutates policy to v8 while read is in
+ * flight." The hook fires ONLY on the first read so the SUBSEQUENT reads
+ * capture + revalidate the same (mutated) version — they are not stale
+ * (the policy did not change again between their capture and revalidation).
+ */
+class HookedContentPort implements RepositoryContentPort {
+  private files = new Map<string, string>();
+  private dirs = new Map<string, { name: string; type: 'file' | 'dir' }[]>();
+  private hookFired = false;
+  constructor(private readonly onFirstRead: () => void) {}
+  setFile(path: string, content: string): this {
+    this.files.set(path, content);
+    return this;
+  }
+  setDir(path: string, entries: { name: string; type: 'file' | 'dir' }[]): this {
+    this.dirs.set(path, entries);
+    return this;
+  }
+  async readFile(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ) {
+    if (!this.hookFired) {
+      this.hookFired = true;
+      this.onFirstRead();
+    }
+    const content = this.files.get(path);
+    if (content === undefined) return null;
+    return { content, contentDigest: createHash('sha256').update(content, 'utf8').digest('hex') };
+  }
+  async listDir(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ) {
+    if (!this.hookFired) {
+      this.hookFired = true;
+      this.onFirstRead();
+    }
+    return this.dirs.get(path) ?? [];
+  }
+}
+
 describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboarding capability)', () => {
   let stack: TestAuthStack;
   let githubAdapter: FakeGitHubAdapter;
@@ -1154,5 +1247,158 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     // the caller could interleave a policy change between).
     expect(pkgEvidence.repositoryReadDecision).toBe('allow');
     expect(pkgEvidence.repositoryReadEnforcement!.performed).toBe(true);
+  });
+
+  // =========================================================================
+  // PR #42 ROUND-4: the snapshot/fencing protocol (end-to-end through the
+  // real analyzer + orchestrator + DB).
+  //
+  // The architect's round-4 review identified that the round-3 boundary
+  // claimed atomicity but was still a check-then-act window with respect to
+  // POLICY CHANGES: decideForProjectScope() (V7) and the GitHub read are two
+  // separate async operations against two different authorities, and a
+  // concurrent policy update CAN commit between them. The round-4 fix is an
+  // explicit snapshot/fencing protocol: capture → read → REVALIDATE →
+  // discard-if-stale. The invariant: "a repository-read result is persisted
+  // only if the policy snapshot that authorized it is still current when the
+  // result is committed."
+  //
+  // This test exercises the fence END-TO-END: a MutatingPolicyGate (starts
+  // at V7/allow) + a HookedContentPort (mutates the gate to V8/deny on the
+  // FIRST read, which is package.json). The first read (package.json)
+  // captures V7, the read triggers the mutation to V8, the revalidation
+  // sees V8 → STALE → the package.json evidence row + the package-derived
+  // observations are NOT persisted. The subsequent reads (README.md, CI,
+  // Dockerfile, etc.) capture + revalidate V8 (no further mutation) → not
+  // stale → their evidence IS persisted. The baseline still completes.
+  // =========================================================================
+
+  it('33. PR #42 r4: the snapshot/fencing protocol — a mid-read policy mutation (v7 capture -> v8 revalidation) -> the stale read result is DISCARDED (zero evidence + zero observation for that path); the baseline still completes with the other reads', async () => {
+    // The architect's round-4 regression spec:
+    //   initial version = 7
+    //     ↓
+    //   governedRead captures v7
+    //     ↓
+    //   test hook mutates policy to v8 while read is in flight
+    //     ↓
+    //   read completes
+    //     ↓
+    //   governedRead rejects the stale result
+    //     ↓
+    //   zero baseline evidence/observation is persisted (for THAT path)
+    const ref = 'fencing-branch';
+    // The hooked content port: the FIRST read (package.json — the first
+    // candidate) triggers the mutation to V8. Subsequent reads do NOT fire
+    // the hook (they capture + revalidate V8 — not stale).
+    const gate = new MutatingPolicyGate(); // starts at V7/allow/rule-v7
+    const port = new HookedContentPort(() => gate.mutateToV8())
+      .setFile('package.json', JSON.stringify({ name: 'fenced-repo', version: '1.0.0' }))
+      .setFile('README.md', '# Fenced Repo')
+      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
+      .setFile('Dockerfile', 'FROM node:20');
+    const analyzer = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    expect(gate.wasMutated(), 'the gate was mutated mid-read').toBe(true);
+
+    // The baseline STILL COMPLETES — a stale read is NOT an infrastructure
+    // failure (the read happened, the result was discarded by the fence, the
+    // baseline continues with the other reads' evidence).
+    expect(result.baseline.state, 'the baseline completes (stale is not a failure)').toBe('complete');
+
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+
+    // CRITICAL: the package.json evidence row is ABSENT — the stale read
+    // result was DISCARDED by the fence (zero evidence for that path). The
+    // architect's invariant: "a repository-read result is persisted only if
+    // the policy snapshot that authorized it is still current when the
+    // result is committed." package.json was authorized under V7 but V8
+    // superseded it before the result could be committed → DISCARDED.
+    expect(
+      evidence.find((e) => e.locator === 'package.json'),
+      'package.json evidence is ABSENT (the stale read was discarded by the fence)',
+    ).toBeUndefined();
+
+    // The OTHER reads (README.md, .github/workflows, Dockerfile, etc.)
+    // captured + revalidated V8 (the mutated state — no further mutation)
+    // → not stale → their evidence IS persisted. The boundary called
+    // decideForProjectScope TWICE per read (capture + revalidation).
+    const readmeEvidence = evidence.find((e) => e.locator === 'README.md');
+    expect(readmeEvidence, 'README.md evidence IS persisted (not stale)').toBeDefined();
+    expect(readmeEvidence!.repositoryReadDecision).toBe('allow');
+    // The fence metadata on the persisted (non-stale) rows:
+    expect(readmeEvidence!.repositoryReadEnforcement!.stale, 'not stale').toBe(false);
+    expect(readmeEvidence!.repositoryReadEnforcement!.revalidated, 'the fence ran').toBe(true);
+    expect(readmeEvidence!.repositoryReadEnforcement!.performed).toBe(true);
+    // The snapshot version (V8 — captured after the mutation) and the
+    // revalidation version (V8 — no further mutation) match.
+    expect(readmeEvidence!.repositoryReadEnforcement!.policyVersion).toBe(8);
+    expect(readmeEvidence!.repositoryReadEnforcement!.ruleId).toBe('fake-rule-v8');
+    expect(readmeEvidence!.repositoryReadEnforcement!.revalidatedPolicyVersion).toBe(8);
+    expect(readmeEvidence!.repositoryReadEnforcement!.revalidatedRuleId).toBe('fake-rule-v8');
+
+    const ciEvidence = evidence.find((e) => e.locator === '.github/workflows');
+    expect(ciEvidence, '.github/workflows evidence IS persisted').toBeDefined();
+    expect(ciEvidence!.repositoryReadEnforcement!.stale).toBe(false);
+    expect(ciEvidence!.repositoryReadEnforcement!.revalidated).toBe(true);
+
+    const dockerfileEvidence = evidence.find((e) => e.locator === 'Dockerfile');
+    expect(dockerfileEvidence, 'Dockerfile evidence IS persisted').toBeDefined();
+    expect(dockerfileEvidence!.repositoryReadEnforcement!.stale).toBe(false);
+
+    // The observations derived from package.json content are ABSENT — the
+    // stale read's content was discarded, so the analyzer never had
+    // package.json content to derive from. The package_managers /
+    // build_commands / frameworks / languages observations are NOT produced.
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(
+      observations.find((o) => o.kind === 'package_managers'),
+      'package_managers observation is ABSENT (package.json content was discarded)',
+    ).toBeUndefined();
+    expect(
+      observations.find((o) => o.kind === 'build_commands'),
+      'build_commands observation is ABSENT',
+    ).toBeUndefined();
+    expect(
+      observations.find((o) => o.kind === 'frameworks'),
+      'frameworks observation is ABSENT (inference had no package.json to reason from)',
+    ).toBeUndefined();
+    expect(
+      observations.find((o) => o.kind === 'languages'),
+      'languages observation is ABSENT',
+    ).toBeUndefined();
+
+    // The observations NOT derived from package.json ARE present:
+    // repository_identity (metadata-observed), ci (from .github/workflows),
+    // deployment (from Dockerfile), architecture (proposed).
+    expect(
+      observations.find((o) => o.kind === 'repository_identity'),
+      'repository_identity observation IS present (metadata-observed, not content-read)',
+    ).toBeDefined();
+    expect(
+      observations.find((o) => o.kind === 'ci'),
+      'ci observation IS present (.github/workflows read succeeded under V8)',
+    ).toBeDefined();
+    expect(
+      observations.find((o) => o.kind === 'deployment'),
+      'deployment observation IS present (Dockerfile read succeeded under V8)',
+    ).toBeDefined();
+    expect(
+      observations.find((o) => o.kind === 'architecture'),
+      'architecture observation IS present (proposed, no evidence dependency)',
+    ).toBeDefined();
+
+    // The fence log was emitted (forensic audit of the discarded read).
+    const logOutput = capture.raw();
+    expect(logOutput, 'the fence logged the stale snapshot').toContain('policy-snapshot-stale');
+    expect(logOutput, 'the log records the snapshot version V7').toContain('"snapshotVersion":7');
+    expect(logOutput, 'the log records the revalidation version V8').toContain('"revalidatedVersion":8');
   });
 });

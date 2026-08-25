@@ -167,25 +167,56 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
     });
 
     // 2. Governed candidate reads — each through the boundary's
-    //    governedRead() (the atomic decide+enforce+read+record method).
-    //    PR #42 round-3: the evidence row records the ACTUAL decision
-    //    (repository_read_decision) + the concrete enforcement effect
-    //    (repository_read_enforcement) in their OWN columns. The Tool
-    //    Runtime columns (tool_invocation_id + policy_decision) stay NULL
-    //    (round-2 invariant preserved — the /github read is NOT a Tool
-    //    Runtime invocation, NOT a host tool run).
+    //    governedRead() (the atomic decide+enforce+read+REVALIDATE+record
+    //    method — PR #42 round-3 + round-4). The evidence row records the
+    //    ACTUAL decision (repository_read_decision) + the concrete
+    //    enforcement effect (repository_read_enforcement) in their OWN
+    //    columns. The Tool Runtime columns (tool_invocation_id +
+    //    policy_decision) stay NULL (round-2 invariant preserved — the
+    //    /github read is NOT a Tool Runtime invocation, NOT a host tool
+    //    run).
+    //
+    //    PR #42 round-4 (the snapshot/fencing protocol): when the boundary
+    //    detects that the policy snapshot that authorized the read is NO
+    //    LONGER current at revalidation (a concurrent policy mutation
+    //    committed DURING the read), it returns a STALE outcome —
+    //    content=null, performed=false, stale=true. The analyzer MUST NOT
+    //    persist an evidence row or observation for that path (the
+    //    architect's invariant: "a repository-read result is persisted only
+    //    if the policy snapshot that authorized it is still current when
+    //    the result is committed"). The forensic audit goes to the
+    //    boundary's log (the DB stays clean — only successfully-authorized-
+    //    and-revalidated reads produce evidence rows). The baseline still
+    //    completes (the other reads' evidence is still valid under their
+    //    own revalidated snapshots).
     const contentByPath = new Map<string, { content: string; contentDigest: string }>();
     for (const candidate of CANDIDATE_READS) {
       // The boundary throws OnboardingAnalysisError on an infrastructure
       // failure (the orchestrator catches it + markFailed — round-2
       // Blocker B, preserved). Expected-missing (null/[]) is NOT an
       // infrastructure failure — the boundary returns content=null +
-      // performed=true (the read happened; the path was absent).
+      // performed=true (the read happened; the path was absent). A STALE
+      // read (round-4 fencing) is ALSO not an infrastructure failure —
+      // the boundary returns content=null + performed=false + stale=true,
+      // and the analyzer skips the evidence row + observation for that
+      // path (the read result was discarded).
       const outcome = await this.deps.governedReadPolicy.governedRead(candidate, ctx);
+
+      // PR #42 round-4 (the snapshot/fencing protocol): a STALE outcome
+      // means the policy snapshot that authorized the read is no longer
+      // current at revalidation. The read result is DISCARDED — do NOT
+      // persist an evidence row or observation for this path. The
+      // boundary already logged the staleness for forensics. Continue
+      // with the next candidate (the baseline still completes with the
+      // other reads' evidence).
+      if (outcome.governance.stale) {
+        continue;
+      }
 
       // Build the evidence row from the bound outcome. The decision +
       // enforcement come from the boundary's governance record (the actual
-      // decision that governed THIS read + the concrete effect).
+      // decision that governed THIS read + the concrete effect + the
+      // revalidation metadata).
       const g = outcome.governance;
       const ev: NewBaselineEvidence = {
         source: 'filesystem',
@@ -209,12 +240,15 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
         // decision, even for path-not-allowed/operation-not-read refusals,
         // which it records as 'deny' with the boundary's refusal reason).
         repositoryReadDecision: g.decision,
-        // PR #42 round-3: the concrete enforcement effect (what
-        // `constrained` actually did — OBSERVABLE). Carries the policy
-        // version snapshot (drift detection), the matched rule id, whether
-        // the read was performed, whether maxOutputBytes truncated the
-        // content + at what byte offset, whether the path was in the
-        // candidate allowlist.
+        // PR #42 round-3 + round-4: the concrete enforcement effect (what
+        // `constrained` actually did — OBSERVABLE) + the snapshot/fencing
+        // metadata (revalidated + revalidatedPolicyVersion +
+        // revalidatedRuleId + revalidatedDecision + stale). Carries the
+        // policy version snapshot (drift detection), the matched rule id,
+        // whether the read was performed, whether maxOutputBytes truncated
+        // the content + at what byte offset, whether the path was in the
+        // candidate allowlist, AND whether the snapshot was revalidated
+        // current (the fence).
         repositoryReadEnforcement: g.enforcement,
       };
       evidence.push(ev);
