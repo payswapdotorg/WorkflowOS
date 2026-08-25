@@ -29,7 +29,9 @@
  * syntactic shape rule, NOT a variable-name denylist; every
  * well-formed key, LD_* included, still reaches the target).
  *
- * GOVERNANCE (structural, not policy — WORK-037 tightens later):
+ * GOVERNANCE (structural; the WORK-037 policy engine is the authority on
+ * top — the executor's fail-closed rejection is defense in depth with a
+ * POLICY reason, not the sandbox's network-blocks-it-anyway happenstance):
  *   * explicit argv separation (argv[0] = executable; no shell string);
  *   * the working directory is CONFINED to the WORK-035 workspace root
  *     (a relative cwd; traversal/absolute/symlink escapes fail closed);
@@ -44,11 +46,26 @@
  *   * the exit code, start/end timing, cancellation (AbortSignal →
  *     SIGTERM), and a hard timeout are all part of the outcome (the
  *     timeout bounds the ENTIRE sandboxed invocation);
- *   * GIT family: remote-network subcommands and cwd/git-dir-redirecting
- *     flags are rejected fail-closed (the workspace holds no GitHub
- *     credentials; remote authority stays /github);
+ *   * GIT family: remote-network subcommands are rejected fail-closed via
+ *     the CANONICAL git-argv classifier (./git-argv.js — shared with the
+ *     WORK-037 policy engine's deployment-domain tagging). The classifier
+ *     finds the EFFECTIVE subcommand by skipping git's global/config
+ *     options (`git -c k=v push` is still rejected — a positional args[0]
+ *     check would miss it). cwd/git-dir-redirecting flags are rejected
+ *     anywhere in the argv (the workspace holds no GitHub credentials;
+ *     remote authority stays /github);
  *   * PACKAGE family: the runner is a BARE executable name (path
- *     separators rejected — no arbitrary binaries).
+ *     separators rejected — no arbitrary binaries). Registry-publication
+ *     subcommands (`publish`/`unpublish`/`deprecate` for the
+ *     publish-capable runners npm/pnpm/yarn/bun) are rejected fail-closed
+ *     via the CANONICAL package-argv classifier (./package-argv.js — shared
+ *     with the WORK-037 policy engine's deployment-domain tagging). The
+ *     classifier finds the EFFECTIVE subcommand by skipping the runner's
+ *     global/config options (`npm --registry=<url> publish` is still
+ *     rejected — a positional args[0] check would miss it). Non-publish-
+ *     capable runners (node/npx/tsx/vitest/jest/tsc/…) are NOT rejected
+ *     (they have no `publish` subcommand; `publish` is a script/argument
+ *     name for them).
  */
 import { execFile } from 'node:child_process';
 import type { ExecFileException, ExecFileOptionsWithStringEncoding } from 'node:child_process';
@@ -66,6 +83,30 @@ import type {
 import { toolOutcomeError } from './tool-contracts.js';
 import { resolveWithinWorkspace, WorkspaceBoundaryError } from './path-confinement.js';
 import type { ProcessSandbox, WrappedProcessLaunch } from './process-sandbox.js';
+// WORK-037 PR-#41 FIX: the CANONICAL git argv classifier — ONE vocabulary
+// shared by this executor (remote-network rejection) and the agent policy
+// engine (deployment-domain tagging). Git permits global/config options
+// BEFORE the effective subcommand (`git -c k=v push`), so a positional
+// args[0] check could fail to reject a remote mutation at the governance
+// gate. The classifier skips git's global options to find the effective
+// subcommand + fails-closed on ambiguity. The deployment set + the redirect
+// flag set live HERE (no second copy in the engine — a mismatch would let
+// policy-allow what the executor rejects, or vice versa).
+import { isGitDeploymentInvocation, GIT_REDIRECT_FLAGS, classifyGitSubcommand } from './git-argv.js';
+// WORK-037 PR-#41 FIX (round 2): the CANONICAL package-command classifier
+// — the package-family twin of the git argv classifier. ONE vocabulary
+// shared by this executor (publish-rejection governance gate) and the
+// agent policy engine (deployment-domain tagging). Package runners
+// (npm/pnpm/yarn/bun) permit global/config options BEFORE the effective
+// subcommand (`npm --registry=<url> publish`), so a positional args[0]
+// check could fail to reject a registry publication at the governance
+// gate (the sandbox's network isolation is defense-in-depth, NOT the
+// authority). The classifier skips the runner's global options to find the
+// effective subcommand + fails-closed on ambiguity. The publish-capable
+// runner set + the deployment subcommand set live HERE (no second copy in
+// the engine — a mismatch would let policy-allow what the executor rejects,
+// or vice versa).
+import { isPackageDeploymentInvocation, classifyPackageSubcommand } from './package-argv.js';
 
 /**
  * The teardown grace: after SIGTERM the group gets this long before the
@@ -83,44 +124,15 @@ interface RawProcessResult {
   readonly aborted: boolean;
 }
 
-/**
- * Git subcommands that touch the REMOTE (network) — rejected fail-closed:
- * the workspace layer holds no credentials and remote repository state is
- * /github's authority (push/pull/fetch/clone/…). (Defense in depth: the
- * sandbox's network namespace blocks these anyway.)
- */
-const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set([
-  'push',
-  'pull',
-  'fetch',
-  'clone',
-  'remote',
-  'ls-remote',
-  'submodule',
-  'fetch-pack',
-  'upload-pack',
-  'send-pack',
-  'receive-pack',
-  'daemon',
-  'http-backend',
-  'svn',
-]);
-
-/**
- * Git argv tokens that REDIRECT where git operates (defeating the forced
- * workspace cwd) — rejected anywhere in the argv. (Defense in depth: the
- * sandbox makes redirected host paths unreachable anyway.)
- */
-const GIT_REDIRECT_FLAGS: ReadonlySet<string> = new Set([
-  '-C',
-  '--git-dir',
-  '--work-tree',
-  '--namespace',
-  '--upload-pack',
-  '--exec-path',
-  '--global',
-  '--system',
-]);
+// Git remote-network / deployment classification + the redirect-flag set
+// are OWNED by the canonical classifier in ./git-argv.js (imported above):
+//   - isGitDeploymentInvocation(argv) — finds the EFFECTIVE git subcommand
+//     by skipping git's GLOBAL/CONFIG options (e.g. `git -c k=v push`), so
+//     a remote mutation preceded by global options is still rejected.
+//   - GIT_REDIRECT_FLAGS — rejected ANYWHERE in the argv (a redirect flag
+//     as a subcommand arg still redirects, e.g. `git log --git-dir=/foo`).
+// There is NO local copy of either set (a mismatch with the policy engine's
+// deployment tagging would let policy-allow what the executor rejects).
 
 /** Env keys the process engine rejects for the GIT family (git-dir smuggling). */
 const GIT_ENV_PREFIX = 'GIT_';
@@ -186,12 +198,20 @@ export class ProcessToolExecutor implements ToolExecutor {
     if (!req || !Array.isArray(req.args) || req.args.length === 0 || !req.args.every((a) => typeof a === 'string')) {
       return toolOutcomeError('tool-invalid-input', 'git request requires a non-empty args array of strings');
     }
-    // Fail-closed governance BEFORE any process spawns.
-    const subcommand = req.args[0]!;
-    if (GIT_REMOTE_SUBCOMMANDS.has(subcommand)) {
+    // Fail-closed governance BEFORE any process spawns. WORK-037 PR-#41 FIX:
+    // classify the EFFECTIVE git subcommand via the CANONICAL classifier
+    // (shared with the policy engine). Git permits global/config options
+    // BEFORE the effective subcommand (`git -c k=v push`, `git --no-pager
+    // push`, `git -C /path push`, `git --git-dir=/foo push`), so a positional
+    // req.args[0] check could fail to reject a remote mutation here. The
+    // classifier skips git's global options to find the effective subcommand
+    // + fails-closed on ambiguity (treats it as deployment-class → rejected).
+    if (isGitDeploymentInvocation(req.args)) {
+      const { subcommand } = classifyGitSubcommand(req.args);
+      const named = subcommand ?? '(ambiguous)';
       return toolOutcomeError(
         'git-remote-operation-forbidden',
-        `git ${subcommand} is a remote-network operation — the workspace holds no GitHub credentials and remote repository authority stays /github (repository-LOCAL git operations only)`,
+        `git ${named} is a remote-network operation — the workspace holds no GitHub credentials and remote repository authority stays /github (repository-LOCAL git operations only)`,
       );
     }
     const redirect = req.args.find((a) => GIT_REDIRECT_FLAGS.has(a));
@@ -232,6 +252,30 @@ export class ProcessToolExecutor implements ToolExecutor {
       return toolOutcomeError(
         'package-runner-path-forbidden',
         `the package runner must be a bare executable name resolved via PATH (got ${JSON.stringify(req.runner)}) — arbitrary binaries are not a capability`,
+      );
+    }
+    // Fail-closed governance BEFORE any process spawn. WORK-037 PR-#41 FIX
+    // (round 2): classify the EFFECTIVE package subcommand via the CANONICAL
+    // classifier (shared with the policy engine). Package runners
+    // (npm/pnpm/yarn/bun) permit global/config options BEFORE the effective
+    // subcommand (`npm --registry=<url> publish`, `npm --silent publish`,
+    // `pnpm --filter <pkg> publish`, `pnpm -C /path publish`,
+    // `yarn --cwd /path publish`), so a positional req.args[0] check could
+    // fail to reject a registry publication at the governance gate. The
+    // classifier skips the runner's global options to find the effective
+    // subcommand + fails-closed on ambiguity (treats it as deployment-class
+    // → rejected). This is the GOVERNANCE-gate rejection (defense-in-depth
+    // on top of the policy authorization decision); the workspace holds no
+    // publish credentials and a registry publication is deployment-class.
+    // Non-publish-capable runners (node/npx/tsx/vitest/jest/tsc/…) are
+    // NOT rejected here (the runner gate returns false — they have no
+    // `publish` subcommand; `publish` is a script/argument name for them).
+    if (isPackageDeploymentInvocation(req.runner, req.args)) {
+      const { subcommand } = classifyPackageSubcommand(req.args);
+      const named = subcommand ?? '(ambiguous)';
+      return toolOutcomeError(
+        'package-publish-forbidden',
+        `${req.runner} ${named} is a registry-publication operation — the workspace holds no publish credentials and publication authority is deployment-class (local package/test execution only)`,
       );
     }
     return this.runProcess([req.runner, ...req.args], {

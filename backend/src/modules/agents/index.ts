@@ -174,6 +174,43 @@ export {
 } from './internal/tool-runtime.types.js';
 export type { ToolRuntimeErrorCode } from './internal/tool-runtime.types.js';
 
+// WORK-037: Agent Policy and Permissions — the durable execution-policy
+// authority BEHIND the WORK-036 ToolPolicyGate seam. The engine implements
+// ToolPolicyGate (allow/deny/ask/constrained across the four control
+// domains: tools, network, secrets, deployment); the durable ASK
+// interaction; versioned document CRUD; and external-handoff eligibility.
+// It is DISTINCT from project authorization (WORK-002): the engine never
+// imports the authorization service — only the route layer calls
+// requireProjectAuthorization (the one-way dependency invariant:
+// Auth/ProjectAuth → Execution Policy → Tool Runtime → Sandboxed Executor).
+// Concrete implementations (the engine, the pg repository, the
+// policy-gated handoff decorator) stay internal — wired by app.ts.
+export type {
+  AgentPolicyDomain,
+  AgentPolicyRule,
+  AgentPolicyDocument,
+  AgentPolicyResolution,
+  AgentPolicyScopeSource,
+  AgentPolicyApproval,
+  AgentPolicyApprovalStatus,
+  AgentPolicyExternalDecision,
+  AgentPolicyRepository,
+  AgentPolicyEngineDeps,
+  AgentPolicyService,
+} from './internal/agent-policy.types.js';
+// The platform default document is pure data (a frozen literal: rule
+// selectors + effects + reasons; no wiring, no credentials, no provider
+// branches) — the sanctioned exception to the types-only barrel rule.
+export {
+  AgentPolicyError,
+  AGENT_POLICY_ERROR_CODES,
+  PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT,
+  AGENT_POLICY_DOMAINS,
+} from './internal/agent-policy.types.js';
+export type { AgentPolicyErrorCode } from './internal/agent-policy.types.js';
+export type { AgentPolicyEngine } from './internal/agent-policy-engine.js';
+export type { AgentPolicyHandoffEvaluator } from './internal/policy-gated-handoff-service.js';
+
 export interface AgentsModuleApi {}
 
 export const agentsModule: ModuleContract & AgentsModuleApi = { name: '/agents' };

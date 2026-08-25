@@ -841,6 +841,14 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'ToolRuntimeError',              // @modules/agents — the typed domain error
       'TOOL_RUNTIME_ERROR_CODES',      // @modules/agents — the stable code list
       'DEFAULT_TOOL_EXECUTION_LIMITS', // @modules/agents — frozen pure-data limits
+      // WORK-037: the agent-policy typed error (the same sanctioned
+      // exception + reasoning) + the frozen pure-data domain list +
+      // the platform default document (a frozen literal: rule selectors +
+      // effects + reasons; no wiring, no credentials).
+      'AgentPolicyError',                   // @modules/agents — the typed domain error
+      'AGENT_POLICY_ERROR_CODES',           // @modules/agents — the stable code list
+      'PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT', // @modules/agents — frozen pure-data default policy
+      'AGENT_POLICY_DOMAINS',              // @modules/agents — frozen pure-data domain list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -8400,6 +8408,18 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
   const TR_BROWSER = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'browser-tool-executor.ts');
   const TR_CONFINEMENT = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'path-confinement.ts');
   const TR_REDACTION = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'observation-redaction.ts');
+  // WORK-037 PR-#41 FIX: the CANONICAL git argv classifier — ONE vocabulary
+  // shared by the policy engine (deployment-domain tagging) and the
+  // process executor (remote-network rejection). Pure (no IO). Lives in
+  // @platform/tools (the correct one-way dependency direction).
+  const TR_GIT_ARGV = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+  const TR_GIT_ARGV_TEST = join(BACKEND_ROOT, 'tests', 'unit', 'git-argv.test.ts');
+  // WORK-037 PR-#41 FIX (round 2): the CANONICAL package-command classifier
+  // — the package-family twin of the git argv classifier. ONE vocabulary
+  // shared by the policy engine (deployment-domain tagging) and the
+  // process executor (publish-rejection governance gate). Pure (no IO).
+  // Lives in @platform/tools (the same one-way dependency direction).
+  const TR_PACKAGE_ARGV = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
   const TR_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
   const TR_SANDBOX_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'process-sandbox.regression.test.ts');
 
@@ -8414,6 +8434,8 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     ['browser-executor', TR_BROWSER],
     ['confinement', TR_CONFINEMENT],
     ['redaction', TR_REDACTION],
+    ['git-argv-classifier', TR_GIT_ARGV],
+    ['package-argv-classifier', TR_PACKAGE_ARGV],
   ] as const;
 
   function strip(src: string): string {
@@ -8466,17 +8488,46 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     expect(svcSrc).not.toMatch(/INSERT INTO wfos_executions\b|UPDATE wfos_executions\b/);
   });
 
-  it('NO GitHub authority duplication (git is repository-LOCAL only; remote operations are denied fail-closed)', () => {
-    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
-    // The fail-closed remote-network denylist.
-    expect(procSrc).toMatch(/GIT_REMOTE_SUBCOMMANDS/);
-    for (const sub of ['push', 'pull', 'fetch', 'clone', 'remote', 'ls-remote']) {
-      expect(procSrc).toContain(`'${sub}'`);
+  it('NO GitHub authority duplication (git is repository-LOCAL only; remote operations are denied fail-closed via the CANONICAL classifier)', () => {
+    // WORK-037 PR-#41 FIX: the fail-closed remote-network classification +
+    // the cwd/git-dir redirect set are OWNED by the canonical git-argv
+    // classifier (TR_GIT_ARGV) — ONE vocabulary shared by the policy
+    // engine (deployment-domain tagging) and the executor (remote-network
+    // rejection). The executor no longer keeps a local divergent copy (a
+    // mismatch would let policy-allow what the executor rejects, or vice
+    // versa). The classifier skips git's GLOBAL/CONFIG options before the
+    // effective subcommand (`git -c k=v push` is still push → denied).
+    const classifierSrc = strip(readFileSync(TR_GIT_ARGV, 'utf8'));
+    expect(classifierSrc, 'the canonical classifier module exists').toMatch(/export function isGitDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export function classifyGitSubcommand/);
+    expect(classifierSrc).toMatch(/export const GIT_DEPLOYMENT_SUBCOMMANDS/);
+    expect(classifierSrc).toMatch(/export const GIT_REDIRECT_FLAGS/);
+    // The canonical classifier's unit proof exists (the architect's
+    // options-before-subcommand scenarios — pure-function, no DB).
+    expect(existsSync(TR_GIT_ARGV_TEST), 'git-argv.test.ts must exist').toBe(true);
+    // The deployment set (one source of truth — the subcommand literals
+    // live HERE, not in the executor or the engine).
+    for (const sub of ['push', 'pull', 'fetch', 'clone', 'remote', 'ls-remote', 'submodule', 'svn', 'daemon', 'http-backend']) {
+      expect(classifierSrc, `${sub} is deployment-class in the canonical set`).toContain(`'${sub}'`);
     }
+    // The classifier skips git's GLOBAL/CONFIG options to find the
+    // effective subcommand (the architect's `git -c k=v push` example).
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS_SHORT/);
+    expect(classifierSrc).toMatch(/'-c'/); // the architect's exact example
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_BOOLEAN_OPTIONS/);
+    expect(classifierSrc).toMatch(/'--no-pager'/);
+    // The executor imports the canonical classifier + uses it (NOT a local
+    // positional args[0] check) + still emits the typed rejection codes.
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    expect(procSrc, 'the executor imports the canonical classifier').toMatch(/from '\.\/git-argv\.js'/);
+    expect(procSrc).toMatch(/isGitDeploymentInvocation\(req\.args\)/);
+    expect(procSrc).toMatch(/classifyGitSubcommand\(req\.args\)/);
     expect(procSrc).toMatch(/git-remote-operation-forbidden/);
-    // The cwd/git-dir redirect denylist.
     expect(procSrc).toMatch(/GIT_REDIRECT_FLAGS/);
     expect(procSrc).toMatch(/git-redirect-forbidden/);
+    // The executor NO LONGER keeps a local divergent copy of either set.
+    expect(procSrc, 'the executor has NO local GIT_REMOTE_SUBCOMMANDS copy').not.toMatch(/const GIT_REMOTE_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local GIT_REDIRECT_FLAGS copy').not.toMatch(/const GIT_REDIRECT_FLAGS/);
     // No PR/merge operations anywhere in the tool runtime.
     for (const [name, p] of TOOL_RUNTIME_FILES) {
       const src = strip(readFileSync(p, 'utf8'));
@@ -8891,3 +8942,543 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
 function AGENTS_INTERNAL_PATH(): string {
   return join(MODULES_DIR, 'agents', 'internal');
 }
+
+// ============================================================================
+// WORK-037 — Agent Policy & Permissions invariants
+// ============================================================================
+//
+// The durable execution-policy authority BEHIND the WORK-036 ToolPolicyGate
+// seam. The invariant under test (the one-way dependency):
+//
+//   Auth / Project Authorization → Execution Policy → Tool Runtime → Sandbox
+//
+//   NO reverse dependency: the engine imports no workflow/verification/review
+//   /github/work-items/authorization module. Only the ROUTE layer calls
+//   requireProjectAuthorization (who-may-resolve) — the engine decides
+//   what-agents-may-do (execution-specific policy). These are two separate
+//   concerns; the engine is the second.
+describe('WORK-037 invariants — Agent Policy and Permissions (the engine behind the ToolPolicyGate seam)', () => {
+  const AP_TYPES = join(MODULES_DIR, 'agents', 'internal', 'agent-policy.types.ts');
+  const AP_ENGINE = join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts');
+  const AP_REPO = join(MODULES_DIR, 'agents', 'internal', 'pg-agent-policy-repository.ts');
+  const AP_HANDOFF = join(MODULES_DIR, 'agents', 'internal', 'policy-gated-handoff-service.ts');
+  const AP_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'agent-policy.route.ts');
+  const AP_REGRESSION = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'agent-policy.regression.test.ts');
+  const AP_MIGRATION = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0037_agent_policy.sql');
+
+  // The workflow/authority modules the engine MUST NOT import (the one-way
+  // dependency). Audit + logger are infrastructure PORTS (allowed — the
+  // engine consumes the AuditEventWriter TYPE + Logger TYPE, never the
+  // audit module's logic, never workflow state).
+  const FORBIDDEN_ENGINE_IMPORTS = [
+    "@modules/auth",
+    "@modules/workflows",
+    "@modules/work-items",
+    "@modules/verification",
+    "@modules/reviews",
+    "@modules/github",
+    "@modules/architecture",
+    "@modules/requirements",
+    "@modules/notifications",
+    "@modules/organizations",
+    "@modules/projects",
+  ];
+  const ENGINE_FILES: ReadonlyArray<string> = [AP_TYPES, AP_ENGINE, AP_REPO, AP_HANDOFF];
+
+  it('the engine + repository + decorator NEVER import a workflow/authority module (the one-way dependency)', () => {
+    for (const file of ENGINE_FILES) {
+      const src = readFileSync(file, 'utf8');
+      for (const forbidden of FORBIDDEN_ENGINE_IMPORTS) {
+        expect(src, `${file} must not import ${forbidden} (the one-way dependency)`).not.toContain(
+          `from '${forbidden}`,
+        );
+        expect(src, `${file} must not import ${forbidden} (the one-way dependency)`).not.toContain(
+          `from "${forbidden}`,
+        );
+      }
+    }
+  });
+
+  it('the engine implements the frozen ToolPolicyGate seam (the runtime diff is zero)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/export class AgentPolicyEngine implements ToolPolicyGate/);
+    expect(engineSrc).toMatch(/async decide\(request: ToolPolicyRequest\): Promise<ToolPolicyDecision>/);
+    // The decision vocabulary is the FROZEN ToolPolicyDecisionValue
+    // (reused, NOT extended — the engine imports it from the seam).
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/ToolPolicyDecisionValue/);
+    // The four control domains + the external-handoff subject.
+    expect(typesSrc).toMatch(/'tool' \| 'network' \| 'secrets' \| 'deployment' \| 'external'/);
+  });
+
+  it('app.ts wires the ENGINE as the runtime policyGate (NOT DefaultToolPolicyGate)', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    // The engine is constructed + wired as the gate.
+    expect(appSrc).toMatch(/new AgentPolicyEngine\(/);
+    expect(appSrc).toMatch(/policyGate: agentPolicyEngine,/);
+    // DefaultToolPolicyGate is no longer imported (the engine replaces it).
+    expect(appSrc).not.toMatch(/DefaultToolPolicyGate/);
+    // The handoff decorator wraps the inner service (external eligibility).
+    expect(appSrc).toMatch(/new PolicyGatedExecutionHandoffService\(/);
+    expect(appSrc).toMatch(/inner: new DefaultExecutionHandoffService\(/);
+  });
+
+  it('fail-closed: decide() returns deny on resolution failure (NEVER silently allow)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The catch → deny path + the fail-closed reason codes.
+    expect(engineSrc).toMatch(/agent-policy-scope-unresolvable/);
+    expect(engineSrc).toMatch(/agent-policy-unavailable/);
+    expect(engineSrc).toMatch(/this\.failClosed\(/);
+    expect(engineSrc).toMatch(/return this\.failClosed\(/);
+    // The fail-closed decision is always 'deny'.
+    expect(engineSrc).toMatch(/return \{ decision: 'deny', reason: `agent-policy/);
+  });
+
+  it('the ASK interaction: a pending approval is ensured (never silently allow)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The engine delegates pending creation to the repository (idempotent
+    // under the partial unique index) + owns the approval-consultation flow.
+    expect(engineSrc).toMatch(/private async ensurePending\(/);
+    expect(engineSrc).toMatch(/this\.deps\.repository\.ensurePendingApproval\(/);
+    expect(engineSrc).toMatch(/decision: 'ask'/);
+    // An APPROVED approval resolves to allow; a DENIED to deny (durable).
+    expect(engineSrc).toMatch(/approval\.status === 'approved'/);
+    expect(engineSrc).toMatch(/approval\.status === 'denied'/);
+  });
+
+  it('no workflow/verification/review/github state mutation (SQL-level)', () => {
+    const FORBIDDEN_TABLES = [
+      'wfos_workflow_states',
+      'wfos_work_items',
+      'wfos_work_orders',
+      'wfos_verification_runs',
+      'wfos_reviews',
+      'wfos_pull_request_associations',
+      'wfos_github_',
+    ];
+    for (const file of [AP_REPO, AP_ENGINE]) {
+      const src = readFileSync(file, 'utf8');
+      for (const table of FORBIDDEN_TABLES) {
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`INSERT INTO ${table}`);
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`UPDATE ${table}`);
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`DELETE FROM ${table}`);
+      }
+    }
+    // The engine persists ONLY to wfos_agent_policies + wfos_agent_policy_approvals.
+    const repoSrc = readFileSync(AP_REPO, 'utf8');
+    expect(repoSrc).toMatch(/INSERT INTO wfos_agent_policies/);
+    expect(repoSrc).toMatch(/INSERT INTO wfos_agent_policy_approvals/);
+    expect(repoSrc).toMatch(/UPDATE wfos_agent_policy_approvals/);
+    expect(repoSrc).toMatch(/DELETE FROM wfos_agent_policies/);
+  });
+
+  it('the migration exists: two tables + partial unique indexes + the version-bump trigger', () => {
+    expect(existsSync(AP_MIGRATION), '0037_agent_policy.sql must exist').toBe(true);
+    const sql = readFileSync(AP_MIGRATION, 'utf8');
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_policies/);
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_policy_approvals/);
+    // The partial unique indexes (one org default, one project override per
+    // project; one pending approval per execution+subject).
+    expect(sql).toMatch(/wfos_agent_policies_org_unique/);
+    expect(sql).toMatch(/WHERE scope = 'organization'/);
+    expect(sql).toMatch(/wfos_agent_policies_project_unique/);
+    expect(sql).toMatch(/WHERE scope = 'project'/);
+    expect(sql).toMatch(/wfos_agent_policy_approvals_pending_unique/);
+    expect(sql).toMatch(/WHERE status = 'pending'/);
+    // The version-bump trigger.
+    expect(sql).toMatch(/wfos_agent_policies_bump_version/);
+    expect(sql).toMatch(/NEW\.policy_version := OLD\.policy_version \+ 1/);
+    // The migration documents the no-credential intent (policy config +
+    // subject identifiers only — no tokens/secrets/passwords stored).
+    expect(sql).toMatch(/No secrets\./);
+  });
+
+  it('the route layer enforces user authorization (who-may-resolve; the engine never imports auth)', () => {
+    const routeSrc = readFileSync(AP_ROUTE, 'utf8');
+    expect(routeSrc).toContain('requireProjectAuthorization');
+    expect(routeSrc).toContain('requireOrganizationAuthorization');
+    // Mutations + approval resolution require project.admin (user authority).
+    expect(routeSrc).toMatch(/permission: 'project\.admin'/);
+    // Reads require project.read.
+    expect(routeSrc).toMatch(/permission: 'project\.read'/);
+    // The approval resolution verifies the approval belongs to the path project
+    // (a project.admin on A cannot resolve an approval for B).
+    expect(routeSrc).toMatch(/approval\.projectId !== projectId/);
+    // The route depends on the AgentPolicyService INTERFACE (not the concrete
+    // engine) — the api layer does not reach into modules/agents/internal.
+    expect(routeSrc).toMatch(/from '@modules\/agents\/index\.js'/);
+    expect(routeSrc).not.toMatch(/\.\.\/\.\.\/modules\/agents\/internal\//);
+  });
+
+  it('the barrel exposes the agent-policy types + the platform default + the error (no concrete impls)', () => {
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/AgentPolicyDocument,/);
+    expect(barrelSrc).toMatch(/AgentPolicyService,/);
+    expect(barrelSrc).toMatch(/AgentPolicyError,/);
+    expect(barrelSrc).toMatch(/PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT,/);
+    // The concrete engine + repository stay internal (wired by app.ts).
+    expect(barrelSrc).not.toMatch(/export \{[^}]*AgentPolicyEngine[^}]*\}/);
+    expect(barrelSrc).not.toMatch(/export \{[^}]*PgAgentPolicyRepository[^}]*\}/);
+  });
+
+  it('the platform default document is a safe out-of-box posture (secrets/deployment/network-mutating controlled)', () => {
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    // secrets → ask; deployment → deny; network-mutating → ask; terminal/package → constrained.
+    expect(typesSrc).toMatch(/id: 'platform-secrets-ask'/);
+    expect(typesSrc).toMatch(/id: 'platform-deployment-deny'/);
+    expect(typesSrc).toMatch(/id: 'platform-network-mutating-ask'/);
+    expect(typesSrc).toMatch(/id: 'platform-terminal-constrained'/);
+    expect(typesSrc).toMatch(/id: 'platform-package-constrained'/);
+    // The default effect is allow (read-oriented + worktree-confined dev).
+    expect(typesSrc).toMatch(/defaultEffect: 'allow'/);
+    // The document + its rules are frozen (Object.freeze).
+    expect(typesSrc).toMatch(/Object\.freeze\(\{\s*description:/);
+  });
+
+  it('the external-handoff eligibility is enforced at the handoff decorator (no host authority gained)', () => {
+    const handoffSrc = readFileSync(AP_HANDOFF, 'utf8');
+    expect(handoffSrc).toMatch(/class PolicyGatedExecutionHandoffService implements ExecutionHandoffService/);
+    // issue() + redeem() both consult the policy (deny/ask → throw; constrained → attach constraints).
+    expect(handoffSrc).toMatch(/evaluateExternalHandoff\(/);
+    expect(handoffSrc).toMatch(/'handoff-policy-denied'/);
+    expect(handoffSrc).toMatch(/'handoff-policy-approval-required'/);
+    // redeemByToken is NOT gated (post-issuance delivery; documented).
+    expect(handoffSrc).toMatch(/companion path is post-issuance delivery/);
+  });
+
+  it('the regression matrix exists with the frozen scenarios', () => {
+    expect(existsSync(AP_REGRESSION), 'agent-policy.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(AP_REGRESSION, 'utf8');
+    // The three layers of proof.
+    expect(src).toMatch(/ENGINE DECISION LOGIC/);
+    expect(src).toMatch(/PERSISTENCE/);
+    expect(src).toMatch(/SEAM INTEGRATION/);
+    // The four control domains are exercised.
+    expect(src).toMatch(/deployment-class/);
+    expect(src).toMatch(/secrets-bearing/);
+    expect(src).toMatch(/network-mutating/);
+    // The ASK approval flow (approved → allow; denied → deny; pending; expired).
+    expect(src).toMatch(/APPROVED approval for the same subject → allow/);
+    expect(src).toMatch(/DENIED approval for the same subject → deny/);
+    expect(src).toMatch(/EXPIRED approved approval/);
+    // Fail-closed (policy failure cannot execute).
+    expect(src).toMatch(/unresolvable scope → deny/);
+    expect(src).toMatch(/repository throws → deny/);
+    // Concurrency (the pending-approval idempotency).
+    expect(src).toMatch(/two parallel asks for the same subject/);
+    // The seam integration (deny/ask → blocked; constrained → limits; allow → executes).
+    expect(src).toMatch(/deny → durable blocked observation; the executor is NEVER called/);
+    expect(src).toMatch(/ask → durable blocked observation/);
+    expect(src).toMatch(/constrained → the executor runs UNDER the tightened limits/);
+    expect(src).toMatch(/constrained readOnly → a mutating invocation is BLOCKED/);
+    expect(src).toMatch(/policy failure cannot execute/);
+    // The external handoff eligibility.
+    expect(src).toMatch(/external handoff eligibility/);
+    // The architect's PR-#41 review: the approval-binding contract +
+    // the audit-dedup invariant + the supersession semantics.
+    expect(src).toMatch(/APPROVAL-BINDING CONTRACT/);
+    expect(src).toMatch(/approved under v1 → same subject under v1 → allow/);
+    expect(src).toMatch(/approved under v1 → policy bumps to v2 → ASK/);
+    expect(src).toMatch(/rule-A replaced with rule-B → ASK/);
+    expect(src).toMatch(/concurrent asks AFTER a policy-version change → exactly ONE new v2 pending/);
+    expect(src).toMatch(/exactly ONE approval-requested audit event/);
+    expect(src).toMatch(/supersedePendingApproval/);
+    expect(src).toMatch(/the v1 pending is SUPERSEDED/);
+  });
+
+  // ==========================================================================
+  // THE APPROVAL-BINDING CONTRACT + AUDIT-DEDUP INVARIANTS (architect's
+  // PR-#41 review: approvals are bound to (policyVersion, ruleId);
+  // concurrent asks emit exactly ONE audit event per pending DB row).
+  // ==========================================================================
+  it('the engine enforces the (policyVersion, ruleId) approval-binding contract in consultApproval', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // consultApproval reads BOTH latest.policyVersion AND latest.ruleId
+    // against the current (version, expectedRuleId) the engine just
+    // produced. A material policy change supersedes prior approvals.
+    expect(engineSrc).toMatch(/latest\.policyVersion/);
+    expect(engineSrc).toMatch(/latest\.ruleId/);
+    expect(engineSrc).toMatch(/expectedRuleId/);
+    expect(engineSrc).toMatch(/match\.rule\?\.id \?\? 'default'/);
+    // The stale-approval path: supersede a stale PENDING; leave
+    // approved/denied stale rows as terminal evidence (not mutated).
+    expect(engineSrc).toMatch(/supersedePendingApproval\(/);
+    expect(engineSrc).toMatch(/if \(latest\.status === 'pending'\)/);
+    // The binding comment is in the source (provenance for the invariant).
+    expect(engineSrc).toMatch(/APPROVAL-BINDING CONTRACT/);
+  });
+
+  it('ensurePending emits the approval-requested audit ONLY when the engine created the row (no duplicate audit evidence)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The { approval, created } destructure — the created flag drives the
+    // audit decision.
+    expect(engineSrc).toMatch(/\{ approval, created \}/);
+    expect(engineSrc).toMatch(/this\.deps\.repository\.ensurePendingApproval\(/);
+    // The audit is emitted ONLY when created=true (the row's creator). The
+    // concurrent observer (created=false) does NOT emit a duplicate.
+    expect(engineSrc).toMatch(/if \(created\)/);
+    expect(engineSrc).toMatch(/auditApprovalEvent\('agent-policy\.approval-requested'/);
+  });
+
+  it('the repository interface binds approvals to (policyVersion, ruleId) + exposes supersedePendingApproval', () => {
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    // ensurePendingApproval returns { approval, created } so the engine
+    // can dedupe the audit emission.
+    expect(typesSrc).toMatch(/Promise<{ approval: AgentPolicyApproval; created: boolean }>/);
+    // supersedePendingApproval is the sanctioned stale-pending path.
+    expect(typesSrc).toMatch(/supersedePendingApproval\(approvalId: string\): Promise<void>/);
+    // The binding contract is documented in the source (provenance).
+    expect(typesSrc).toMatch(/APPROVAL-BINDING CONTRACT/);
+  });
+
+  it('the repository implements supersedePendingApproval as a CAS UPDATE (concurrent supersedes are idempotent)', () => {
+    const repoSrc = readFileSync(AP_REPO, 'utf8');
+    expect(repoSrc).toMatch(/async supersedePendingApproval\(approvalId: string\): Promise<void>/);
+    // The CAS predicate is status='pending' (idempotent under concurrent
+    // calls — the second UPDATE matches 0 rows).
+    expect(repoSrc).toMatch(/WHERE id = \$1\s+AND status = 'pending'/);
+    // The resolution_note + resolved_at are set (audit evidence).
+    expect(repoSrc).toMatch(/superseded by policy-version change/);
+    // ensurePendingApproval returns { approval, created }.
+    expect(repoSrc).toMatch(/return \{ approval: mapApproval\(res\.rows\[0\]\), created: true \}/);
+    expect(repoSrc).toMatch(/return \{ approval: existing, created: false \}/);
+  });
+
+  it('the migration documents the binding contract + the supersession semantics', () => {
+    const sql = readFileSync(AP_MIGRATION, 'utf8');
+    // The binding contract comment is in the migration (provenance for the
+    // engine's runtime check; documents that approvals are bound to
+    // (policy_version, rule_id), not just (execution_id, subject_key)).
+    expect(sql).toMatch(/APPROVAL-BINDING CONTRACT/);
+    expect(sql).toMatch(/policy_version, rule_id/);
+    // The supersession path is documented (stale pending → 'expired';
+    // approved/denied stale rows are NOT mutated).
+    expect(sql).toMatch(/supersedePendingApproval/);
+    expect(sql).toMatch(/status='pending'/);
+    expect(sql).toMatch(/NOT mutated/);
+    // The 'expired' status overload is documented (TTL-passed OR
+    // policy-superseded; the resolution_note distinguishes them).
+    expect(sql).toMatch(/'expired' status is overloaded/);
+    expect(sql).toMatch(/superseded by policy-version change/);
+  });
+
+  // ==========================================================================
+  // THE CANONICAL GIT-ARGV CLASSIFIER INVARIANTS (architect's PR-#41 review:
+  // git deployment classification must skip global/config options before the
+  // effective subcommand — ONE classifier shared by policy + executor; the
+  // sandbox's network isolation is defense-in-depth, NOT the authority).
+  // ==========================================================================
+  it('the canonical git-argv classifier exists + is shared by BOTH the policy engine and the process executor (ONE vocabulary, no second copy)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+    expect(existsSync(classifierPath), 'git-argv.ts must exist').toBe(true);
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The canonical exports (one source of truth).
+    expect(classifierSrc).toMatch(/export function classifyGitSubcommand/);
+    expect(classifierSrc).toMatch(/export function isGitDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export const GIT_DEPLOYMENT_SUBCOMMANDS/);
+    expect(classifierSrc).toMatch(/export const GIT_REDIRECT_FLAGS/);
+    // BOTH layers import the SAME classifier from @platform/tools/git-argv.js
+    // (the engine via the @platform alias — the correct one-way dependency
+    // direction: Execution Policy → Tool Runtime; the executor same-layer).
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/from '@platform\/tools\/git-argv\.js'/);
+    expect(engineSrc).toMatch(/isGitDeploymentInvocation/);
+    const procPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+    const procSrc = readFileSync(procPath, 'utf8');
+    expect(procSrc).toMatch(/from '\.\/git-argv\.js'/);
+    expect(procSrc).toMatch(/isGitDeploymentInvocation/);
+    // NEITHER layer keeps a local divergent copy of the deployment set (a
+    // mismatch would let policy-allow what the executor rejects, or vice
+    // versa). The architect's finding was precisely this duplication with a
+    // positional args[0] check on each side.
+    expect(engineSrc, 'the engine has NO local DEPLOYMENT_GIT_SUBCOMMANDS copy').not.toMatch(/const DEPLOYMENT_GIT_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local GIT_REMOTE_SUBCOMMANDS copy').not.toMatch(/const GIT_REMOTE_SUBCOMMANDS/);
+  });
+
+  it('the engine classifies the EFFECTIVE git subcommand (NOT a positional args[0] check — the architect\'s finding)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // tagInvocation calls isGitDeploymentInvocation(args) — the canonical
+    // classifier that skips git's global/config options before the
+    // effective subcommand (`git -c k=v push` is still push → deployment).
+    expect(engineSrc).toMatch(/isGitDeploymentInvocation\(args\)/);
+    // The positional args[0] check on the deployment set is GONE (the
+    // architect's finding: args[0] was `-c`, not `push` → not deployment).
+    expect(engineSrc, 'the engine NO LONGER checks args[0] against a local deployment set').not.toMatch(/DEPLOYMENT_GIT_SUBCOMMANDS\.has\(args\[0\]/);
+  });
+
+  it('the canonical classifier skips git\'s GLOBAL/CONFIG options before the effective subcommand (the architect\'s `git -c k=v push` example)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The global-option vocabulary the classifier skips to find the
+    // effective subcommand (value-taking short + long, boolean).
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS_SHORT/);
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS/);
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_BOOLEAN_OPTIONS/);
+    // The architect's exact example: `-c k=v` (short, value-taking).
+    expect(classifierSrc).toMatch(/'-c'/);
+    // The `--` options terminator + the `=value` attached form.
+    expect(classifierSrc).toMatch(/tok === '--'/);
+    expect(classifierSrc).toMatch(/tok\.includes\('='\)/);
+    // The fail-closed ambiguity path (unknown option before the subcommand
+    // → treat as deployment so a crafted unknown option cannot smuggle a
+    // remote mutation past the deployment rule).
+    expect(classifierSrc).toMatch(/ambiguous/);
+  });
+
+  it('the regression matrix covers options-before-subcommand (the architect\'s scenarios) at all three layers', () => {
+    // Layer 0: the canonical classifier unit proof.
+    const classifierTest = join(BACKEND_ROOT, 'tests', 'unit', 'git-argv.test.ts');
+    expect(existsSync(classifierTest), 'git-argv.test.ts must exist').toBe(true);
+    const unitSrc = readFileSync(classifierTest, 'utf8');
+    // The architect's exact example + the family of options-before-push.
+    expect(unitSrc).toMatch(/git -c k=v push/);
+    expect(unitSrc).toMatch(/git --no-pager push/);
+    expect(unitSrc).toMatch(/git -C \/path push/);
+    expect(unitSrc).toMatch(/git --git-dir=\/foo push/);
+    // Options before fetch / remote / clone (the architect's "etc.").
+    expect(unitSrc).toMatch(/git -c k=v fetch/);
+    expect(unitSrc).toMatch(/git --no-pager remote/);
+    expect(unitSrc).toMatch(/git -c k=v clone/);
+    // The fail-closed ambiguity scenario.
+    expect(unitSrc).toMatch(/fail-closed/);
+    // Layer 1: the engine integration (agent-policy.regression.test.ts) —
+    // the POLICY authorization decision is correct for the scenarios.
+    const engineRegressionSrc = readFileSync(AP_REGRESSION, 'utf8');
+    expect(engineRegressionSrc).toMatch(/PR#41: `git -c k=v push`/);
+    expect(engineRegressionSrc).toMatch(/platform-deployment-deny/);
+    expect(engineRegressionSrc).toMatch(/fail-closed on ambiguity/);
+    // Layer 2: the executor integration (tool-runtime.regression.test.ts) —
+    // the governance-gate rejection before any process spawns.
+    const execRegressionPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+    const execRegressionSrc = readFileSync(execRegressionPath, 'utf8');
+    expect(execRegressionSrc).toMatch(/git remote-network operations BEHIND global\/config options/);
+    expect(execRegressionSrc).toMatch(/git-remote-operation-forbidden/);
+    // The fix does NOT over-restrict LOCAL subcommands behind options.
+    expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
+  });
+
+  // ==========================================================================
+  // THE CANONICAL PACKAGE-ARGV CLASSIFIER INVARIANTS (architect's PR-#41
+  // round-2 review at `35420da`: the git-argv canonical classifier was
+  // approved; the package family's positional `args[0] === 'publish'`
+  // shortcut was flagged as the analogous remaining gap — package runners
+  // permit global/config options before the effective subcommand, so
+  // `npm --registry=<url> publish` could be misclassified as ordinary
+  // `tool` activity. ONE classifier shared by policy + executor; the
+  // sandbox's network isolation is defense-in-depth, NOT the authority).
+  // ==========================================================================
+  it('the canonical package-argv classifier exists + is shared by BOTH the policy engine and the process executor (ONE vocabulary, no second copy)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
+    expect(existsSync(classifierPath), 'package-argv.ts must exist').toBe(true);
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The canonical exports (one source of truth).
+    expect(classifierSrc).toMatch(/export function classifyPackageSubcommand/);
+    expect(classifierSrc).toMatch(/export function isPackageDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export const PACKAGE_PUBLISH_CAPABLE_RUNNERS/);
+    expect(classifierSrc).toMatch(/export const PACKAGE_DEPLOYMENT_SUBCOMMANDS/);
+    // BOTH layers import the SAME classifier — the engine via the @platform
+    // alias (the correct one-way dependency direction: Execution Policy →
+    // Tool Runtime); the executor same-layer (./package-argv.js).
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/from '@platform\/tools\/package-argv\.js'/);
+    expect(engineSrc).toMatch(/isPackageDeploymentInvocation/);
+    const procPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+    const procSrc = readFileSync(procPath, 'utf8');
+    expect(procSrc).toMatch(/from '\.\/package-argv\.js'/);
+    expect(procSrc).toMatch(/isPackageDeploymentInvocation/);
+    // NEITHER layer keeps a local divergent copy of the publish-capable
+    // runner set or the deployment subcommand set (a mismatch would let
+    // policy-allow what the executor rejects, or vice versa). The
+    // architect's round-2 finding was precisely this duplication with a
+    // positional args[0] check on the engine side.
+    expect(engineSrc, 'the engine has NO local PACKAGE_DEPLOYMENT copy').not.toMatch(/const PACKAGE_DEPLOYMENT_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local PACKAGE_PUBLISH_CAPABLE copy').not.toMatch(/const PACKAGE_PUBLISH_CAPABLE_RUNNERS/);
+  });
+
+  it('the engine classifies the EFFECTIVE package subcommand (NOT a positional args[0] === \'publish\' shortcut — the architect\'s round-2 finding)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // tagInvocation calls isPackageDeploymentInvocation(runner, args) — the
+    // canonical classifier that skips the runner's global/config options
+    // before the effective subcommand (`npm --registry=<url> publish` is
+    // still publish → deployment).
+    expect(engineSrc).toMatch(/isPackageDeploymentInvocation\(runner, args\)/);
+    // The positional args[0] === 'publish' shortcut is GONE (the
+    // architect's round-2 finding: args[0] was `--registry=...`, not
+    // `publish` → not deployment → WRONG). This is the static invariant
+    // the architect required: the shortcut cannot reappear.
+    expect(engineSrc, 'the engine NO LONGER uses the positional args[0] === \'publish\' shortcut').not.toMatch(/args\[0\]\s*===\s*['"]publish['"]/);
+  });
+
+  it('the canonical package classifier skips the runner\'s GLOBAL/CONFIG options before the effective subcommand (the architect\'s `npm --registry=<...> publish` example)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The global-option vocabulary the classifier skips to find the
+    // effective subcommand (value-taking long + short, boolean long + short).
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_VALUE_OPTIONS\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_VALUE_OPTIONS_SHORT\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_BOOLEAN_OPTIONS\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_BOOLEAN_OPTIONS_SHORT\b/);
+    // The architect's exact example: `--registry=<url>` (long, value-taking,
+    // the `=` attached form). The space form `--registry <url>` is also
+    // handled (the value-taking long set consumes the next token).
+    expect(classifierSrc).toMatch(/'--registry'/);
+    // The `--` options terminator + the `=value` attached form.
+    expect(classifierSrc).toMatch(/tok === '--'/);
+    expect(classifierSrc).toMatch(/tok\.includes\('='\)/);
+    // The fail-closed ambiguity path (unknown option before the subcommand
+    // → treat as deployment so a crafted unknown option cannot smuggle a
+    // publication past the deployment rule).
+    expect(classifierSrc).toMatch(/ambiguous/);
+    // The runner gate (publish-capable only) — non-publish-capable runners
+    // (node/npx/tsx/…) never get a false deployment-deny.
+    expect(classifierSrc).toMatch(/PACKAGE_PUBLISH_CAPABLE_RUNNERS\.has\(runner\)/);
+    // The publish family (the frozen contract's "package 'publish' commands").
+    expect(classifierSrc).toMatch(/'publish'/);
+    expect(classifierSrc).toMatch(/'unpublish'/);
+    expect(classifierSrc).toMatch(/'deprecate'/);
+  });
+
+  it('the regression matrix covers options-before-subcommand (the architect\'s round-2 scenarios) at all three layers', () => {
+    // Layer 0: the canonical classifier unit proof.
+    const classifierTest = join(BACKEND_ROOT, 'tests', 'unit', 'package-argv.test.ts');
+    expect(existsSync(classifierTest), 'package-argv.test.ts must exist').toBe(true);
+    const unitSrc = readFileSync(classifierTest, 'utf8');
+    // The architect's exact example + the family of options-before-publish.
+    expect(unitSrc).toMatch(/npm --registry=http:\/\/x publish/);
+    expect(unitSrc).toMatch(/npm --silent publish/);
+    expect(unitSrc).toMatch(/npm --workspace foo publish/);
+    // Options before publish for the other publish-capable runners.
+    expect(unitSrc).toMatch(/pnpm --filter foo publish/);
+    expect(unitSrc).toMatch(/pnpm -C \/path publish/);
+    expect(unitSrc).toMatch(/yarn --cwd \/path publish/);
+    // The publish-family siblings behind options.
+    expect(unitSrc).toMatch(/npm --registry=http:\/\/x unpublish/);
+    expect(unitSrc).toMatch(/npm --silent deprecate/);
+    // The normal (local) case — `npm test` must NOT be deployment.
+    expect(unitSrc).toMatch(/`npm test` → NOT deployment/);
+    // The non-publish-capable runner case (node + publish as a script arg).
+    expect(unitSrc).toMatch(/node --inspect publish\.js/);
+    // The fail-closed ambiguity scenario.
+    expect(unitSrc).toMatch(/fail-closed/);
+    // The value-taking option's value cannot smuggle a publish-looking token.
+    expect(unitSrc).toMatch(/cannot smuggle a publish-looking token/);
+
+    // Layer 1: the engine integration (agent-policy.regression.test.ts) —
+    // the POLICY authorization decision is correct for the scenarios.
+    const engineRegressionSrc = readFileSync(AP_REGRESSION, 'utf8');
+    expect(engineRegressionSrc).toMatch(/PR#41 round 2: `npm --registry=http:\/\/x publish`/);
+    expect(engineRegressionSrc).toMatch(/platform-deployment-deny/);
+    expect(engineRegressionSrc).toMatch(/fail-closed on ambiguity/);
+    expect(engineRegressionSrc).toMatch(/non-publish-capable runner/);
+
+    // Layer 2: the executor integration (tool-runtime.regression.test.ts)
+    // — the governance-gate rejection before any process spawns.
+    const execRegressionPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+    const execRegressionSrc = readFileSync(execRegressionPath, 'utf8');
+    expect(execRegressionSrc).toMatch(/package publish operations are DENIED at the governance gate/);
+    expect(execRegressionSrc).toMatch(/package-publish-forbidden/);
+    // The fix does NOT over-restrict LOCAL commands / non-publish-capable
+    // runners (the architect's surgical principle).
+    expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
+  });
+});

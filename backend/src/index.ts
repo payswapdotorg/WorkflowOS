@@ -309,6 +309,21 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-037: Agent Policy & Permissions routes. Backend-authorized
+      // (project.read / project.admin). The engine never imports the
+      // authorization service — only this route layer calls
+      // requireProjectAuthorization (the one-way dependency invariant).
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.agentPolicyEngine
+        ? {
+            agentPolicy: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              agentPolicyEngine: app.deps.agentPolicyEngine,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

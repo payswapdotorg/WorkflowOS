@@ -23,6 +23,7 @@ import { executionRoutes, type ExecutionRouteDeps } from './routes/execution.rou
 import { companionRoutes, type CompanionRouteDeps } from './routes/companion.route.js';
 import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.route.js';
 import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
+import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -85,6 +86,8 @@ export interface ServerDeps extends JobsRouteDeps {
   benchmark?: BenchmarkRouteDeps;
   /** WORK-033: Execution Policy & Fair Benchmarking routes. Backend-authorized. */
   executionPolicy?: ExecutionPolicyRouteDeps;
+  /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
+  agentPolicy?: AgentPolicyRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -177,6 +180,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.executionPolicy) {
     await executionPolicyRoutes(app, deps.executionPolicy);
+  }
+  if (deps.auth && deps.agentPolicy) {
+    await agentPolicyRoutes(app, deps.agentPolicy);
   }
   return app;
 }
