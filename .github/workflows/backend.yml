@@ -89,6 +89,18 @@ jobs:
         run: bun install --frozen-lockfile
         working-directory: frontend
 
+      # WORK-036 (PR #40): the namespace process sandbox requires
+      # unprivileged user namespaces. Ubuntu 24.04 (ubuntu-latest) restricts
+      # them via AppArmor by default (kernel.apparmor_restrict_unprivileged_
+      # userns=1), which makes `unshare --user` fail with EPERM — the sandbox
+      # then (correctly) fails CLOSED and every process-family regression
+      # reports process-sandbox-unavailable. Lift the restriction for the
+      # test run (a deployment-host prerequisite of the sandbox, stated here
+      # explicitly). Hosts without the sysctl already permit user namespaces
+      # by default, so its absence is tolerated.
+      - name: Enable unprivileged user namespaces (WORK-036 process sandbox prerequisite)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Run tests (unit + integration + static architecture checks)
         run: bun run test
 

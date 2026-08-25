@@ -116,8 +116,12 @@ describe('WORK-036 process sandbox (PR #40 review fix) — cwd confinement is NO
     await writeFile(join(root, 'host-marker.txt'), 'HOST-ONLY-SECRET-MARKER\n');
 
     // A completely unrelated host repository (for the git -C escape route).
+    // (Local git identity is configured PER REPOSITORY — the host's global
+    // identity must never be a test prerequisite; CI has none.)
     unrelatedRepoDir = await mkdtemp(join(tmpdir(), 'w036-unrelated-'));
     await execFileAsync('git', ['init', '-b', 'main'], { cwd: unrelatedRepoDir });
+    await execFileAsync('git', ['config', 'user.email', 'unrelated@workflowos.invalid'], { cwd: unrelatedRepoDir });
+    await execFileAsync('git', ['config', 'user.name', 'Unrelated Test'], { cwd: unrelatedRepoDir });
     await writeFile(join(unrelatedRepoDir, 'secret.txt'), 'UNRELATED-REPO-SECRET\n');
     await execFileAsync('git', ['add', '.'], { cwd: unrelatedRepoDir });
     await execFileAsync('git', ['commit', '-m', 'base'], { cwd: unrelatedRepoDir });
