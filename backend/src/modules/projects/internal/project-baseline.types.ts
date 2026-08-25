@@ -135,9 +135,27 @@ export interface BaselineEvidence {
   readonly locator: string;
   readonly contentDigest: string | null;
   readonly redacted: boolean;
-  /** The governed tool invocation identity (native) — null for external reports. */
+  /**
+   * The governed ToolRuntime invocation identity (the WORK-036 boundary).
+   * NON-NULL ONLY when the read was performed through ToolRuntime.invoke.
+   * NULL when the read was performed through the /github authority (the
+   * onboarding content-read path — the analyzer consults the WORK-037
+   * project-scoped policy gate, then delegates to the /github
+   * GitHubAdapter; that is NOT a ToolRuntime invocation). Also NULL for
+   * external-reported evidence. The PR #42 round-2 review forbade
+   * manufacturing tool_invocation_ids for operations that never went
+   * through Tool Runtime.
+   */
   readonly toolInvocationId: string | null;
-  /** The WORK-037 policy decision that governed this read — the audit trail. */
+  /**
+   * The WORK-037 policy decision that governed this read — the audit trail.
+   * NON-NULL ONLY when a host tool run occurred (a ToolRuntime invocation
+   * gated by the WORK-037 engine's decide()). NULL when no host tool run
+   * occurred (the /github-authority read path; external-reported
+   * evidence). The WORK-037 project-scoped gate IS still consulted at
+   * runtime (the analyzer refuses to proceed on deny/ask); that
+   * consultation is a runtime invariant, not an evidence-row claim.
+   */
   readonly policyDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
   readonly observedAt: Date;
   readonly createdAt: Date;
@@ -209,10 +227,14 @@ export interface ProjectBaselineRepository {
   listForProject(projectId: string): Promise<ProjectBaseline[]>;
 
   /**
-   * Persist evidence rows for a baseline. Idempotent on (baseline_id,
-   * tool_invocation_id) — a re-drive of the same governed read does not
-   * duplicate evidence. Returns the persisted rows (with their IDs, for
-   * observation evidence_ref linkage).
+   * Persist evidence rows for a baseline. Idempotent on (baseline_id, source,
+   * locator) — a re-drive of the same governed read does not duplicate
+   * evidence. Returns the persisted rows (with their IDs, for observation
+   * evidence_ref linkage). The PR #42 round-2 review replaced the prior
+   * (baseline_id, tool_invocation_id) key: tool_invocation_id is NULL for
+   * /github-authority reads (no ToolRuntime invocation), so the prior key
+   * could not deduplicate (NULL != NULL in PostgreSQL UNIQUE). The honest
+   * composite key is (source, locator).
    */
   appendEvidence(
     baselineId: string,

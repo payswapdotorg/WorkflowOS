@@ -222,9 +222,17 @@ CREATE TRIGGER wfos_project_baseline_transition_guard_trigger
 
 -- ---------------------------------------------------------------------------
 -- wfos_project_baseline_evidence — the evidence rows backing observations.
--- Each row links to the governed tool invocation that produced it (native) or
--- the provider-reported source (external), and records the WORK-037 policy
--- decision that governed the read (null for external-reported observations).
+-- Each row references the WORK-037 policy decision that gated the read
+-- (when a host tool run occurred) or is null for external-reported
+-- observations. The PR #42 round-2 review established: a /github-authority
+-- content read is NOT a ToolRuntime invocation — the onboarding analysis
+-- path consults the WORK-037 project-scoped policy gate, then delegates the
+-- read to the /github GitHubAdapter (the only SDK caller). The evidence row
+-- honestly records that: tool_invocation_id is NULL (no ToolRuntime.invoke
+-- happened), and policy_decision is NULL (no host tool run — the schema
+-- reserves policy_decision for "host tool run" audit trail). The
+-- consultation of the WORK-037 gate is a runtime invariant (the analyzer
+-- refuses to proceed on deny/ask); it is not a tool-invocation claim.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS wfos_project_baseline_evidence (
@@ -240,18 +248,41 @@ CREATE TABLE IF NOT EXISTS wfos_project_baseline_evidence (
   -- Whether secret-shaped content was redacted before persistence. TRUE means
   -- the stored claim/evidence reflects [REDACTED] markers, never raw secrets.
   redacted BOOLEAN NOT NULL DEFAULT FALSE,
-  -- The governed tool invocation identity (native analysis). Links to the
-  -- ToolPolicyGate decision recorded below. Null for external-reported evidence.
+  -- The governed ToolRuntime invocation identity (the WORK-036 boundary).
+  -- NON-NULL ONLY when the read was performed through ToolRuntime.invoke —
+  -- the actual governed tool execution path. NULL when the read was performed
+  -- through the /github authority (the onboarding content-read path: the
+  -- analyzer consults the WORK-037 project-scoped policy gate, then delegates
+  -- to the /github GitHubAdapter — that is NOT a ToolRuntime invocation, so
+  -- no tool_invocation_id is recorded). Also NULL for external-reported
+  -- evidence (the provider reported the observation; no host tool run).
+  -- The PR #42 round-2 review forbid manufacturing tool_invocation_ids for
+  -- operations that never went through Tool Runtime.
   tool_invocation_id TEXT,
   -- The WORK-037 policy decision that governed this read (allow/constrained/
-  -- deny/ask). Null for external-reported evidence (no host tool run). This
-  -- is the audit trail proving analysis respected the execution policy.
+  -- deny/ask). NON-NULL ONLY when a host tool run occurred (a ToolRuntime
+  -- invocation was gated by the WORK-037 engine's decide() — the execution-
+  -- scoped path). NULL when no host tool run occurred (the /github-authority
+  -- read path; external-reported evidence). The PR #42 round-2 review
+  -- established: a non-NULL policy_decision on a /github read implied a
+  -- governed tool invocation had happened when it had not — the read goes
+  -- through the /github authority, not the ToolRuntime. The WORK-037
+  -- project-scoped gate IS still consulted at runtime (the analyzer refuses
+  -- to proceed on deny/ask); that consultation is a runtime invariant, not
+  -- an evidence-row claim.
   policy_decision TEXT CHECK (policy_decision IN (
     'allow', 'constrained', 'deny', 'ask') OR policy_decision IS NULL),
   observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT wfos_project_baseline_evidence_invocation_unique
-    UNIQUE (baseline_id, tool_invocation_id)
+  -- Idempotency: one evidence row per (baseline, source, locator). A re-drive
+  -- of the same governed read upserts the same row — no duplicates. The
+  -- PR #42 round-2 review replaced the prior (baseline_id, tool_invocation_id)
+  -- key: tool_invocation_id is now NULL for /github-authority reads (no
+  -- ToolRuntime invocation), so the prior key could not deduplicate (NULL !=
+  -- NULL in PostgreSQL UNIQUE). The honest composite key is the (source,
+  -- locator) pair — one evidence row per read locator per baseline.
+  CONSTRAINT wfos_project_baseline_evidence_locator_unique
+    UNIQUE (baseline_id, source, locator)
 );
 
 CREATE INDEX IF NOT EXISTS wfos_project_baseline_evidence_baseline_idx

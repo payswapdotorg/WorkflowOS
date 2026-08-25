@@ -9919,5 +9919,155 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(route).toMatch(/msg\.includes\('no-confirmed-on-failed'\)/);
     expect(route).toMatch(/reply\.code\(409\)\.send\(\{[^}]*error: 'no-confirmed-on-failed'/);
   });
+
+  // =========================================================================
+  // PR #42 round-2 review (the two new blockers the architect identified on
+  // the 48c4612 diff). The previous three blockers are substantially
+  // addressed; round-2 closes two remaining correctness/architecture gaps.
+  // =========================================================================
+
+  it('PR #42 r2 (Blocker A): the analyzer does NOT manufacture toolInvocationId for /github-authority reads (no ToolRuntime invocation happened)', () => {
+    // The architect's PR #42 round-2 Blocker A: the production path is
+    //   Onboarding → GovernedFilesystemAnalyzer
+    //     → ToolPolicyGate.decideForProjectScope()
+    //     → GitHubRepositoryContentPort
+    //         → GitHubAdapter.getFileContent/listDir()
+    // The policy gate is consulted, but the actual repository read is
+    // performed directly by /github. There is NO ToolRuntime invocation,
+    // NO real tool claim, NO tool observation. The evidence row must NOT
+    // manufacture a tool_invocation_id for operations that never went
+    // through Tool Runtime. The policy_decision must NOT imply a host
+    // tool run occurred (the schema reserves policy_decision for "host
+    // tool run" audit trail — the /github read is NOT a host tool run).
+    //
+    // The analyzer source must:
+    //   * set toolInvocationId: null on every NewBaselineEvidence it produces;
+    //   * set policyDecision: null on every NewBaselineEvidence it produces;
+    //   * NOT persist the policy-gate invocationId (the stable decision key)
+    //     as the evidence row's tool_invocation_id (that was the
+    //     fabrication the architect identified).
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    // The evidence row's toolInvocationId is NULL (no ToolRuntime invocation).
+    expect(analyzer, 'evidence toolInvocationId is null (no ToolRuntime invocation)').toMatch(/toolInvocationId:\s*null/);
+    // The evidence row's policyDecision is NULL (no host tool run — the
+    // /github read path is not a ToolRuntime invocation).
+    expect(analyzer, 'evidence policyDecision is null (no host tool run)').toMatch(/policyDecision:\s*null/);
+    // The observation→evidence linkage uses the LOCATOR (the path), not a
+    // manufactured toolInvocationId. The orchestrator resolves locator→
+    // evidence id by the composite (source, locator) key.
+    expect(analyzer, 'observations reference evidence by locator').toMatch(/evidenceRef:\s*packageJsonEvidence\s*\?\s*\[packageJsonEvidence\.locator\]/);
+    expect(analyzer, 'ci observation references evidence by locator').toMatch(/evidenceRef:\s*ciEvidence\s*\?\s*\[ciEvidence\.locator\]/);
+    expect(analyzer, 'deployment observation references evidence by locator').toMatch(/evidenceRef:\s*dockerfileEvidence\s*\?\s*\[dockerfileEvidence\.locator\]/);
+    // The policy-gate invocationId (the stable decision key) is INTERNAL
+    // to the policy request — it is NOT persisted on the evidence row.
+    // The analyzer must NOT assign invocationId to ev.toolInvocationId.
+    expect(analyzer, 'must not assign the policy invocationId to evidence toolInvocationId').not.toMatch(/toolInvocationId:\s*invocationId/);
+  });
+
+  it('PR #42 r2 (Blocker A): the migration evidence UNIQUE constraint is (baseline_id, source, locator) — the honest idempotency key (NOT tool_invocation_id)', () => {
+    // The architect's PR #42 round-2 Blocker A: the previous UNIQUE
+    // (baseline_id, tool_invocation_id) could not deduplicate re-drives
+    // once tool_invocation_id became NULL for /github-authority reads
+    // (NULL != NULL in PostgreSQL UNIQUE). The honest composite key is
+    // (baseline_id, source, locator) — one evidence row per read locator
+    // per baseline. A re-drive upserts the same row, no duplicates.
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql, 'the evidence UNIQUE is on (baseline_id, source, locator)').toMatch(/UNIQUE \(baseline_id, source, locator\)/);
+    // The OLD (baseline_id, tool_invocation_id) constraint name must be
+    // GONE (replaced by the locator-based constraint).
+    expect(sql, 'the old (baseline_id, tool_invocation_id) UNIQUE is removed').not.toMatch(/UNIQUE \(baseline_id, tool_invocation_id\)/);
+    // The pg repository's appendEvidence uses the new composite key for
+    // ON CONFLICT + the re-fetch SELECT.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidence ON CONFLICT uses (baseline_id, source, locator)').toMatch(/ON CONFLICT \(baseline_id, source, locator\) DO NOTHING/);
+    expect(repo, 'appendEvidence re-fetch SELECT uses (source, locator)').toMatch(/WHERE baseline_id = \$1 AND source = \$2 AND locator = \$3/);
+  });
+
+  it('PR #42 r2 (Blocker A): the pg repository appendEvidence uses the honest composite key (no tool_invocation_id in ON CONFLICT)', () => {
+    // The pg repository's appendEvidence must NOT use tool_invocation_id
+    // as the ON CONFLICT key (that would fail when tool_invocation_id is
+    // NULL — NULL != NULL in PostgreSQL UNIQUE, so no conflict would be
+    // detected and a re-drive would duplicate evidence rows).
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'must NOT ON CONFLICT on tool_invocation_id').not.toMatch(/ON CONFLICT \(baseline_id, tool_invocation_id\)/);
+    expect(repo, 'must NOT SELECT evidence by tool_invocation_id alone').not.toMatch(/WHERE baseline_id = \$1 AND tool_invocation_id = \$2/);
+  });
+
+  it('PR #42 r2 (Blocker B): the analyzer propagates infrastructure failures (no try/catch that swallows content-read failures)', () => {
+    // The architect's PR #42 round-2 Blocker B: the analyzer's per-candidate
+    // try/catch around content reads swallowed infrastructure failures
+    // (GitHub unavailable, authentication failure, API failure, content
+    // retrieval infrastructure failure). That meant a production GitHub
+    // configuration failure could result in a COMPLETED Project Baseline
+    // containing effectively only repository metadata, rather than a
+    // failed/incomplete onboarding. False success for the central WORK-038
+    // objective: establishing a baseline FROM REPOSITORY EVIDENCE.
+    //
+    // The fix: the analyzer's content read CATCHES the infrastructure
+    // failure and RE-THROWS it as a typed OnboardingAnalysisError with
+    // code 'repository-content-unavailable' (so the orchestrator can
+    // markFailed the baseline with a forensic failure_stage). The
+    // previous swallow-and-continue pattern (logger.warn + continue) is
+    // GONE for content-read failures.
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    // The analyzer throws the typed OnboardingAnalysisError with code
+    // 'repository-content-unavailable' on a content-read failure.
+    expect(analyzer, 'throws OnboardingAnalysisError on content-read failure').toMatch(/throw new OnboardingAnalysisError\(/);
+    expect(analyzer, 'uses the sanctioned repository-content-unavailable code').toMatch(/'repository-content-unavailable'/);
+    // The OLD swallow-and-continue pattern (logger.warn +
+    // 'does NOT abort the baseline') is GONE.
+    expect(analyzer, 'must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
+  });
+
+  it('PR #42 r2 (Blocker B): the orchestrator catches OnboardingAnalysisError + markFailed with the repository-content-unavailable failure stage', () => {
+    // The orchestrator must catch the typed OnboardingAnalysisError and
+    // markFailed the baseline with failure_stage='repository-content-unavailable'
+    // (forensic provenance — the baseline did NOT reach 'complete' on a
+    // content-provider failure; the required repository analysis could not
+    // actually inspect the repository).
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'imports OnboardingAnalysisError').toMatch(/import\s+\{\s*OnboardingAnalysisError\s*\}\s+from\s+['"]\.\.\/onboarding\.types\.js['"]/);
+    expect(orchestrator, 'instanceof check for OnboardingAnalysisError').toMatch(/err instanceof OnboardingAnalysisError/);
+    expect(orchestrator, 'checks the err.code for repository-content-unavailable').toMatch(/err\.code === 'repository-content-unavailable'/);
+    expect(orchestrator, 'markFailed with the repository-content-unavailable failure stage').toMatch(/'repository-content-unavailable'/);
+  });
+
+  it('PR #42 r2 (Blocker B): the route surfaces repository-content-unavailable as 502 (bad gateway — the content provider is unavailable)', () => {
+    // The route must translate the orchestrator's
+    // repository-content-unavailable failure into a 502 (bad gateway —
+    // the content provider is unavailable) so the caller distinguishes
+    // infrastructure failure from a server error. The response surfaces
+    // the failure_stage + baselineState for the caller's forensic
+    // provenance.
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/msg\.includes\('repository-content-unavailable'\)/);
+    expect(route).toMatch(/reply\.code\(502\)\.send\(\{[^}]*error: 'repository-content-unavailable'/);
+    expect(route).toMatch(/failureStage: 'repository-content-unavailable'/);
+  });
+
+  it('PR #42 r2 (Blocker B): the typed OnboardingAnalysisError + sanctioned codes live in onboarding.types.ts (the discriminated-class pattern)', () => {
+    // The typed onboarding-analysis error class + the sanctioned failure-code
+    // list follow the WORK-035/036/037 discriminated-class pattern: a stable
+    // machine-readable code + structured context. The orchestrator + the
+    // route layer consume the typed error (no message-string parsing for the
+    // instanceof path; the route still uses message-string matching for
+    // backward compatibility with the existing 'no-repository-link' /
+    // 'revision-unresolvable' patterns).
+    const types = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(types).toMatch(/ONBOARDING_ANALYSIS_ERROR_CODES/);
+    expect(types).toMatch(/'repository-content-unavailable'/);
+    expect(types).toMatch(/class OnboardingAnalysisError extends Error/);
+    expect(types).toMatch(/readonly code: OnboardingAnalysisErrorCode/);
+    expect(types).toMatch(/readonly failingLocator: string \| null/);
+  });
 });
 

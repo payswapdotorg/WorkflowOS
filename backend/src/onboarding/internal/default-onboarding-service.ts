@@ -48,6 +48,14 @@ import type {
   RepositoryAnalyzer,
   AnalysisContext,
 } from '../onboarding.types.js';
+// PR #42 round-2 (Blocker B): the typed onboarding-analysis error. Thrown
+// by the analyzer when a content read hits an infrastructure failure
+// (GitHub unavailable / authentication failure / API failure / content
+// retrieval infrastructure failure). Caught here to markFailed the baseline
+// with failure_stage='repository-content-unavailable' (forensic provenance)
+// — a baseline must NEVER reach 'complete' when the required repository
+// analysis could not actually inspect the repository.
+import { OnboardingAnalysisError } from '../onboarding.types.js';
 
 export interface DefaultOnboardingServiceDeps {
   readonly projectRepository: ProjectRepository;
@@ -161,16 +169,21 @@ export class DefaultOnboardingService implements OnboardingService {
       const result = await this.deps.analyzer.analyze(analysisContext);
 
       // 8. Persist evidence, then link observations to evidence ids.
+      //    PR #42 round-2 (Blocker A): observations reference evidence by
+      //    LOCATOR (the path), not by a manufactured toolInvocationId.
+      //    The orchestrator resolves locator→evidence id by the composite
+      //    (source, locator) key (the evidence row's honest idempotency
+      //    key, per migration 0038 round-2).
       const persistedEvidence =
         await this.deps.projectBaselineRepository.appendEvidence(baseline.id, result.evidence);
-      const evidenceByInvocation = new Map<string, string>();
+      const evidenceByLocator = new Map<string, string>();
       for (const ev of persistedEvidence) {
-        if (ev.toolInvocationId) evidenceByInvocation.set(ev.toolInvocationId, ev.id);
+        evidenceByLocator.set(ev.locator, ev.id);
       }
       const linkedObservations: NewBaselineObservation[] = result.observations.map((obs) => ({
         ...obs,
         evidenceRef: obs.evidenceRef
-          .map((ref) => evidenceByInvocation.get(ref) ?? null)
+          .map((ref) => evidenceByLocator.get(ref) ?? null)
           .filter((v): v is string => v !== null),
       }));
 
@@ -200,14 +213,32 @@ export class DefaultOnboardingService implements OnboardingService {
       //     a false confirmed baseline — the repository enforces no confirmed
       //     observation may exist on a failed baseline). The failure_stage
       //     records where the analysis failed.
+      //     PR #42 round-2 (Blocker B): an OnboardingAnalysisError with code
+      //     'repository-content-unavailable' is the typed signal that a
+      //     content read hit an infrastructure failure (GitHub unavailable,
+      //     authentication failure, API failure, content retrieval
+      //     infrastructure failure). The failure_stage is set to
+      //     'repository-content-unavailable' (forensic provenance — the
+      //     baseline did NOT reach 'complete' on a content-provider
+      //     failure; the required repository analysis could not actually
+      //     inspect the repository). Other errors keep the generic
+      //     'analysis-error' failure stage.
+      const isContentUnavailable =
+        err instanceof OnboardingAnalysisError &&
+        err.code === 'repository-content-unavailable';
+      const failureStage = isContentUnavailable
+        ? 'repository-content-unavailable'
+        : 'analysis-error';
       this.deps.logger.warn('onboarding.analysis-failed', {
         baselineId: baseline.id,
+        failureStage,
         error: (err as Error).message,
+        failingLocator: err instanceof OnboardingAnalysisError ? err.failingLocator : null,
       });
       try {
         const failed = await this.deps.projectBaselineRepository.markFailed(
           baseline.id,
-          'analysis-error',
+          failureStage,
           baseline.version,
         );
         if (failed) {
@@ -239,6 +270,7 @@ function toBaselineHeader(b: {
   analysisMode: string;
   analysisRunId: string | null;
   contentDigest: string | null;
+  failureStage: string | null;
   finalizedAt: Date | null;
 }): OnboardResult['baseline'] {
   return {
@@ -250,6 +282,10 @@ function toBaselineHeader(b: {
     analysisMode: b.analysisMode as OnboardResult['baseline']['analysisMode'],
     analysisRunId: b.analysisRunId,
     contentDigest: b.contentDigest,
+    // PR #42 round-2 (Blocker B): surface the failure_stage so the caller
+    // sees WHERE analysis failed (e.g. 'repository-content-unavailable'
+    // when a content read hit an infrastructure failure).
+    failureStage: b.failureStage,
     finalizedAt: b.finalizedAt,
   };
 }

@@ -26,6 +26,17 @@ export type {
   GovernedReadOutcome,
 } from './onboarding.types.js';
 export type { ToolPolicyRequest } from './onboarding.types.js';
+// PR #42 round-2 review (Blocker B): the typed onboarding-analysis error
+// class (OnboardingAnalysisError) + the sanctioned failure-code list
+// (ONBOARDING_ANALYSIS_ERROR_CODES) live in onboarding.types.ts and are
+// imported directly by the orchestrator (src/onboarding/internal/
+// default-onboarding-service.ts — intra-package, not a cross-package value
+// export). The barrel stays types-only (the static-architecture invariant
+// forbids value exports — mirrors the frozen-module barrel rule). The route
+// layer surfaces the failure stage via message-string matching (the existing
+// pattern for 'no-repository-link' / 'revision-unresolvable' — no value
+// import needed).
+export type { OnboardingAnalysisErrorCode } from './onboarding.types.js';
 
 export type { DefaultOnboardingService } from './internal/default-onboarding-service.js';
 export type { DefaultOnboardingServiceDeps } from './internal/default-onboarding-service.js';

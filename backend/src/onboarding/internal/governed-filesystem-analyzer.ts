@@ -18,6 +18,43 @@
  * This is the "no silent promotion" invariant at the source: the analyzer
  * cannot promote.
  *
+ * PR #42 round-2 review (Blocker A) — the /github read path is NOT a
+ * ToolRuntime invocation:
+ *   The analyzer consults the WORK-037 project-scoped policy gate
+ *   (decideForProjectScope) for every candidate read; if the decision is
+ *   'deny' or 'ask', the read is blocked (no content observed, no
+ *   content-derived observations produced). If 'allow' or 'constrained',
+ *   the read is delegated to the /github GitHubAdapter via the production
+ *   RepositoryContentPort. That read is NOT a ToolRuntime.invoke — the
+ *   /github adapter is the only SDK caller, but it is NOT the WORK-036
+ *   governed tool execution boundary. The evidence row honestly records
+ *   that: tool_invocation_id is NULL (no ToolRuntime invocation happened),
+ *   policy_decision is NULL (no host tool run — the schema reserves
+ *   policy_decision for "host tool run" audit trail). The WORK-037 gate
+ *   consultation IS a runtime invariant (the analyzer refuses to proceed
+ *   on deny/ask); it is not an evidence-row claim. The evidence-row
+ *   idempotency key is the honest composite (baseline_id, source, locator).
+ *   The observation→evidence linkage uses the locator (the path), not a
+ *   manufactured toolInvocationId.
+ *
+ * PR #42 round-2 review (Blocker B) — distinguish expected-missing from
+ * infrastructure failure:
+ *   The RepositoryContentPort contract is explicit:
+ *     * readFile returns null when the path does not exist at the revision.
+ *     * listDir returns [] when the directory does not exist.
+ *     * BOTH throw on infrastructure failure (GitHub unavailable,
+ *       authentication failure, API failure, content retrieval
+ *       infrastructure failure).
+ *   The analyzer's per-candidate content read has NO try/catch —
+ *   infrastructure failures propagate as a typed OnboardingAnalysisError so
+ *   the orchestrator can markFailed the baseline (a baseline must NEVER
+ *   reach 'complete' when the required repository analysis could not
+ *   actually inspect the repository). Expected-missing (null/[]) and
+ *   unparseable JSON (the package.json parse try/catch) are NOT
+ *   infrastructure failures — those are handled gracefully (the analyzer
+ *   continues with remaining candidates; the baseline still completes with
+ *   whatever observations could be derived).
+ *
  * Deep stack/security/deployment scanning is WORK-039+ (STRICTLY OUT OF
  * SCOPE). The foundation analyzer demonstrates the governed provenance model
  * end-to-end on a bounded candidate set; the port is extensible.
@@ -43,6 +80,7 @@ import type {
   RepositoryAnalyzer,
   RepositoryContentPort,
 } from '../onboarding.types.js';
+import { OnboardingAnalysisError } from '../onboarding.types.js';
 
 /** The candidate paths the foundation analyzer inspects (bounded, extensible). */
 const CANDIDATE_READS: readonly GovernedReadRequest[] = [
@@ -80,9 +118,15 @@ export interface GovernedFilesystemAnalyzerDeps {
    * GitHubRepositoryContentPort (delegates to the /github GitHubAdapter);
    * tests inject an in-memory provider for deterministic governed analysis.
    * The port is consulted only for ALLOWED reads (deny/ask blocks the
-   * content); a content-read failure is logged as evidence and the analyzer
-   * continues with remaining candidates (the baseline completes with the
-   * observations it could derive).
+   * content). The port's contract: readFile returns null when the path does
+   * not exist at the revision; listDir returns [] when the directory does
+   * not exist; BOTH throw on infrastructure failure (GitHub unavailable,
+   * authentication failure, API failure, content retrieval infrastructure
+   * failure). Infrastructure failures propagate as a typed
+   * OnboardingAnalysisError so the orchestrator can markFailed the baseline
+   * (PR #42 round-2 review Blocker B — a baseline must NEVER reach
+   * 'complete' when the required repository analysis could not actually
+   * inspect the repository).
    */
   readonly contentPort?: RepositoryContentPort;
   readonly policyGate: ProjectScopedPolicyGate;
@@ -116,14 +160,20 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
     });
 
     // 2. Governed candidate reads — each routed through the policy gate.
-    const evidenceByLocator = new Map<string, string>();
-    // The governed-read content (only for ALLOWED reads — a deny/ask blocks
-    // the content, so derived observations depending on that content are
-    // never produced). This is the "tool execution respects WORK-037 policy"
-    // invariant at the analyzer level: a denied read cannot contribute
-    // observed/inferred facts.
+    //    PR #42 round-2 (Blocker A): the evidence row's tool_invocation_id
+    //    is NULL (the /github read path is NOT a ToolRuntime invocation).
+    //    The policy_decision is also NULL (no host tool run — the schema
+    //    reserves policy_decision for "host tool run" audit trail). The
+    //    WORK-037 gate consultation is a runtime invariant only.
+    //    PR #42 round-2 (Blocker B): infrastructure failures (the port
+    //    throws) propagate as a typed OnboardingAnalysisError; expected-
+    //    missing (null/[]) is handled gracefully (the analyzer continues).
     const contentByPath = new Map<string, { content: string; contentDigest: string }>();
     for (const candidate of CANDIDATE_READS) {
+      // The invocationId is a STABLE KEY for the policy gate's decision
+      // (so the same read gets the same decision across retries). It is
+      // NOT persisted as tool_invocation_id — there is no ToolRuntime
+      // invocation. It is internal to the policy request only.
       const invocationId = `${ctx.analysisRunId}:${candidate.operation}:${candidate.path}`;
       const policyRequest: ToolPolicyRequest = {
         invocationId,
@@ -142,9 +192,21 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
 
       // Record the governed decision as evidence — even when the read is
       // blocked (the audit trail proves analysis respected the policy gate).
+      // PR #42 round-2 (Blocker A): tool_invocation_id is NULL (no
+      // ToolRuntime invocation); policy_decision is NULL (no host tool run).
+      // The evidence row's audit value is the content_digest (NULL when the
+      // read was blocked OR the path was absent) + the source + the locator
+      // (the honest composite idempotency key).
       let content: { content: string; contentDigest: string } | null = null;
       const allowed = decision.decision === 'allow' || decision.decision === 'constrained';
       if (allowed && this.deps.contentPort) {
+        // PR #42 round-2 (Blocker B): NO try/catch around the content read.
+        // The port's contract: null/[] = expected-missing (the analyzer
+        // continues); throw = infrastructure failure (the analyzer
+        // propagates as a typed OnboardingAnalysisError so the orchestrator
+        // can markFailed the baseline). The previous implementation's
+        // try/catch swallowed GitHub-unavailable failures and produced a
+        // false 'complete' baseline with only metadata observations.
         try {
           if (candidate.operation === 'list') {
             const entries = await this.deps.contentPort.listDir(
@@ -168,13 +230,34 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
             );
           }
         } catch (err) {
-          // A content-read failure is an observed failure (the evidence
-          // records the policy decision + the read error); it does NOT abort
-          // the baseline. The analyzer continues with remaining candidates.
-          this.deps.logger.warn('onboarding.analyzer-content-read-failed', {
+          // Infrastructure / content-provider failure (GitHub unavailable,
+          // authentication failure, API failure, content retrieval
+          // infrastructure failure). Propagate as a typed
+          // OnboardingAnalysisError so the orchestrator can markFailed the
+          // baseline — the baseline must NEVER reach 'complete' on a
+          // content-provider failure (the required repository analysis
+          // could not actually inspect the repository).
+          this.deps.logger.error('onboarding.analyzer-content-read-infrastructure-failed', {
             path: candidate.path,
+            operation: candidate.operation,
             error: (err as Error).message,
           });
+          throw new OnboardingAnalysisError(
+            'repository-content-unavailable',
+            `repository-content-unavailable: the repository content provider threw an infrastructure failure reading '${candidate.path}' (${candidate.operation}) at revision ${ctx.baselineCommitSha} for ${ctx.repositoryOwner}/${ctx.repositoryName} — ${(err as Error).message}`,
+            {
+              failingLocator: candidate.path,
+              cause: err,
+              context: {
+                owner: ctx.repositoryOwner,
+                repository: ctx.repositoryName,
+                commitSha: ctx.baselineCommitSha,
+                path: candidate.path,
+                operation: candidate.operation,
+                underlyingError: (err as Error).message,
+              },
+            },
+          );
         }
       }
 
@@ -183,17 +266,20 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
         locator: candidate.path,
         contentDigest: content?.contentDigest ?? null,
         redacted: true,
-        toolInvocationId: invocationId,
-        policyDecision: decision.decision,
+        // PR #42 round-2 (Blocker A): NULL — the /github read path is NOT
+        // a ToolRuntime invocation. Do not manufacture toolInvocationIds
+        // for operations that never went through Tool Runtime.
+        toolInvocationId: null,
+        // PR #42 round-2 (Blocker A): NULL — no host tool run. The
+        // schema reserves policy_decision for "host tool run" audit trail
+        // (a ToolRuntime invocation gated by decide()). The WORK-037
+        // project-scoped gate IS consulted at runtime (the analyzer
+        // refuses to proceed on deny/ask — that is the runtime
+        // invariant); that consultation is not an evidence-row claim.
+        policyDecision: null,
       };
       evidence.push(ev);
-      // The evidence row id is assigned by the repository on persist; the
-      // orchestrator links observations to evidence after appendEvidence
-      // returns the persisted ids. Here we record the locator for the
-      // linking pass (observations that depend on this evidence reference
-      // it by locator; the orchestrator rewrites evidenceRef to ids).
       if (content) {
-        evidenceByLocator.set(candidate.path, invocationId);
         contentByPath.set(candidate.path, content);
       }
     }
@@ -204,7 +290,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
     //    policy gate is respected at the observation level, not just the
     //    evidence level).
     const packageJsonEvidence = evidence.find(
-      (e) => e.locator === 'package.json' && e.policyDecision !== 'deny' && e.policyDecision !== 'ask',
+      (e) => e.locator === 'package.json',
     );
     const packageContent = contentByPath.get('package.json') ?? null;
     if (packageContent) {
@@ -223,7 +309,11 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
             provenance: 'observed',
             claim: observedPkg,
             claimDigest: claimDigest(pkg),
-            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.toolInvocationId ?? ''] : [],
+            // PR #42 round-2 (Blocker A): observations reference evidence
+            // by LOCATOR (the path), not by a manufactured
+            // toolInvocationId. The orchestrator resolves locator→evidence
+            // id by the composite (source, locator) key.
+            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.locator] : [],
           });
         }
         // build/test/lint commands (OBSERVED from scripts).
@@ -238,7 +328,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
             provenance: 'observed',
             claim: redactForObservation(commandsClaim) as Record<string, unknown>,
             claimDigest: claimDigest(commandsClaim),
-            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.toolInvocationId ?? ''] : [],
+            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.locator] : [],
           });
         }
         // frameworks + languages (INFERRED from dependencies).
@@ -263,7 +353,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
             provenance: 'inferred',
             claim: redactForObservation(frameworksClaim) as Record<string, unknown>,
             claimDigest: claimDigest(frameworksClaim),
-            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.toolInvocationId ?? ''] : [],
+            evidenceRef: packageJsonEvidence ? [packageJsonEvidence.locator] : [],
           });
         }
         // languages (INFERRED from package.json presence → javascript/typescript).
@@ -276,11 +366,13 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
           provenance: 'inferred',
           claim: redactForObservation(languagesClaim) as Record<string, unknown>,
           claimDigest: claimDigest(languagesClaim),
-          evidenceRef: packageJsonEvidence ? [packageJsonEvidence.toolInvocationId ?? ''] : [],
+          evidenceRef: packageJsonEvidence ? [packageJsonEvidence.locator] : [],
         });
       } catch {
         // package.json present but unparseable — record nothing (the
         // observed read still produced evidence; the inference is skipped).
+        // This is NOT an infrastructure failure (the content WAS read);
+        // the analyzer continues with remaining candidates.
       }
     }
 
@@ -297,12 +389,13 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
         workflows,
         inferredFrom: '.github/workflows directory listing',
       };
+      const ciEvidence = evidence.find((e) => e.locator === '.github/workflows');
       observations.push({
         kind: 'ci',
         provenance: 'observed',
         claim: redactForObservation(ciClaim) as Record<string, unknown>,
         claimDigest: claimDigest(ciClaim),
-        evidenceRef: [],
+        evidenceRef: ciEvidence ? [ciEvidence.locator] : [],
       });
     }
 
@@ -319,7 +412,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
         provenance: 'inferred',
         claim: redactForObservation(deploymentClaim) as Record<string, unknown>,
         claimDigest: claimDigest(deploymentClaim),
-        evidenceRef: dockerfileEvidence ? [dockerfileEvidence.toolInvocationId ?? ''] : [],
+        evidenceRef: dockerfileEvidence ? [dockerfileEvidence.locator] : [],
       });
     }
 

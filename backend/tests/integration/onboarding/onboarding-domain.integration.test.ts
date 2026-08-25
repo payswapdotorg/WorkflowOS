@@ -71,6 +71,36 @@ class InMemoryContentPort implements RepositoryContentPort {
   }
 }
 
+/**
+ * PR #42 round-2 (Blocker B): a content port that ALWAYS throws on reads —
+ * simulates a /github-authority infrastructure failure (GitHub unavailable,
+ * authentication failure, API failure, content retrieval infrastructure
+ * failure). The analyzer must propagate this as a typed
+ * OnboardingAnalysisError so the orchestrator can markFailed the baseline
+ * (the baseline must NEVER reach 'complete' on a content-provider failure).
+ */
+class FailingContentPort implements RepositoryContentPort {
+  constructor(private readonly failureCode: string = 'github-not-configured') {}
+  async readFile(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ): Promise<{ readonly content: string; readonly contentDigest: string } | null> {
+    throw new Error(`${this.failureCode}: simulated infrastructure failure reading file '${path}'`);
+  }
+  async listDir(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ): Promise<readonly { readonly name: string; readonly type: 'file' | 'dir' }[]> {
+    throw new Error(`${this.failureCode}: simulated infrastructure failure listing dir '${path}'`);
+  }
+}
+
 /** A configurable project-scoped policy gate (defaults to allow). */
 class FakePolicyGate implements ProjectScopedPolicyGate {
   private denied = new Set<string>();
@@ -307,19 +337,41 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     expect(ci!.provenance).toBe('observed');
   });
 
-  it('14-15. analysis uses governed tooling + respects the WORK-037 policy gate (deny blocks the read)', async () => {
+  it('14-15. analysis respects the WORK-037 policy gate (deny blocks the read; the /github read is NOT a tool invocation — no fake toolInvocationId on the evidence)', async () => {
+    // PR #42 round-2 (Blocker A): the /github read path is NOT a
+    // ToolRuntime invocation. The evidence row honestly records NULL
+    // tool_invocation_id (no ToolRuntime invocation happened) and NULL
+    // policy_decision (no host tool run — the schema reserves
+    // policy_decision for "host tool run" audit trail). The WORK-037
+    // project-scoped gate IS still consulted at runtime (the analyzer
+    // refuses to proceed on deny/ask); that consultation is a runtime
+    // invariant, not an evidence-row claim.
     policyGate.denyPath('package.json');
     const result = await onboardingService.onboard({ projectId });
     const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
     const pkgEvidence = evidence.find((e) => e.locator === 'package.json');
-    expect(pkgEvidence, 'package.json evidence exists (the read was gated)').toBeDefined();
-    expect(pkgEvidence!.policyDecision).toBe('deny');
+    expect(pkgEvidence, 'package.json evidence exists (the read was attempted)').toBeDefined();
+    // The evidence row honestly records NO tool invocation and NO host
+    // tool run policy decision (the /github read path is not a
+    // ToolRuntime invocation).
+    expect(pkgEvidence!.toolInvocationId).toBeNull();
+    expect(pkgEvidence!.policyDecision).toBeNull();
+    // deny blocked the read → no content observed.
     expect(pkgEvidence!.contentDigest).toBeNull();
+    // The package_managers observation is absent (deny blocked the
+    // derived observation — the runtime invariant: a denied read cannot
+    // contribute observed/inferred facts).
     const observations = await projectBaselineRepository.listObservations(result.baseline.id);
     const pkg = observations.find((o) => o.kind === 'package_managers');
     expect(pkg, 'package_managers observation absent (deny blocked the read)').toBeUndefined();
+    // A non-blocked read (README.md) still produces content (the gate's
+    // 'allow' decision is respected at runtime — content is read). The
+    // evidence row still honestly records NULL tool_invocation_id and
+    // NULL policy_decision (the /github read is NOT a tool invocation).
     const readmeEvidence = evidence.find((e) => e.locator === 'README.md');
-    expect(readmeEvidence!.policyDecision).toBe('allow');
+    expect(readmeEvidence!.contentDigest).not.toBeNull();
+    expect(readmeEvidence!.toolInvocationId).toBeNull();
+    expect(readmeEvidence!.policyDecision).toBeNull();
   });
 
   it('16. secret-shaped values are redacted before persistence (secrets are not stored)', async () => {
@@ -516,13 +568,22 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     const pkg = observations.find((o) => o.kind === 'package_managers');
     expect(pkg, 'package_managers observation produced via the production content port').toBeDefined();
     expect((pkg!.claim as { name: string }).name).toBe('production-wired-repo');
-    // The evidence records the governed read (the policy decision + the
-    // content digest from the GitHubAdapter — non-null because content was read).
+    // PR #42 round-2 (Blocker A): the evidence row honestly records NO
+    // tool invocation (tool_invocation_id IS NULL — the /github read path
+    // is NOT a ToolRuntime invocation) and NO host tool run policy
+    // decision (policy_decision IS NULL — the schema reserves
+    // policy_decision for "host tool run" audit trail). The content
+    // digest is non-null because content WAS read through the production
+    // port (the GitHubAdapter's setFile content). The WORK-037
+    // project-scoped gate IS still consulted at runtime (the analyzer
+    // refuses to proceed on deny/ask); that is a runtime invariant, not
+    // an evidence-row claim.
     const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
     const pkgEvidence = evidence.find((e) => e.locator === 'package.json');
     expect(pkgEvidence, 'package.json evidence exists').toBeDefined();
-    expect(pkgEvidence!.policyDecision).toBe('allow');
-    expect(pkgEvidence!.contentDigest).not.toBeNull();
+    expect(pkgEvidence!.toolInvocationId, 'no fake toolInvocationId (no ToolRuntime invocation)').toBeNull();
+    expect(pkgEvidence!.policyDecision, 'no host tool run policy_decision (the /github read is not a tool invocation)').toBeNull();
+    expect(pkgEvidence!.contentDigest, 'content was read through the production port').not.toBeNull();
     // The CI observation was derived from the .github/workflows listing the
     // production port returned through the GitHubAdapter.
     const ci = observations.find((o) => o.kind === 'ci');
@@ -626,5 +687,253 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     const stillInferred = after.find((o) => o.id === inferred.id)!;
     expect(stillInferred.provenance).toBe('inferred');
     expect(stillInferred.confirmedBy).toBeNull();
+  });
+
+  // =========================================================================
+  // PR #42 round-2 review fixes (the two new blockers the architect
+  // identified on the 48c4612 diff):
+  //   Blocker A — repository analysis is still not actually using the Tool
+  //     Runtime (the analyzer manufactured tool_invocation_id + policy_decision
+  //     for /github-authority reads that never went through Tool Runtime).
+  //   Blocker B — a complete baseline could be produced with no repository
+  //     content (the analyzer's per-candidate try/catch swallowed
+  //     infrastructure failures, so a GitHub-unavailable baseline reached
+  //     'complete' with only metadata observations).
+  // =========================================================================
+
+  it('26. PR #42 r2 (Blocker B): missing package.json → still a valid complete analysis (expected-missing is graceful)', async () => {
+    // The architect's PR #42 round-2 Blocker B required: distinguish
+    // expected-missing (file absent / directory absent — the analyzer
+    // continues, the baseline still completes) from infrastructure failure
+    // (GitHub unavailable — the analyzer propagates, the baseline fails).
+    // This test exercises the expected-missing path: the InMemoryContentPort
+    // returns null for package.json (no setup) → the analyzer continues →
+    // the baseline still completes (with the observations it could derive
+    // from the other candidates).
+    //
+    // Use a UNIQUE ref so this creates a fresh baseline (the main-sha
+    // baseline may already be complete from earlier tests).
+    const ref = 'missing-package-json-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    // Construct an analyzer with a content port that returns null for
+    // package.json (file absent) and [] for .github/workflows (dir absent),
+    // but DOES return README.md + Dockerfile content (the other candidates).
+    const partialContentPort = new InMemoryContentPort()
+      .setFile('README.md', '# Missing Package Repo\nNo package.json here.')
+      .setFile('Dockerfile', 'FROM node:20');
+    // Do NOT set package.json (file absent → null). Do NOT set .github/workflows
+    // (dir absent → []). Do NOT set docker-compose.yml or prisma/schema.prisma.
+    const partialAnalyzer = new GovernedFilesystemAnalyzer({
+      contentPort: partialContentPort,
+      policyGate,
+      logger,
+    });
+    const partialService = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer: partialAnalyzer,
+      logger,
+    });
+    const result = await partialService.onboard({ projectId, ref });
+    // Expected-missing is graceful: the baseline STILL completes (it derives
+    // observations from README.md + Dockerfile; the package_managers /
+    // frameworks / languages observations are absent because package.json
+    // was absent).
+    expect(result.baseline.state, 'expected-missing is graceful — baseline completes').toBe('complete');
+    expect(result.baseline.baselineCommitSha).toBe(branch.sha);
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    // The package_managers observation is ABSENT (no package.json content).
+    const pkg = observations.find((o) => o.kind === 'package_managers');
+    expect(pkg, 'no package_managers observation (package.json was absent)').toBeUndefined();
+    // The deployment observation IS present (Dockerfile was read).
+    const deployment = observations.find((o) => o.kind === 'deployment');
+    expect(deployment, 'deployment observation present (Dockerfile was read)').toBeDefined();
+    // The CI observation is ABSENT (.github/workflows dir was absent).
+    const ci = observations.find((o) => o.kind === 'ci');
+    expect(ci, 'no ci observation (.github/workflows was absent)').toBeUndefined();
+    // The repository_identity observation IS present (always observed from
+    // the context metadata, regardless of content reads).
+    const repoId = observations.find((o) => o.kind === 'repository_identity');
+    expect(repoId, 'repository_identity observation always present').toBeDefined();
+  });
+
+  it('27. PR #42 r2 (Blocker B): GitHub / content provider unavailable → the baseline is NOT complete (infrastructure failure propagates → markFailed)', async () => {
+    // The architect's PR #42 round-2 Blocker B required: distinguish
+    // expected-missing (continue) from infrastructure failure (the content
+    // provider throws — GitHub unavailable, authentication failure, API
+    // failure, content retrieval infrastructure failure). The latter must
+    // propagate so the orchestrator markFailed the baseline — the baseline
+    // must NEVER reach 'complete' when the required repository analysis
+    // could not actually inspect the repository.
+    //
+    // The previous implementation's per-candidate try/catch swallowed
+    // GitHub-unavailable failures and produced a false 'complete' baseline
+    // with only metadata observations. This test proves that loophole is
+    // closed.
+    const ref = 'github-unavailable-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    // The FailingContentPort throws on EVERY read — simulates GitHub
+    // unavailable (the production DefaultGitHubAdapter throws
+    // 'github-not-configured' until credentials are wired; this fake
+    // reproduces that infrastructure-failure mode).
+    const failingContentPort = new FailingContentPort('github-not-configured');
+    const failingAnalyzer = new GovernedFilesystemAnalyzer({
+      contentPort: failingContentPort,
+      policyGate,
+      logger,
+    });
+    const failingService = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer: failingAnalyzer,
+      logger,
+    });
+    const result = await failingService.onboard({ projectId, ref });
+    // The baseline is NOT complete — it is FAILED (the orchestrator caught
+    // the typed OnboardingAnalysisError and markFailed with the
+    // 'repository-content-unavailable' failure stage).
+    expect(result.baseline.state, 'GitHub-unavailable → failed (not complete)').toBe('failed');
+    expect(result.baseline.baselineCommitSha).toBe(branch.sha);
+    expect(result.baseline.failureStage, 'failure_stage is the forensic provenance').toBe('repository-content-unavailable');
+    // The baseline carries NO content-derived observations (only the
+    // repository_identity observation may have been persisted — but since
+    // the analyzer threw BEFORE the orchestrator's persist step, even
+    // repository_identity is absent).
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.length, 'no observations persisted (analysis threw before persist)').toBe(0);
+  });
+
+  it('28. PR #42 r2 (Blocker B): partial candidate failure according to the frozen requirement (some candidates expected-missing, others succeed → baseline still completes)', async () => {
+    // The architect's PR #42 round-2 regression-coverage list includes
+    // "partial candidate failure according to the frozen requirement" — the
+    // analyzer gracefully handles per-candidate EXPECTED-missing (file
+    // absent, dir absent, unparseable JSON) without aborting. The baseline
+    // completes with whatever observations could be derived.
+    //
+    // This is the WORK-038 frozen-requirement behavior: package.json
+    // present but unparseable → record nothing (the observed read still
+    // produced evidence; the inference is skipped); file absent → continue;
+    // directory absent → continue. None of these abort the baseline.
+    const ref = 'partial-candidate-failure-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    // A content port where:
+    //   * package.json is present but UNPARSEABLE (malformed JSON) — the
+    //     analyzer's try { JSON.parse } catch handles it gracefully (the
+    //     observed read still produced evidence; the inference is skipped);
+    //   * README.md is present + parseable (a normal read);
+    //   * .github/workflows dir is absent (returns []) — the analyzer
+    //     continues (no ci observation);
+    //   * Dockerfile is present (a normal read);
+    //   * docker-compose.yml + prisma/schema.prisma are absent (return null)
+    //     — the analyzer continues.
+    const partialContentPort = new InMemoryContentPort()
+      .setFile('package.json', '{ this is not valid JSON ((((')
+      .setFile('README.md', '# Partial Repo\nSome candidates are missing.')
+      .setFile('Dockerfile', 'FROM node:20');
+    const partialAnalyzer = new GovernedFilesystemAnalyzer({
+      contentPort: partialContentPort,
+      policyGate,
+      logger,
+    });
+    const partialService = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer: partialAnalyzer,
+      logger,
+    });
+    const result = await partialService.onboard({ projectId, ref });
+    // Partial candidate failure (expected-missing + unparseable) is graceful
+    // — the baseline STILL completes (it derives observations from the
+    // candidates that DID have content; the unparseable/absent candidates
+    // contribute no observations).
+    expect(result.baseline.state, 'partial expected-failure is graceful — baseline completes').toBe('complete');
+    expect(result.baseline.baselineCommitSha).toBe(branch.sha);
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    // The package_managers observation is ABSENT (package.json was
+    // unparseable — JSON.parse threw, the analyzer skipped the inference).
+    const pkg = observations.find((o) => o.kind === 'package_managers');
+    expect(pkg, 'no package_managers observation (package.json was unparseable)').toBeUndefined();
+    // The deployment observation IS present (Dockerfile was read).
+    const deployment = observations.find((o) => o.kind === 'deployment');
+    expect(deployment, 'deployment observation present (Dockerfile was read)').toBeDefined();
+    // The CI observation is ABSENT (.github/workflows dir was absent).
+    const ci = observations.find((o) => o.kind === 'ci');
+    expect(ci, 'no ci observation (.github/workflows was absent)').toBeUndefined();
+    // The evidence row for package.json is STILL persisted (the read
+    // succeeded; the content was unparseable, but the evidence row records
+    // the content_digest of the raw (unparseable) content).
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    const pkgEvidence = evidence.find((e) => e.locator === 'package.json');
+    expect(pkgEvidence, 'package.json evidence row persisted (the read was attempted)').toBeDefined();
+    expect(pkgEvidence!.contentDigest, 'content_digest is the raw (unparseable) content fingerprint').not.toBeNull();
+    // PR #42 round-2 (Blocker A): the evidence row honestly records NO
+    // tool invocation and NO host tool run policy decision.
+    expect(pkgEvidence!.toolInvocationId).toBeNull();
+    expect(pkgEvidence!.policyDecision).toBeNull();
+  });
+
+  it('29. PR #42 r2 (Blocker A): no fake tool invocation / evidence for reads that never executed through Tool Runtime', async () => {
+    // The architect's PR #42 round-2 Blocker A: the production path is
+    //   Onboarding → GovernedFilesystemAnalyzer → ToolPolicyGate.decideForProjectScope
+    //     → GitHubRepositoryContentPort → GitHubAdapter.getFileContent/listDir
+    // The policy gate is consulted, but the actual repository read is
+    // performed directly by /github. There is NO ToolRuntime invocation,
+    // NO real tool claim, NO tool observation. The evidence row must NOT
+    // manufacture a tool_invocation_id for operations that never went
+    // through Tool Runtime. The policy_decision must NOT imply a host tool
+    // run occurred (the schema reserves policy_decision for "host tool
+    // run" audit trail — the /github read is NOT a host tool run).
+    //
+    // This test asserts: EVERY evidence row produced by the governed
+    // analyzer has tool_invocation_id IS NULL and policy_decision IS NULL
+    // (the /github read path is NOT a ToolRuntime invocation). The WORK-037
+    // gate IS still consulted at runtime (the analyzer refuses to proceed
+    // on deny/ask — verified by test 14-15); that consultation is a runtime
+    // invariant, not an evidence-row claim.
+    const result = await onboardingService.onboard({ projectId });
+    expect(result.baseline.state).toBe('complete');
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    expect(evidence.length, 'evidence rows exist').toBeGreaterThan(0);
+    // EVERY evidence row honestly records NO tool invocation and NO host
+    // tool run policy decision (the /github read path is NOT a
+    // ToolRuntime invocation — do not manufacture tool_invocation_ids for
+    // operations that never went through Tool Runtime).
+    for (const ev of evidence) {
+      expect(ev.toolInvocationId, `evidence row ${ev.locator}: tool_invocation_id must be NULL (no ToolRuntime invocation)`).toBeNull();
+      expect(ev.policyDecision, `evidence row ${ev.locator}: policy_decision must be NULL (no host tool run)`).toBeNull();
+    }
+    // The observation→evidence linkage uses the LOCATOR (the path), not a
+    // manufactured toolInvocationId. The orchestrator resolves locator→
+    // evidence id by the composite (source, locator) key.
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    const withEvidence = observations.filter((o) => o.evidenceRef.length > 0);
+    expect(withEvidence.length, 'some observations reference evidence').toBeGreaterThan(0);
+    const evidenceIds = new Set(evidence.map((e) => e.id));
+    for (const obs of withEvidence) {
+      for (const ref of obs.evidenceRef) {
+        expect(evidenceIds.has(ref), `evidence ref ${ref} exists`).toBe(true);
+      }
+    }
   });
 });

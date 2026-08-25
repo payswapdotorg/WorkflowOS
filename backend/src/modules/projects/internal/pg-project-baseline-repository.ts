@@ -239,19 +239,21 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   ): Promise<BaselineEvidence[]> {
     if (evidence.length === 0) return [];
     const insertedIds: string[] = [];
-    // Insert one-by-one with ON CONFLICT DO NOTHING on (baseline_id,
-    // tool_invocation_id) for native governed reads; for external-reported
-    // evidence (tool_invocation_id NULL) we insert directly (the UNIQUE
-    // constraint does not apply to NULLs in PostgreSQL — multiple NULL
-    // invocations are allowed, which is correct: a provider may report many
-    // observations without a host tool run).
+    // Insert one-by-one with ON CONFLICT DO NOTHING on (baseline_id, source,
+    // locator) — the honest idempotency key (one evidence row per read locator
+    // per baseline). The PR #42 round-2 review replaced the prior
+    // (baseline_id, tool_invocation_id) key: tool_invocation_id is now NULL
+    // for /github-authority reads (no ToolRuntime invocation), so the prior
+    // key could not deduplicate (NULL != NULL in PostgreSQL UNIQUE). The
+    // honest composite key is (source, locator) — a re-drive of the same
+    // governed read upserts the same row, no duplicates.
     for (const ev of evidence) {
       const r = await this.db.query<{ id: string }>(
         `INSERT INTO wfos_project_baseline_evidence
            (baseline_id, source, locator, content_digest, redacted,
             tool_invocation_id, policy_decision)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (baseline_id, tool_invocation_id) DO NOTHING
+         ON CONFLICT (baseline_id, source, locator) DO NOTHING
          RETURNING id`,
         [
           baselineId,
@@ -267,11 +269,12 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
         insertedIds.push(r.rows[0].id);
       } else {
         // ON CONFLICT DO NOTHING — the evidence already exists (idempotent
-        // re-drive). Re-fetch the existing row's id for observation linkage.
+        // re-drive). Re-fetch the existing row's id for observation linkage
+        // by the honest composite key (source, locator).
         const existing = await this.db.query<{ id: string }>(
           `SELECT id FROM wfos_project_baseline_evidence
-            WHERE baseline_id = $1 AND tool_invocation_id = $2`,
-          [baselineId, ev.toolInvocationId],
+            WHERE baseline_id = $1 AND source = $2 AND locator = $3`,
+          [baselineId, ev.source, ev.locator],
         );
         if (existing.rowCount && existing.rows[0]) {
           insertedIds.push(existing.rows[0].id);

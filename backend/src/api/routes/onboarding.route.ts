@@ -83,6 +83,25 @@ export async function onboardingRoutes(
             message: msg.slice(0, 500),
           });
         }
+        // PR #42 round-2 (Blocker B): the analyzer threw a typed
+        // OnboardingAnalysisError with code 'repository-content-unavailable'
+        // — the repository content provider (the /github GitHubAdapter)
+        // returned an infrastructure failure (GitHub unavailable,
+        // authentication failure, API failure, content retrieval
+        // infrastructure failure). The orchestrator markFailed the baseline
+        // with failure_stage='repository-content-unavailable' (the baseline
+        // did NOT reach 'complete' — the required repository analysis could
+        // not actually inspect the repository). Surface as 502 (bad
+        // gateway — the content provider is unavailable) so the caller
+        // distinguishes infrastructure failure from a server error.
+        if (msg.includes('repository-content-unavailable')) {
+          return reply.code(502).send({
+            error: 'repository-content-unavailable',
+            message: 'The repository content provider (GitHub) was unavailable or refused the read. The baseline is in the failed state with failure_stage="repository-content-unavailable". Retry onboarding when GitHub is reachable.',
+            baselineState: 'failed',
+            failureStage: 'repository-content-unavailable',
+          });
+        }
         return reply.code(500).send({ error: 'onboarding-failed', message: msg.slice(0, 500) });
       }
     });

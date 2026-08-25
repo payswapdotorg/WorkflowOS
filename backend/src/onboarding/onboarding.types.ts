@@ -173,6 +173,13 @@ export interface OnboardResult {
     readonly analysisMode: BaselineAnalysisMode;
     readonly analysisRunId: string | null;
     readonly contentDigest: string | null;
+    /**
+     * Where analysis failed (failed rows only; the durable forensic). Set
+     * to 'repository-content-unavailable' when a content read hit an
+     * infrastructure failure (PR #42 round-2 Blocker B). Null for non-
+     * failed rows.
+     */
+    readonly failureStage: string | null;
     readonly finalizedAt: Date | null;
   };
   /** Whether this call performed the analysis (false = idempotent re-entry). */
@@ -217,3 +224,69 @@ export interface OnboardingService {
 
 // Re-export the policy-request shape so the analyzer can build requests.
 export type { ToolPolicyRequest };
+
+// --- Typed errors (the WORK-035/036/037 discriminated-class pattern) ---
+//
+// PR #42 round-2 review (Blocker B): the analyzer MUST distinguish
+// "expected missing" (file absent / directory absent — the port returns
+// null/[] — the analyzer continues, the baseline still completes) from
+// "infrastructure / content-provider failure" (the port THROWS — GitHub
+// unavailable, authentication failure, API failure, content retrieval
+// infrastructure failure). The latter propagates as a typed
+// OnboardingAnalysisError so the orchestrator can markFailed the baseline
+// (a baseline must NEVER reach 'complete' when the required repository
+// analysis could not actually inspect the repository). The orchestrator
+// surfaces the failure stage through the route as 502 (bad gateway — the
+// content provider is unavailable) so the caller distinguishes
+// infrastructure failure from a successful metadata-only baseline.
+
+/**
+ * The sanctioned onboarding-analysis failure codes. The orchestrator maps
+ * these to markFailed failure_stage values (forensic provenance) and the
+ * route maps them to HTTP status codes (502 for infrastructure failures).
+ */
+export const ONBOARDING_ANALYSIS_ERROR_CODES = [
+  // The repository content provider (the /github GitHubAdapter, or a test
+  // fake of it) threw an infrastructure failure — GitHub unavailable,
+  // authentication failure, API failure, content retrieval infrastructure
+  // failure. The baseline must NOT reach 'complete' on this; the
+  // orchestrator markFailed with failure_stage='repository-content-unavailable'.
+  'repository-content-unavailable',
+  // A content read returned content that failed validation in a way that
+  // is NOT a path-not-found (e.g., a directory listing where a file was
+  // expected). Reserved for future strict content-shape checks.
+  'repository-content-malformed',
+] as const;
+
+export type OnboardingAnalysisErrorCode =
+  (typeof ONBOARDING_ANALYSIS_ERROR_CODES)[number];
+
+/**
+ * A typed onboarding-analysis failure. Thrown by the analyzer when a
+ * content read fails with an infrastructure failure (NOT a path-not-found —
+ * those return null/[] and the analyzer continues). The orchestrator
+ * catches this and markFailed the baseline so it NEVER reaches 'complete'
+ * on a content-provider failure.
+ */
+export class OnboardingAnalysisError extends Error {
+  readonly code: OnboardingAnalysisErrorCode;
+  /** The failing candidate locator (path) — for forensic provenance. */
+  readonly failingLocator: string | null;
+  readonly context: Readonly<Record<string, unknown>>;
+
+  constructor(
+    code: OnboardingAnalysisErrorCode,
+    message: string,
+    options: {
+      failingLocator?: string | null;
+      cause?: unknown;
+      context?: Readonly<Record<string, unknown>>;
+    } = {},
+  ) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = 'OnboardingAnalysisError';
+    this.code = code;
+    this.failingLocator = options.failingLocator ?? null;
+    this.context = options.context ?? {};
+  }
+}
