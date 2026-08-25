@@ -798,6 +798,10 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'BaselineEvidence',
       'NewBaselineObservation',
       'NewBaselineEvidence',
+      // PR #42 round-3: the governed repository-read boundary's enforcement
+      // record shape (lives in /projects — the evidence is a /projects
+      // artifact; the onboarding boundary consumes it through the barrel).
+      'RepositoryReadEnforcement',
       'EnsureBaselineInput',
       'ProjectBaselineRepository',
       'ProjectBaselineErrorCode',
@@ -9996,7 +10000,7 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(repo, 'must NOT SELECT evidence by tool_invocation_id alone').not.toMatch(/WHERE baseline_id = \$1 AND tool_invocation_id = \$2/);
   });
 
-  it('PR #42 r2 (Blocker B): the analyzer propagates infrastructure failures (no try/catch that swallows content-read failures)', () => {
+  it('PR #42 r2 (Blocker B): the governed repository-read boundary propagates infrastructure failures (no swallow-and-continue)', () => {
     // The architect's PR #42 round-2 Blocker B: the analyzer's per-candidate
     // try/catch around content reads swallowed infrastructure failures
     // (GitHub unavailable, authentication failure, API failure, content
@@ -10006,23 +10010,33 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     // failed/incomplete onboarding. False success for the central WORK-038
     // objective: establishing a baseline FROM REPOSITORY EVIDENCE.
     //
-    // The fix: the analyzer's content read CATCHES the infrastructure
-    // failure and RE-THROWS it as a typed OnboardingAnalysisError with
-    // code 'repository-content-unavailable' (so the orchestrator can
-    // markFailed the baseline with a forensic failure_stage). The
-    // previous swallow-and-continue pattern (logger.warn + continue) is
-    // GONE for content-read failures.
+    // PR #42 round-3 refactored the throw to the governed repository-read
+    // BOUNDARY (src/onboarding/internal/governed-repository-read-policy.ts) —
+    // the analyzer now calls governedRead() per candidate and propagates the
+    // boundary's typed OnboardingAnalysisError (no try/catch swallowing).
+    // The boundary is the honest home for the throw: it captures the decision
+    // + performs the read + propagates the infrastructure failure with the
+    // bound authorization (decision + policyVersion + ruleId) in the error
+    // context (forensic provenance travels with the failure even though no
+    // evidence row is persisted).
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    expect(boundary, 'the boundary throws OnboardingAnalysisError on content-read failure').toMatch(/throw new OnboardingAnalysisError\(/);
+    expect(boundary, 'uses the sanctioned repository-content-unavailable code').toMatch(/'repository-content-unavailable'/);
+    // The analyzer NO LONGER throws the typed error itself (the boundary
+    // does). The analyzer calls governedRead() per candidate and the boundary
+    // error propagates through the analyzer (no try/catch around the call).
     const analyzer = readFileSync(
       join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
       'utf8',
     );
-    // The analyzer throws the typed OnboardingAnalysisError with code
-    // 'repository-content-unavailable' on a content-read failure.
-    expect(analyzer, 'throws OnboardingAnalysisError on content-read failure').toMatch(/throw new OnboardingAnalysisError\(/);
-    expect(analyzer, 'uses the sanctioned repository-content-unavailable code').toMatch(/'repository-content-unavailable'/);
+    expect(analyzer, 'the analyzer calls governedRead() per candidate').toMatch(/await this\.deps\.governedReadPolicy\.governedRead\(/);
     // The OLD swallow-and-continue pattern (logger.warn +
-    // 'does NOT abort the baseline') is GONE.
-    expect(analyzer, 'must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
+    // 'does NOT abort the baseline') is GONE from BOTH files.
+    expect(analyzer, 'analyzer must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
+    expect(boundary, 'boundary must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
   });
 
   it('PR #42 r2 (Blocker B): the orchestrator catches OnboardingAnalysisError + markFailed with the repository-content-unavailable failure stage', () => {
@@ -10068,6 +10082,195 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(types).toMatch(/class OnboardingAnalysisError extends Error/);
     expect(types).toMatch(/readonly code: OnboardingAnalysisErrorCode/);
     expect(types).toMatch(/readonly failingLocator: string \| null/);
+  });
+
+  // =========================================================================
+  // PR #42 round-3 review (the governed repository-read boundary made real).
+  // The architect's round-3 review identified the single remaining
+  // architectural blocker: the round-2 path was a check-then-act
+  // authorization window (PolicyGate.decideForProjectScope -> if allow/
+  // constrained -> GitHubAdapter.getFileContent) with NOTHING atomic tying
+  // the authorization decision to the actual read, and `constrained` having
+  // no concrete enforcement effect. Round-3 introduces a DISTINCT
+  // GovernedRepositoryReadPolicy boundary whose governedRead() atomically
+  // captures the decision, enforces it, performs the read under the captured
+  // decision, applies the `constrained` enforcement, and returns the bound
+  // decision+effect+content. The round-2 invariants (no fake
+  // toolInvocationId; infrastructure failure propagates; append-only
+  // observations; failed-baseline confirmation guard) are PRESERVED.
+  // =========================================================================
+
+  it('PR #42 r3: a DISTINCT GovernedRepositoryReadPolicy boundary exists for /github reads (the atomic governed-read operation)', () => {
+    // The architect's round-3 sanctioned alternative path: a clearly distinct
+    // RepositoryReadPolicy/authorization boundary for /github reads. The
+    // boundary file must exist + implement the boundary interface + reuse the
+    // WORK-037 decideForProjectScope engine (NO parallel engine).
+    const boundaryPath = join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts');
+    expect(existsSync(boundaryPath), 'src/onboarding/internal/governed-repository-read-policy.ts must exist').toBe(true);
+    const boundary = readFileSync(boundaryPath, 'utf8');
+    expect(boundary, 'implements the boundary interface').toMatch(/implements GovernedRepositoryReadPolicy/);
+    expect(boundary, 'exposes the atomic governedRead method').toMatch(/async governedRead\(/);
+    // The boundary REUSES the WORK-037 project-scoped gate (no parallel
+    // engine — same matcher, same document, same decision vocabulary).
+    expect(boundary, 'reuses the WORK-037 project-scoped gate (no parallel engine)').toMatch(/policyGate: ProjectScopedPolicyGate/);
+    // The boundary holds NO GitHub SDK + NO credentials (imports only the
+    // onboarding types + node:crypto + @platform/logger). The content port
+    // is the boundary's leaf dependency (the /github adapter is the only SDK
+    // caller, behind the port).
+    expect(boundary, 'imports no GitHub SDK').not.toMatch(/from '@octokit/);
+    expect(boundary, 'imports no /github internal/').not.toMatch(/from '@modules\/github\/internal/);
+  });
+
+  it('PR #42 r3: the analyzer calls governedRead() per candidate — NO direct policyGate.decide + contentPort.readFile (no check-then-act window)', () => {
+    // The architect's round-3 requirement: "make the policy decision and read
+    // operation a single authoritative operation boundary." The analyzer must
+    // NOT call the policy gate or the content port directly — it calls the
+    // boundary's governedRead() ONLY (the decision + the read are bound in
+    // ONE method). This eliminates the round-2 check-then-act window.
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    expect(analyzer, 'the analyzer depends on the governed-read boundary').toMatch(/governedReadPolicy: GovernedRepositoryReadPolicy/);
+    expect(analyzer, 'the analyzer calls governedRead() per candidate').toMatch(/await this\.deps\.governedReadPolicy\.governedRead\(/);
+    // The analyzer must NOT call the policy gate or the content port directly
+    // (those are now INSIDE the boundary — the analyzer has no check-then-act
+    // window).
+    expect(analyzer, 'the analyzer must NOT call the policy gate directly').not.toMatch(/this\.deps\.policyGate\.decideForProjectScope/);
+    expect(analyzer, 'the analyzer must NOT call the content port directly').not.toMatch(/this\.deps\.contentPort\.(readFile|listDir)/);
+  });
+
+  it('PR #42 r3: `constrained` has a CONCRETE enforcement effect — maxOutputBytes truncation + path-allowlist + read-only', () => {
+    // The architect's round-3 requirement: "define what `constrained` means
+    // for this direct-read operation." The boundary must implement CONCRETE
+    // enforcement (not just consult-and-proceed). The maxOutputBytes
+    // constraint must TRUNCATE the observed content + recompute the digest
+    // on the truncated content; the path-allowlist must REFUSE reads outside
+    // the candidate set; the boundary must be structurally read-only.
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    // maxOutputBytes truncation: the boundary slices the content + recomputes
+    // the digest on the truncated slice (the digest reflects what was
+    // ACTUALLY observed, not the pre-truncation content).
+    expect(boundary, 'the boundary applies maxOutputBytes truncation').toMatch(/maxOutputBytes/);
+    expect(boundary, 'the boundary truncates the content slice').toMatch(/\.slice\(0,\s*maxOutputBytes\)/);
+    expect(boundary, 'the boundary recomputes the digest on the truncated content').toMatch(/contentDigest:\s*sha256\(truncatedContent\)/);
+    // path-allowlist: the boundary refuses reads outside the candidate set.
+    expect(boundary, 'the boundary enforces the candidate allowlist').toMatch(/candidateAllowlist\.has\(request\.path\)/);
+    expect(boundary, 'the boundary refuses out-of-allowlist paths').toMatch(/not in the candidate allowlist/);
+    // read-only: the boundary refuses non-read/list operations.
+    expect(boundary, 'the boundary is structurally read-only').toMatch(/SUPPORTED_OPERATIONS/);
+    expect(boundary, 'the boundary refuses non-read operations').toMatch(/is not supported/);
+  });
+
+  it('PR #42 r3: the migration records the actual decision + enforcement in their OWN columns (distinct from the Tool Runtime columns)', () => {
+    // The architect's round-3 requirement: "record the actual decision/effect
+    // without pretending it was a Tool Runtime invocation." The migration must
+    // add DISTINCT columns (repository_read_decision + repository_read_enforcement)
+    // — the round-2 columns (tool_invocation_id + policy_decision) stay NULL
+    // for /github reads (round-2 invariant preserved).
+    const sql = readFileSync(
+      join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0039_project_baseline_repository_read_governance.sql'),
+      'utf8',
+    );
+    expect(sql, 'the migration adds repository_read_decision').toMatch(/ADD COLUMN IF NOT EXISTS repository_read_decision/);
+    expect(sql, 'the migration adds repository_read_enforcement').toMatch(/ADD COLUMN IF NOT EXISTS repository_read_enforcement/);
+    expect(sql, 'repository_read_decision CHECK is the decision vocabulary').toMatch(/repository_read_decision IN \('allow', 'constrained', 'deny', 'ask'\)/);
+    // The migration must NOT alter the round-2 tool_invocation_id /
+    // policy_decision columns (those stay NULL for /github reads — the
+    // round-2 invariants are preserved).
+    expect(sql, 'the migration does NOT drop tool_invocation_id').not.toMatch(/DROP COLUMN.*tool_invocation_id/);
+    expect(sql, 'the migration does NOT drop policy_decision').not.toMatch(/DROP COLUMN.*policy_decision/);
+  });
+
+  it('PR #42 r3: the evidence type + pg repository carry the new decision + enforcement columns (honest recording)', () => {
+    // The NewBaselineEvidence + BaselineEvidence types must carry the two
+    // new fields; the pg repository must INSERT + SELECT + map them.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'NewBaselineEvidence has repositoryReadDecision').toMatch(/readonly repositoryReadDecision:/);
+    expect(types, 'NewBaselineEvidence has repositoryReadEnforcement').toMatch(/readonly repositoryReadEnforcement:/);
+    expect(types, 'BaselineEvidence has repositoryReadDecision').toMatch(/readonly repositoryReadDecision:.*'allow' \| 'constrained' \| 'deny' \| 'ask' \| null/);
+    // The RepositoryReadEnforcement shape (the forensic record).
+    expect(types, 'RepositoryReadEnforcement.policyVersion').toMatch(/readonly policyVersion: number \| null/);
+    expect(types, 'RepositoryReadEnforcement.performed').toMatch(/readonly performed: boolean/);
+    expect(types, 'RepositoryReadEnforcement.truncated').toMatch(/readonly truncated: boolean/);
+    expect(types, 'RepositoryReadEnforcement.pathAllowed').toMatch(/readonly pathAllowed: boolean/);
+    // The pg repository INSERT + SELECT + map the new columns.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidence INSERTs repository_read_decision').toMatch(/repository_read_decision/);
+    expect(repo, 'appendEvidence INSERTs repository_read_enforcement').toMatch(/repository_read_enforcement/);
+    expect(repo, 'listEvidence SELECTs repository_read_decision').toMatch(/repository_read_decision, repository_read_enforcement/);
+    expect(repo, 'mapEvidence maps the new fields').toMatch(/repositoryReadDecision:/);
+  });
+
+  it('PR #42 r3: the analyzer records the ACTUAL decision + enforcement on the evidence row (round-2 honesty preserved + round-3 honesty added)', () => {
+    // The round-2 invariants (tool_invocation_id=NULL, policy_decision=NULL)
+    // are PRESERVED; the round-3 fix ADDS the honest recording of the actual
+    // decision + enforcement in their OWN columns.
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    // Round-2 invariants PRESERVED.
+    expect(analyzer, 'toolInvocationId is NULL (no ToolRuntime invocation — round-2 preserved)').toMatch(/toolInvocationId:\s*null/);
+    expect(analyzer, 'policyDecision is NULL (no host tool run — round-2 preserved)').toMatch(/policyDecision:\s*null/);
+    // Round-3 honesty ADDED: the actual decision + enforcement are recorded
+    // in their OWN columns.
+    expect(analyzer, 'records the actual repository_read_decision').toMatch(/repositoryReadDecision:\s*g\.decision/);
+    expect(analyzer, 'records the repository_read_enforcement').toMatch(/repositoryReadEnforcement:\s*g\.enforcement/);
+  });
+
+  it('PR #42 r3: app.ts wires the governed-read boundary into the analyzer (production onboarding uses the atomic boundary, not the check-then-act path)', () => {
+    // The composition root must construct the DefaultGovernedRepositoryReadPolicy
+    // (reusing the agentPolicyEngine as the policy gate + the production
+    // GitHubRepositoryContentPort as the content port + the analyzer's
+    // candidate allowlist) and pass it to the GovernedFilesystemAnalyzer. The
+    // analyzer must NOT be constructed with contentPort + policyGate directly
+    // (that was the round-2 check-then-act path).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'imports DefaultGovernedRepositoryReadPolicy').toMatch(/import \{ DefaultGovernedRepositoryReadPolicy \}/);
+    expect(appSrc, 'imports the candidate allowlist').toMatch(/GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST/);
+    expect(appSrc, 'constructs the boundary with policyGate + contentPort + candidateAllowlist').toMatch(/new DefaultGovernedRepositoryReadPolicy\(/);
+    expect(appSrc, 'passes governedReadPolicy to the analyzer').toMatch(/governedReadPolicy:\s*onboardingGovernedReadPolicy/);
+    // The analyzer must NOT be constructed with the round-2 direct deps.
+    expect(appSrc, 'must NOT pass contentPort to the analyzer (round-2 check-then-act path)').not.toMatch(/new GovernedFilesystemAnalyzer\(\{[^}]*contentPort:/);
+    expect(appSrc, 'must NOT pass policyGate to the analyzer (round-2 check-then-act path)').not.toMatch(/new GovernedFilesystemAnalyzer\(\{[^}]*policyGate:/);
+  });
+
+  it('PR #42 r3: the WORK-037 engine surfaces policyVersion + ruleId + scopeSource on the project-scoped decision (additive — the frozen decide() seam is UNCHANGED)', () => {
+    // The architect's round-3 requirement: "prevent policy drift between
+    // decision and read" + "record the actual decision/effect." The
+    // governed-read boundary needs the policy version snapshot (drift
+    // detection) + the matched rule id (forensic provenance) AT DECISION
+    // TIME. The WORK-037 engine must surface these from decideForProjectScope
+    // (additive — the engine already computes them in evaluateCore; the frozen
+    // ToolPolicyGate.decide() seam is UNCHANGED). The decision type lives in
+    // /agents (the engine produces it; the dependency direction is
+    // onboarding → agents).
+    const engine = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts'),
+      'utf8',
+    );
+    expect(engine, 'decideForProjectScope returns ProjectScopedPolicyDecision').toMatch(/Promise<ProjectScopedPolicyDecision>/);
+    expect(engine, 'the engine surfaces policyVersion from evaluateCore').toMatch(/policyVersion:\s*core\.version/);
+    expect(engine, 'the engine surfaces ruleId from evaluateCore').toMatch(/ruleId:\s*core\.match\.rule\?\.id/);
+    expect(engine, 'the engine surfaces scopeSource from evaluateCore').toMatch(/scopeSource:\s*core\.resolutionSource/);
+    // The decision type lives in /agents (NOT /onboarding — the engine
+    // produces it; the dependency direction is onboarding → agents).
+    const policyTypes = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'agent-policy.types.ts'),
+      'utf8',
+    );
+    expect(policyTypes, 'ProjectScopedPolicyDecision is defined in /agents').toMatch(/export interface ProjectScopedPolicyDecision/);
+    // The onboarding types RE-IMPORT it (not define a duplicate — the
+    // dependency direction is onboarding → agents).
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'onboarding re-imports ProjectScopedPolicyDecision from /agents (no duplicate)').toMatch(/import type \{[^}]*ProjectScopedPolicyDecision[^}]*\} from '@modules\/agents\/index\.js'/);
   });
 });
 

@@ -1,10 +1,21 @@
 /**
  * WORK-038: GovernedFilesystemAnalyzer — the default repository analyzer.
  *
- * Routes EVERY candidate read through the project-scoped ToolPolicyGate (the
- * WORK-037 boundary), records the decision as evidence, redacts secrets
- * (the platform observation-redaction util), and produces provenance-tagged
- * observations:
+ * Routes EVERY candidate read through the governed repository-read boundary
+ * (the PR #42 round-3 {@link GovernedRepositoryReadPolicy} — a DISTINCT,
+ * atomic operation boundary for /github reads that ties the WORK-037
+ * authorization decision to the actual read + the `constrained`
+ * enforcement + the bound record). The boundary returns ONE outcome per
+ * candidate carrying the content (null when blocked/absent) + the bound
+ * governance (decision + policyVersion + ruleId + performed + enforcement).
+ *
+ * The analyzer NEVER calls the WORK-037 policy gate directly, NEVER calls
+ * the content port directly — it calls the boundary's governedRead() ONLY.
+ * This eliminates the round-2 check-then-act window (decide() then read())
+ * — the decision and the read are bound in ONE atomic boundary method.
+ *
+ * The analyzer redacts secrets (the platform observation-redaction util) and
+ * produces provenance-tagged observations:
  *
  *   * OBSERVED   — directly established from file content (package.json
  *                  fields, CI config presence, Dockerfile presence).
@@ -18,46 +29,36 @@
  * This is the "no silent promotion" invariant at the source: the analyzer
  * cannot promote.
  *
- * PR #42 round-2 review (Blocker A) — the /github read path is NOT a
- * ToolRuntime invocation:
- *   The analyzer consults the WORK-037 project-scoped policy gate
- *   (decideForProjectScope) for every candidate read; if the decision is
- *   'deny' or 'ask', the read is blocked (no content observed, no
- *   content-derived observations produced). If 'allow' or 'constrained',
- *   the read is delegated to the /github GitHubAdapter via the production
- *   RepositoryContentPort. That read is NOT a ToolRuntime.invoke — the
- *   /github adapter is the only SDK caller, but it is NOT the WORK-036
- *   governed tool execution boundary. The evidence row honestly records
- *   that: tool_invocation_id is NULL (no ToolRuntime invocation happened),
- *   policy_decision is NULL (no host tool run — the schema reserves
- *   policy_decision for "host tool run" audit trail). The WORK-037 gate
- *   consultation IS a runtime invariant (the analyzer refuses to proceed
- *   on deny/ask); it is not an evidence-row claim. The evidence-row
- *   idempotency key is the honest composite (baseline_id, source, locator).
- *   The observation→evidence linkage uses the locator (the path), not a
- *   manufactured toolInvocationId.
+ * PR #42 round-3 (the governed read made real):
+ *   * the evidence row records the ACTUAL decision that governed the read
+ *     (repository_read_decision) + the concrete enforcement effect
+ *     (repository_read_enforcement) in their OWN columns — NOT masquerading
+ *     as a Tool Runtime invocation. tool_invocation_id stays NULL (the
+ *     /github read path is NOT a ToolRuntime invocation — round-2 invariant
+ *     preserved). policy_decision stays NULL (reserved for "host tool run"
+ *     — round-2 invariant preserved). The decision + effect are recorded
+ *     honestly in their own columns.
+ *   * `constrained` has a CONCRETE enforcement effect: maxOutputBytes
+ *     truncates the observed content + recomputes the digest on the
+ *     truncated content (the digest reflects what was actually observed).
+ *     The boundary applies this; the analyzer just records the returned
+ *     enforcement record.
+ *   * policy drift is prevented-by-construction (the decision is captured
+ *     and the read is performed in ONE boundary method) AND made observable
+ *     (the policyVersion snapshot is recorded in repository_read_enforcement).
  *
- * PR #42 round-2 review (Blocker B) — distinguish expected-missing from
- * infrastructure failure:
- *   The RepositoryContentPort contract is explicit:
- *     * readFile returns null when the path does not exist at the revision.
- *     * listDir returns [] when the directory does not exist.
- *     * BOTH throw on infrastructure failure (GitHub unavailable,
- *       authentication failure, API failure, content retrieval
- *       infrastructure failure).
- *   The analyzer's per-candidate content read has NO try/catch —
- *   infrastructure failures propagate as a typed OnboardingAnalysisError so
- *   the orchestrator can markFailed the baseline (a baseline must NEVER
- *   reach 'complete' when the required repository analysis could not
- *   actually inspect the repository). Expected-missing (null/[]) and
- *   unparseable JSON (the package.json parse try/catch) are NOT
- *   infrastructure failures — those are handled gracefully (the analyzer
- *   continues with remaining candidates; the baseline still completes with
- *   whatever observations could be derived).
+ * PR #42 round-2 invariants PRESERVED:
+ *   * no fake toolInvocationId (tool_invocation_id stays NULL).
+ *   * infrastructure failure propagates as OnboardingAnalysisError
+ *     'repository-content-unavailable' → markFailed (the boundary
+ *     re-throws content-port failures as the typed error).
+ *   * expected-missing graceful (null/[] → continue, baseline completes).
+ *   * observation DELETE protection (the migration trigger).
+ *   * failed-baseline confirmation guard (the repository method).
  *
  * Deep stack/security/deployment scanning is WORK-039+ (STRICTLY OUT OF
  * SCOPE). The foundation analyzer demonstrates the governed provenance model
- * end-to-end on a bounded candidate set; the port is extensible.
+ * end-to-end on a bounded candidate set; the boundary is extensible.
  *
  * Boundary: src/onboarding/ — application capability, NOT a module, NOT an
  * authority. No provider SDKs, no credentials, no DB access (the orchestrator
@@ -66,7 +67,6 @@
 import { createHash } from 'node:crypto';
 import { redactForObservation } from '@platform/tools/observation-redaction.js';
 import type { Logger } from '@platform/logger.js';
-import type { ToolPolicyRequest } from '@modules/agents/index.js';
 import type {
   BaselineObservationKind,
   NewBaselineEvidence,
@@ -76,11 +76,9 @@ import type {
   AnalysisContext,
   AnalysisResult,
   GovernedReadRequest,
-  ProjectScopedPolicyGate,
+  GovernedRepositoryReadPolicy,
   RepositoryAnalyzer,
-  RepositoryContentPort,
 } from '../onboarding.types.js';
-import { OnboardingAnalysisError } from '../onboarding.types.js';
 
 /** The candidate paths the foundation analyzer inspects (bounded, extensible). */
 const CANDIDATE_READS: readonly GovernedReadRequest[] = [
@@ -91,6 +89,11 @@ const CANDIDATE_READS: readonly GovernedReadRequest[] = [
   { path: 'docker-compose.yml', family: 'filesystem', operation: 'read' },
   { path: 'prisma/schema.prisma', family: 'filesystem', operation: 'read' },
 ];
+
+/** The candidate-path allowlist (the boundary refuses reads outside this set). */
+const CANDIDATE_ALLOWLIST: ReadonlySet<string> = new Set(
+  CANDIDATE_READS.map((c) => c.path),
+);
 
 /** sha256 hex of a string. */
 function sha256(text: string): string {
@@ -112,24 +115,25 @@ function claimDigest(claim: Record<string, unknown>): string {
   return sha256(JSON.stringify(claim, Object.keys(claim).sort()));
 }
 
+/**
+ * The frozen candidate set (re-exported so the composition root can pass
+ * the SAME allowlist to the boundary — the analyzer cannot read an
+ * arbitrary path through the boundary because the boundary is scoped to
+ * this set).
+ */
+export const GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST = CANDIDATE_ALLOWLIST;
+
 export interface GovernedFilesystemAnalyzerDeps {
   /**
-   * The repository content port. The PRODUCTION wiring (app.ts) injects
-   * GitHubRepositoryContentPort (delegates to the /github GitHubAdapter);
-   * tests inject an in-memory provider for deterministic governed analysis.
-   * The port is consulted only for ALLOWED reads (deny/ask blocks the
-   * content). The port's contract: readFile returns null when the path does
-   * not exist at the revision; listDir returns [] when the directory does
-   * not exist; BOTH throw on infrastructure failure (GitHub unavailable,
-   * authentication failure, API failure, content retrieval infrastructure
-   * failure). Infrastructure failures propagate as a typed
-   * OnboardingAnalysisError so the orchestrator can markFailed the baseline
-   * (PR #42 round-2 review Blocker B — a baseline must NEVER reach
-   * 'complete' when the required repository analysis could not actually
-   * inspect the repository).
+   * The governed repository-read boundary (PR #42 round-3). The analyzer
+   * calls governedRead() per candidate — the boundary atomically captures
+   * the WORK-037 decision, enforces it (deny/ask/path-not-allowed/
+   * operation-not-read -> no read), performs the read under the captured
+   * decision, applies the `constrained` enforcement, and returns the bound
+   * decision+effect+content. The analyzer NEVER calls the policy gate or
+   * the content port directly — there is no check-then-act window.
    */
-  readonly contentPort?: RepositoryContentPort;
-  readonly policyGate: ProjectScopedPolicyGate;
+  readonly governedReadPolicy: GovernedRepositoryReadPolicy;
   readonly logger: Logger;
 }
 
@@ -142,7 +146,10 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
 
     // 1. OBSERVED repository_identity — established from the /github
     //    authority metadata carried in the context (owner, name, sha, ref).
-    //    This is a directly-observed fact, not an inference.
+    //    This is a directly-observed fact, not an inference. It does NOT
+    //    come from a governed content read (no evidence row, no governance
+    //    record) — it is observed from the context metadata the orchestrator
+    //    resolved through /github getBranch.
     const repoIdentityClaim = {
       owner: ctx.repositoryOwner,
       repository: ctx.repositoryName,
@@ -156,139 +163,72 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
       provenance: 'observed',
       claim: redactForObservation(repoIdentityClaim) as Record<string, unknown>,
       claimDigest: claimDigest(repoIdentityClaim),
-      evidenceRef: [], // linked below after evidence is persisted
+      evidenceRef: [], // no evidence row (metadata-observed, not content-read)
     });
 
-    // 2. Governed candidate reads — each routed through the policy gate.
-    //    PR #42 round-2 (Blocker A): the evidence row's tool_invocation_id
-    //    is NULL (the /github read path is NOT a ToolRuntime invocation).
-    //    The policy_decision is also NULL (no host tool run — the schema
-    //    reserves policy_decision for "host tool run" audit trail). The
-    //    WORK-037 gate consultation is a runtime invariant only.
-    //    PR #42 round-2 (Blocker B): infrastructure failures (the port
-    //    throws) propagate as a typed OnboardingAnalysisError; expected-
-    //    missing (null/[]) is handled gracefully (the analyzer continues).
+    // 2. Governed candidate reads — each through the boundary's
+    //    governedRead() (the atomic decide+enforce+read+record method).
+    //    PR #42 round-3: the evidence row records the ACTUAL decision
+    //    (repository_read_decision) + the concrete enforcement effect
+    //    (repository_read_enforcement) in their OWN columns. The Tool
+    //    Runtime columns (tool_invocation_id + policy_decision) stay NULL
+    //    (round-2 invariant preserved — the /github read is NOT a Tool
+    //    Runtime invocation, NOT a host tool run).
     const contentByPath = new Map<string, { content: string; contentDigest: string }>();
     for (const candidate of CANDIDATE_READS) {
-      // The invocationId is a STABLE KEY for the policy gate's decision
-      // (so the same read gets the same decision across retries). It is
-      // NOT persisted as tool_invocation_id — there is no ToolRuntime
-      // invocation. It is internal to the policy request only.
-      const invocationId = `${ctx.analysisRunId}:${candidate.operation}:${candidate.path}`;
-      const policyRequest: ToolPolicyRequest = {
-        invocationId,
-        executionId: `onboarding:${ctx.baselineId}`,
-        sessionId: ctx.analysisRunId,
-        workspaceId: `onboarding:${ctx.baselineId}`,
-        family: candidate.family,
-        operation: candidate.operation,
-        input: redactForObservation({ path: candidate.path, mode: candidate.operation }) as Record<string, unknown>,
-      };
-      const decision = await this.deps.policyGate.decideForProjectScope(
-        policyRequest,
-        ctx.projectId,
-        ctx.organizationId,
-      );
+      // The boundary throws OnboardingAnalysisError on an infrastructure
+      // failure (the orchestrator catches it + markFailed — round-2
+      // Blocker B, preserved). Expected-missing (null/[]) is NOT an
+      // infrastructure failure — the boundary returns content=null +
+      // performed=true (the read happened; the path was absent).
+      const outcome = await this.deps.governedReadPolicy.governedRead(candidate, ctx);
 
-      // Record the governed decision as evidence — even when the read is
-      // blocked (the audit trail proves analysis respected the policy gate).
-      // PR #42 round-2 (Blocker A): tool_invocation_id is NULL (no
-      // ToolRuntime invocation); policy_decision is NULL (no host tool run).
-      // The evidence row's audit value is the content_digest (NULL when the
-      // read was blocked OR the path was absent) + the source + the locator
-      // (the honest composite idempotency key).
-      let content: { content: string; contentDigest: string } | null = null;
-      const allowed = decision.decision === 'allow' || decision.decision === 'constrained';
-      if (allowed && this.deps.contentPort) {
-        // PR #42 round-2 (Blocker B): NO try/catch around the content read.
-        // The port's contract: null/[] = expected-missing (the analyzer
-        // continues); throw = infrastructure failure (the analyzer
-        // propagates as a typed OnboardingAnalysisError so the orchestrator
-        // can markFailed the baseline). The previous implementation's
-        // try/catch swallowed GitHub-unavailable failures and produced a
-        // false 'complete' baseline with only metadata observations.
-        try {
-          if (candidate.operation === 'list') {
-            const entries = await this.deps.contentPort.listDir(
-              ctx.repositoryOwner,
-              ctx.repositoryName,
-              ctx.baselineCommitSha,
-              candidate.path,
-              ctx.installationId,
-            );
-            if (entries.length > 0) {
-              const listing = entries.map((e) => `${e.type}:${e.name}`).sort().join('\n');
-              content = { content: listing, contentDigest: sha256(listing) };
-            }
-          } else {
-            content = await this.deps.contentPort.readFile(
-              ctx.repositoryOwner,
-              ctx.repositoryName,
-              ctx.baselineCommitSha,
-              candidate.path,
-              ctx.installationId,
-            );
-          }
-        } catch (err) {
-          // Infrastructure / content-provider failure (GitHub unavailable,
-          // authentication failure, API failure, content retrieval
-          // infrastructure failure). Propagate as a typed
-          // OnboardingAnalysisError so the orchestrator can markFailed the
-          // baseline — the baseline must NEVER reach 'complete' on a
-          // content-provider failure (the required repository analysis
-          // could not actually inspect the repository).
-          this.deps.logger.error('onboarding.analyzer-content-read-infrastructure-failed', {
-            path: candidate.path,
-            operation: candidate.operation,
-            error: (err as Error).message,
-          });
-          throw new OnboardingAnalysisError(
-            'repository-content-unavailable',
-            `repository-content-unavailable: the repository content provider threw an infrastructure failure reading '${candidate.path}' (${candidate.operation}) at revision ${ctx.baselineCommitSha} for ${ctx.repositoryOwner}/${ctx.repositoryName} — ${(err as Error).message}`,
-            {
-              failingLocator: candidate.path,
-              cause: err,
-              context: {
-                owner: ctx.repositoryOwner,
-                repository: ctx.repositoryName,
-                commitSha: ctx.baselineCommitSha,
-                path: candidate.path,
-                operation: candidate.operation,
-                underlyingError: (err as Error).message,
-              },
-            },
-          );
-        }
-      }
-
+      // Build the evidence row from the bound outcome. The decision +
+      // enforcement come from the boundary's governance record (the actual
+      // decision that governed THIS read + the concrete effect).
+      const g = outcome.governance;
       const ev: NewBaselineEvidence = {
         source: 'filesystem',
         locator: candidate.path,
-        contentDigest: content?.contentDigest ?? null,
+        contentDigest: outcome.content?.contentDigest ?? null,
         redacted: true,
-        // PR #42 round-2 (Blocker A): NULL — the /github read path is NOT
-        // a ToolRuntime invocation. Do not manufacture toolInvocationIds
-        // for operations that never went through Tool Runtime.
+        // PR #42 round-2 invariant (PRESERVED): NULL — the /github read
+        // path is NOT a ToolRuntime invocation. Do not manufacture
+        // toolInvocationIds for operations that never went through Tool
+        // Runtime.
         toolInvocationId: null,
-        // PR #42 round-2 (Blocker A): NULL — no host tool run. The
-        // schema reserves policy_decision for "host tool run" audit trail
-        // (a ToolRuntime invocation gated by decide()). The WORK-037
-        // project-scoped gate IS consulted at runtime (the analyzer
-        // refuses to proceed on deny/ask — that is the runtime
-        // invariant); that consultation is not an evidence-row claim.
+        // PR #42 round-2 invariant (PRESERVED): NULL — no host tool run.
+        // The schema reserves policy_decision for "host tool run" audit
+        // trail (a ToolRuntime invocation gated by decide()). The /github
+        // read is NOT a host tool run.
         policyDecision: null,
+        // PR #42 round-3: the ACTUAL WORK-037 decision that governed THIS
+        // /github read, recorded in its OWN column (not masquerading as a
+        // Tool Runtime invocation). Non-null for every governed read
+        // (allow/constrained/deny/ask — the boundary always produces a
+        // decision, even for path-not-allowed/operation-not-read refusals,
+        // which it records as 'deny' with the boundary's refusal reason).
+        repositoryReadDecision: g.decision,
+        // PR #42 round-3: the concrete enforcement effect (what
+        // `constrained` actually did — OBSERVABLE). Carries the policy
+        // version snapshot (drift detection), the matched rule id, whether
+        // the read was performed, whether maxOutputBytes truncated the
+        // content + at what byte offset, whether the path was in the
+        // candidate allowlist.
+        repositoryReadEnforcement: g.enforcement,
       };
       evidence.push(ev);
-      if (content) {
-        contentByPath.set(candidate.path, content);
+      if (outcome.content) {
+        contentByPath.set(candidate.path, outcome.content);
       }
     }
 
     // 3. Derive observations from governed content (OBSERVED + INFERRED).
-    //    Uses the contentByPath map — a denied read is absent from the map,
-    //    so derived observations depending on it are never produced (the
-    //    policy gate is respected at the observation level, not just the
-    //    evidence level).
+    //    Uses the contentByPath map — a denied/blocked read is absent from
+    //    the map, so derived observations depending on it are never
+    //    produced (the policy gate is respected at the observation level,
+    //    not just the evidence level — the boundary's governance propagates
+    //    to the observation derivation).
     const packageJsonEvidence = evidence.find(
       (e) => e.locator === 'package.json',
     );

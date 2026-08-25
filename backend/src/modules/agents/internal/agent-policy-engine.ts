@@ -53,6 +53,7 @@ import type {
   AgentPolicyResolution,
   AgentPolicyRule,
   AgentPolicyScopeSource,
+  ProjectScopedPolicyDecision,
 } from './agent-policy.types.js';
 import {
   AGENT_POLICY_DOMAINS,
@@ -189,13 +190,34 @@ export class AgentPolicyEngine implements ToolPolicyGate {
     request: ToolPolicyRequest,
     projectId: string,
     organizationId: string,
-  ): Promise<ToolPolicyDecision> {
+  ): Promise<ProjectScopedPolicyDecision> {
     try {
       const scope = { organizationId, projectId };
       const core = await this.evaluateCore(scope, request);
       // Non-interactive: return the decision as-is (ask stays ask → the
       // analyzer treats it as blocked; no pending approval is created).
-      return core.decision;
+      //
+      // PR #42 round-3: surface the policy version snapshot + the matched
+      // rule id + the scope source the engine already computed in
+      // evaluateCore. The governed repository-read boundary
+      // (src/onboarding/internal/governed-repository-read-policy.ts) needs
+      // these to (a) record the ACTUAL decision on the evidence row in its
+      // OWN column (repository_read_decision + repository_read_enforcement)
+      // and (b) snapshot the policy version at decision time so policy drift
+      // between the decision and the read is OBSERVABLE (not just
+      // prevented-by-construction). This is additive — the frozen
+      // ToolPolicyGate.decide() seam is UNCHANGED; only the onboarding-
+      // local project-scoped entry surfaces the version/rule/scope the
+      // engine already computes. Test fakes returning { decision: 'allow' }
+      // still satisfy ProjectScopedPolicyDecision (every added field is
+      // optional — a fake that does not surface them records policyVersion
+      // = null, honestly "not surfaced by the gate").
+      return {
+        ...core.decision,
+        policyVersion: core.version,
+        ruleId: core.match.rule?.id ?? null,
+        scopeSource: core.resolutionSource,
+      };
     } catch (err) {
       this.deps.logger.warn('agent-policy.decide-project-scope-failed', {
         projectId,
@@ -228,6 +250,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
     version: number;
     document: AgentPolicyDocument;
     decision: ToolPolicyDecision;
+    resolutionSource: AgentPolicyScopeSource;
   }> {
     const resolution = await this.deps.repository.getEffectivePolicy(
       scope.organizationId,
@@ -235,6 +258,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
     );
     const document = resolution?.document ?? PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT;
     const version = resolution?.policyVersion ?? 0;
+    const resolutionSource = resolution?.source ?? 'platform-default';
     const tags = tagInvocation(request);
     const match = matchDocument(document, tags);
 
@@ -244,6 +268,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
         match,
         version,
         document,
+        resolutionSource,
         decision: { decision: 'ask', reason: reasonFor(version, match, 'requires approval') },
       };
     }
@@ -254,6 +279,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
         match,
         version,
         document,
+        resolutionSource,
         decision: {
           decision: 'constrained',
           constraints,
@@ -266,6 +292,7 @@ export class AgentPolicyEngine implements ToolPolicyGate {
       match,
       version,
       document,
+      resolutionSource,
       decision: {
         decision: match.effect as 'allow' | 'deny',
         reason: reasonFor(version, match, undefined),

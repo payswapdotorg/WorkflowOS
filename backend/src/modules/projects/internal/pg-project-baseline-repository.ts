@@ -37,6 +37,7 @@ import type {
   BaselineEvidenceSource,
   BaselineState,
   BaselineAnalysisMode,
+  RepositoryReadEnforcement,
 } from './project-baseline.types.js';
 import { ProjectBaselineError } from './project-baseline.types.js';
 
@@ -88,6 +89,11 @@ interface EvidenceRow {
   redacted: boolean;
   tool_invocation_id: string | null;
   policy_decision: string | null;
+  // PR #42 round-3 (the governed repository-read boundary): the WORK-037
+  // decideForProjectScope decision + the concrete enforcement effect, recorded
+  // in their OWN columns (distinct from the Tool Runtime columns).
+  repository_read_decision: string | null;
+  repository_read_enforcement: Record<string, unknown> | null;
   observed_at: Date | string;
   created_at: Date | string;
 }
@@ -140,6 +146,21 @@ function mapObservation(r: ObservationRow): BaselineObservation {
   };
 }
 
+function mapEnforcement(raw: Record<string, unknown> | null): RepositoryReadEnforcement | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null;
+  const v = raw as Record<string, unknown>;
+  return {
+    policyVersion: typeof v.policyVersion === 'number' ? v.policyVersion : null,
+    ruleId: typeof v.ruleId === 'string' ? v.ruleId : null,
+    performed: v.performed === true,
+    truncated: v.truncated === true,
+    maxOutputBytes: typeof v.maxOutputBytes === 'number' ? v.maxOutputBytes : null,
+    truncatedAtBytes: typeof v.truncatedAtBytes === 'number' ? v.truncatedAtBytes : null,
+    pathAllowed: v.pathAllowed === true,
+    reason: typeof v.reason === 'string' ? v.reason : null,
+  };
+}
+
 function mapEvidence(r: EvidenceRow): BaselineEvidence {
   return {
     id: r.id,
@@ -150,6 +171,12 @@ function mapEvidence(r: EvidenceRow): BaselineEvidence {
     redacted: r.redacted,
     toolInvocationId: r.tool_invocation_id,
     policyDecision: (r.policy_decision ?? null) as BaselineEvidence['policyDecision'],
+    // PR #42 round-3: the governed repository-read decision + enforcement.
+    repositoryReadDecision:
+      (r.repository_read_decision ?? null) as BaselineEvidence['repositoryReadDecision'],
+    repositoryReadEnforcement: mapEnforcement(
+      (r.repository_read_enforcement ?? null) as Record<string, unknown> | null,
+    ),
     observedAt: asDate(r.observed_at)!,
     createdAt: asDate(r.created_at)!,
   };
@@ -251,8 +278,9 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
       const r = await this.db.query<{ id: string }>(
         `INSERT INTO wfos_project_baseline_evidence
            (baseline_id, source, locator, content_digest, redacted,
-            tool_invocation_id, policy_decision)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            tool_invocation_id, policy_decision,
+            repository_read_decision, repository_read_enforcement)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (baseline_id, source, locator) DO NOTHING
          RETURNING id`,
         [
@@ -263,6 +291,14 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
           ev.redacted,
           ev.toolInvocationId,
           ev.policyDecision,
+          // PR #42 round-3: the governed repository-read decision + the
+          // concrete enforcement effect (the `constrained` effect made
+          // OBSERVABLE). NULL when the evidence row did not come from a
+          // governed repository read.
+          ev.repositoryReadDecision,
+          ev.repositoryReadEnforcement === null
+            ? null
+            : JSON.stringify(ev.repositoryReadEnforcement),
         ],
       );
       if (r.rowCount && r.rows[0]) {
@@ -283,7 +319,9 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     }
     const rows = await this.db.query<EvidenceRow>(
       `SELECT id, baseline_id, source, locator, content_digest, redacted,
-              tool_invocation_id, policy_decision, observed_at, created_at
+              tool_invocation_id, policy_decision,
+              repository_read_decision, repository_read_enforcement,
+              observed_at, created_at
          FROM wfos_project_baseline_evidence
         WHERE id = ANY($1::uuid[]) ORDER BY created_at`,
       [insertedIds],
@@ -340,7 +378,9 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   async listEvidence(baselineId: string): Promise<BaselineEvidence[]> {
     const rows = await this.db.query<EvidenceRow>(
       `SELECT id, baseline_id, source, locator, content_digest, redacted,
-              tool_invocation_id, policy_decision, observed_at, created_at
+              tool_invocation_id, policy_decision,
+              repository_read_decision, repository_read_enforcement,
+              observed_at, created_at
          FROM wfos_project_baseline_evidence
         WHERE baseline_id = $1 ORDER BY created_at`,
       [baselineId],

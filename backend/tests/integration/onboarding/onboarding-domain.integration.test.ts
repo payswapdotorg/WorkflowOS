@@ -25,7 +25,8 @@ import { FakeGitHubAdapter } from '../../../src/modules/github/internal/fake-git
 import { PgProjectBaselineRepository } from '../../../src/modules/projects/internal/pg-project-baseline-repository.js';
 import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
 import { DefaultOnboardingService } from '../../../src/onboarding/internal/default-onboarding-service.js';
-import { GovernedFilesystemAnalyzer } from '../../../src/onboarding/internal/governed-filesystem-analyzer.js';
+import { GovernedFilesystemAnalyzer, GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST } from '../../../src/onboarding/internal/governed-filesystem-analyzer.js';
+import { DefaultGovernedRepositoryReadPolicy } from '../../../src/onboarding/internal/governed-repository-read-policy.js';
 // PR #42 (Blocker 1) fix: the PRODUCTION RepositoryContentPort wiring (delegates
 // to the /github GitHubAdapter — the only SDK caller). Exercised end-to-end
 // against the FakeGitHubAdapter's in-memory content tree.
@@ -33,7 +34,29 @@ import { GitHubRepositoryContentPort } from '../../../src/onboarding/internal/gi
 import { createLogger } from '@platform/logger.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
 import type { RepositoryContentPort, ProjectScopedPolicyGate } from '@onboarding/index.js';
-import type { ToolPolicyDecision, ToolPolicyRequest } from '@modules/agents/index.js';
+import type { ToolPolicyConstraints, ToolPolicyRequest } from '@modules/agents/index.js';
+
+/**
+ * Wires the REAL governed repository-read boundary (PR #42 round-3) around
+ * the test's content port + policy gate + the analyzer's candidate
+ * allowlist, then constructs the analyzer on top of it. The integration
+ * suite exercises the real boundary end-to-end (the boundary IS the unit
+ * under test for the round-3 invariants — atomic decide+enforce+read+
+ * record; constrained truncation; path-allowlist; honest evidence).
+ */
+function buildGovernedAnalyzer(
+  contentPort: RepositoryContentPort,
+  policyGate: ProjectScopedPolicyGate,
+  logger: ReturnType<typeof createLogger>,
+): GovernedFilesystemAnalyzer {
+  const governedReadPolicy = new DefaultGovernedRepositoryReadPolicy({
+    policyGate,
+    contentPort,
+    candidateAllowlist: GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST,
+    logger,
+  });
+  return new GovernedFilesystemAnalyzer({ governedReadPolicy, logger });
+}
 
 /** A configurable in-memory repository content provider. */
 class InMemoryContentPort implements RepositoryContentPort {
@@ -104,19 +127,35 @@ class FailingContentPort implements RepositoryContentPort {
 /** A configurable project-scoped policy gate (defaults to allow). */
 class FakePolicyGate implements ProjectScopedPolicyGate {
   private denied = new Set<string>();
+  private constrained: { readonly paths: Set<string>; readonly constraints: ToolPolicyConstraints } | null = null;
+  private nextPolicyVersion = 1;
   denyPath(path: string): this {
     this.denied.add(path);
+    return this;
+  }
+  /** PR #42 round-3: constrain a set of paths with the given constraints (maxOutputBytes truncation effect). */
+  constrainPaths(paths: string[], constraints: ToolPolicyConstraints): this {
+    this.constrained = { paths: new Set(paths), constraints };
     return this;
   }
   async decideForProjectScope(
     request: ToolPolicyRequest,
     _projectId: string,
     _organizationId: string,
-  ): Promise<ToolPolicyDecision> {
-    if (this.denied.has(request.input.path as string)) {
-      return { decision: 'deny', reason: 'denied by test policy' };
+  ) {
+    const path = request.input.path as string;
+    // PR #42 round-3: the fake surfaces policyVersion + ruleId + scopeSource
+    // so the governed boundary can record them on the evidence row (drift
+    // detection + forensic provenance). The real AgentPolicyEngine surfaces
+    // these from evaluateCore; the fake simulates them deterministically.
+    const base = { policyVersion: this.nextPolicyVersion, ruleId: 'fake-rule', scopeSource: 'project' as const };
+    if (this.denied.has(path)) {
+      return { ...base, decision: 'deny' as const, reason: 'denied by test policy' };
     }
-    return { decision: 'allow' };
+    if (this.constrained && this.constrained.paths.has(path)) {
+      return { ...base, decision: 'constrained' as const, constraints: this.constrained.constraints, reason: 'constrained by test policy' };
+    }
+    return { ...base, decision: 'allow' as const };
   }
 }
 
@@ -146,11 +185,7 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     projectBaselineRepository = new PgProjectBaselineRepository(stack.db.client);
     projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(stack.db.client);
 
-    const analyzer = new GovernedFilesystemAnalyzer({
-      contentPort,
-      policyGate,
-      logger,
-    });
+    const analyzer = buildGovernedAnalyzer(contentPort, policyGate, logger);
     onboardingService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
@@ -358,6 +393,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     expect(pkgEvidence!.policyDecision).toBeNull();
     // deny blocked the read → no content observed.
     expect(pkgEvidence!.contentDigest).toBeNull();
+    // PR #42 round-3: the ACTUAL decision that governed the read is now
+    // RECORDED on the evidence row (in repository_read_decision — its OWN
+    // column, NOT masquerading as a Tool Runtime invocation). The round-2
+    // path recorded policy_decision=NULL AND tool_invocation_id=NULL, so the
+    // decision was not recorded at all. The round-3 boundary records it.
+    expect(pkgEvidence!.repositoryReadDecision, 'the deny decision IS recorded on the evidence row').toBe('deny');
+    expect(pkgEvidence!.repositoryReadEnforcement, 'the enforcement record is present').not.toBeNull();
+    expect(pkgEvidence!.repositoryReadEnforcement!.performed, 'deny -> performed=false (the read did not happen)').toBe(false);
+    expect(pkgEvidence!.repositoryReadEnforcement!.pathAllowed, 'package.json is in the candidate allowlist').toBe(true);
     // The package_managers observation is absent (deny blocked the
     // derived observation — the runtime invariant: a denied read cannot
     // contribute observed/inferred facts).
@@ -372,6 +416,10 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     expect(readmeEvidence!.contentDigest).not.toBeNull();
     expect(readmeEvidence!.toolInvocationId).toBeNull();
     expect(readmeEvidence!.policyDecision).toBeNull();
+    // PR #42 round-3: the allow decision IS recorded on the README evidence row.
+    expect(readmeEvidence!.repositoryReadDecision).toBe('allow');
+    expect(readmeEvidence!.repositoryReadEnforcement!.performed, 'allow -> performed=true (the read happened)').toBe(true);
+    expect(readmeEvidence!.repositoryReadEnforcement!.pathAllowed).toBe(true);
   });
 
   it('16. secret-shaped values are redacted before persistence (secrets are not stored)', async () => {
@@ -543,11 +591,7 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
 
     // The PRODUCTION content port (delegates to the GitHubAdapter).
     const productionContentPort = new GitHubRepositoryContentPort(githubAdapter);
-    const productionAnalyzer = new GovernedFilesystemAnalyzer({
-      contentPort: productionContentPort,
-      policyGate,
-      logger,
-    });
+    const productionAnalyzer = buildGovernedAnalyzer(productionContentPort, policyGate, logger);
     const productionService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
@@ -728,11 +772,7 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       .setFile('Dockerfile', 'FROM node:20');
     // Do NOT set package.json (file absent → null). Do NOT set .github/workflows
     // (dir absent → []). Do NOT set docker-compose.yml or prisma/schema.prisma.
-    const partialAnalyzer = new GovernedFilesystemAnalyzer({
-      contentPort: partialContentPort,
-      policyGate,
-      logger,
-    });
+    const partialAnalyzer = buildGovernedAnalyzer(partialContentPort, policyGate, logger);
     const partialService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
@@ -789,11 +829,7 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     // 'github-not-configured' until credentials are wired; this fake
     // reproduces that infrastructure-failure mode).
     const failingContentPort = new FailingContentPort('github-not-configured');
-    const failingAnalyzer = new GovernedFilesystemAnalyzer({
-      contentPort: failingContentPort,
-      policyGate,
-      logger,
-    });
+    const failingAnalyzer = buildGovernedAnalyzer(failingContentPort, policyGate, logger);
     const failingService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
@@ -849,11 +885,7 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       .setFile('package.json', '{ this is not valid JSON ((((')
       .setFile('README.md', '# Partial Repo\nSome candidates are missing.')
       .setFile('Dockerfile', 'FROM node:20');
-    const partialAnalyzer = new GovernedFilesystemAnalyzer({
-      contentPort: partialContentPort,
-      policyGate,
-      logger,
-    });
+    const partialAnalyzer = buildGovernedAnalyzer(partialContentPort, policyGate, logger);
     const partialService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
@@ -923,6 +955,17 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       expect(ev.toolInvocationId, `evidence row ${ev.locator}: tool_invocation_id must be NULL (no ToolRuntime invocation)`).toBeNull();
       expect(ev.policyDecision, `evidence row ${ev.locator}: policy_decision must be NULL (no host tool run)`).toBeNull();
     }
+    // PR #42 round-3: the ACTUAL decision + enforcement ARE recorded on EVERY
+    // evidence row (in repository_read_decision + repository_read_enforcement
+    // — their OWN columns, NOT masquerading as a Tool Runtime invocation).
+    // The round-2 path left the decision unrecorded (policy_decision=NULL +
+    // tool_invocation_id=NULL); the round-3 boundary records it honestly.
+    for (const ev of evidence) {
+      expect(ev.repositoryReadDecision, `evidence row ${ev.locator}: repository_read_decision is recorded`).not.toBeNull();
+      expect(ev.repositoryReadEnforcement, `evidence row ${ev.locator}: repository_read_enforcement is recorded`).not.toBeNull();
+      expect(ev.repositoryReadEnforcement!.policyVersion, `evidence row ${ev.locator}: policyVersion snapshot recorded (drift detection)`).not.toBeNull();
+      expect(ev.repositoryReadEnforcement!.pathAllowed, `evidence row ${ev.locator}: path was in the candidate allowlist`).toBe(true);
+    }
     // The observation→evidence linkage uses the LOCATOR (the path), not a
     // manufactured toolInvocationId. The orchestrator resolves locator→
     // evidence id by the composite (source, locator) key.
@@ -935,5 +978,181 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
         expect(evidenceIds.has(ref), `evidence ref ${ref} exists`).toBe(true);
       }
     }
+  });
+
+  // =========================================================================
+  // PR #42 round-3 (the governed repository-read boundary made real).
+  // The architect's round-3 review: the round-2 path was a check-then-act
+  // authorization window (PolicyGate.decideForProjectScope -> if allow/
+  // constrained -> GitHubAdapter.getFileContent) with NOTHING atomic tying
+  // the authorization decision to the actual read, and `constrained` having
+  // no concrete enforcement effect. The round-3 fix introduces a DISTINCT
+  // GovernedRepositoryReadPolicy boundary (src/onboarding/internal/
+  // governed-repository-read-policy.ts) whose governedRead() atomically
+  // captures the decision, enforces it, performs the read under the
+  // captured decision, applies the `constrained` enforcement, and returns
+  // the bound decision+effect+content.
+  // =========================================================================
+
+  it('30. PR #42 r3: `constrained` has a CONCRETE enforcement effect — maxOutputBytes truncates the observed content + recomputes the digest', async () => {
+    // The architect's round-3 requirement: "define what `constrained` means
+    // for this direct-read operation." The boundary implements maxOutputBytes:
+    // the observed content is truncated to N bytes; the contentDigest is
+    // recomputed on the TRUNCATED content (the digest reflects what was
+    // ACTUALLY observed, not the pre-truncation content); the enforcement
+    // record carries truncated=true + truncatedAtBytes=N. This is a REAL,
+    // verifiable effect: a constrained read returns DIFFERENT content (and
+    // a different digest) than an unconstrained read of the same path.
+    const ref = 'constrained-truncation-branch';
+    // A large package.json (well over the 64-byte maxOutputBytes constraint).
+    const largeContent = JSON.stringify({
+      name: 'constrained-truncation-repo',
+      version: '9.9.9',
+      description: 'a large package.json that exceeds the maxOutputBytes constraint',
+      scripts: { build: 'tsc', test: 'vitest', lint: 'eslint .' },
+      dependencies: { next: '^14.0.0', react: '^18.0.0' },
+    });
+    expect(largeContent.length, 'the test content exceeds 64 bytes').toBeGreaterThan(64);
+    const constrainedPort = new InMemoryContentPort().setFile('package.json', largeContent);
+    // Constrain package.json to 64 bytes max.
+    const constrainedGate = new FakePolicyGate().constrainPaths(['package.json'], { maxOutputBytes: 64 });
+    const constrainedAnalyzer = buildGovernedAnalyzer(constrainedPort, constrainedGate, logger);
+    const constrainedService = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer: constrainedAnalyzer,
+      logger,
+    });
+    const result = await constrainedService.onboard({ projectId, ref });
+    expect(result.baseline.state, 'constrained baseline still completes (truncation is not a failure)').toBe('complete');
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    const pkgEvidence = evidence.find((e) => e.locator === 'package.json')!;
+    // The decision is 'constrained' (recorded in its OWN column).
+    expect(pkgEvidence.repositoryReadDecision).toBe('constrained');
+    // The enforcement effect: truncated=true, truncatedAtBytes=64, maxOutputBytes=64.
+    expect(pkgEvidence.repositoryReadEnforcement!.truncated, 'the content WAS truncated').toBe(true);
+    expect(pkgEvidence.repositoryReadEnforcement!.maxOutputBytes).toBe(64);
+    expect(pkgEvidence.repositoryReadEnforcement!.truncatedAtBytes).toBe(64);
+    expect(pkgEvidence.repositoryReadEnforcement!.performed).toBe(true);
+    // The content_digest is the digest of the TRUNCATED content (64 bytes),
+    // NOT the digest of the full content. Prove this by computing both and
+    // asserting the evidence matches the truncated one.
+    const truncatedContent = largeContent.slice(0, 64);
+    const truncatedDigest = createHash('sha256').update(truncatedContent, 'utf8').digest('hex');
+    const fullDigest = createHash('sha256').update(largeContent, 'utf8').digest('hex');
+    expect(pkgEvidence.contentDigest, 'the digest is of the TRUNCATED content (what was actually observed)').toBe(truncatedDigest);
+    expect(pkgEvidence.contentDigest, 'the digest is NOT of the full pre-truncation content').not.toBe(fullDigest);
+    // The package_managers observation is ABSENT — the truncated content is
+    // not valid JSON (it was cut mid-object), so JSON.parse threw and the
+    // inference was skipped (the analyzer's graceful-unparseable path).
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.find((o) => o.kind === 'package_managers'), 'no package_managers observation (truncated content was unparseable)').toBeUndefined();
+  });
+
+  it('31. PR #42 r3: the candidate-allowlist refuses reads outside the declared set (even on an allow decision) — the boundary is structurally scoped', async () => {
+    // The architect's round-3 requirement: the boundary is a DISTINCT
+    // authorization boundary for /github reads, not just a policy check.
+    // The path-allowlist is boundary-level enforcement: the boundary refuses
+    // reads of paths outside the declared candidate set (the analyzer's
+    // CANDIDATE_READS), even when the policy decision is 'allow'. This is a
+    // REAL effect: the analyzer cannot read an arbitrary path through the
+    // boundary, regardless of policy. (The analyzer only ever issues
+    // candidate-set reads in practice — this test exercises the boundary
+    // directly to prove the enforcement is structural, not coincidental.)
+    const ref = 'path-allowlist-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    const port = new InMemoryContentPort()
+      .setFile('package.json', JSON.stringify({ name: 'allowlist-repo' }))
+      .setFile('secret.env', 'SUPER_SECRET=value'); // NOT in the candidate allowlist
+    const gate = new FakePolicyGate(); // allow-all
+    const boundary = new DefaultGovernedRepositoryReadPolicy({
+      policyGate: gate,
+      contentPort: port,
+      candidateAllowlist: GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST,
+      logger,
+    });
+    const ctx = {
+      baselineId: '00000000-0000-0000-0000-000000000000',
+      projectId,
+      organizationId: orgId,
+      repositoryOwner: 'test-org',
+      repositoryName: 'existing-repo',
+      installationId: '12345',
+      baselineCommitSha: branch.sha,
+      revisionRef: ref,
+      analysisRunId: 'allowlist-test',
+      analysisMode: 'native' as const,
+    };
+    // A path IN the allowlist: allow + content read.
+    const allowed = await boundary.governedRead(
+      { path: 'package.json', family: 'filesystem', operation: 'read' }, ctx,
+    );
+    expect(allowed.governance.decision).toBe('allow');
+    expect(allowed.governance.enforcement.pathAllowed).toBe(true);
+    expect(allowed.governance.enforcement.performed).toBe(true);
+    expect(allowed.content, 'the allowlisted path was read').not.toBeNull();
+    // A path NOT in the allowlist: the boundary refuses (deny +
+    // pathAllowed=false + performed=false), even though the policy gate
+    // would 'allow' it. The read NEVER happens.
+    const refused = await boundary.governedRead(
+      { path: 'secret.env', family: 'filesystem', operation: 'read' }, ctx,
+    );
+    expect(refused.governance.decision, 'path-not-allowed -> deny (the boundary refuses)').toBe('deny');
+    expect(refused.governance.enforcement.pathAllowed).toBe(false);
+    expect(refused.governance.enforcement.performed, 'the read did NOT happen').toBe(false);
+    expect(refused.content).toBeNull();
+    expect(refused.governance.reason).toContain('not in the candidate allowlist');
+    // A mutating operation: the boundary refuses (read-only structural enforcement).
+    const refusedOp = await boundary.governedRead(
+      { path: 'package.json', family: 'filesystem', operation: 'write' }, ctx,
+    );
+    expect(refusedOp.governance.decision, 'non-read operation -> deny (the boundary is read-only)').toBe('deny');
+    expect(refusedOp.governance.enforcement.performed).toBe(false);
+    expect(refusedOp.governance.reason).toContain("not supported");
+  });
+
+  it('32. PR #42 r3: the decision + the policy version are bound to the read (drift made OBSERVABLE) — no check-then-act window at the boundary API', async () => {
+    // The architect's round-3 requirement: "prevent policy drift between
+    // decision and read" + "record the actual decision/effect." The boundary
+    // captures the decision (+ the policy version snapshot + the matched
+    // rule id) at the START of governedRead() and IS the authorization for
+    // THAT read (the read happens immediately under it, in the same method
+    // — no caller-interleavable gap). The policy version is recorded on the
+    // evidence row so a later auditor can verify "this content was read
+    // under policy version V" — drift made OBSERVABLE, not just
+    // prevented-by-construction.
+    const ref = 'policy-version-branch';
+    const port = new InMemoryContentPort().setFile('package.json', JSON.stringify({ name: 'drift-repo' }));
+    const gate = new FakePolicyGate(); // surfaces policyVersion=1, ruleId='fake-rule', scopeSource='project'
+    const analyzer = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    expect(result.baseline.state).toBe('complete');
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    const pkgEvidence = evidence.find((e) => e.locator === 'package.json')!;
+    // The policy version snapshot IS recorded on the evidence row (drift
+    // detection — a later auditor can verify which policy version
+    // authorized this read).
+    expect(pkgEvidence.repositoryReadEnforcement!.policyVersion, 'the policy version snapshot is recorded').toBe(1);
+    expect(pkgEvidence.repositoryReadEnforcement!.ruleId, 'the matched rule id is recorded').toBe('fake-rule');
+    // The decision + the version are bound in ONE outcome (the boundary
+    // method returned them together — there was no separate decide() call
+    // the caller could interleave a policy change between).
+    expect(pkgEvidence.repositoryReadDecision).toBe('allow');
+    expect(pkgEvidence.repositoryReadEnforcement!.performed).toBe(true);
   });
 });

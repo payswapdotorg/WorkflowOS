@@ -157,6 +157,22 @@ export interface BaselineEvidence {
    * consultation is a runtime invariant, not an evidence-row claim.
    */
   readonly policyDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  /**
+   * PR #42 round-3 (the governed repository-read boundary made real): the
+   * WORK-037 decideForProjectScope decision that governed THIS /github read,
+   * recorded in its OWN column (NOT masquerading as a Tool Runtime
+   * invocation). NON-NULL when the evidence row came from a governed
+   * repository read (the boundary's governedRead()); NULL otherwise. See
+   * {@link NewBaselineEvidence.repositoryReadDecision}.
+   */
+  readonly repositoryReadDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  /**
+   * PR #42 round-3: the concrete enforcement effect (the `constrained` effect
+   * made OBSERVABLE). NON-NULL when the evidence row came from a governed
+   * repository read; NULL otherwise. See
+   * {@link RepositoryReadEnforcement}.
+   */
+  readonly repositoryReadEnforcement: Readonly<RepositoryReadEnforcement> | null;
   readonly observedAt: Date;
   readonly createdAt: Date;
 }
@@ -174,14 +190,65 @@ export interface NewBaselineObservation {
   readonly evidenceRef: readonly string[];
 }
 
+/**
+ * The concrete enforcement effect a `constrained` (or boundary-enforced)
+ * repository-read decision had on the actual read (PR #42 round-3). This is
+ * the honest record of "what `constrained` actually did" — recorded on the
+ * evidence row so the effect is OBSERVABLE, not just claimed.
+ */
+export interface RepositoryReadEnforcement {
+  /** The WORK-037 policy version snapshot at decision time (drift detection). */
+  readonly policyVersion: number | null;
+  /** The matched rule id (null = default effect). */
+  readonly ruleId: string | null;
+  /** Whether the read was actually performed (deny/ask/path-not-allowed -> false). */
+  readonly performed: boolean;
+  /** Whether maxOutputBytes truncated the observed content. */
+  readonly truncated: boolean;
+  /** The maxOutputBytes constraint in effect (null = no constraint). */
+  readonly maxOutputBytes: number | null;
+  /** The byte offset at which truncation occurred (null if not truncated). */
+  readonly truncatedAtBytes: number | null;
+  /** Whether the candidate-allowlist admitted the path (the boundary enforcement). */
+  readonly pathAllowed: boolean;
+  /** The decision reason (the WORK-037 reason OR the boundary's refusal reason). */
+  readonly reason: string | null;
+}
+
 /** A new evidence row to persist. */
 export interface NewBaselineEvidence {
   readonly source: BaselineEvidenceSource;
   readonly locator: string;
   readonly contentDigest: string | null;
   readonly redacted: boolean;
+  // PR #42 round-2 invariant (PRESERVED): NULL for /github-authority reads —
+  // the /github read path is NOT a ToolRuntime invocation. Do not manufacture
+  // tool_invocation_ids for operations that never went through Tool Runtime.
   readonly toolInvocationId: string | null;
+  // PR #42 round-2 invariant (PRESERVED): NULL for /github-authority reads —
+  // reserved for "host tool run" audit trail (a ToolRuntime invocation gated
+  // by the WORK-037 engine's decide()). The /github read is NOT a host tool
+  // run. The WORK-037 project-scoped gate IS consulted at runtime (the
+  // boundary refuses to proceed on deny/ask); that consultation is a runtime
+  // invariant, not a host-tool-run claim.
   readonly policyDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  // PR #42 round-3 (the governed repository-read boundary made real): the
+  // WORK-037 decideForProjectScope decision that governed THIS /github read,
+  // recorded in its OWN column (NOT masquerading as a Tool Runtime invocation).
+  // NON-NULL when the evidence row came from a governed repository read; NULL
+  // for evidence rows that did not come from a governed read (none currently
+  // exist — all evidence rows come from governed reads). The architect's
+  // round-3 requirement: "record the actual decision/effect without
+  // pretending it was a Tool Runtime invocation" — this column records the
+  // decision; tool_invocation_id + policy_decision stay NULL.
+  readonly repositoryReadDecision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  // PR #42 round-3: the concrete enforcement effect (the `constrained` effect
+  // made OBSERVABLE). Recorded as jsonb on the evidence row so a later
+  // auditor can verify the content was read under decision X (policy version
+  // V), that maxOutputBytes truncated it to N bytes, that the path was in the
+  // candidate allowlist. NULL when the evidence row did not come from a
+  // governed repository read.
+  readonly repositoryReadEnforcement: Readonly<RepositoryReadEnforcement> | null;
 }
 
 /** Input for the idempotent ensureBaseline (one row per project+repo+commit). */

@@ -55,6 +55,15 @@ import { GovernedFilesystemAnalyzer } from './onboarding/internal/governed-files
 // inspects repository files (delegates to the /github GitHubAdapter — the
 // only SDK caller; no GitHub SDK in the onboarding domain).
 import { GitHubRepositoryContentPort } from './onboarding/internal/github-content-port.js';
+// PR #42 round-3: the governed repository-read boundary — the distinct,
+// atomic decide+enforce+read+record operation for /github reads. The
+// analyzer calls governedRead() per candidate (NOT the policy gate or the
+// content port directly — no check-then-act window). The boundary reuses
+// the WORK-037 decideForProjectScope engine (no parallel engine) and is
+// scoped to the analyzer's candidate allowlist (the boundary refuses reads
+// outside the declared candidate set, even on an allow decision).
+import { DefaultGovernedRepositoryReadPolicy } from './onboarding/internal/governed-repository-read-policy.js';
+import { GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST } from './onboarding/internal/governed-filesystem-analyzer.js';
 import type {
   SpecificationRepository,
   SpecificationVersionRepository,
@@ -1113,12 +1122,27 @@ export async function buildApp(
     // metadata-derived observations); tests used an in-memory provider and
     // so did not exercise the production wiring. The GitHubAdapter throws
     // 'github-not-configured' until GITHUB_APP_* credentials are wired
-    // (same gate as WORK-026 provisioning); the analyzer's per-candidate
-    // try/catch records the failure as evidence and continues.
+    // (same gate as WORK-026 provisioning); the boundary propagates the
+    // failure as a typed OnboardingAnalysisError so the orchestrator can
+    // markFailed the baseline (PR #42 round-2 Blocker B, preserved).
     const onboardingContentPort = new GitHubRepositoryContentPort(githubAdapter);
-    const onboardingAnalyzer = new GovernedFilesystemAnalyzer({
-      contentPort: onboardingContentPort,
+    // PR #42 round-3: wire the governed repository-read boundary. The
+    // analyzer calls governedRead() per candidate — the boundary atomically
+    // captures the WORK-037 decideForProjectScope decision, enforces it
+    // (deny/ask/path-not-allowed/operation-not-read -> no read), performs
+    // the read under the captured decision, applies the `constrained`
+    // enforcement (maxOutputBytes truncation), and returns the bound
+    // decision+effect+content. There is NO check-then-act window. The
+    // candidate allowlist (the SAME set the analyzer iterates) scopes the
+    // boundary — the analyzer cannot read an arbitrary path through it.
+    const onboardingGovernedReadPolicy = new DefaultGovernedRepositoryReadPolicy({
       policyGate: agentPolicyEngine,
+      contentPort: onboardingContentPort,
+      candidateAllowlist: GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST,
+      logger,
+    });
+    const onboardingAnalyzer = new GovernedFilesystemAnalyzer({
+      governedReadPolicy: onboardingGovernedReadPolicy,
       logger,
     });
     const onboardingService = new DefaultOnboardingService({

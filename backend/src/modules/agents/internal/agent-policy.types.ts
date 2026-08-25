@@ -337,6 +337,38 @@ export interface AgentPolicyExternalDecision {
   readonly approvalId?: string;
 }
 
+/**
+ * The WORK-037 policy decision for a project-scoped invocation (the
+ * ADDITIVE onboarding entry — decideForProjectScope — added by WORK-038),
+ * with the forensic metadata the governed repository-read boundary (PR #42
+ * round-3) needs to record the actual decision + prevent/detect policy
+ * drift.
+ *
+ * This is a SUPERSET of the frozen {@link ToolPolicyDecision}
+ * (tool-runtime.types.ts) — the frozen `ToolPolicyGate.decide()` seam is
+ * UNCHANGED; only the additive project-scoped entry surfaces the
+ * version/rule/scope the engine already computes internally in
+ * evaluateCore. Every field except `decision` is OPTIONAL so a test fake
+ * returning `{ decision: 'allow' }` still satisfies the contract (the
+ * version is then null — honestly recorded as "policyVersion not surfaced
+ * by the gate").
+ *
+ * Lives HERE (in /agents) — not in /onboarding — because the engine
+ * PRODUCES it (the dependency direction is onboarding → agents, not the
+ * reverse). /onboarding re-imports it through the /agents barrel.
+ */
+export interface ProjectScopedPolicyDecision {
+  readonly decision: ToolPolicyDecisionValue;
+  readonly reason?: string;
+  readonly constraints?: ToolPolicyConstraints;
+  /** The WORK-037 policy version snapshot at decision time (drift detection). */
+  readonly policyVersion?: number;
+  /** The matched rule id (null/undefined = default effect). */
+  readonly ruleId?: string | null;
+  /** The scope source ('project' | 'organization' | 'platform-default'). */
+  readonly scopeSource?: AgentPolicyScopeSource;
+}
+
 export interface AgentPolicyEngineDeps {
   readonly repository: AgentPolicyRepository;
   readonly auditWriter?: Pick<import('@modules/audit/index.js').AuditEventWriter, 'write'>;

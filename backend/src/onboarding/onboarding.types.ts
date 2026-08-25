@@ -30,7 +30,8 @@
  */
 import type { ToolFamily } from '@platform/tools/tool-contracts.js';
 import type {
-  ToolPolicyDecision,
+  ProjectScopedPolicyDecision,
+  ToolPolicyDecisionValue,
   ToolPolicyRequest,
 } from '@modules/agents/index.js';
 import type {
@@ -38,7 +39,14 @@ import type {
   BaselineEvidenceSource,
   NewBaselineEvidence,
   NewBaselineObservation,
+  RepositoryReadEnforcement,
 } from '@modules/projects/index.js';
+
+// Re-export ProjectScopedPolicyDecision (defined in /agents — the engine
+// produces it; the dependency direction is onboarding → agents) so the
+// governed repository-read boundary + the project-scoped gate seam can
+// reference it without reaching across the package boundary.
+export type { ProjectScopedPolicyDecision };
 
 // --- The project-scoped policy gate (the WORK-037 boundary for onboarding) ---
 
@@ -50,13 +58,20 @@ import type {
  * and has no wfos_executions row. Onboarding is NON-INTERACTIVE: an 'ask'
  * decision is returned as-is (the analyzer records it as a blocked
  * observation; no pending approval is created).
+ *
+ * PR #42 round-3: decideForProjectScope returns the richer
+ * {@link ProjectScopedPolicyDecision} so the governed repository-read
+ * boundary can capture the policy version snapshot (drift detection) and
+ * the matched rule id (forensic provenance) AT DECISION TIME — the decision
+ * and the version are bound in the same call. The decision type lives in
+ * /agents (the engine produces it; onboarding re-imports it).
  */
 export interface ProjectScopedPolicyGate {
   decideForProjectScope(
     request: ToolPolicyRequest,
     projectId: string,
     organizationId: string,
-  ): Promise<ToolPolicyDecision>;
+  ): Promise<ProjectScopedPolicyDecision>;
 }
 
 // --- The repository content port (how file content at a revision is read) ---
@@ -192,15 +207,120 @@ export interface OnboardResult {
 export interface GovernedReadRequest {
   readonly path: string;
   readonly family: ToolFamily;
+  /** 'read' (a file) | 'list' (a directory). The boundary refuses others. */
   readonly operation: string;
 }
 
-/** A governed read outcome (the decision + optional content). */
+/**
+ * The bound governance record for ONE governed repository read (PR #42
+ * round-3). This is the honest, atomic record of the decision that
+ * authorized the read AND the concrete enforcement effect the boundary
+ * applied. It is NOT a Tool Runtime invocation record — there is no
+ * tool_invocation_id here (the /github read path is not a ToolRuntime
+ * invocation). It is recorded on the evidence row in its OWN columns
+ * (repository_read_decision + repository_read_enforcement), distinct from
+ * the Tool Runtime columns (tool_invocation_id + policy_decision stay NULL).
+ */
+export interface RepositoryReadGovernance {
+  /** The WORK-037 decideForProjectScope decision (allow/constrained/deny/ask). */
+  readonly decision: ToolPolicyDecisionValue;
+  /** The decision reason (the WORK-037 reason OR the boundary's refusal reason). */
+  readonly reason: string | null;
+  /** The policy version snapshot at decision time (drift detection; null when the gate did not surface one). */
+  readonly policyVersion: number | null;
+  /** The matched rule id (null = default effect). */
+  readonly ruleId: string | null;
+  /** Whether the read was actually performed (deny/ask/path-not-allowed/operation-not-read -> false). */
+  readonly performed: boolean;
+  /** The concrete enforcement effect (what `constrained` actually did — OBSERVABLE). */
+  readonly enforcement: Readonly<RepositoryReadEnforcement>;
+}
+
+/**
+ * The outcome of a governed repository read: the content (null when the read
+ * was blocked OR the path was absent) + the bound governance record. The
+ * decision and the content are returned by ONE boundary method — there is no
+ * caller-interleavable check-then-act gap (PR #42 round-3).
+ */
 export interface GovernedReadOutcome {
   readonly request: GovernedReadRequest;
-  readonly decision: ToolPolicyDecision;
-  readonly invocationId: string;
   readonly content: { readonly content: string; readonly contentDigest: string } | null;
+  readonly governance: RepositoryReadGovernance;
+}
+
+/**
+ * PR #42 round-3 — the governed repository-read boundary for /github reads.
+ *
+ * The architect's round-3 review identified that the round-2 path was a
+ * check-then-act authorization window:
+ *
+ *   PolicyGate.decideForProjectScope()            (decision at T1)
+ *     -> if allow/constrained
+ *       -> GitHubAdapter.getFileContent/listDir()  (read at T2 > T1)
+ *
+ * with NOTHING atomic tying the authorization decision to the actual read,
+ * and `constrained` having no concrete enforcement effect. This boundary
+ * makes the governance real: {@link governedRead} is a SINGLE authoritative
+ * operation that captures the WORK-037 decision, enforces it (deny/ask/
+ * path-not-allowed/operation-not-read -> no read), performs the read under
+ * the captured decision, applies the `constrained` enforcement, and returns
+ * the bound decision+effect+content.
+ *
+ * WHY THE ALTERNATIVE PATH (not the preferred Tool Runtime adaptation):
+ * the frozen WORK-036 `DefaultToolRuntime.invoke()` is structurally coupled
+ * to ExecutionSession (must be 'running') + Workspace (must be 'ready') +
+ * WorktreeMaterializer (host-path re-resolution) + a family ToolExecutor.
+ * Onboarding is NOT a Work Item execution — it has NO wfos_executions row,
+ * NO ExecutionSession, NO Workspace, NO host worktree. Routing onboarding
+ * reads through `invoke()` would require manufacturing a synthetic session/
+ * workspace/worktree — exactly the "fake toolInvocationId" smell the
+ * architect already rejected in round-2. Adapting the frozen WORK-036
+ * boundary to support a session-less, workspace-less, worktree-less read
+ * path is a substantial refactor of a FROZEN boundary, out of scope for
+ * WORK-038. The architect's handoff explicitly sanctioned the non-executing
+ * /github read path IF made a real, distinct, atomic boundary — which this
+ * is. It REUSES the WORK-037 decideForProjectScope engine (no parallel
+ * engine — same matcher, same document, same decision vocabulary).
+ *
+ * `constrained` enforcement (made concrete + verifiable):
+ *   * maxOutputBytes — truncate the observed content to N bytes, flag
+ *     truncated=true, truncatedAtBytes=N, recompute contentDigest on the
+ *     TRUNCATED content (the digest reflects what was actually observed).
+ *   * path-allowlist — the boundary only admits reads of paths in the
+ *     declared candidate set; an arbitrary path -> pathAllowed=false,
+ *     performed=false, decision='deny' (even an allow policy cannot read an
+ *     arbitrary path through this boundary).
+ *   * read-only — the boundary only supports read/list operations; any
+ *     other operation is refused (performed=false).
+ *
+ * Policy drift prevention: the decision is captured at the START of
+ * governedRead() and IS the authorization for THAT read (the read happens
+ * immediately under it, in the same method). The policy version is also
+ * snapshotted into RepositoryReadGovernance.policyVersion so a later auditor
+ * can verify "this content was read under policy version V" — drift made
+ * OBSERVABLE, not just prevented-by-construction.
+ */
+export interface GovernedRepositoryReadPolicy {
+  /**
+   * The single authoritative operation boundary for a /github read. Captures
+   * the WORK-037 decision, enforces it, performs the read under the captured
+   * decision, applies the `constrained` enforcement, and returns the bound
+   * decision+effect+content. There is NO check-then-act window at this API.
+   *
+   * Infrastructure failures (the content port throws — GitHub unavailable,
+   * authentication failure, API failure, content retrieval infrastructure
+   * failure) propagate as a typed {@link OnboardingAnalysisError} (code
+   * 'repository-content-unavailable') so the orchestrator can markFailed the
+   * baseline — the baseline must NEVER reach 'complete' when the required
+   * repository analysis could not actually inspect the repository (PR #42
+   * round-2 Blocker B, preserved). Expected-missing (the port returns
+   * null/[]) is NOT an infrastructure failure — the boundary returns
+   * content=null + performed=true (the read happened; the path was absent).
+   */
+  governedRead(
+    request: GovernedReadRequest,
+    ctx: AnalysisContext,
+  ): Promise<GovernedReadOutcome>;
 }
 
 /** Convenience: the evidence-source vocabulary (mirrors the DB CHECK). */

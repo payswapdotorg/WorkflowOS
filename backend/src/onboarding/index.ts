@@ -14,6 +14,7 @@
  */
 export type {
   ProjectScopedPolicyGate,
+  ProjectScopedPolicyDecision,
   RepositoryContentPort,
   RepositoryAnalyzer,
   AnalysisContext,
@@ -24,6 +25,8 @@ export type {
   OnboardingService,
   GovernedReadRequest,
   GovernedReadOutcome,
+  GovernedRepositoryReadPolicy,
+  RepositoryReadGovernance,
 } from './onboarding.types.js';
 export type { ToolPolicyRequest } from './onboarding.types.js';
 // PR #42 round-2 review (Blocker B): the typed onboarding-analysis error
@@ -42,6 +45,12 @@ export type { DefaultOnboardingService } from './internal/default-onboarding-ser
 export type { DefaultOnboardingServiceDeps } from './internal/default-onboarding-service.js';
 export type { GovernedFilesystemAnalyzer } from './internal/governed-filesystem-analyzer.js';
 export type { GovernedFilesystemAnalyzerDeps } from './internal/governed-filesystem-analyzer.js';
+// PR #42 round-3: the governed repository-read boundary (the distinct,
+// atomic decide+enforce+read+record operation for /github reads). The
+// composition root (app.ts) instantiates it (a VALUE import from internal/ —
+// the barrel stays types-only per the static-architecture invariant).
+export type { DefaultGovernedRepositoryReadPolicy } from './internal/governed-repository-read-policy.js';
+export type { DefaultGovernedRepositoryReadPolicyDeps } from './internal/governed-repository-read-policy.js';
 // WORK-038 PR #42 fix: the PRODUCTION RepositoryContentPort wiring (delegates
 // to the /github GitHubAdapter — the only SDK caller). Type-only re-export
 // (the composition root in app.ts instantiates it).

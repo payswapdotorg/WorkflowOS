@@ -47,6 +47,7 @@ export type {
   BaselineEvidence,
   NewBaselineObservation,
   NewBaselineEvidence,
+  RepositoryReadEnforcement,
   EnsureBaselineInput,
   ProjectBaselineRepository,
   ProjectBaselineErrorCode,
