@@ -177,6 +177,7 @@ import { DefaultToolRuntime } from './modules/agents/internal/tool-runtime-servi
 import { DefaultToolPolicyGate } from './modules/agents/internal/tool-runtime.types.js';
 import { FsToolExecutor } from './platform/tools/fs-tool-executor.js';
 import { ProcessToolExecutor } from './platform/tools/process-tool-executor.js';
+import { NamespaceProcessSandbox } from './platform/tools/process-sandbox.js';
 import { HttpToolExecutor } from './platform/tools/http-tool-executor.js';
 import { BrowserToolExecutor } from './platform/tools/browser-tool-executor.js';
 import { FsWorktreeMaterializer } from './platform/workspace/fs-worktree-materializer.js';
@@ -1007,6 +1008,24 @@ export async function buildApp(
     // never duplicated). No browser driver is configured by default — the
     // family fails closed with the typed unavailability outcome until a
     // provider driver adapter is supplied behind the port.
+    // PR #40 review fix: the process sandbox boundary. Every terminal/git/
+    // package invocation crosses the namespace sandbox (mount/net/pid/
+    // ipc/uts/user + pivot_root + capability drop) — cwd confinement alone
+    // confines the invocation, not the process. Deployment-level extra
+    // toolchain roots (read-only system image additions) come from
+    // WFOS_SANDBOX_TOOLCHAIN_PATHS (':'-separated, operator config only —
+    // tool callers can never influence it). Fail-closed: if the sandbox
+    // primitives are unavailable, the process families report the typed
+    // 'process-sandbox-unavailable' outcome — there is no unsandboxed
+    // fallback.
+    const processSandbox = new NamespaceProcessSandbox({
+      extraToolchainRoots:
+        (process.env.WFOS_SANDBOX_TOOLCHAIN_PATHS ?? '')
+          .split(':')
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+      logger,
+    });
     const toolRuntime = new DefaultToolRuntime({
       sessionService: executionSessionService,
       sessionRepository: executionSessionRepository,
@@ -1014,9 +1033,9 @@ export async function buildApp(
       materializer: workspaceMaterializer,
       executors: {
         filesystem: new FsToolExecutor({ logger }),
-        terminal: new ProcessToolExecutor('terminal', { logger }),
-        git: new ProcessToolExecutor('git', { logger }),
-        package: new ProcessToolExecutor('package', { logger }),
+        terminal: new ProcessToolExecutor('terminal', { logger, sandbox: processSandbox }),
+        git: new ProcessToolExecutor('git', { logger, sandbox: processSandbox }),
+        package: new ProcessToolExecutor('package', { logger, sandbox: processSandbox }),
         http: new HttpToolExecutor({ logger }),
         browser: new BrowserToolExecutor({ logger }),
       },

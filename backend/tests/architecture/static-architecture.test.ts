@@ -343,6 +343,7 @@ const PROVIDER_IMPLEMENTATION_FILES = new Set([
   //     contracts live in tool-contracts.ts which domain code MAY import) ---
   'src/platform/tools/fs-tool-executor.ts', // FsToolExecutor
   'src/platform/tools/process-tool-executor.ts', // ProcessToolExecutor (terminal/git/package)
+  'src/platform/tools/process-sandbox.ts', // NamespaceProcessSandbox (the PR #40 review-fix sandbox)
   'src/platform/tools/http-tool-executor.ts', // HttpToolExecutor
   'src/platform/tools/browser-tool-executor.ts', // BrowserToolExecutor + BrowserDriver port host
 ]);
@@ -8394,11 +8395,13 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
   const TR_CONTRACTS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'tool-contracts.ts');
   const TR_FS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'fs-tool-executor.ts');
   const TR_PROCESS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+  const TR_SANDBOX = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-sandbox.ts');
   const TR_HTTP = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'http-tool-executor.ts');
   const TR_BROWSER = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'browser-tool-executor.ts');
   const TR_CONFINEMENT = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'path-confinement.ts');
   const TR_REDACTION = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'observation-redaction.ts');
   const TR_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+  const TR_SANDBOX_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'process-sandbox.regression.test.ts');
 
   const TOOL_RUNTIME_FILES = [
     ['types', TR_TYPES],
@@ -8406,6 +8409,7 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     ['contracts', TR_CONTRACTS],
     ['fs-executor', TR_FS],
     ['process-executor', TR_PROCESS],
+    ['process-sandbox', TR_SANDBOX],
     ['http-executor', TR_HTTP],
     ['browser-executor', TR_BROWSER],
     ['confinement', TR_CONFINEMENT],
@@ -8639,7 +8643,7 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
   it('terminal governance: explicit argv, NO shell, bounded output, sanitized env, timeout + cancellation', () => {
     const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
     // execFile with EXPLICIT argv — never child_process.exec (shell).
-    expect(procSrc).toMatch(/execFileAsync\(argv\[0\]!, argv\.slice\(1\)/);
+    expect(procSrc).toMatch(/execFile\(/);
     expect(procSrc).not.toMatch(/child_process\.exec\(|exec\(userString|shell:\s*true/);
     // argv separation is validated (a shell string can never smuggle in).
     expect(procSrc).toMatch(/requires a non-empty argv of strings \(no shell strings\)/);
@@ -8647,12 +8651,93 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     expect(procSrc).toMatch(/maxBuffer/);
     expect(procSrc).toMatch(/timeout/);
     expect(procSrc).toMatch(/signal: opts\.ctx\.signal/);
-    expect(procSrc).toMatch(/killSignal: 'SIGTERM'/);
-    // Cancellation + timeout map to distinct observable outcome codes.
+    // The teardown: process-group SIGTERM with a guaranteed SIGKILL
+    // escalation (the wrapper blocks SIGTERM; the pid-1 target ignores
+    // default-disposition signals).
+    expect(procSrc).toMatch(/process\.kill\(-child\.pid, sig\)/);
+    expect(procSrc).toMatch(/TEARDOWN_GRACE_MS/);
+    expect(procSrc).toMatch(/'SIGKILL'/);
+    // Cancellation + timeout map to distinct observable outcome codes
+    // (deterministic flags — not signal bookkeeping through the wrapper).
     expect(procSrc).toMatch(/'cancelled'/);
     expect(procSrc).toMatch(/'timeout'/);
     // The package family rejects arbitrary binaries (bare runner names).
     expect(procSrc).toMatch(/package-runner-path-forbidden/);
+  });
+
+  it('the PROCESS SANDBOX boundary (PR #40 review fix): kernel-enforced confinement, fail-closed, NO unsandboxed fallback', () => {
+    expect(existsSync(TR_SANDBOX), 'platform/tools/process-sandbox.ts must exist').toBe(true);
+    const sandboxSrc = readFileSync(TR_SANDBOX, 'utf8');
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+
+    // The port + exactly ONE implementation; NO pass-through sandbox.
+    expect(sandboxSrc).toMatch(/export interface ProcessSandbox\b/);
+    expect(sandboxSrc).toMatch(/export class NamespaceProcessSandbox implements ProcessSandbox/);
+    expect(sandboxSrc).toMatch(/export class ProcessSandboxError extends Error/);
+    // The executor REQUIRES the sandbox (no optional dep, no default).
+    expect(procSrc).toMatch(/readonly sandbox: ProcessSandbox;/);
+    expect(procSrc).not.toMatch(/sandbox\?:/);
+    // app.ts wires the REAL namespace sandbox into ALL THREE process families.
+    expect(appSrc).toMatch(/new NamespaceProcessSandbox\(/);
+    for (const family of ['terminal', 'git', 'package']) {
+      expect(appSrc, `app.ts must wire the sandbox into the ${family} executor`).toContain(
+        `new ProcessToolExecutor('${family}', { logger, sandbox: processSandbox })`,
+      );
+    }
+
+    // Fail-closed: ensureAvailable BEFORE wrapLaunch BEFORE the spawn;
+    // the typed unavailable outcome; no fallback spawn of the raw argv.
+    const runProcessBody = procSrc.match(/private async runProcess[\s\S]*?\n  \}/)![0];
+    const ensureIdx = runProcessBody.indexOf('this.sandbox.ensureAvailable()');
+    const wrapIdx = runProcessBody.indexOf('this.sandbox.wrapLaunch(');
+    const spawnIdx = procSrc.indexOf('launch.argv[0]!');
+    expect(ensureIdx).toBeGreaterThan(-1);
+    expect(wrapIdx).toBeGreaterThan(ensureIdx);
+    expect(spawnIdx).toBeGreaterThan(procSrc.indexOf('private spawnSandboxed'));
+    expect(procSrc).toMatch(/'process-sandbox-unavailable'/);
+    expect(procSrc).toMatch(/there is no unsandboxed fallback/);
+    // The outcome records WHICH confinement produced it (observability).
+    expect(procSrc).toMatch(/sandbox: this\.sandbox\.id/);
+
+    // The unshare flags: user + mount + NET + PID + IPC + UTS + kill-child.
+    expect(sandboxSrc).toContain("'--user'");
+    expect(sandboxSrc).toContain("'--map-root-user'");
+    expect(sandboxSrc).toContain("'--mount'");
+    expect(sandboxSrc).toContain("'--net'");
+    expect(sandboxSrc).toContain("'--pid'");
+    expect(sandboxSrc).toContain("'--ipc'");
+    expect(sandboxSrc).toContain("'--uts'");
+    expect(sandboxSrc).toContain("'--kill-child'");
+
+    // The FROZEN setup script: pivot_root + tmpfs root + read-only system
+    // binds + the sealed old root + the capability drop. NO interpolation
+    // (no '${' anywhere in the script — user argv travels POSITIONALLY).
+    const scriptMatch = sandboxSrc.match(/export const NAMESPACE_SANDBOX_SETUP_SCRIPT = `([\s\S]*?)`;/);
+    expect(scriptMatch, 'the frozen setup script constant must exist').not.toBeNull();
+    const script = scriptMatch![1];
+    expect(script).not.toContain('${');
+    for (const fragment of [
+      'mount -t tmpfs',
+      'mount --bind /usr',
+      'mount -o remount,bind,ro',
+      'pivot_root /mnt /mnt/.putold',
+      'umount -l /.putold',
+      'mount -t tmpfs -o size=4k,mode=000 tmpfs /.putold',
+      'set -eu',
+      'test -x /usr/bin/setpriv',
+      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- "$@"',
+      'shift 4',
+    ]) {
+      expect(script, `the frozen script must contain: ${fragment}`).toContain(fragment);
+    }
+    // The git object store bind derives from the WORK-035 layout module —
+    // never from the tamperable .git pointer file.
+    expect(sandboxSrc).toMatch(/deriveRepositoryDirFromWorktreePath/);
+    expect(sandboxSrc).not.toMatch(/readFile.*\.git|gitdir:/);
+    // The layout module owns the inverse derivation (single source).
+    const layoutSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'worktree-layout.ts'), 'utf8');
+    expect(layoutSrc).toMatch(/export function deriveRepositoryDirFromWorktreePath/);
   });
 
   it('the WORK-036 regression matrix exists (the frozen scenarios)', () => {
@@ -8682,6 +8767,29 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     // The seam + chain-gate scenarios.
     expect(src).toMatch(/policy seam: deny \+ ask BLOCK execution/);
     expect(src).toMatch(/chain gates: no session \/ not-running session \/ no workspace \/ not-ready workspace/);
+  });
+
+  it('the PROCESS-SANDBOX regression matrix exists (the PR #40 review-fix scenarios)', () => {
+    expect(existsSync(TR_SANDBOX_TEST), 'process-sandbox.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(TR_SANDBOX_TEST, 'utf8');
+    // cwd confinement ≠ process confinement — the review's framing.
+    expect(src).toMatch(/cwd confinement is NOT process confinement/);
+    // Legitimate workspace-local development commands still run.
+    expect(src).toMatch(/legitimate workspace-local development commands still run/);
+    expect(src).toMatch(/legitimate git operations run inside the worktree THROUGH the shared object store/);
+    expect(src).toMatch(/the review bypass route/);
+    // The escape routes are all blocked.
+    expect(src).toMatch(/absolute host filesystem access is BLOCKED/);
+    expect(src).toMatch(/traversal cannot escape the workspace/);
+    expect(src).toMatch(/git -C <outside repository> is BLOCKED via the terminal family/);
+    expect(src).toMatch(/the host environment and host processes are invisible/);
+    expect(src).toMatch(/direct network access is BLOCKED from the sandbox/);
+    // The hostile-process + seal + fail-closed + shape invariants.
+    expect(src).toMatch(/a hostile process cannot remount, unstack, or unmount the frozen sandbox/);
+    expect(src).toMatch(/an unusable sandbox fails CLOSED/);
+    expect(src).toMatch(/the frozen constant script \+ POSITIONAL argv/);
+    expect(src).toMatch(/extra toolchain roots are validated/);
+    expect(src).toMatch(/never the tamperable \.git pointer/);
   });
 
   it('the barrel exposes the tool contracts (implementations internal; the sanctioned error + limits constants)', () => {

@@ -45,6 +45,7 @@ import { FsToolExecutor } from '../../../src/platform/tools/fs-tool-executor.js'
 import { ProcessToolExecutor } from '../../../src/platform/tools/process-tool-executor.js';
 import { HttpToolExecutor } from '../../../src/platform/tools/http-tool-executor.js';
 import { BrowserToolExecutor } from '../../../src/platform/tools/browser-tool-executor.js';
+import { NamespaceProcessSandbox } from '../../../src/platform/tools/process-sandbox.js';
 import type { BrowserDriver } from '../../../src/platform/tools/browser-tool-executor.js';
 import { FsWorktreeMaterializer } from '../../../src/platform/workspace/fs-worktree-materializer.js';
 import { DefaultAuditService } from '../../../src/modules/audit/internal/audit-service.js';
@@ -212,6 +213,10 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
       },
     };
 
+    // PR #40 review fix: the REAL namespace sandbox — every process-family
+    // test now proves its behavior THROUGH the kernel-enforced boundary
+    // (the same one app.ts wires).
+    const processSandbox = new NamespaceProcessSandbox({ logger: stack.db.logger });
     runtime = new DefaultToolRuntime({
       sessionService,
       sessionRepository: sessionRepo,
@@ -219,9 +224,9 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
       materializer,
       executors: {
         filesystem: new FsToolExecutor({ logger: stack.db.logger }),
-        terminal: new ProcessToolExecutor('terminal', { logger: stack.db.logger }),
-        git: new ProcessToolExecutor('git', { logger: stack.db.logger }),
-        package: new ProcessToolExecutor('package', { logger: stack.db.logger }),
+        terminal: new ProcessToolExecutor('terminal', { logger: stack.db.logger, sandbox: processSandbox }),
+        git: new ProcessToolExecutor('git', { logger: stack.db.logger, sandbox: processSandbox }),
+        package: new ProcessToolExecutor('package', { logger: stack.db.logger, sandbox: processSandbox }),
         http: new HttpToolExecutor({ logger: stack.db.logger }),
         browser: new BrowserToolExecutor({ logger: stack.db.logger, driver: browserDriver }),
       },
@@ -977,7 +982,10 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
     });
     expect(missing.record.status).toBe('failed');
     expect(missing.record.error?.code).toBe('filesystem-error');
-    // A missing executable.
+    // A missing executable — PR #40 review fix: the failure now happens
+    // INSIDE the sandbox (the setup shell reports 127), which is the
+    // honest semantics: the SANDBOX worked; the TOOL does not exist.
+    // (A sandbox-level failure would be 'process-sandbox-unavailable'.)
     const noBinary = await runtime.invoke({
       invocationId: 'w036-fail-nobinary',
       executionId: chain.executionId,
@@ -986,7 +994,8 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
       idempotency: 'idempotent',
     });
     expect(noBinary.record.status).toBe('failed');
-    expect(noBinary.record.error?.code).toBe('process-error');
+    expect(noBinary.record.error?.code).toBe('non-zero-exit');
+    expect(noBinary.record.exitCode).toBe(127);
     // Invalid input (the typed contract error).
     const invalid = await runtime
       .invoke({

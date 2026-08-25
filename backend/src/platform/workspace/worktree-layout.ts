@@ -110,3 +110,41 @@ export function parseWorktreeToken(token: string): ParsedWorktreeToken {
   assertSafeSegment('executionRecordId', executionRecordId);
   return { repositoryOwner, repositoryName, kind: 'exec', executionRecordId };
 }
+
+/**
+ * WORK-036 (PR #40 review fix): the INVERSE layout derivation — given a
+ * resolved worktree HOST path, recover the repository directory it is
+ * attached to (`<root>/<owner>/<repository>`). The process sandbox uses
+ * this to bind the shared git object store a worktree needs (git's own
+ * worktree model: objects/refs live in the repository's `.git`, shared
+ * across worktrees BY DESIGN).
+ *
+ * WHY the path shape — never the worktree's `.git` POINTER — is the
+ * authority: the `.git` file lives INSIDE the writable worktree, so a
+ * sandboxed process could rewrite it to point anywhere on the host. The
+ * layout derivation is validated against the safe-segment vocabulary and
+ * can only ever name the repository the WORK-035 layout places at that
+ * location; a tampered pointer at worst BREAKS git inside the sandbox
+ * (observable), it can never widen the bind.
+ *
+ * Returns null when the path is not worktree-shaped (a plain directory
+ * workspace has no separate repository object store to bind).
+ */
+export function deriveRepositoryDirFromWorktreePath(worktreeDir: string): string | null {
+  if (typeof worktreeDir !== 'string' || !worktreeDir.startsWith('/')) return null;
+  const parts = worktreeDir.split('/').filter((p) => p.length > 0);
+  // <root…>/<owner>/<repository>/exec/<executionRecordId> — at minimum
+  // owner/repository/exec/id under a root of "/".
+  if (parts.length < 4 || parts[parts.length - 2] !== 'exec') return null;
+  const executionRecordId = parts[parts.length - 1]!;
+  const repositoryName = parts[parts.length - 3]!;
+  const repositoryOwner = parts[parts.length - 4]!;
+  try {
+    assertSafeSegment('repositoryOwner', repositoryOwner);
+    assertSafeSegment('repositoryName', repositoryName);
+    assertSafeSegment('executionRecordId', executionRecordId);
+  } catch {
+    return null;
+  }
+  return '/' + parts.slice(0, parts.length - 2).join('/');
+}

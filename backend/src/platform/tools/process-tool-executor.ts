@@ -1,9 +1,19 @@
 /**
  * WORK-036: ProcessToolExecutor — ONE governed process engine for the
- * terminal, git, and package families (the safest existing platform
- * process abstraction: promisified child_process.execFile with EXPLICIT
- * argv — never child_process.exec(userString); there is no shell, so
- * there is no shell-escape surface).
+ * terminal, git, and package families (explicit-argv child spawning —
+ * never child_process.exec(userString); there is no shell, so there is
+ * no shell-escape surface).
+ *
+ * PR #40 REVIEW FIX — the sandbox boundary: this executor previously
+ * confined only the WORKING DIRECTORY, which confines the invocation,
+ * not the PROCESS: a cwd-confined child could still `cat /etc/passwd`,
+ * run `git -C /outside/repository …`, read host credentials through
+ * /proc/<pid>/environ, and open sockets. EVERY launch now crosses the
+ * injected ProcessSandbox boundary (mount/net/pid/ipc/uts/user
+ * namespaces, pivot_root, capability drop) — see process-sandbox.ts.
+ * Fail-closed: no usable sandbox ⇒ the typed
+ * `process-sandbox-unavailable` outcome ⇒ NO process. There is no
+ * unsandboxed fallback path in this class.
  *
  * GOVERNANCE (structural, not policy — WORK-037 tightens later):
  *   * explicit argv separation (argv[0] = executable; no shell string);
@@ -12,9 +22,13 @@
  *   * the child environment is a SANITIZED MINIMAL base + the explicit
  *     caller env — the host environment (which may hold GitHub/LLM
  *     credentials) is NEVER inherited;
+ *   * the kernel-enforced sandbox confines the PROCESS to the worktree
+ *     (+ the repository's shared .git object store — git's own worktree
+ *     model) and cuts network, host processes, and host configuration;
  *   * stdout/stderr captured with per-stream byte caps (bounded output);
  *   * the exit code, start/end timing, cancellation (AbortSignal →
- *     SIGTERM), and a hard timeout are all part of the outcome;
+ *     SIGTERM), and a hard timeout are all part of the outcome (the
+ *     timeout bounds the ENTIRE sandboxed invocation);
  *   * GIT family: remote-network subcommands and cwd/git-dir-redirecting
  *     flags are rejected fail-closed (the workspace holds no GitHub
  *     credentials; remote authority stays /github);
@@ -22,7 +36,7 @@
  *     separators rejected — no arbitrary binaries).
  */
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import type { ExecFileException, ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import type { Logger } from '@platform/logger.js';
 import type {
   GitToolRequest,
@@ -36,13 +50,29 @@ import type {
 } from './tool-contracts.js';
 import { toolOutcomeError } from './tool-contracts.js';
 import { resolveWithinWorkspace, WorkspaceBoundaryError } from './path-confinement.js';
+import type { ProcessSandbox, WrappedProcessLaunch } from './process-sandbox.js';
 
-const execFileAsync = promisify(execFile);
+/**
+ * The teardown grace: after SIGTERM the group gets this long before the
+ * SIGKILL escalation (a PID-1-in-its-namespace target legitimately
+ * ignores default-disposition SIGTERM — only SIGKILL is guaranteed).
+ */
+const TEARDOWN_GRACE_MS = 2_000;
+
+/** The raw spawn result before governed mapping. */
+interface RawProcessResult {
+  readonly err: (Error & { code?: number | string; killed?: boolean; signal?: string }) | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+  readonly aborted: boolean;
+}
 
 /**
  * Git subcommands that touch the REMOTE (network) — rejected fail-closed:
  * the workspace layer holds no credentials and remote repository state is
- * /github's authority (push/pull/fetch/clone/…).
+ * /github's authority (push/pull/fetch/clone/…). (Defense in depth: the
+ * sandbox's network namespace blocks these anyway.)
  */
 const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'push',
@@ -63,7 +93,8 @@ const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set([
 
 /**
  * Git argv tokens that REDIRECT where git operates (defeating the forced
- * workspace cwd) — rejected anywhere in the argv.
+ * workspace cwd) — rejected anywhere in the argv. (Defense in depth: the
+ * sandbox makes redirected host paths unreachable anyway.)
  */
 const GIT_REDIRECT_FLAGS: ReadonlySet<string> = new Set([
   '-C',
@@ -81,6 +112,13 @@ const GIT_ENV_PREFIX = 'GIT_';
 
 export interface ProcessToolExecutorDeps {
   readonly logger: Logger;
+  /**
+   * REQUIRED, no default: the sandbox every native process crosses. The
+   * composition root injects NamespaceProcessSandbox (app.ts); tests
+   * inject the real one or an unavailable stub — there is no constructor
+   * path that yields an unsandboxed executor.
+   */
+  readonly sandbox: ProcessSandbox;
 }
 
 export class ProcessToolExecutor implements ToolExecutor {
@@ -89,9 +127,11 @@ export class ProcessToolExecutor implements ToolExecutor {
   constructor(family: 'terminal' | 'git' | 'package', deps: ProcessToolExecutorDeps) {
     this.family = family;
     this.logger = deps.logger;
+    this.sandbox = deps.sandbox;
   }
 
   private readonly logger: Logger;
+  private readonly sandbox: ProcessSandbox;
 
   async execute(request: ToolFamilyRequest, ctx: ToolExecutorContext): Promise<ToolExecutionOutcome> {
     if (this.family === 'git') return this.executeGit(request as GitToolRequest, ctx);
@@ -197,7 +237,9 @@ export class ProcessToolExecutor implements ToolExecutor {
       cwd = await resolveWithinWorkspace(opts.ctx.workspaceRoot, opts.cwd ?? '.');
     } catch (err) {
       if (err instanceof WorkspaceBoundaryError) {
-        return toolOutcomeError(err.code, `working directory rejected — ${err.message}`);
+        return toolOutcomeError(err.code, `working directory rejected — ${err.message}`, {
+          output: { argv: argv.length, sandbox: this.sandbox.id },
+        });
       }
       throw err;
     }
@@ -205,98 +247,209 @@ export class ProcessToolExecutor implements ToolExecutor {
     const timeout = this.boundedTimeout(opts.timeoutMs, opts.ctx);
     const env = this.sanitizedEnv(opts.env, cwd);
 
+    // The sandbox boundary — FAIL-CLOSED: if it is not usable, no process
+    // runs at all (there is no unsandboxed fallback anywhere).
     try {
-      const { stdout, stderr } = await execFileAsync(argv[0]!, argv.slice(1) as string[], {
-        cwd,
-        env,
-        timeout,
-        maxBuffer: opts.ctx.limits.maxOutputBytes,
-        killSignal: 'SIGTERM',
-        signal: opts.ctx.signal,
-        encoding: 'utf8',
-      });
-      this.logger.info('tool.process.completed', {
-        family: this.family,
-        argv0: argv[0],
-        exitCode: 0,
-      });
-      return {
-        exitCode: 0,
-        stdout: stdout ?? '',
-        stderr: stderr ?? '',
-        output: { argv: argv.length, cwd: opts.cwd ?? '.', timedOut: false },
-        error: null,
-        cancelled: false,
-        truncated: false,
-      };
+      await this.sandbox.ensureAvailable();
     } catch (err) {
-      return this.mapProcessError(err, argv, opts.ctx.signal);
+      return toolOutcomeError('process-sandbox-unavailable', (err as Error).message, {
+        output: { argv: argv.length, sandbox: this.sandbox.id },
+      });
+    }
+    let launch: WrappedProcessLaunch;
+    try {
+      launch = await this.sandbox.wrapLaunch({ argv, cwd, workspaceRoot: opts.ctx.workspaceRoot, env });
+    } catch (err) {
+      return toolOutcomeError(
+        'process-sandbox-unavailable',
+        `the sandboxed launch could not be prepared — ${(err as Error).message}`,
+        { output: { argv: argv.length, sandbox: this.sandbox.id } },
+      );
+    }
+
+    try {
+      const raw = await this.spawnSandboxed(launch, {
+        timeout,
+        signal: opts.ctx.signal,
+        maxBuffer: opts.ctx.limits.maxOutputBytes,
+        hostCwd: opts.ctx.workspaceRoot,
+      });
+      if (raw.err === null) {
+        this.logger.info('tool.process.completed', {
+          family: this.family,
+          argv0: argv[0],
+          exitCode: 0,
+          sandbox: this.sandbox.id,
+        });
+        return {
+          exitCode: 0,
+          stdout: raw.stdout ?? '',
+          stderr: raw.stderr ?? '',
+          output: { argv: argv.length, cwd: opts.cwd ?? '.', timedOut: false, sandbox: this.sandbox.id },
+          error: null,
+          cancelled: false,
+          truncated: false,
+        };
+      }
+      return this.mapProcessError(raw, argv);
+    } catch (err) {
+      // A spawn-level failure BEFORE any child exists (typed, honest).
+      return toolOutcomeError('process-error', `${(err as Error).name ?? 'Error'}: ${(err as Error).message ?? String(err)}`, {
+        output: { argv: argv.length, sandbox: this.sandbox.id },
+      });
     }
   }
 
-  /** Map an execFile failure to the governed outcome (never a thrown crash). */
-  private mapProcessError(err: unknown, argv: readonly string[], signal?: AbortSignal): ToolExecutionOutcome {
-    const e = err as {
-      code?: number | string;
-      killed?: boolean;
-      signal?: string;
-      stdout?: string;
-      stderr?: string;
-      name?: string;
-      message?: string;
-    };
-    const stdout = e.stdout ?? '';
-    const stderr = e.stderr ?? '';
-    const truncated = e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+  /**
+   * Spawn the WRAPPED launch and own its ENTIRE lifecycle. The unshare
+   * wrapper blocks SIGTERM while waiting, and the exec'd target is PID 1
+   * of its namespace (default-disposition signals are ignored) — so the
+   * teardown is a PROCESS-GROUP kill (detached spawn) with a guaranteed
+   * SIGKILL escalation after the grace period. The timeout bounds the
+   * WHOLE sandboxed invocation (setup included).
+   */
+  private spawnSandboxed(
+    launch: WrappedProcessLaunch,
+    opts: { timeout: number; signal?: AbortSignal; maxBuffer: number; hostCwd: string },
+  ): Promise<RawProcessResult> {
+    return new Promise<RawProcessResult>((resolve) => {
+      let timedOut = false;
+      let settled = false;
+      let escalateTimer: ReturnType<typeof setTimeout> | undefined;
 
-    // Caller-initiated cancellation (AbortSignal fired → AbortError).
-    if (e.name === 'AbortError' || (signal?.aborted && e.killed)) {
+      // `detached` is a runtime spawn option the execFile typings omit
+      // (it makes the wrapper a process-group leader for teardown).
+      const spawnOptions = {
+        cwd: opts.hostCwd,
+        env: launch.env as Record<string, string>,
+        maxBuffer: opts.maxBuffer,
+        killSignal: 'SIGKILL',
+        encoding: 'utf8',
+        detached: true,
+      } as ExecFileOptionsWithStringEncoding & { detached: boolean };
+
+      const child = execFile(
+        launch.argv[0]!,
+        launch.argv.slice(1) as string[],
+        spawnOptions,
+        (err: ExecFileException | null, stdout: string, stderr: string) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutTimer);
+          clearTimeout(escalateTimer);
+          opts.signal?.removeEventListener('abort', onAbort);
+          resolve({
+            err: err as RawProcessResult['err'],
+            stdout: stdout ?? '',
+            stderr: stderr ?? '',
+            timedOut,
+            aborted: opts.signal?.aborted === true,
+          });
+        },
+      );
+
+      const teardown = (sig: 'SIGTERM' | 'SIGKILL') => {
+        try {
+          if (child.pid) process.kill(-child.pid, sig);
+        } catch {
+          /* the group is already gone */
+        }
+        try {
+          child.kill(sig);
+        } catch {
+          /* the child is already gone */
+        }
+      };
+
+      const onAbort = () => {
+        teardown('SIGTERM');
+        escalateTimer = setTimeout(() => teardown('SIGKILL'), TEARDOWN_GRACE_MS);
+      };
+
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        teardown('SIGTERM');
+        escalateTimer = setTimeout(() => teardown('SIGKILL'), TEARDOWN_GRACE_MS);
+      }, opts.timeout);
+
+      if (opts.signal) {
+        if (opts.signal.aborted) onAbort();
+        else opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  /** Map a raw spawn result to the governed outcome (never a thrown crash). */
+  private mapProcessError(raw: RawProcessResult, argv: readonly string[]): ToolExecutionOutcome {
+    const e = raw.err!;
+    const stdout = raw.stdout ?? '';
+    const stderr = raw.stderr ?? '';
+    const truncated = e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+    const sandboxOutput = { argv: argv.length, sandbox: this.sandbox.id };
+
+    // The sandbox launcher itself could not be executed (ENOENT on the
+    // unshare binary) — never fall back to an unsandboxed spawn.
+    if (e.code === 'ENOENT' && e.message.includes('unshare')) {
+      return toolOutcomeError(
+        'process-sandbox-unavailable',
+        "the sandbox launcher 'unshare' is not executable on this host — there is no unsandboxed fallback",
+        { stdout, stderr, output: sandboxOutput },
+      );
+    }
+
+    // Caller-initiated cancellation (deterministic: the flag, not signal
+    // bookkeeping through the wrapper chain).
+    if (raw.aborted) {
       return {
         exitCode: null,
         stdout,
         stderr,
-        output: { argv: argv.length, cancelled: true },
+        output: { ...sandboxOutput, cancelled: true },
         error: { code: 'cancelled', message: 'the invocation was cancelled (caller interruption)' },
         cancelled: true,
         truncated,
       };
     }
-    // Hard timeout (execFile killed the process after timeout ms).
-    if (e.killed && e.signal === 'SIGTERM') {
+    // Hard timeout (deterministic flag — the bound covers the ENTIRE
+    // sandboxed invocation, setup included; the escalation guarantees
+    // the teardown completes).
+    if (raw.timedOut) {
       return {
         exitCode: null,
         stdout,
         stderr,
-        output: { argv: argv.length, timedOut: true },
+        output: { ...sandboxOutput, timedOut: true },
         error: { code: 'timeout', message: `the process was killed after exceeding its timeout bound` },
         cancelled: false,
         truncated,
       };
     }
-    if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+    if (truncated) {
       return {
-        exitCode: typeof e.code === 'number' ? e.code : null,
+        exitCode: null,
         stdout,
         stderr,
-        output: { argv: argv.length, maxBufferExceeded: true },
+        output: { ...sandboxOutput, maxBufferExceeded: true },
         error: { code: 'output-limit-exceeded', message: `the process output exceeded the bounded buffer and the process was killed` },
         cancelled: false,
         truncated: true,
       };
     }
-    // Spawn failure (ENOENT etc.) vs non-zero exit.
+    // Spawn failure vs non-zero exit. A missing TARGET binary fails
+    // INSIDE the sandbox (exit 127 from the setup shell) — that is a
+    // tool-level failure, not a sandbox failure.
     const exitCode = typeof e.code === 'number' ? e.code : null;
     return {
       exitCode,
       stdout,
       stderr,
-      output: { argv: argv.length },
+      output: sandboxOutput,
       error: {
         code: exitCode !== null ? 'non-zero-exit' : 'process-error',
         message:
           exitCode !== null
             ? `the process exited with code ${exitCode}`
-            : `${e.name ?? 'Error'}: ${e.message ?? String(err)}`,
+            : `${e.name ?? 'Error'}: ${e.message}`,
       },
       cancelled: false,
       truncated,

@@ -34,6 +34,15 @@
  * confine every path to it (path-confinement.ts) — no arbitrary host
  * filesystem access, no credentials (the process environment is
  * sanitized; the HTTP executor never adds authentication).
+ *
+ * PR #40 review fix — the confinement claim, corrected: application-level
+ * path confinement (fs family, cwd) confines the INVOCATION; for the
+ * process families the PROCESS itself must also be confined, which is
+ * the kernel's job: every terminal/git/package launch crosses the
+ * ProcessSandbox boundary (namespace-isolated: the host filesystem is
+ * detached via pivot_root, the network is unshared, host processes are
+ * invisible, and the capability set is dropped before exec — see
+ * process-sandbox.ts). cwd confinement alone was never confinement.
  */
 
 /** The frozen WORK-036 tool families. */
