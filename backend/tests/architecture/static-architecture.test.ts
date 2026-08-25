@@ -8408,6 +8408,12 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
   const TR_BROWSER = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'browser-tool-executor.ts');
   const TR_CONFINEMENT = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'path-confinement.ts');
   const TR_REDACTION = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'observation-redaction.ts');
+  // WORK-037 PR-#41 FIX: the CANONICAL git argv classifier — ONE vocabulary
+  // shared by the policy engine (deployment-domain tagging) and the
+  // process executor (remote-network rejection). Pure (no IO). Lives in
+  // @platform/tools (the correct one-way dependency direction).
+  const TR_GIT_ARGV = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+  const TR_GIT_ARGV_TEST = join(BACKEND_ROOT, 'tests', 'unit', 'git-argv.test.ts');
   const TR_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
   const TR_SANDBOX_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'process-sandbox.regression.test.ts');
 
@@ -8422,6 +8428,7 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     ['browser-executor', TR_BROWSER],
     ['confinement', TR_CONFINEMENT],
     ['redaction', TR_REDACTION],
+    ['git-argv-classifier', TR_GIT_ARGV],
   ] as const;
 
   function strip(src: string): string {
@@ -8474,17 +8481,46 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     expect(svcSrc).not.toMatch(/INSERT INTO wfos_executions\b|UPDATE wfos_executions\b/);
   });
 
-  it('NO GitHub authority duplication (git is repository-LOCAL only; remote operations are denied fail-closed)', () => {
-    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
-    // The fail-closed remote-network denylist.
-    expect(procSrc).toMatch(/GIT_REMOTE_SUBCOMMANDS/);
-    for (const sub of ['push', 'pull', 'fetch', 'clone', 'remote', 'ls-remote']) {
-      expect(procSrc).toContain(`'${sub}'`);
+  it('NO GitHub authority duplication (git is repository-LOCAL only; remote operations are denied fail-closed via the CANONICAL classifier)', () => {
+    // WORK-037 PR-#41 FIX: the fail-closed remote-network classification +
+    // the cwd/git-dir redirect set are OWNED by the canonical git-argv
+    // classifier (TR_GIT_ARGV) — ONE vocabulary shared by the policy
+    // engine (deployment-domain tagging) and the executor (remote-network
+    // rejection). The executor no longer keeps a local divergent copy (a
+    // mismatch would let policy-allow what the executor rejects, or vice
+    // versa). The classifier skips git's GLOBAL/CONFIG options before the
+    // effective subcommand (`git -c k=v push` is still push → denied).
+    const classifierSrc = strip(readFileSync(TR_GIT_ARGV, 'utf8'));
+    expect(classifierSrc, 'the canonical classifier module exists').toMatch(/export function isGitDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export function classifyGitSubcommand/);
+    expect(classifierSrc).toMatch(/export const GIT_DEPLOYMENT_SUBCOMMANDS/);
+    expect(classifierSrc).toMatch(/export const GIT_REDIRECT_FLAGS/);
+    // The canonical classifier's unit proof exists (the architect's
+    // options-before-subcommand scenarios — pure-function, no DB).
+    expect(existsSync(TR_GIT_ARGV_TEST), 'git-argv.test.ts must exist').toBe(true);
+    // The deployment set (one source of truth — the subcommand literals
+    // live HERE, not in the executor or the engine).
+    for (const sub of ['push', 'pull', 'fetch', 'clone', 'remote', 'ls-remote', 'submodule', 'svn', 'daemon', 'http-backend']) {
+      expect(classifierSrc, `${sub} is deployment-class in the canonical set`).toContain(`'${sub}'`);
     }
+    // The classifier skips git's GLOBAL/CONFIG options to find the
+    // effective subcommand (the architect's `git -c k=v push` example).
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS_SHORT/);
+    expect(classifierSrc).toMatch(/'-c'/); // the architect's exact example
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_BOOLEAN_OPTIONS/);
+    expect(classifierSrc).toMatch(/'--no-pager'/);
+    // The executor imports the canonical classifier + uses it (NOT a local
+    // positional args[0] check) + still emits the typed rejection codes.
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    expect(procSrc, 'the executor imports the canonical classifier').toMatch(/from '\.\/git-argv\.js'/);
+    expect(procSrc).toMatch(/isGitDeploymentInvocation\(req\.args\)/);
+    expect(procSrc).toMatch(/classifyGitSubcommand\(req\.args\)/);
     expect(procSrc).toMatch(/git-remote-operation-forbidden/);
-    // The cwd/git-dir redirect denylist.
     expect(procSrc).toMatch(/GIT_REDIRECT_FLAGS/);
     expect(procSrc).toMatch(/git-redirect-forbidden/);
+    // The executor NO LONGER keeps a local divergent copy of either set.
+    expect(procSrc, 'the executor has NO local GIT_REMOTE_SUBCOMMANDS copy').not.toMatch(/const GIT_REMOTE_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local GIT_REDIRECT_FLAGS copy').not.toMatch(/const GIT_REDIRECT_FLAGS/);
     // No PR/merge operations anywhere in the tool runtime.
     for (const [name, p] of TOOL_RUNTIME_FILES) {
       const src = strip(readFileSync(p, 'utf8'));
@@ -9217,5 +9253,100 @@ describe('WORK-037 invariants — Agent Policy and Permissions (the engine behin
     // policy-superseded; the resolution_note distinguishes them).
     expect(sql).toMatch(/'expired' status is overloaded/);
     expect(sql).toMatch(/superseded by policy-version change/);
+  });
+
+  // ==========================================================================
+  // THE CANONICAL GIT-ARGV CLASSIFIER INVARIANTS (architect's PR-#41 review:
+  // git deployment classification must skip global/config options before the
+  // effective subcommand — ONE classifier shared by policy + executor; the
+  // sandbox's network isolation is defense-in-depth, NOT the authority).
+  // ==========================================================================
+  it('the canonical git-argv classifier exists + is shared by BOTH the policy engine and the process executor (ONE vocabulary, no second copy)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+    expect(existsSync(classifierPath), 'git-argv.ts must exist').toBe(true);
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The canonical exports (one source of truth).
+    expect(classifierSrc).toMatch(/export function classifyGitSubcommand/);
+    expect(classifierSrc).toMatch(/export function isGitDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export const GIT_DEPLOYMENT_SUBCOMMANDS/);
+    expect(classifierSrc).toMatch(/export const GIT_REDIRECT_FLAGS/);
+    // BOTH layers import the SAME classifier from @platform/tools/git-argv.js
+    // (the engine via the @platform alias — the correct one-way dependency
+    // direction: Execution Policy → Tool Runtime; the executor same-layer).
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/from '@platform\/tools\/git-argv\.js'/);
+    expect(engineSrc).toMatch(/isGitDeploymentInvocation/);
+    const procPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+    const procSrc = readFileSync(procPath, 'utf8');
+    expect(procSrc).toMatch(/from '\.\/git-argv\.js'/);
+    expect(procSrc).toMatch(/isGitDeploymentInvocation/);
+    // NEITHER layer keeps a local divergent copy of the deployment set (a
+    // mismatch would let policy-allow what the executor rejects, or vice
+    // versa). The architect's finding was precisely this duplication with a
+    // positional args[0] check on each side.
+    expect(engineSrc, 'the engine has NO local DEPLOYMENT_GIT_SUBCOMMANDS copy').not.toMatch(/const DEPLOYMENT_GIT_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local GIT_REMOTE_SUBCOMMANDS copy').not.toMatch(/const GIT_REMOTE_SUBCOMMANDS/);
+  });
+
+  it('the engine classifies the EFFECTIVE git subcommand (NOT a positional args[0] check — the architect\'s finding)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // tagInvocation calls isGitDeploymentInvocation(args) — the canonical
+    // classifier that skips git's global/config options before the
+    // effective subcommand (`git -c k=v push` is still push → deployment).
+    expect(engineSrc).toMatch(/isGitDeploymentInvocation\(args\)/);
+    // The positional args[0] check on the deployment set is GONE (the
+    // architect's finding: args[0] was `-c`, not `push` → not deployment).
+    expect(engineSrc, 'the engine NO LONGER checks args[0] against a local deployment set').not.toMatch(/DEPLOYMENT_GIT_SUBCOMMANDS\.has\(args\[0\]/);
+  });
+
+  it('the canonical classifier skips git\'s GLOBAL/CONFIG options before the effective subcommand (the architect\'s `git -c k=v push` example)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The global-option vocabulary the classifier skips to find the
+    // effective subcommand (value-taking short + long, boolean).
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS_SHORT/);
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_VALUE_OPTIONS/);
+    expect(classifierSrc).toMatch(/GIT_GLOBAL_BOOLEAN_OPTIONS/);
+    // The architect's exact example: `-c k=v` (short, value-taking).
+    expect(classifierSrc).toMatch(/'-c'/);
+    // The `--` options terminator + the `=value` attached form.
+    expect(classifierSrc).toMatch(/tok === '--'/);
+    expect(classifierSrc).toMatch(/tok\.includes\('='\)/);
+    // The fail-closed ambiguity path (unknown option before the subcommand
+    // → treat as deployment so a crafted unknown option cannot smuggle a
+    // remote mutation past the deployment rule).
+    expect(classifierSrc).toMatch(/ambiguous/);
+  });
+
+  it('the regression matrix covers options-before-subcommand (the architect\'s scenarios) at all three layers', () => {
+    // Layer 0: the canonical classifier unit proof.
+    const classifierTest = join(BACKEND_ROOT, 'tests', 'unit', 'git-argv.test.ts');
+    expect(existsSync(classifierTest), 'git-argv.test.ts must exist').toBe(true);
+    const unitSrc = readFileSync(classifierTest, 'utf8');
+    // The architect's exact example + the family of options-before-push.
+    expect(unitSrc).toMatch(/git -c k=v push/);
+    expect(unitSrc).toMatch(/git --no-pager push/);
+    expect(unitSrc).toMatch(/git -C \/path push/);
+    expect(unitSrc).toMatch(/git --git-dir=\/foo push/);
+    // Options before fetch / remote / clone (the architect's "etc.").
+    expect(unitSrc).toMatch(/git -c k=v fetch/);
+    expect(unitSrc).toMatch(/git --no-pager remote/);
+    expect(unitSrc).toMatch(/git -c k=v clone/);
+    // The fail-closed ambiguity scenario.
+    expect(unitSrc).toMatch(/fail-closed/);
+    // Layer 1: the engine integration (agent-policy.regression.test.ts) —
+    // the POLICY authorization decision is correct for the scenarios.
+    const engineRegressionSrc = readFileSync(AP_REGRESSION, 'utf8');
+    expect(engineRegressionSrc).toMatch(/PR#41: `git -c k=v push`/);
+    expect(engineRegressionSrc).toMatch(/platform-deployment-deny/);
+    expect(engineRegressionSrc).toMatch(/fail-closed on ambiguity/);
+    // Layer 2: the executor integration (tool-runtime.regression.test.ts) —
+    // the governance-gate rejection before any process spawns.
+    const execRegressionPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+    const execRegressionSrc = readFileSync(execRegressionPath, 'utf8');
+    expect(execRegressionSrc).toMatch(/git remote-network operations BEHIND global\/config options/);
+    expect(execRegressionSrc).toMatch(/git-remote-operation-forbidden/);
+    // The fix does NOT over-restrict LOCAL subcommands behind options.
+    expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
   });
 });

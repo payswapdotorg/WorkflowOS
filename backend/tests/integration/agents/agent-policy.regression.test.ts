@@ -341,6 +341,103 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
     expect(d.decision).toBe('deny');
   });
 
+  // ==========================================================================
+  // PR #41 FIX — options BEFORE the effective git subcommand.
+  //
+  // The architect's finding: git deployment classification only checked
+  // args[0]; git permits global/config options BEFORE the effective
+  // subcommand (e.g. `git -c k=v push`), so a positional args[0] check
+  // could classify a REMOTE mutation as ordinary `tool` activity →
+  // allow/constrained instead of the required deployment deny. The engine
+  // now classifies the EFFECTIVE subcommand via the CANONICAL git-argv
+  // classifier (shared with the executor). These prove the POLICY
+  // authorization decision is correct for the architect's scenarios.
+  // (The canonical classifier itself is unit-proven in
+  // tests/unit/git-argv.test.ts; these are the engine integration.)
+  // ==========================================================================
+  it('PR#41: `git -c k=v push` (the architect\'s exact example) → deny (deployment-class, NOT allow)', async () => {
+    // The positional args[0] check saw `-c` → NOT deployment → allow. WRONG.
+    // The canonical classifier skips `-c` + value `k=v` → effective `push` →
+    // deployment → the platform default's deployment-deny fires.
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['-c', 'k=v', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: `git --no-pager push` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['--no-pager', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: `git -C /path push` (chdir before push) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['-C', '/path', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: `git --git-dir=/foo push` (= form) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['--git-dir=/foo', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: `git --git-dir /foo push` (space form) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['--git-dir', '/foo', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: `git -c k=v fetch` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.fetch', input: { args: ['-c', 'k=v', 'fetch'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
+  it('PR#41: `git --no-pager remote` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.remote', input: { args: ['--no-pager', 'remote'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
+  it('PR#41: `git -c k=v clone <url>` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.clone', input: { args: ['-c', 'k=v', 'clone', 'https://github.com/x/y.git'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
+  it('PR#41: options before push with refspecs: `git -c k=v push origin main` → deny', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['-c', 'k=v', 'push', 'origin', 'main'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
+  it('PR#41: LOCAL subcommand behind options is preserved: `git --no-pager status` → allow', async () => {
+    // The boolean option is skipped; `status` is local → allow (NOT
+    // over-restricted by the fix).
+    const d = await engine.decide(req({ family: 'git', operation: 'git.status', input: { args: ['--no-pager', 'status'] } }));
+    expect(d.decision).toBe('allow');
+  });
+
+  it('PR#41: LOCAL subcommand behind -c: `git -c user.email=x@y status` → allow', async () => {
+    const d = await engine.decide(req({ family: 'git', operation: 'git.status', input: { args: ['-c', 'user.email=x@y', 'status'] } }));
+    expect(d.decision).toBe('allow');
+  });
+
+  it('PR#41: fail-closed on ambiguity — `git -Z push` (unknown option) → deny (deployment-class)', async () => {
+    // An unknown option before the subcommand → the classifier cannot
+    // confidently classify → treat as deployment (deny by default). A
+    // crafted unknown option cannot smuggle a remote mutation past the
+    // deployment rule.
+    const d = await engine.decide(req({ family: 'git', operation: 'git.push', input: { args: ['-Z', 'push'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41: fail-closed on ambiguity — `git --future-flag status` (unknown option before LOCAL subcommand) → deny', async () => {
+    // status is local, but the unknown option before it → fail-closed →
+    // deployment → deny. Over-restrictive but SAFE (the architect's
+    // principle: the policy authorization decision is the authority).
+    const d = await engine.decide(req({ family: 'git', operation: 'git.status', input: { args: ['--future-flag', 'status'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
   it('platform default: http GET → allow', async () => {
     const d = await engine.decide(req({ family: 'http', operation: 'http.GET', input: { url: 'https://api.example.com/x', method: 'GET' } }));
     expect(d.decision).toBe('allow');

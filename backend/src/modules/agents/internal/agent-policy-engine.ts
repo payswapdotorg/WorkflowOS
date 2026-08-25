@@ -20,6 +20,16 @@
  */
 import type { ToolFamily } from '@platform/tools/tool-contracts.js';
 import { REDACTED } from '@platform/tools/observation-redaction.js';
+// WORK-037 PR-#41 FIX: the CANONICAL git argv classifier — ONE vocabulary
+// shared by the policy engine (here, deployment-domain tagging) and the
+// process executor (remote-network rejection). Git permits global/config
+// options BEFORE the effective subcommand (e.g. `git -c k=v push`), so a
+// positional args[0] check could misclassify a remote mutation as ordinary
+// `tool` activity → allow/constrained instead of the required deployment
+// deny. The classifier skips git's global options to find the effective
+// subcommand. Lives in @platform/tools (the correct one-way dependency
+// direction: Execution Policy → Tool Runtime).
+import { isGitDeploymentInvocation } from '@platform/tools/git-argv.js';
 import type {
   AgentPolicyApproval,
   AgentPolicyApprovalStatus,
@@ -54,28 +64,11 @@ const TOOL_FAMILIES: readonly ToolFamily[] = [
   'browser',
 ];
 
-/**
- * Git subcommands that mutate the REMOTE (publication/deployment-class).
- * Mirrors the WORK-036 process-tool-executor GIT_REMOTE_SUBCOMMANDS
- * vocabulary — the policy layer's deployment classification is consistent
- * with the executor's fail-closed remote rejection (defense in depth,
- * with a POLICY reason instead of the executor's generic refusal).
- */
-const DEPLOYMENT_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
-  'push',
-  'pull',
-  'fetch',
-  'clone',
-  'remote',
-  'ls-remote',
-  'submodule',
-  'fetch-pack',
-  'upload-pack',
-  'send-pack',
-  'receive-pack',
-  'daemon',
-  'http-backend',
-]);
+// Git deployment classification is OWNED by the canonical classifier in
+// @platform/tools/git-argv.ts (isGitDeploymentInvocation) — shared with the
+// WORK-036 process executor's remote-network rejection. There is NO local
+// copy of the deployment-subcommand set here (a mismatch would let policy
+// tag deployment where the executor would NOT reject, or vice versa).
 
 const DEFAULT_APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const RULE_ID_PATTERN = /^[a-z0-9-]{1,64}$/;
@@ -627,8 +620,18 @@ function tagInvocation(request: ToolPolicyRequest): InvocationTags {
   }
 
   if (family === 'git') {
+    // WORK-037 PR-#41 FIX: classify the EFFECTIVE git subcommand via the
+    // CANONICAL classifier (shared with the executor). Git permits global
+    // / config options BEFORE the effective subcommand (`git -c k=v push`,
+    // `git --no-pager push`, `git -C /path push`, `git --git-dir=/foo push`),
+    // so a positional args[0] check could classify a REMOTE mutation as
+    // ordinary `tool` activity → allow/constrained instead of the required
+    // deployment deny. The classifier skips git's global options to find
+    // the effective subcommand + fails-closed on ambiguity. This is the
+    // POLICY authorization decision (the authority); the sandbox's network
+    // isolation is valuable defense-in-depth but does NOT replace it.
     const args = Array.isArray(request.input?.args) ? (request.input.args as readonly string[]) : [];
-    if (DEPLOYMENT_GIT_SUBCOMMANDS.has(args[0] ?? '')) domains.add('deployment');
+    if (isGitDeploymentInvocation(args)) domains.add('deployment');
   } else if (family === 'package') {
     const args = Array.isArray(request.input?.args) ? (request.input.args as readonly string[]) : [];
     if (args[0] === 'publish') domains.add('deployment');

@@ -539,6 +539,73 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
     expect(redirect.record.error?.code).toBe('git-redirect-forbidden');
   });
 
+  it('git remote-network operations BEHIND global/config options are DENIED (PR #41 — the canonical classifier)', async () => {
+    // The architect's finding: `git -c k=v push` has args[0]=`-c`, so a
+    // positional args[0] check would NOT match the remote set → the
+    // executor would fail to reject at the governance gate (the sandbox's
+    // network isolation is defense-in-depth, NOT the authority). The
+    // canonical classifier skips git's global options to find the
+    // effective subcommand → push/fetch/remote/clone behind options are
+    // still rejected at the gate (a POLICY reason, before any spawn).
+    const chain = await makeReadyChain();
+    for (const [id, args] of [
+      ['w037-git-c-push', ['-c', 'k=v', 'push']], // the architect's exact example
+      ['w037-git-c-push-refs', ['-c', 'k=v', 'push', 'origin', 'main']],
+      ['w037-git-no-pager-push', ['--no-pager', 'push']],
+      ['w037-git-P-push', ['-P', 'push']],
+      ['w037-git-paginate-push', ['--paginate', 'push']],
+      ['w037-git-C-push', ['-C', '/path', 'push']],
+      ['w037-git-gitdir-eq-push', ['--git-dir=/foo', 'push']],
+      ['w037-git-gitdir-sp-push', ['--git-dir', '/foo', 'push']],
+      ['w037-git-namespace-push', ['--namespace=foo', 'push']],
+      ['w037-git-c-fetch', ['-c', 'k=v', 'fetch']],
+      ['w037-git-no-pager-remote', ['--no-pager', 'remote']],
+      ['w037-git-c-clone', ['-c', 'k=v', 'clone', 'https://github.com/x/y.git']],
+      ['w037-git-c-pull', ['-c', 'k=v', 'pull']],
+      ['w037-git-c-ls-remote', ['-c', 'k=v', 'ls-remote']],
+      ['w037-git-c-submodule', ['-c', 'k=v', 'submodule', 'update']],
+      ['w037-git-stacked-opts-push', ['--no-pager', '-c', 'k=v', '--git-dir=/foo', 'push']],
+      ['w037-git-dd-terminator-push', ['--', 'push']],
+      // Ambiguity → fail-closed (treat as deployment → rejected).
+      ['w037-git-unknown-opt-push', ['-Z', 'push']],
+    ] as const) {
+      const res = await runtime.invoke({
+        invocationId: id,
+        executionId: chain.executionId,
+        family: 'git',
+        input: { args: [...args] },
+        idempotency: 'idempotent',
+      });
+      expect(res.record.status, id).toBe('failed');
+      expect(res.record.error?.code, id).toBe('git-remote-operation-forbidden');
+    }
+  });
+
+  it('git LOCAL subcommands behind global/config options still run (PR #41 — the fix does NOT over-restrict)', async () => {
+    // status behind --no-pager / -c must NOT be remote-rejected (the
+    // boolean/value option is skipped; `status` is local → runs in the
+    // worktree). This proves the fix is surgical: it catches the remote
+    // mutation, not the local dev workflow. (Options here are NOT redirect
+    // flags — `-c` is a config override, `--no-pager` is a pager toggle;
+    // the executor's redirect-anywhere check is a separate, unchanged
+    // concern that rejects `-C` / `--git-dir` etc. anywhere in the argv.)
+    const chain = await makeReadyChain();
+    for (const [id, args] of [
+      ['w037-git-no-pager-status', ['--no-pager', 'status', '--porcelain']],
+      ['w037-git-c-status', ['-c', 'user.email=x@y', 'status', '--porcelain']],
+      ['w037-git-stacked-local', ['--no-pager', '-c', 'user.email=x@y', 'status', '--porcelain']],
+    ] as const) {
+      const res = await runtime.invoke({
+        invocationId: id,
+        executionId: chain.executionId,
+        family: 'git',
+        input: { args: [...args] },
+        idempotency: 'idempotent',
+      });
+      expect(res.record.status, id).toBe('succeeded');
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // 9: package/test
   // ---------------------------------------------------------------------------
