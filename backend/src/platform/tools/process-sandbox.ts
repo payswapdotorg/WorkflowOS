@@ -15,6 +15,38 @@
  *           ↓  (wrapLaunch — ONE launch pipeline, no second engine)
  *   namespace sandbox → the actual process
  *
+ * PR #40 SECOND REVIEW FIX — the TWO-PHASE ENVIRONMENT. The first review
+ * fix passed the caller-permitted environment to execFile(unshare, …)
+ * itself: dynamic-loader variables such as LD_PRELOAD / LD_AUDIT /
+ * LD_LIBRARY_PATH were therefore interpreted by the loaders of unshare,
+ * the construction shell, mount and setpriv — BEFORE (or in lieu of) the
+ * sandbox boundary — which is attacker-controlled code execution with a
+ * full host filesystem view (empirically reproduced: an LD_PRELOAD
+ * constructor on the launcher wrote host files and leaked the REAL
+ * /etc/passwd). The environment is now TWO SEPARATE CONTRACTS:
+ *
+ *   HOST LAUNCH ENVIRONMENT — SANDBOX_HOST_LAUNCH_ENV: a FROZEN literal
+ *   (a standard system PATH, nothing else). It is platform-owned: it
+ *   reads NO process.env, NO caller data, NOTHING per-invocation. It is
+ *   the environment of unshare, the construction shell, mount and
+ *   setpriv — nothing controlled by the tool invocation can execute
+ *   before the boundary exists.
+ *
+ *       HOST LAUNCH ENVIRONMENT
+ *           ↓  execFile(/usr/bin/unshare, …)
+ *       namespace + mount isolation + pivot_root + capability drop
+ *           ↓  setpriv execs a second FROZEN shell
+ *       TARGET ENVIRONMENT (count-framed positional parameters applied
+ *       by `export` AFTER the drop — only then does any loader see it)
+ *           ↓
+ *       actual terminal/git/package executable
+ *
+ *   The caller-permitted environment travels as argv DATA (K=V words
+ *   behind a count parameter) — never in the environment of ANY
+ *   pre-boundary executable. This is NOT a denylist: no variable name
+ *   is filtered; the two phases are structurally distinct types
+ *   (ProcessSandboxLaunch.targetEnv vs WrappedProcessLaunch.env).
+ *
  * WHAT THE KERNEL ENFORCES (per invocation, zero host-side residue):
  *   * MOUNT namespace + pivot_root — the host filesystem is DETACHED:
  *     the sandbox root is a fresh tmpfs; the ONLY host paths inside are
@@ -75,15 +107,40 @@ export interface ProcessSandboxLaunch {
   readonly cwd: string;
   /** The WORK-035 worktree host path — the only writable host surface. */
   readonly workspaceRoot: string;
-  /** The sanitized child environment (unchanged by the sandbox). */
-  readonly env: Readonly<Record<string, string>>;
+  /**
+   * The TARGET environment: the caller-permitted, sanitized environment
+   * the final executable receives — applied ONLY AFTER the sandbox
+   * boundary (namespaces + pivot_root + capability drop). It NEVER
+   * reaches unshare, the construction shell, mount or setpriv: the host
+   * launcher environment is the frozen SANDBOX_HOST_LAUNCH_ENV.
+   */
+  readonly targetEnv: Readonly<Record<string, string>>;
 }
 
 /** The wrapped launch the single execFile pipeline spawns. */
 export interface WrappedProcessLaunch {
   readonly argv: readonly string[];
+  /**
+   * The HOST LAUNCH environment — ALWAYS the frozen platform-owned
+   * SANDBOX_HOST_LAUNCH_ENV (never caller data, never process.env).
+   * The caller-permitted environment is inside `argv`, delivered to the
+   * target after the boundary.
+   */
   readonly env: Readonly<Record<string, string>>;
 }
+
+/**
+ * The HOST LAUNCH environment: the ONLY environment any pre-boundary
+ * executable (unshare, the construction shell, mount, setpriv) ever
+ * sees. A FROZEN literal — no process.env, no per-invocation data, no
+ * caller input. Dynamic-loader variables (LD_PRELOAD, LD_AUDIT,
+ * LD_LIBRARY_PATH, …), shell startup variables (ENV/BASH_ENV) and every
+ * other caller-supplied variable are structurally absent because this
+ * constant is the entire contract for the launcher phase.
+ */
+export const SANDBOX_HOST_LAUNCH_ENV: Readonly<Record<string, string>> = Object.freeze({
+  PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+});
 
 /**
  * The provider-independent sandbox port. One implementation ships
@@ -100,8 +157,9 @@ export interface ProcessSandbox {
   ensureAvailable(): Promise<void>;
   /**
    * Wrap a launch in the sandbox. PURE with respect to the launch: the
-   * user argv is appended POSITIONALLY — never interpolated into any
-   * script text (no shell-string surface, no injection surface).
+   * user argv AND the target environment are appended POSITIONALLY —
+   * never interpolated into any script text (no shell-string surface,
+   * no injection surface) and never placed in the launcher environment.
    */
   wrapLaunch(launch: ProcessSandboxLaunch): Promise<WrappedProcessLaunch>;
 }
@@ -131,8 +189,18 @@ export class ProcessSandboxError extends Error {
  * The COMPLETE sandbox setup script. FROZEN: a constant with NO
  * interpolation — every value it needs arrives as a POSITIONAL parameter
  * ($1=workspaceRoot $2=cwd $3=gitDir $4=extraToolchainRoots ':'-joined;
- * shift 4 → "$@" = the user argv). No caller-controlled data can ever
- * enter the script text.
+ * shift 4 → "$@" = the count-framed TARGET ENVIRONMENT (the entry count,
+ * then K=V words) followed by the user argv). No caller-controlled data
+ * can ever enter the script text.
+ *
+ * THE TWO-PHASE ENVIRONMENT (the tail of this script): after pivot_root
+ * and the capability drop, setpriv execs a SECOND frozen shell whose
+ * ONLY job is to `export` the counted K=V words and then exec the target
+ * argv. The target environment therefore enters the process tree AFTER
+ * the boundary — the loaders of unshare, this construction shell, mount
+ * and setpriv run under the frozen host launch environment alone, so
+ * caller variables (LD_PRELOAD & friends) can never execute code on the
+ * host side of the boundary.
  *
  * Requirements: Linux, util-linux `unshare`/`mount`/`setpriv`
  * (/usr/bin/setpriv), unprivileged user namespaces. The script fails
@@ -209,12 +277,20 @@ hostname workflowos-sandbox 2>/dev/null || true
 test -x /usr/bin/setpriv
 cd "$CWD"
 unset OLDPWD
-exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- "$@"
+exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c 'set -eu
+N=$1
+shift
+while [ "$N" -gt 0 ]; do
+  export "$1"
+  shift
+  N=$((N - 1))
+done
+exec "$@"' workflowos-target-env "$@"
 `;
 
 /** The unshare launcher prefix (the kernel-enforced isolation flags). */
 const UNSHARE_ARGV = [
-  'unshare',
+  '/usr/bin/unshare',
   '--user',
   '--map-root-user',
   '--mount',
@@ -304,6 +380,12 @@ export class NamespaceProcessSandbox implements ProcessSandbox {
     }
     const gitDir = await this.resolveGitDir(workspaceRoot);
     const extra = this.extraRoots.join(':');
+    // The TARGET environment travels as argv DATA: a count, then K=V
+    // words, then the user argv. It is applied by the second frozen
+    // shell AFTER the capability drop — it is NEVER the environment of
+    // the execFile(unshare, …) launcher (that is the frozen
+    // SANDBOX_HOST_LAUNCH_ENV below, and nothing else).
+    const targetEnvEntries = Object.entries(launch.targetEnv).map(([k, v]) => `${k}=${v}`);
     return {
       argv: [
         ...UNSHARE_ARGV,
@@ -313,9 +395,11 @@ export class NamespaceProcessSandbox implements ProcessSandbox {
         cwd,
         gitDir,
         extra,
+        String(targetEnvEntries.length),
+        ...targetEnvEntries,
         ...launch.argv,
       ],
-      env: launch.env,
+      env: SANDBOX_HOST_LAUNCH_ENV,
     };
   }
 
@@ -354,7 +438,7 @@ export class NamespaceProcessSandbox implements ProcessSandbox {
         argv: ['true'],
         cwd: probeDir,
         workspaceRoot: probeDir,
-        env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8' },
+        targetEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8' },
       });
       await execFileAsync(launch.argv[0]!, launch.argv.slice(1) as string[], {
         cwd: probeDir,

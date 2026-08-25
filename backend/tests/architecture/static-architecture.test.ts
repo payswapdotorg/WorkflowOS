@@ -8701,6 +8701,9 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     expect(procSrc).toMatch(/sandbox: this\.sandbox\.id/);
 
     // The unshare flags: user + mount + NET + PID + IPC + UTS + kill-child.
+    // The launcher binary is ABSOLUTE (no PATH resolution — the launcher
+    // environment is the frozen constant below, nothing else).
+    expect(sandboxSrc).toContain("'/usr/bin/unshare',");
     expect(sandboxSrc).toContain("'--user'");
     expect(sandboxSrc).toContain("'--map-root-user'");
     expect(sandboxSrc).toContain("'--mount'");
@@ -8726,7 +8729,7 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
       'mount -t tmpfs -o size=4k,mode=000 tmpfs /.putold',
       'set -eu',
       'test -x /usr/bin/setpriv',
-      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- "$@"',
+      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c',
       'shift 4',
     ]) {
       expect(script, `the frozen script must contain: ${fragment}`).toContain(fragment);
@@ -8738,6 +8741,72 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     // The layout module owns the inverse derivation (single source).
     const layoutSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'worktree-layout.ts'), 'utf8');
     expect(layoutSrc).toMatch(/export function deriveRepositoryDirFromWorktreePath/);
+  });
+
+  it('the TWO-PHASE ENVIRONMENT (PR #40 second review fix): the launcher env is a frozen platform constant — caller env reaches ONLY the post-boundary target', () => {
+    const sandboxSrc = readFileSync(TR_SANDBOX, 'utf8');
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+
+    // The HOST LAUNCH environment is a frozen literal constant — the
+    // entire launcher-phase env contract. It is platform-owned: the
+    // sandbox module's CODE reads no process.env at all (comments
+    // stripped — no host environment can enter the launcher).
+    expect(sandboxSrc).toMatch(
+      /export const SANDBOX_HOST_LAUNCH_ENV: Readonly<Record<string, string>> = Object\.freeze\(\{\s*PATH: '\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin',\s*\}\);/,
+    );
+    expect(strip(sandboxSrc)).not.toContain('process.env');
+    // wrapLaunch returns EXACTLY that constant as the launcher env —
+    // never the launch input, never a merge, never caller data. (The
+    // availability probe legitimately CONSUMES the wrapped launch env —
+    // the invariant is scoped to wrapLaunch, the only constructor of
+    // WrappedProcessLaunch.)
+    const wrapBody = sandboxSrc.match(
+      /async wrapLaunch\(launch: ProcessSandboxLaunch\): Promise<WrappedProcessLaunch> \{[\s\S]*?\n  \}/,
+    )![0]!;
+    expect(wrapBody).toContain('env: SANDBOX_HOST_LAUNCH_ENV');
+    expect(wrapBody).not.toMatch(/env:\s*launch/);
+    expect(wrapBody).not.toMatch(/env\s*:\s*\{\s*\.\.\.\s*launch/);
+
+    // The launch INPUT has no `env` field at all — the caller-permitted
+    // environment can ONLY be named as `targetEnv` (a structurally
+    // distinct contract; this is the invariant that makes the
+    // LD_PRELOAD-reaches-unshare escape unrepresentable).
+    const launchIface = sandboxSrc.match(/export interface ProcessSandboxLaunch \{[\s\S]*?\n\}/)![0];
+    expect(launchIface).toContain('readonly targetEnv: Readonly<Record<string, string>>;');
+    expect(launchIface).not.toMatch(/readonly env:/);
+
+    // The target env enters the WRAPPED ARGV as count-framed K=V words
+    // (data — applied by the in-sandbox shell after the boundary).
+    expect(sandboxSrc).toContain('Object.entries(launch.targetEnv)');
+    expect(sandboxSrc).toMatch(/String\(targetEnvEntries\.length\)/);
+
+    // The frozen script: the capability drop execs the SECOND frozen
+    // shell that applies the counted target env — the drop happens
+    // BEFORE any caller environment exists in the process tree, and the
+    // env application execs the target verbatim.
+    const scriptMatch = sandboxSrc.match(/export const NAMESPACE_SANDBOX_SETUP_SCRIPT = `([\s\S]*?)`;/);
+    const script = scriptMatch![1]!;
+    const dropIdx = script.indexOf(
+      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c',
+    );
+    const envApplyIdx = script.indexOf('export "$1"');
+    const targetExecIdx = script.lastIndexOf('exec "$@"');
+    expect(dropIdx, 'the capability drop must exec the env-applying shell').toBeGreaterThan(-1);
+    expect(envApplyIdx, 'the target env is applied by export words').toBeGreaterThan(dropIdx);
+    expect(targetExecIdx, 'the target argv exec comes after the env application').toBeGreaterThan(envApplyIdx);
+    for (const fragment of ['N=$1', 'while [ "$N" -gt 0 ]; do', 'export "$1"', 'N=$((N - 1))', 'exec "$@"']) {
+      expect(script, `the frozen env-application script must contain: ${fragment}`).toContain(fragment);
+    }
+
+    // The executor passes the caller env ONLY as targetEnv; the spawn
+    // uses the wrapped launch env (the frozen constant) — there is no
+    // locally merged environment anywhere in the spawn path.
+    expect(procSrc).toContain('targetEnv: env');
+    expect(procSrc).not.toMatch(/env:\s*env\b/);
+    expect(procSrc).not.toMatch(/env:\s*this\.sanitizedEnv/);
+    // Environment keys are SHAPE-validated (a syntactic rule — NOT a
+    // variable-name denylist; LD_* keys still reach the target).
+    expect(procSrc).toMatch(/ENV_KEY_PATTERN/);
   });
 
   it('the WORK-036 regression matrix exists (the frozen scenarios)', () => {
@@ -8790,6 +8859,21 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     expect(src).toMatch(/the frozen constant script \+ POSITIONAL argv/);
     expect(src).toMatch(/extra toolchain roots are validated/);
     expect(src).toMatch(/never the tamperable \.git pointer/);
+    // PR #40 SECOND review fix — the TWO-PHASE ENVIRONMENT scenarios:
+    // the launcher env is the frozen constant (wrapLaunch shape) and
+    // every caller loader/runtime vector (LD_PRELOAD with a compiled
+    // malicious workspace .so, LD_PRELOAD naming a host .so, LD_AUDIT,
+    // LD_LIBRARY_PATH with a planted bogus libc, caller PATH, LD_DEBUG,
+    // legitimate env passthrough, env-key shape) is regression-proven.
+    expect(src).toMatch(/the TWO-PHASE ENVIRONMENT/);
+    expect(src).toMatch(/caller LD_PRELOAD \(a workspace-resident malicious \.so\) executes ONLY inside the sandbox/);
+    expect(src).toMatch(/naming a HOST-resident library preloads NOTHING anywhere/);
+    expect(src).toMatch(/caller LD_AUDIT \(a workspace-resident audit library\) is confined to the post-boundary target/);
+    expect(src).toMatch(/planted bogus libc\.so\.6 cannot hijack the launcher/);
+    expect(src).toMatch(/a caller-controlled PATH cannot influence the sandbox launcher/);
+    expect(src).toMatch(/caller LD_DEBUG reaches only the TARGET loader/);
+    expect(src).toMatch(/legitimate caller environment variables still work inside the sandbox/);
+    expect(src).toMatch(/environment keys must be valid variable names/);
   });
 
   it('the barrel exposes the tool contracts (implementations internal; the sanctioned error + limits constants)', () => {

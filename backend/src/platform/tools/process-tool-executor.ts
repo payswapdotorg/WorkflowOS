@@ -15,13 +15,28 @@
  * `process-sandbox-unavailable` outcome ⇒ NO process. There is no
  * unsandboxed fallback path in this class.
  *
+ * PR #40 SECOND REVIEW FIX — the TWO-PHASE ENVIRONMENT: the sanitized
+ * caller-permitted environment is handed to the sandbox as the TARGET
+ * environment (ProcessSandboxLaunch.targetEnv) — it is applied INSIDE
+ * the sandbox, AFTER pivot_root and the capability drop, and reaches
+ * ONLY the target executable's loader. The host-side launcher
+ * (execFile(unshare, …)) runs under the sandbox's frozen
+ * platform-owned environment, so caller variables such as LD_PRELOAD,
+ * LD_AUDIT or LD_LIBRARY_PATH can never execute code on the host side
+ * of the boundary (see process-sandbox.ts — SANDBOX_HOST_LAUNCH_ENV).
+ * Environment keys must be valid variable names (the target env is
+ * delivered as `export` words by the frozen in-sandbox shell — a
+ * syntactic shape rule, NOT a variable-name denylist; every
+ * well-formed key, LD_* included, still reaches the target).
+ *
  * GOVERNANCE (structural, not policy — WORK-037 tightens later):
  *   * explicit argv separation (argv[0] = executable; no shell string);
  *   * the working directory is CONFINED to the WORK-035 workspace root
  *     (a relative cwd; traversal/absolute/symlink escapes fail closed);
  *   * the child environment is a SANITIZED MINIMAL base + the explicit
  *     caller env — the host environment (which may hold GitHub/LLM
- *     credentials) is NEVER inherited;
+ *     credentials) is NEVER inherited, and the caller env reaches the
+ *     TARGET only (never the sandbox launcher);
  *   * the kernel-enforced sandbox confines the PROCESS to the worktree
  *     (+ the repository's shared .git object store — git's own worktree
  *     model) and cuts network, host processes, and host configuration;
@@ -109,6 +124,14 @@ const GIT_REDIRECT_FLAGS: ReadonlySet<string> = new Set([
 
 /** Env keys the process engine rejects for the GIT family (git-dir smuggling). */
 const GIT_ENV_PREFIX = 'GIT_';
+
+/**
+ * The TARGET environment travels through the sandbox as K=V words that
+ * the frozen in-sandbox shell applies with `export` — keys must be
+ * valid variable names (a SYNTACTIC shape rule, not a denylist: any
+ * well-formed key, LD_PRELOAD included, is delivered to the target).
+ */
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface ProcessToolExecutorDeps {
   readonly logger: Logger;
@@ -232,6 +255,19 @@ export class ProcessToolExecutor implements ToolExecutor {
       ctx: ToolExecutorContext;
     },
   ): Promise<ToolExecutionOutcome> {
+    // The target environment is applied INSIDE the sandbox as `export`
+    // words — keys must be valid variable names (fail closed BEFORE any
+    // sandbox work; a malformed key never claims an invocation).
+    for (const key of Object.keys(opts.env ?? {})) {
+      if (!ENV_KEY_PATTERN.test(key)) {
+        return toolOutcomeError(
+          'tool-invalid-input',
+          `environment key ${JSON.stringify(key)} is not a valid variable name — the sandboxed target environment is delivered as export words after the sandbox boundary`,
+          { output: { argv: argv.length, sandbox: this.sandbox.id } },
+        );
+      }
+    }
+
     let cwd: string;
     try {
       cwd = await resolveWithinWorkspace(opts.ctx.workspaceRoot, opts.cwd ?? '.');
@@ -258,7 +294,16 @@ export class ProcessToolExecutor implements ToolExecutor {
     }
     let launch: WrappedProcessLaunch;
     try {
-      launch = await this.sandbox.wrapLaunch({ argv, cwd, workspaceRoot: opts.ctx.workspaceRoot, env });
+      // targetEnv: the caller-permitted environment for the TARGET —
+      // applied inside the sandbox AFTER the boundary. The launcher
+      // environment is the sandbox's frozen platform-owned constant
+      // (WrappedProcessLaunch.env), never this value.
+      launch = await this.sandbox.wrapLaunch({
+        argv,
+        cwd,
+        workspaceRoot: opts.ctx.workspaceRoot,
+        targetEnv: env,
+      });
     } catch (err) {
       return toolOutcomeError(
         'process-sandbox-unavailable',
@@ -463,10 +508,13 @@ export class ProcessToolExecutor implements ToolExecutor {
   }
 
   /**
-   * The sanitized child environment: a FIXED minimal base (never the host
-   * env — the host may hold GitHub/LLM credentials) + the explicit caller
-   * env. HOME points INSIDE the workspace cwd (no host user configuration
-   * leaks through ~/.gitconfig or runner caches).
+   * The sanitized TARGET environment: a FIXED minimal base (never the
+   * host env — the host may hold GitHub/LLM credentials) + the explicit
+   * caller env. This environment is delivered to the target INSIDE the
+   * sandbox (after pivot_root + capability drop) as count-framed K=V
+   * words — it NEVER reaches the host-side sandbox launcher (see
+   * process-sandbox.ts). HOME points INSIDE the workspace cwd (no host
+   * user configuration leaks through ~/.gitconfig or runner caches).
    */
   private sanitizedEnv(
     extra: Readonly<Record<string, string>> | undefined,

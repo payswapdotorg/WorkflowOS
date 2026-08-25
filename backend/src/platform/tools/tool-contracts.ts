@@ -72,7 +72,12 @@ export interface TerminalToolRequest {
   readonly argv: readonly string[];
   /** A cwd RELATIVE to the workspace root (default '.'). */
   readonly cwd?: string;
-  /** Explicit extra environment (sanitized base + these; host env is NOT inherited). */
+  /**
+   * Explicit extra environment for the TARGET process (sanitized base +
+   * these; the host env is NOT inherited). Delivered INSIDE the sandbox
+   * — AFTER the namespace/pivot_root/capability-drop boundary — never to
+   * the host-side sandbox launcher. Keys must be valid variable names.
+   */
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
 }
@@ -85,6 +90,7 @@ export interface GitToolRequest {
    * never holds GitHub credentials and remote authority stays /github.
    */
   readonly args: readonly string[];
+  /** TARGET-process environment (delivered inside the sandbox, after the boundary; keys must be valid variable names). */
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
 }
@@ -98,6 +104,7 @@ export interface PackageToolRequest {
   readonly args: readonly string[];
   /** A cwd RELATIVE to the workspace root (default '.'). */
   readonly cwd?: string;
+  /** TARGET-process environment (delivered inside the sandbox, after the boundary; keys must be valid variable names). */
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
 }
