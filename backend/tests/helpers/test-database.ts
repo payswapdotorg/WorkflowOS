@@ -173,6 +173,12 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
       TRUNCATE wfos_execution_callbacks RESTART IDENTITY CASCADE;
       TRUNCATE wfos_execution_events RESTART IDENTITY CASCADE;
       TRUNCATE wfos_executions RESTART IDENTITY CASCADE;
+      -- WORK-038: Project Baseline observations + evidence (child tables
+      -- first), then the baseline header. Scoped to project + repo +
+      -- exact-commit (idempotent unique).
+      TRUNCATE wfos_project_baseline_observations RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_project_baseline_evidence RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_project_baselines RESTART IDENTITY CASCADE;
       TRUNCATE wfos_llm_execution_records RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_transitions RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_executions RESTART IDENTITY CASCADE;

@@ -36,12 +36,20 @@ import type {
   ProjectRepository,
   ProjectRepositoryAssociationRepository,
   ProjectAccessRepository,
+  ProjectBaselineRepository,
 } from '@modules/projects/index.js';
+import type { OnboardingService } from '@onboarding/index.js';
 import {
   PgProjectRepository,
   PgProjectAccessRepository,
   PgProjectRepositoryAssociationRepository,
 } from './modules/projects/internal/pg-project-repository.js';
+import { PgProjectBaselineRepository } from './modules/projects/internal/pg-project-baseline-repository.js';
+// WORK-038: Existing Project Onboarding — the application-layer orchestrator
+// that composes /github + /agents + /projects to produce evidence-backed
+// Project Baseline proposals. NOT a module, NOT an authority; owns NO tables.
+import { DefaultOnboardingService } from './onboarding/internal/default-onboarding-service.js';
+import { GovernedFilesystemAnalyzer } from './onboarding/internal/governed-filesystem-analyzer.js';
 import type {
   SpecificationRepository,
   SpecificationVersionRepository,
@@ -406,6 +414,15 @@ export interface AppDeps {
    *  DB + execution + benchmark + agent-provider-registry are configured.
    *  Advisory only — never bypasses ExecutionService.submit() (§34). */
   executionPolicyService?: ExecutionPolicyService;
+  /** WORK-038: Existing Project Onboarding — the application-layer
+   *  orchestrator (NOT a module, NOT an authority). Composes /github
+   *  (revision resolution) + /agents (the project-scoped ToolPolicyGate) +
+   *  /projects (baseline storage) to produce evidence-backed Project
+   *  Baseline proposals. Present when DB + agents + /github are configured. */
+  onboardingService?: OnboardingService;
+  /** WORK-038: the /projects Project Baseline storage repository (the single
+   *  project authority for baselines). Present when DB is configured. */
+  projectBaselineRepository?: ProjectBaselineRepository;
 }
 
 export interface BuildAppOptions {
@@ -613,6 +630,11 @@ export async function buildApp(
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
+  // WORK-038: the onboarding orchestrator + the /projects baseline storage
+  // repository (declared at function scope; constructed inside the agents
+  // block — exposed for the onboarding route surface).
+  let onboardingServiceRef: OnboardingService | undefined;
+  let projectBaselineRepositoryRef: ProjectBaselineRepository | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
@@ -1071,6 +1093,28 @@ export async function buildApp(
     });
     toolRuntimeRef = toolRuntime;
     agentPolicyEngineRef = agentPolicyEngine;
+    // WORK-038: Existing Project Onboarding — the application-layer
+    // orchestrator. Composes /github (revision resolution) + /agents (the
+    // project-scoped ToolPolicyGate via agentPolicyEngine.decideForProjectScope)
+    // + /projects (baseline storage). NOT a module, NOT an authority; owns
+    // NO tables. The baseline is stored THROUGH /projects (the single project
+    // authority). No GitHub SDK, no credentials, no DB access in the
+    // orchestrator domain — it delegates to the injected authorities.
+    const projectBaselineRepository = new PgProjectBaselineRepository(database);
+    const onboardingAnalyzer = new GovernedFilesystemAnalyzer({
+      policyGate: agentPolicyEngine,
+      logger,
+    });
+    const onboardingService = new DefaultOnboardingService({
+      projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter,
+      analyzer: onboardingAnalyzer,
+      logger,
+    });
+    onboardingServiceRef = onboardingService;
+    projectBaselineRepositoryRef = projectBaselineRepository;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1485,6 +1529,12 @@ export async function buildApp(
       // authorization — the engine decides what agents may do; the route
       // layer decides who may resolve approvals.
       agentPolicyEngine: agentPolicyEngineRef,
+      // WORK-038: Existing Project Onboarding — the application-layer
+      // orchestrator (present when DB + agents + /github configured). NOT an
+      // authority; composes /github + /agents + /projects to produce
+      // evidence-backed Project Baseline proposals stored through /projects.
+      onboardingService: onboardingServiceRef,
+      projectBaselineRepository: projectBaselineRepositoryRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +

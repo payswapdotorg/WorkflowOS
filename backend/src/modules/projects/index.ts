@@ -28,6 +28,33 @@ export type {
   AssociateRepositoryInput,
   ProjectRepositoryAssociationRepository,
 } from './internal/project.types.js';
+// WORK-038: Project Baseline — the evidence-backed reconstruction of a
+// repository WorkflowOS did NOT originally create. The baseline is a PROJECT
+// artifact (stored THROUGH the existing /projects authority); it is NOT a
+// second project/repo/architecture/requirements/workflow/verification/review
+// authority. Provenance (observed/inferred/confirmed/proposed) is the central
+// invariant; provenance is never silently promoted. The onboarding
+// ORCHESTRATION (revision resolution + governed analysis) lives in the
+// application-layer src/onboarding/ capability (not a module).
+export type {
+  BaselineProvenance,
+  BaselineState,
+  BaselineAnalysisMode,
+  BaselineObservationKind,
+  BaselineEvidenceSource,
+  ProjectBaseline,
+  BaselineObservation,
+  BaselineEvidence,
+  NewBaselineObservation,
+  NewBaselineEvidence,
+  EnsureBaselineInput,
+  ProjectBaselineRepository,
+  ProjectBaselineErrorCode,
+} from './internal/project-baseline.types.js';
+export {
+  ProjectBaselineError,
+  PROJECT_BASELINE_ERROR_CODES,
+} from './internal/project-baseline.types.js';
 
 /**
  * Public capabilities exposed by the /projects module to other modules.

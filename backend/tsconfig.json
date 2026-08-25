@@ -27,6 +27,7 @@
       "@platform/*": ["src/platform/*"],
       "@api/*": ["src/api/*"],
       "@modules/*": ["src/modules/*"],
+      "@onboarding/*": ["src/onboarding/*"],
       "@root/*": ["src/*"],
       "@/*": ["../frontend/src/*"]
     },

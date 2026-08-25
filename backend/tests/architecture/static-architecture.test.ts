@@ -782,6 +782,29 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'ProjectRepositoryAssociation',
       'AssociateRepositoryInput',
       'ProjectRepositoryAssociationRepository',
+      // WORK-038 Project Baseline types (the evidence-backed reconstruction of
+      // a repository WorkflowOS did not create — a PROJECT artifact stored
+      // through the existing /projects authority; provenance is the central
+      // invariant). These are project-domain contracts: the baseline is a
+      // project sub-artifact, NOT a second project/repo/architecture/
+      // requirements/workflow/verification/review authority.
+      'BaselineProvenance',
+      'BaselineState',
+      'BaselineAnalysisMode',
+      'BaselineObservationKind',
+      'BaselineEvidenceSource',
+      'ProjectBaseline',
+      'BaselineObservation',
+      'BaselineEvidence',
+      'NewBaselineObservation',
+      'NewBaselineEvidence',
+      'EnsureBaselineInput',
+      'ProjectBaselineRepository',
+      'ProjectBaselineErrorCode',
+      // WORK-038: the baseline typed error (the sanctioned
+      // discriminated-error-class exception — see PURE_DATA_CATALOG_EXPORTS).
+      'ProjectBaselineError',
+      'PROJECT_BASELINE_ERROR_CODES',
       // Module contract marker (every frozen module exports one).
       'projectsModule',
     ]);
@@ -849,6 +872,10 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'AGENT_POLICY_ERROR_CODES',           // @modules/agents — the stable code list
       'PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT', // @modules/agents — frozen pure-data default policy
       'AGENT_POLICY_DOMAINS',              // @modules/agents — frozen pure-data domain list
+      // WORK-038: the project-baseline typed error (the same sanctioned
+      // exception + reasoning) + the frozen pure-data error-code list.
+      'ProjectBaselineError',              // @modules/projects — the typed domain error
+      'PROJECT_BASELINE_ERROR_CODES',       // @modules/projects — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -9482,3 +9509,284 @@ describe('WORK-037 invariants — Agent Policy and Permissions (the engine behin
     expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
   });
 });
+
+/**
+ * WORK-038 invariants — Existing Project Onboarding (the Project Baseline
+ * boundary + the onboarding application capability).
+ *
+ * The central correctness requirement: WorkflowOS must NEVER pretend
+ * inferred/reconstructed architecture was the historical authoritative
+ * architecture of the original project. Every reconstructed fact carries
+ * provenance (observed/inferred/confirmed/proposed); provenance is never
+ * collapsed into a confidence number; provenance is never silently promoted.
+ *
+ * Authority boundaries preserved:
+ *   /github       — the repository + exact-revision authority (NO GitHub SDK
+ *                   in the onboarding domain; the adapter is the only SDK caller)
+ *   /projects     — the Project Baseline STORAGE authority (the baseline is a
+ *                   project artifact; /projects remains the single project
+ *                   authority; onboarding owns NO tables)
+ *   /architecture — the architecture authority (onboarding NEVER auto-freezes;
+ *                    proposed architecture is a PROPOSED observation, never an
+ *                    ArchitectureVersion)
+ *   /workflows, /verification, /reviews — never mutated by onboarding
+ *
+ * The onboarding capability lives in src/onboarding/ — an APPLICATION-LAYER
+ * orchestrator (like src/execution-policy/ + src/benchmark/), NOT a frozen
+ * module and NOT an authority.
+ */
+describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline + onboarding capability)', () => {
+  const ONBOARDING_DIR = join(SRC_ROOT, 'onboarding');
+  const PROJECTS_BASELINE_REPO = join(MODULES_DIR, 'projects', 'internal', 'pg-project-baseline-repository.ts');
+  const MIGRATION_0038 = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0038_project_baselines.sql');
+  const ENGINE_PATH = join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts');
+
+  /** Recursively list every .ts file under a directory. */
+  function listTsFiles(dir: string): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        out.push(...listTsFiles(full));
+      } else if (entry.endsWith('.ts')) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('WORK-038 is NOT a frozen module — onboarding is an application capability, not a new authority', () => {
+    // The static check at PLAT-AC-01 enforces exactly 17 frozen modules. The
+    // onboarding capability must NOT add an 18th module under src/modules/.
+    // It lives under src/onboarding/ (an application-layer directory, like
+    // src/execution-policy/ and src/benchmark/).
+    expect(existsSync(join(MODULES_DIR, 'onboarding'))).toBe(false);
+    expect(existsSync(ONBOARDING_DIR)).toBe(true);
+  });
+
+  it('no second project authority — onboarding does NOT create projects (it stores baselines under existing /projects authority rows)', () => {
+    // The onboarding orchestrator + analyzer must not create Project rows.
+    // It reads the project (to resolve orgId) + stores baselines THROUGH
+    // /projects (the single project authority).
+    const files = [...listTsFiles(ONBOARDING_DIR), PROJECTS_BASELINE_REPO];
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      // The baseline repository must not expose a project-creation method.
+      // (It may reference ProjectRepository.findById — read-only — but must
+      // not call create/transitionState on the project.)
+      expect(
+        src,
+        `${relative(BACKEND_ROOT, f)} must not create/transition projects`,
+      ).not.toMatch(/projectRepository\.(create|transitionState|update)\s*\(/);
+    }
+  });
+
+  it('no second repository / GitHub authority — onboarding imports NO GitHub SDK + no /github internal/', () => {
+    // The onboarding domain holds no GitHub credentials and no GitHub SDK.
+    // It consumes the /github barrel (GitHubAdapter.getBranch +
+    // ProjectGitHubRepositoryRepository) — the adapter is the only SDK caller.
+    const files = listTsFiles(ONBOARDING_DIR);
+    expect(files.length, 'src/onboarding/ must contain implementation files').toBeGreaterThan(0);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import @octokit (GitHub SDK)`).not.toMatch(/from\s+['"]@octokit/);
+      expect(src, `${rel} must not import /github internal/`).not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+      // The onboarding barrel (index.ts) imports internal/ within its own
+      // module — that's allowed (it's not a cross-module internal/ import).
+    }
+  });
+
+  it('no second architecture authority — onboarding NEVER auto-freezes / never creates ArchitectureVersion rows', () => {
+    // Proposed architecture is a PROPOSED baseline observation, never an
+    // ArchitectureVersion. Onboarding never calls ArchitectureService
+    // mutation methods (freezeVersion / approveChangeAndCreateReplacement /
+    // ArchitectureVersionRepository.create). The /architecture authority is
+    // untouched.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /architecture internal/`).not.toMatch(/from\s+['"][^'"]*modules\/architecture\/internal/);
+      expect(src, `${rel} must not freeze architecture versions`).not.toMatch(/freezeVersion\s*\(/);
+      expect(src, `${rel} must not create architecture versions`).not.toMatch(/architectureVersionRepository\.create\s*\(/);
+      expect(src, `${rel} must not approve architecture change requests`).not.toMatch(/approveChangeAndCreateReplacement\s*\(/);
+    }
+  });
+
+  it('no second requirements authority — onboarding does NOT create Requirement/AcceptanceCriterion rows', () => {
+    // Inferred requirements are OBSERVATIONS (provenance=inferred), never
+    // authoritative requirements. The /requirements authority is untouched.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /requirements internal/`).not.toMatch(/from\s+['"][^'"]*modules\/requirements\/internal/);
+      expect(src, `${rel} must not create requirements`).not.toMatch(/requirementRepository\.create\s*\(/);
+      expect(src, `${rel} must not create acceptance criteria`).not.toMatch(/acceptanceCriterionRepository\.create\s*\(/);
+    }
+  });
+
+  it('no workflow / verification / review mutation — onboarding never mutates those authorities', () => {
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /workflows internal/`).not.toMatch(/from\s+['"][^'"]*modules\/workflows\/internal/);
+      expect(src, `${rel} must not import /verification internal/`).not.toMatch(/from\s+['"][^'"]*modules\/verification\/internal/);
+      expect(src, `${rel} must not import /reviews internal/`).not.toMatch(/from\s+['"][^'"]*modules\/reviews\/internal/);
+    }
+  });
+
+  it('no credentials — onboarding never imports a concrete secret store + never assigns token/password values', () => {
+    // The onboarding domain never handles credentials. Secret-shaped content
+    // is redacted by the platform observation-redaction util before persistence.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import EnvSecretStore`).not.toMatch(/EnvSecretStore/);
+      expect(src, `${rel} must not import the secret-store barrel`).not.toMatch(/from\s+['"]@platform\/secrets/);
+      expect(src, `${rel} must not import /auth internal/`).not.toMatch(/from\s+['"][^'"]*modules\/auth\/internal/);
+    }
+  });
+
+  it('no provider SDK leakage — onboarding domain imports no pg / ioredis / pglite', () => {
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import pg`).not.toMatch(/from\s+['"]pg['"]/);
+      expect(src, `${rel} must not import pglite`).not.toMatch(/from\s+['"]@electric-sql\/pglite/);
+      expect(src, `${rel} must not import ioredis`).not.toMatch(/from\s+['"]ioredis/);
+    }
+  });
+
+  it('no maintenance engine / no continuous scheduler — onboarding is baseline reconstruction, not continuous maintenance', () => {
+    // WORK-041 (maintenance/health) + WORK-040 (continuous planner) are
+    // STRICTLY OUT OF SCOPE. Onboarding produces a ONE-SHOT baseline; it does
+    // not schedule recurring scans or maintenance work items.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not declare a cron/scheduler`).not.toMatch(/setInterval\s*\(|cron\s*\(/);
+      expect(src, `${rel} must not declare a maintenance engine`).not.toMatch(/MaintenanceEngine|HealthEngine/);
+    }
+  });
+
+  it('provenance required on every reconstructed fact — the migration CHECK enforces the four-value vocabulary', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // The observation provenance CHECK.
+    expect(sql).toMatch(/provenance TEXT NOT NULL CHECK \(provenance IN \(\s*'observed',\s*'inferred',\s*'confirmed',\s*'proposed'\s*\)/);
+    // The baseline state CHECK.
+    expect(sql).toMatch(/state TEXT NOT NULL DEFAULT 'analyzing' CHECK \(state IN \(\s*'analyzing',\s*'complete',\s*'failed'\s*\)\)/);
+    // The observation-kind CHECK enumerates the baseline-content categories.
+    expect(sql).toMatch(/kind TEXT NOT NULL CHECK \(kind IN/);
+  });
+
+  it('exact repository revision required — baseline_commit_sha is NOT NULL + immutable', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql).toMatch(/baseline_commit_sha TEXT NOT NULL/);
+    // The identity-immutable guard rejects re-targeting the commit SHA.
+    expect(sql).toMatch(/NEW\.baseline_commit_sha IS DISTINCT FROM OLD\.baseline_commit_sha/);
+    // Idempotency: UNIQUE(project, repo, exact commit).
+    expect(sql).toMatch(/UNIQUE \(project_id, project_github_repository_id, baseline_commit_sha\)/);
+  });
+
+  it('no silent provenance promotion — the observation-guard trigger enforces the authorized confirmation path', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // confirmed requires confirmed_by + confirmed_at (the authorized path).
+    expect(sql).toMatch(/provenance=confirmed requires confirmed_by \+ confirmed_at/);
+    // Non-confirmed observations must NOT carry confirmation metadata.
+    expect(sql).toMatch(/provenance=% must not carry confirmed_by\/confirmed_at/);
+    // Only inferred/proposed → confirmed is a legal promotion.
+    expect(sql).toMatch(/only inferred\/proposed -> confirmed via the authorized path is permitted/);
+    // The claim is immutable (a row is never rewritten under the same key).
+    expect(sql).toMatch(/observation kind\/claim\/digest is immutable/);
+  });
+
+  it('failed analysis cannot produce a false confirmed baseline — markFailed refuses when a confirmed observation exists', () => {
+    // The pg repository's markFailed refuses if any observation is confirmed
+    // (the "failed analysis cannot produce a false confirmed baseline"
+    // invariant). This is the service-level guard; the trigger is the backstop.
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(src).toMatch(/project-baseline-no-confirmed-on-failed/);
+    expect(src).toMatch(/provenance = 'confirmed'/);
+  });
+
+  it('the onboarding barrel is types-only — no concrete implementations exported', () => {
+    // Mirrors the frozen-module barrel rule (line ~880). The onboarding
+    // barrel exposes only type aliases + interface contracts; the concrete
+    // DefaultOnboardingService + GovernedFilesystemAnalyzer stay in internal/
+    // and are wired by app.ts.
+    const barrel = readFileSync(join(ONBOARDING_DIR, 'index.ts'), 'utf8');
+    // Value re-exports forbidden (only `export type` + the barrel's own type
+    // aliases). The barrel may re-export type aliases of internal classes
+    // (DefaultOnboardingService etc.) via `export type { ... }` — that is a
+    // TYPE-ONLY re-export, not a value export, so it's permitted.
+    const valueExportRe = /export\s+(?!type\b)\{([^}]+)\}\s+from\s+['"]/g;
+    const violations: string[] = [];
+    for (const m of barrel.matchAll(valueExportRe)) {
+      const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+      for (const n of names) {
+        violations.push(`src/onboarding/index.ts value-exports "${n}"`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('decideForProjectScope is ADDITIVE — the engine still implements decide() unchanged (the native execution path)', () => {
+    // The frozen ToolPolicyGate seam is UNCHANGED. The engine gains an
+    // additive project-scoped method for onboarding; the native decide()
+    // path (execution-scoped, with the durable ask→approval interaction) is
+    // preserved.
+    const engine = readFileSync(ENGINE_PATH, 'utf8');
+    expect(engine).toMatch(/async decide\(request: ToolPolicyRequest\)/);
+    expect(engine).toMatch(/async decideForProjectScope\(/);
+    // decide() still resolves scope by executionId (the native path).
+    expect(engine).toMatch(/resolveScope\(request\.executionId\)/);
+    // decide() still routes ask through resolveAsk (the durable approval path).
+    expect(engine).toMatch(/this\.resolveAsk\(scope, request, core\.tags, core\.match, core\.version, core\.document\)/);
+    // The shared core is extracted (no duplicated matcher — the architect's
+    // "no second engine" principle).
+    expect(engine).toMatch(/private async evaluateCore/);
+    // decideForProjectScope is NON-INTERACTIVE (no approval creation for ask).
+    expect(engine).toMatch(/onboarding is NON-INTERACTIVE/);
+  });
+
+  it('the analyzer NEVER produces confirmed observations — confirmation is the authorized human path only', () => {
+    // The "no silent promotion" invariant at the SOURCE: the analyzer can
+    // only emit observed/inferred/proposed. Only the /projects
+    // confirmObservation method (called by the authorized route) can produce
+    // confirmed. This is verified by asserting the analyzer source never
+    // emits provenance: 'confirmed'.
+    const analyzer = readFileSync(join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'), 'utf8');
+    expect(analyzer).not.toMatch(/provenance:\s*['"]confirmed['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]observed['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]inferred['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]proposed['"]/);
+  });
+
+  it('tenant isolation — every baseline query is scoped by project_id (+ organization_id denormalized)', () => {
+    // The pg repository's read queries must scope by project_id (which is
+    // org-scoped via wfos_projects). No cross-tenant access (no "list all
+    // baselines" without a project filter).
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    // findById is permitted (it returns the row; the ROUTE checks
+    // baseline.projectId === projectId — verified in onboarding.route.ts).
+    // listForProject scopes by project_id.
+    expect(src).toMatch(/listForProject\(projectId: string\)/);
+    expect(src).toMatch(/WHERE project_id = \$1 ORDER BY created_at DESC/);
+  });
+
+  it('the route layer verifies ownership server-side — a baseline UUID is NOT an authorization credential', () => {
+    // onboarding.route.ts must check baseline.projectId === projectId for
+    // every baseline-scoped mutation/read (no UUID-as-credential).
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/baseline\.projectId !== projectId/);
+    expect(route).toMatch(/requireProjectAuthorization/);
+  });
+});
+
