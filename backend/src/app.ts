@@ -173,6 +173,13 @@ import {
 } from './modules/agents/internal/session-terminal-relay.js';
 import { PgAgentWorkspaceRepository } from './modules/agents/internal/pg-agent-workspace-repository.js';
 import { DefaultAgentWorkspaceService } from './modules/agents/internal/agent-workspace-service.js';
+import { DefaultToolRuntime } from './modules/agents/internal/tool-runtime-service.js';
+import { DefaultToolPolicyGate } from './modules/agents/internal/tool-runtime.types.js';
+import { FsToolExecutor } from './platform/tools/fs-tool-executor.js';
+import { ProcessToolExecutor } from './platform/tools/process-tool-executor.js';
+import { NamespaceProcessSandbox } from './platform/tools/process-sandbox.js';
+import { HttpToolExecutor } from './platform/tools/http-tool-executor.js';
+import { BrowserToolExecutor } from './platform/tools/browser-tool-executor.js';
 import { FsWorktreeMaterializer } from './platform/workspace/fs-worktree-materializer.js';
 import {
   WorkspaceReleaseOutboxRelay,
@@ -223,6 +230,7 @@ import type {
   ExecutionHandoffService,
   ExecutionCallbackService,
   ExecutionEventIngestionService,
+  ToolRuntime,
 } from '@modules/agents/index.js';
 import type { ExecutionTaskService } from '@modules/work-items/index.js';
 
@@ -377,6 +385,11 @@ export interface AppDeps {
   executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
+  /** WORK-036: the governed Tool Runtime. Present when DB + agents are
+   *  configured. Capabilities, never authorities — tool outcomes are
+   *  observations (session events + audit) and never mutate workflow,
+   *  verification, review, merge, or architecture state. */
+  toolRuntime?: ToolRuntime;
   /** WORK-032: Native vs External Execution Benchmark service. Present when
    *  DB + execution + workflow + verification + review are configured. */
   benchmarkService?: BenchmarkService;
@@ -577,6 +590,10 @@ export async function buildApp(
   // scope; constructed inside the agents block).
   let workspaceReleaseRelay: OutboxRelay | undefined;
   let agentWorkspaceServiceRef: { reconcilePendingReleases(): Promise<number> } | undefined;
+  // WORK-036: the governed tool runtime (declared at function scope; the
+  // agents block constructs it — exposed for the future native-execution
+  // path that drives governed tools inside the workspace).
+  let toolRuntimeRef: ToolRuntime | undefined;
   // The session service is also referenced by the handler registry below.
   let executionSessionServiceRef: { reconcileTerminalForExecution(executionId: string): Promise<unknown> } | undefined;
   let executionPolicyService: ExecutionPolicyService | undefined;
@@ -961,12 +978,15 @@ export async function buildApp(
       projectGitHubRepositoryLookup: projectGitHubRepositoryRepository!,
       baselineResolver: githubAdapter,
     });
+    // The ONE workspace materializer (shared by the workspace service and
+    // the WORK-036 tool runtime's host-path re-resolution).
+    const workspaceMaterializer = new FsWorktreeMaterializer({
+      rootDir: process.env.WFOS_WORKSPACE_ROOT ?? './.workspaces',
+      logger,
+    });
     const agentWorkspaceService = new DefaultAgentWorkspaceService({
       workspaceRepository: agentWorkspaceRepository,
-      materializer: new FsWorktreeMaterializer({
-        rootDir: process.env.WFOS_WORKSPACE_ROOT ?? './.workspaces',
-        logger,
-      }),
+      materializer: workspaceMaterializer,
       logger,
     });
     workspaceReleaseRelay = new WorkspaceReleaseOutboxRelay({
@@ -975,6 +995,55 @@ export async function buildApp(
       logger,
     });
     agentWorkspaceServiceRef = agentWorkspaceService;
+
+    // --- WORK-036: Tool Runtime — the governed tool boundary BENEATH the
+    // execution/session/workspace authority. Tools are capabilities, never
+    // authorities: outcomes are observations (session `tool_call` +
+    // `observation` events + audit), never workflow/verification/review
+    // mutations. The executors are platform-owned execution infrastructure
+    // (workspace-confined fs/process/git/package/http/browser); the policy
+    // gate is the WORK-037 enforcement seam (default: allow — no permission
+    // engine in WORK-036). The SAME materializer instance re-resolves each
+    // invocation's workspace worktree root (the WORK-035 boundary reused,
+    // never duplicated). No browser driver is configured by default — the
+    // family fails closed with the typed unavailability outcome until a
+    // provider driver adapter is supplied behind the port.
+    // PR #40 review fix: the process sandbox boundary. Every terminal/git/
+    // package invocation crosses the namespace sandbox (mount/net/pid/
+    // ipc/uts/user + pivot_root + capability drop) — cwd confinement alone
+    // confines the invocation, not the process. Deployment-level extra
+    // toolchain roots (read-only system image additions) come from
+    // WFOS_SANDBOX_TOOLCHAIN_PATHS (':'-separated, operator config only —
+    // tool callers can never influence it). Fail-closed: if the sandbox
+    // primitives are unavailable, the process families report the typed
+    // 'process-sandbox-unavailable' outcome — there is no unsandboxed
+    // fallback.
+    const processSandbox = new NamespaceProcessSandbox({
+      extraToolchainRoots:
+        (process.env.WFOS_SANDBOX_TOOLCHAIN_PATHS ?? '')
+          .split(':')
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+      logger,
+    });
+    const toolRuntime = new DefaultToolRuntime({
+      sessionService: executionSessionService,
+      sessionRepository: executionSessionRepository,
+      workspaceRepository: agentWorkspaceRepository,
+      materializer: workspaceMaterializer,
+      executors: {
+        filesystem: new FsToolExecutor({ logger }),
+        terminal: new ProcessToolExecutor('terminal', { logger, sandbox: processSandbox }),
+        git: new ProcessToolExecutor('git', { logger, sandbox: processSandbox }),
+        package: new ProcessToolExecutor('package', { logger, sandbox: processSandbox }),
+        http: new HttpToolExecutor({ logger }),
+        browser: new BrowserToolExecutor({ logger }),
+      },
+      policyGate: new DefaultToolPolicyGate(),
+      auditWriter: auditService,
+      logger,
+    });
+    toolRuntimeRef = toolRuntime;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1377,6 +1446,9 @@ export async function buildApp(
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,
+      // WORK-036: the governed tool runtime (present when DB + agents
+      // configured). Capabilities, never authorities — observations only.
+      toolRuntime: toolRuntimeRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +

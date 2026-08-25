@@ -339,6 +339,13 @@ const PROVIDER_IMPLEMENTATION_FILES = new Set([
   'src/platform/worker/fixtures/echo.job.ts', // createEchoJobHandler (fixture)
   // --- WORK-002 secrets (SEC-001) ---
   'src/platform/secrets/env-secret-store.ts', // EnvSecretStore (concrete secret impl)
+  // --- WORK-036 tool executors (concrete execution infrastructure; the
+  //     contracts live in tool-contracts.ts which domain code MAY import) ---
+  'src/platform/tools/fs-tool-executor.ts', // FsToolExecutor
+  'src/platform/tools/process-tool-executor.ts', // ProcessToolExecutor (terminal/git/package)
+  'src/platform/tools/process-sandbox.ts', // NamespaceProcessSandbox (the PR #40 review-fix sandbox)
+  'src/platform/tools/http-tool-executor.ts', // HttpToolExecutor
+  'src/platform/tools/browser-tool-executor.ts', // BrowserToolExecutor + BrowserDriver port host
 ]);
 
 /**
@@ -828,6 +835,12 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // exception + reasoning).
       'AgentWorkspaceError',           // @modules/agents — the typed domain error
       'AGENT_WORKSPACE_ERROR_CODES',   // @modules/agents — the stable code list
+      // WORK-036: the tool-runtime typed error (the same sanctioned
+      // exception + reasoning) + the frozen structural limits constant
+      // (pure data — no wiring, no credentials).
+      'ToolRuntimeError',              // @modules/agents — the typed domain error
+      'TOOL_RUNTIME_ERROR_CODES',      // @modules/agents — the stable code list
+      'DEFAULT_TOOL_EXECUTION_LIMITS', // @modules/agents — frozen pure-data limits
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -8371,3 +8384,510 @@ describe('WORK-035 invariants — agent workspaces and git worktrees', () => {
     expect(matTestSrc).toMatch(/path-traversal-safe/);
   });
 });
+
+// ===========================================================================
+// WORK-036 — Tool Runtime invariants (the governed tool boundary)
+// ===========================================================================
+
+describe('WORK-036 invariants — the governed Tool Runtime', () => {
+  const TR_TYPES = join(MODULES_DIR, 'agents', 'internal', 'tool-runtime.types.ts');
+  const TR_SERVICE = join(MODULES_DIR, 'agents', 'internal', 'tool-runtime-service.ts');
+  const TR_CONTRACTS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'tool-contracts.ts');
+  const TR_FS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'fs-tool-executor.ts');
+  const TR_PROCESS = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+  const TR_SANDBOX = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-sandbox.ts');
+  const TR_HTTP = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'http-tool-executor.ts');
+  const TR_BROWSER = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'browser-tool-executor.ts');
+  const TR_CONFINEMENT = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'path-confinement.ts');
+  const TR_REDACTION = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'observation-redaction.ts');
+  const TR_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+  const TR_SANDBOX_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'process-sandbox.regression.test.ts');
+
+  const TOOL_RUNTIME_FILES = [
+    ['types', TR_TYPES],
+    ['service', TR_SERVICE],
+    ['contracts', TR_CONTRACTS],
+    ['fs-executor', TR_FS],
+    ['process-executor', TR_PROCESS],
+    ['process-sandbox', TR_SANDBOX],
+    ['http-executor', TR_HTTP],
+    ['browser-executor', TR_BROWSER],
+    ['confinement', TR_CONFINEMENT],
+    ['redaction', TR_REDACTION],
+  ] as const;
+
+  function strip(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  it('ONE tool-runtime boundary: the platform contracts + the /agents runtime (no second engine anywhere)', () => {
+    // The contracts exist exactly once (platform-owned, provider-independent).
+    expect(existsSync(TR_CONTRACTS), 'platform/tools/tool-contracts.ts must exist').toBe(true);
+    const contractsSrc = readFileSync(TR_CONTRACTS, 'utf8');
+    expect(contractsSrc).toMatch(/export type ToolFamily = 'filesystem' \| 'terminal' \| 'git' \| 'package' \| 'http' \| 'browser'/);
+    // The frozen six families.
+    for (const family of ['filesystem', 'terminal', 'git', 'package', 'http', 'browser']) {
+      expect(contractsSrc).toContain(`'${family}'`);
+    }
+    // The runtime service exists exactly once in /agents and implements the port.
+    const svcSrc = strip(readFileSync(TR_SERVICE, 'utf8'));
+    expect(svcSrc).toMatch(/class DefaultToolRuntime implements ToolRuntime/);
+    // No OTHER module declares a tool runtime (one boundary — grep the module tree).
+    const otherToolRuntimeFiles: string[] = [];
+    for (const file of walkTs(MODULES_DIR)) {
+      const rel = relative(BACKEND_ROOT, file);
+      if (file === TR_TYPES || file === TR_SERVICE) continue;
+      const src = readFileSync(file, 'utf8');
+      if (/class \w*ToolRuntime\b|interface ToolRuntime\b/.test(src)) {
+        otherToolRuntimeFiles.push(rel);
+      }
+    }
+    expect(otherToolRuntimeFiles, `a second tool runtime exists: ${otherToolRuntimeFiles.join(', ')}`).toEqual([]);
+  });
+
+  it('NO second execution engine, NO workflow/verification/review mutation (tools are capabilities, never authorities)', () => {
+    for (const [name, p] of TOOL_RUNTIME_FILES) {
+      const src = strip(readFileSync(p, 'utf8'));
+      // Never a second execution engine / provider registry / gateway.
+      expect(src, `${name}: no ExecutionService construction`).not.toMatch(/class \w*ExecutionService|new \w*ExecutionService|implements ExecutionService\b/);
+      expect(src, `${name}: no AgentGateway`).not.toMatch(/AgentGateway/);
+      expect(src, `${name}: no second provider registry`).not.toMatch(/ProviderRegistry\b/);
+      // Never an authority: no workflow / verification / review mutation.
+      expect(src, `${name}: no workflow mutation`).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+      expect(src, `${name}: no verification mutation`).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+      expect(src, `${name}: no review mutation`).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+      // No WorkItem/WorkOrder state decisions either.
+      expect(src, `${name}: no work-item mutation`).not.toMatch(/INSERT INTO wfos_work_items|UPDATE wfos_work_items|DELETE FROM wfos_work_items/);
+    }
+    // The runtime touches ONLY the session events table (observations) —
+    // never the workflow/verification/review tables (checked above), and
+    // never the execution records themselves.
+    const svcSrc = strip(readFileSync(TR_SERVICE, 'utf8'));
+    expect(svcSrc).not.toMatch(/INSERT INTO wfos_executions\b|UPDATE wfos_executions\b/);
+  });
+
+  it('NO GitHub authority duplication (git is repository-LOCAL only; remote operations are denied fail-closed)', () => {
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    // The fail-closed remote-network denylist.
+    expect(procSrc).toMatch(/GIT_REMOTE_SUBCOMMANDS/);
+    for (const sub of ['push', 'pull', 'fetch', 'clone', 'remote', 'ls-remote']) {
+      expect(procSrc).toContain(`'${sub}'`);
+    }
+    expect(procSrc).toMatch(/git-remote-operation-forbidden/);
+    // The cwd/git-dir redirect denylist.
+    expect(procSrc).toMatch(/GIT_REDIRECT_FLAGS/);
+    expect(procSrc).toMatch(/git-redirect-forbidden/);
+    // No PR/merge operations anywhere in the tool runtime.
+    for (const [name, p] of TOOL_RUNTIME_FILES) {
+      const src = strip(readFileSync(p, 'utf8'));
+      expect(src, `${name}: no GitHub PR/merge authority`).not.toMatch(/createPullRequest|mergePullRequest|\.merge\(/);
+      expect(src, `${name}: no octokit`).not.toMatch(/octokit/);
+    }
+  });
+
+  it('NO provider SDK leakage into the public tool contracts (browser driver is a neutral port)', () => {
+    // The contracts + the browser port carry NO provider SDK types.
+    for (const [name, p] of [
+      ['contracts', TR_CONTRACTS],
+      ['browser-executor', TR_BROWSER],
+      ['types', TR_TYPES],
+    ] as const) {
+      const src = strip(readFileSync(p, 'utf8'));
+      expect(src, `${name}: no Playwright/CDP coupling`).not.toMatch(/playwright|chrome-remote|cdp|puppeteer|devtools/i);
+      expect(src, `${name}: no provider SDKs`).not.toMatch(/from ['"]playwright|from ['"]puppeteer|from ['"]@octokit|zai-sdk/);
+    }
+    // The BrowserDriver port is neutral (its result types are plain data).
+    const browserSrc = readFileSync(TR_BROWSER, 'utf8');
+    expect(browserSrc).toMatch(/export interface BrowserDriver\b/);
+    expect(browserSrc).toMatch(/export interface BrowserNavigationResult\b/);
+    // HTTP is plain fetch — no provider client.
+    const httpSrc = strip(readFileSync(TR_HTTP, 'utf8'));
+    expect(httpSrc).toMatch(/await fetch\(/);
+    expect(httpSrc).not.toMatch(/axios|got\(|node-fetch/);
+    // Provider-independent: no provider names in the tool contracts.
+    for (const p of [TR_CONTRACTS, TR_TYPES]) {
+      const contractSrc = strip(readFileSync(p, 'utf8'));
+      expect(contractSrc, `${p}: no provider specifics`).not.toMatch(/\bopenai\b|\banthropic\b|\bzai\b|\bcodex\b|\bclaude\b|\bchatgpt\b/i);
+    }
+  });
+
+  it('NO credential capture (sanitized process env + observation redaction + no secret-store access)', () => {
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    // The child environment is a SANITIZED MINIMAL base — the host env is
+    // NEVER inherited wholesale.
+    expect(procSrc).toMatch(/sanitizedEnv/);
+    expect(procSrc).not.toMatch(/\.\.\.process\.env|env:\s*process\.env/);
+    // The HTTP executor never ADDS authentication.
+    const httpSrc = strip(readFileSync(TR_HTTP, 'utf8'));
+    expect(httpSrc).not.toMatch(/Authorization.*=|Bearer\s+\$\{/);
+    // The observation redaction layer exists with the key-name vocabulary.
+    const redactSrc = readFileSync(TR_REDACTION, 'utf8');
+    expect(redactSrc).toMatch(/export function redactForObservation/);
+    expect(redactSrc).toMatch(/export function redactHttpHeaders/);
+    expect(redactSrc).toContain("export const REDACTED = '[REDACTED]'");
+    for (const key of ['secret', 'token', 'password', 'authorization', 'cookie', 'credential', 'api[-_]?key']) {
+      expect(redactSrc).toMatch(new RegExp(key));
+    }
+    // No credential/secret-store access anywhere in the tool runtime.
+    for (const [name, p] of TOOL_RUNTIME_FILES) {
+      const src = strip(readFileSync(p, 'utf8'));
+      expect(src, `${name}: no env credential reads`).not.toMatch(/process\.env\.[A-Z_]*(API_KEY|SECRET|TOKEN|PASSWORD)/);
+      expect(src, `${name}: no secret store`).not.toMatch(/SecretStore|EnvSecretStore|getSecret/);
+      expect(src, `${name}: no cookies captured`).not.toMatch(/cookieStore|jar\b/i);
+    }
+  });
+
+  it('NO permission engine + NO adaptive router (the WORK-037/043/044 boundaries stay unimplemented)', () => {
+    for (const [name, p] of TOOL_RUNTIME_FILES) {
+      const src = strip(readFileSync(p, 'utf8'));
+      // The policy SEAM exists but no ENGINE: no persisted policy tables,
+      // no role/capability model, no ask-interaction flow.
+      expect(src, `${name}: no permission tables`).not.toMatch(/INSERT INTO wfos_(agent_)?polic|CREATE TABLE.*permission/);
+      expect(src, `${name}: no role model`).not.toMatch(/AgentRole|role:|assignRole/);
+      // No adaptive routing / eligibility / scheduling.
+      expect(src, `${name}: no adaptive router`).not.toMatch(/adaptiveRoute|routeProvider|AdaptiveRouter/);
+      expect(src, `${name}: no eligibility engine`).not.toMatch(/EligibilityEngine|executionEligibility/);
+      expect(src, `${name}: no scheduler`).not.toMatch(/setInterval|cron|scheduleJob/);
+    }
+    // The SEAM itself: the gate port + the four-value decision vocabulary.
+    const typesSrc = readFileSync(TR_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/export type ToolPolicyDecisionValue = 'allow' \| 'deny' \| 'ask' \| 'constrained'/);
+    expect(typesSrc).toMatch(/export interface ToolPolicyGate\b/);
+    expect(typesSrc).toMatch(/export class DefaultToolPolicyGate implements ToolPolicyGate/);
+    // The runtime crosses the gate BEFORE any executor runs.
+    const svcSrc = strip(readFileSync(TR_SERVICE, 'utf8'));
+    const invokeBody = svcSrc.match(/private async invokeUnchecked[\s\S]*?\n  \}/)![0];
+    const gateIdx = invokeBody.indexOf('policyGate.decide');
+    const executorIdx = invokeBody.indexOf('executor.execute');
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(executorIdx).toBeGreaterThan(gateIdx);
+  });
+
+  it('the WORKSPACE BOUNDARY is reused from WORK-035 (no competing filesystem/worktree abstraction)', () => {
+    // The runtime consumes the WORK-035 workspace repository + materializer.
+    const svcSrc = strip(readFileSync(TR_SERVICE, 'utf8'));
+    expect(svcSrc).toMatch(/workspaceRepository: Pick<AgentWorkspaceRepository, 'getWorkspaceForExecution'>/);
+    expect(svcSrc).toMatch(/materializer: WorktreeMaterializer/);
+    // The host path comes from the materializer re-resolution — no
+    // independent path derivation.
+    expect(svcSrc).toMatch(/materializer\.materialize\(\{/);
+    // Every filesystem/cwd access flows through the confinement module.
+    const fsSrc = strip(readFileSync(TR_FS, 'utf8'));
+    expect(fsSrc).toMatch(/resolveWithinWorkspace/);
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    expect(procSrc).toMatch(/resolveWithinWorkspace/);
+    // The confinement module rejects traversal + absolute + symlink escapes.
+    const confSrc = readFileSync(TR_CONFINEMENT, 'utf8');
+    expect(confSrc).toMatch(/isAbsolute/);
+    expect(confSrc).toMatch(/realpath/);
+    expect(confSrc).toMatch(/WorkspaceBoundaryError/);
+    expect(confSrc).toMatch(/'workspace-boundary-violation'/);
+    // No second worktree/materializer abstraction in the tool layer.
+    for (const [name, p] of TOOL_RUNTIME_FILES) {
+      const src = strip(readFileSync(p, 'utf8'));
+      expect(src, `${name}: no competing worktree abstraction`).not.toMatch(/git worktree add|worktreePathToken = |buildWorktreePathToken/);
+    }
+  });
+
+  it('the normalized contract: identity + linkage + policy + timing + outcome + cancellation + idempotency', () => {
+    const typesSrc = readFileSync(TR_TYPES, 'utf8');
+    // The full normalized record key set.
+    expect(typesSrc).toMatch(/export interface ToolInvocationRecord\b/);
+    for (const field of [
+      'invocationId', 'executionId', 'sessionId', 'workspaceId', 'origin',
+      'tool', 'input', 'policy', 'startedAt', 'completedAt', 'status',
+      'exitCode', 'stdout', 'stderr', 'output', 'error', 'truncated',
+    ]) {
+      expect(typesSrc).toMatch(new RegExp(`readonly ${field}:`));
+    }
+    // The statuses (uncertainty is observable) + idempotency declaration.
+    expect(typesSrc).toMatch(/export type ToolInvocationStatus = 'succeeded' \| 'failed' \| 'cancelled' \| 'blocked' \| 'unknown'/);
+    expect(typesSrc).toMatch(/export type ToolInvocationIdempotency = 'idempotent' \| 'non-idempotent'/);
+    // Native AND external parity through the same contract.
+    expect(typesSrc).toMatch(/origin: 'native' \| 'external'/);
+    expect(typesSrc).toMatch(/recordExternalObservation\(input: ExternalToolObservationInput\)/);
+    // Bounded output is structural.
+    const contractsSrc = readFileSync(TR_CONTRACTS, 'utf8');
+    expect(contractsSrc).toMatch(/maxOutputBytes/);
+    expect(contractsSrc).toMatch(/maxResponseBytes|maxHttpBodyBytes/);
+    expect(contractsSrc).toMatch(/truncated: boolean/);
+    // Cancellation is in the contract (AbortSignal).
+    expect(typesSrc).toMatch(/readonly signal\?: AbortSignal/);
+  });
+
+  it('durable observability through the EXISTING evidence architecture (session events + audit — no parallel tool-event store)', () => {
+    // No new migration, no new table for tool events.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    const migrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+    for (const f of migrationFiles) {
+      const src = readFileSync(join(migrationsDir, f), 'utf8');
+      expect(src, `${f}: no parallel tool-event store`).not.toMatch(/CREATE TABLE IF NOT EXISTS wfos_tool_|CREATE TABLE IF NOT EXISTS wfos_agent_tool/);
+    }
+    // The observations ride the session event vocabulary (tool_call + observation).
+    const repoSrc = strip(readFileSync(join(AGENTS_INTERNAL_PATH(), 'pg-execution-session-repository.ts'), 'utf8'));
+    expect(repoSrc).toMatch(/claimToolInvocation/);
+    expect(repoSrc).toMatch(/appendToolObservation/);
+    expect(repoSrc).toMatch(/'tool_call'/);
+    expect(repoSrc).toMatch(/'observation'/);
+    // The invocation-key dedupe uses the payload match under the session
+    // row lock (the existing serialized transactional pattern — not a
+    // read-check-write).
+    expect(repoSrc).toMatch(/payload->>'invocationId' = \$2/);
+    expect(repoSrc).toMatch(/FOR UPDATE/);
+    // The runtime emits audit events (supplementary, never authoritative).
+    const svcSrc = strip(readFileSync(TR_SERVICE, 'utf8'));
+    expect(svcSrc).toMatch(/tool\.invocation\.\$\{record\.status\}/);
+    expect(svcSrc).toMatch(/emitAudit/);
+  });
+
+  it('terminal governance: explicit argv, NO shell, bounded output, sanitized env, timeout + cancellation', () => {
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    // execFile with EXPLICIT argv — never child_process.exec (shell).
+    expect(procSrc).toMatch(/execFile\(/);
+    expect(procSrc).not.toMatch(/child_process\.exec\(|exec\(userString|shell:\s*true/);
+    // argv separation is validated (a shell string can never smuggle in).
+    expect(procSrc).toMatch(/requires a non-empty argv of strings \(no shell strings\)/);
+    // Bounded output + timeout + signal cancellation.
+    expect(procSrc).toMatch(/maxBuffer/);
+    expect(procSrc).toMatch(/timeout/);
+    expect(procSrc).toMatch(/signal: opts\.ctx\.signal/);
+    // The teardown: process-group SIGTERM with a guaranteed SIGKILL
+    // escalation (the wrapper blocks SIGTERM; the pid-1 target ignores
+    // default-disposition signals).
+    expect(procSrc).toMatch(/process\.kill\(-child\.pid, sig\)/);
+    expect(procSrc).toMatch(/TEARDOWN_GRACE_MS/);
+    expect(procSrc).toMatch(/'SIGKILL'/);
+    // Cancellation + timeout map to distinct observable outcome codes
+    // (deterministic flags — not signal bookkeeping through the wrapper).
+    expect(procSrc).toMatch(/'cancelled'/);
+    expect(procSrc).toMatch(/'timeout'/);
+    // The package family rejects arbitrary binaries (bare runner names).
+    expect(procSrc).toMatch(/package-runner-path-forbidden/);
+  });
+
+  it('the PROCESS SANDBOX boundary (PR #40 review fix): kernel-enforced confinement, fail-closed, NO unsandboxed fallback', () => {
+    expect(existsSync(TR_SANDBOX), 'platform/tools/process-sandbox.ts must exist').toBe(true);
+    const sandboxSrc = readFileSync(TR_SANDBOX, 'utf8');
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+
+    // The port + exactly ONE implementation; NO pass-through sandbox.
+    expect(sandboxSrc).toMatch(/export interface ProcessSandbox\b/);
+    expect(sandboxSrc).toMatch(/export class NamespaceProcessSandbox implements ProcessSandbox/);
+    expect(sandboxSrc).toMatch(/export class ProcessSandboxError extends Error/);
+    // The executor REQUIRES the sandbox (no optional dep, no default).
+    expect(procSrc).toMatch(/readonly sandbox: ProcessSandbox;/);
+    expect(procSrc).not.toMatch(/sandbox\?:/);
+    // app.ts wires the REAL namespace sandbox into ALL THREE process families.
+    expect(appSrc).toMatch(/new NamespaceProcessSandbox\(/);
+    for (const family of ['terminal', 'git', 'package']) {
+      expect(appSrc, `app.ts must wire the sandbox into the ${family} executor`).toContain(
+        `new ProcessToolExecutor('${family}', { logger, sandbox: processSandbox })`,
+      );
+    }
+
+    // Fail-closed: ensureAvailable BEFORE wrapLaunch BEFORE the spawn;
+    // the typed unavailable outcome; no fallback spawn of the raw argv.
+    const runProcessBody = procSrc.match(/private async runProcess[\s\S]*?\n  \}/)![0];
+    const ensureIdx = runProcessBody.indexOf('this.sandbox.ensureAvailable()');
+    const wrapIdx = runProcessBody.indexOf('this.sandbox.wrapLaunch(');
+    const spawnIdx = procSrc.indexOf('launch.argv[0]!');
+    expect(ensureIdx).toBeGreaterThan(-1);
+    expect(wrapIdx).toBeGreaterThan(ensureIdx);
+    expect(spawnIdx).toBeGreaterThan(procSrc.indexOf('private spawnSandboxed'));
+    expect(procSrc).toMatch(/'process-sandbox-unavailable'/);
+    expect(procSrc).toMatch(/there is no unsandboxed fallback/);
+    // The outcome records WHICH confinement produced it (observability).
+    expect(procSrc).toMatch(/sandbox: this\.sandbox\.id/);
+
+    // The unshare flags: user + mount + NET + PID + IPC + UTS + kill-child.
+    // The launcher binary is ABSOLUTE (no PATH resolution — the launcher
+    // environment is the frozen constant below, nothing else).
+    expect(sandboxSrc).toContain("'/usr/bin/unshare',");
+    expect(sandboxSrc).toContain("'--user'");
+    expect(sandboxSrc).toContain("'--map-root-user'");
+    expect(sandboxSrc).toContain("'--mount'");
+    expect(sandboxSrc).toContain("'--net'");
+    expect(sandboxSrc).toContain("'--pid'");
+    expect(sandboxSrc).toContain("'--ipc'");
+    expect(sandboxSrc).toContain("'--uts'");
+    expect(sandboxSrc).toContain("'--kill-child'");
+
+    // The FROZEN setup script: pivot_root + tmpfs root + read-only system
+    // binds + the sealed old root + the capability drop. NO interpolation
+    // (no '${' anywhere in the script — user argv travels POSITIONALLY).
+    const scriptMatch = sandboxSrc.match(/export const NAMESPACE_SANDBOX_SETUP_SCRIPT = `([\s\S]*?)`;/);
+    expect(scriptMatch, 'the frozen setup script constant must exist').not.toBeNull();
+    const script = scriptMatch![1];
+    expect(script).not.toContain('${');
+    for (const fragment of [
+      'mount -t tmpfs',
+      'mount --bind /usr',
+      'mount -o remount,bind,ro',
+      'pivot_root /mnt /mnt/.putold',
+      'umount -l /.putold',
+      'mount -t tmpfs -o size=4k,mode=000 tmpfs /.putold',
+      'set -eu',
+      'test -x /usr/bin/setpriv',
+      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c',
+      'shift 4',
+    ]) {
+      expect(script, `the frozen script must contain: ${fragment}`).toContain(fragment);
+    }
+    // The git object store bind derives from the WORK-035 layout module —
+    // never from the tamperable .git pointer file.
+    expect(sandboxSrc).toMatch(/deriveRepositoryDirFromWorktreePath/);
+    expect(sandboxSrc).not.toMatch(/readFile.*\.git|gitdir:/);
+    // The layout module owns the inverse derivation (single source).
+    const layoutSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'worktree-layout.ts'), 'utf8');
+    expect(layoutSrc).toMatch(/export function deriveRepositoryDirFromWorktreePath/);
+  });
+
+  it('the TWO-PHASE ENVIRONMENT (PR #40 second review fix): the launcher env is a frozen platform constant — caller env reaches ONLY the post-boundary target', () => {
+    const sandboxSrc = readFileSync(TR_SANDBOX, 'utf8');
+    const procSrc = strip(readFileSync(TR_PROCESS, 'utf8'));
+
+    // The HOST LAUNCH environment is a frozen literal constant — the
+    // entire launcher-phase env contract. It is platform-owned: the
+    // sandbox module's CODE reads no process.env at all (comments
+    // stripped — no host environment can enter the launcher).
+    expect(sandboxSrc).toMatch(
+      /export const SANDBOX_HOST_LAUNCH_ENV: Readonly<Record<string, string>> = Object\.freeze\(\{\s*PATH: '\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin',\s*\}\);/,
+    );
+    expect(strip(sandboxSrc)).not.toContain('process.env');
+    // wrapLaunch returns EXACTLY that constant as the launcher env —
+    // never the launch input, never a merge, never caller data. (The
+    // availability probe legitimately CONSUMES the wrapped launch env —
+    // the invariant is scoped to wrapLaunch, the only constructor of
+    // WrappedProcessLaunch.)
+    const wrapBody = sandboxSrc.match(
+      /async wrapLaunch\(launch: ProcessSandboxLaunch\): Promise<WrappedProcessLaunch> \{[\s\S]*?\n  \}/,
+    )![0]!;
+    expect(wrapBody).toContain('env: SANDBOX_HOST_LAUNCH_ENV');
+    expect(wrapBody).not.toMatch(/env:\s*launch/);
+    expect(wrapBody).not.toMatch(/env\s*:\s*\{\s*\.\.\.\s*launch/);
+
+    // The launch INPUT has no `env` field at all — the caller-permitted
+    // environment can ONLY be named as `targetEnv` (a structurally
+    // distinct contract; this is the invariant that makes the
+    // LD_PRELOAD-reaches-unshare escape unrepresentable).
+    const launchIface = sandboxSrc.match(/export interface ProcessSandboxLaunch \{[\s\S]*?\n\}/)![0];
+    expect(launchIface).toContain('readonly targetEnv: Readonly<Record<string, string>>;');
+    expect(launchIface).not.toMatch(/readonly env:/);
+
+    // The target env enters the WRAPPED ARGV as count-framed K=V words
+    // (data — applied by the in-sandbox shell after the boundary).
+    expect(sandboxSrc).toContain('Object.entries(launch.targetEnv)');
+    expect(sandboxSrc).toMatch(/String\(targetEnvEntries\.length\)/);
+
+    // The frozen script: the capability drop execs the SECOND frozen
+    // shell that applies the counted target env — the drop happens
+    // BEFORE any caller environment exists in the process tree, and the
+    // env application execs the target verbatim.
+    const scriptMatch = sandboxSrc.match(/export const NAMESPACE_SANDBOX_SETUP_SCRIPT = `([\s\S]*?)`;/);
+    const script = scriptMatch![1]!;
+    const dropIdx = script.indexOf(
+      'exec /usr/bin/setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c',
+    );
+    const envApplyIdx = script.indexOf('export "$1"');
+    const targetExecIdx = script.lastIndexOf('exec "$@"');
+    expect(dropIdx, 'the capability drop must exec the env-applying shell').toBeGreaterThan(-1);
+    expect(envApplyIdx, 'the target env is applied by export words').toBeGreaterThan(dropIdx);
+    expect(targetExecIdx, 'the target argv exec comes after the env application').toBeGreaterThan(envApplyIdx);
+    for (const fragment of ['N=$1', 'while [ "$N" -gt 0 ]; do', 'export "$1"', 'N=$((N - 1))', 'exec "$@"']) {
+      expect(script, `the frozen env-application script must contain: ${fragment}`).toContain(fragment);
+    }
+
+    // The executor passes the caller env ONLY as targetEnv; the spawn
+    // uses the wrapped launch env (the frozen constant) — there is no
+    // locally merged environment anywhere in the spawn path.
+    expect(procSrc).toContain('targetEnv: env');
+    expect(procSrc).not.toMatch(/env:\s*env\b/);
+    expect(procSrc).not.toMatch(/env:\s*this\.sanitizedEnv/);
+    // Environment keys are SHAPE-validated (a syntactic rule — NOT a
+    // variable-name denylist; LD_* keys still reach the target).
+    expect(procSrc).toMatch(/ENV_KEY_PATTERN/);
+  });
+
+  it('the WORK-036 regression matrix exists (the frozen scenarios)', () => {
+    expect(existsSync(TR_TEST), 'tool-runtime.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(TR_TEST, 'utf8');
+    // The 20 frozen scenarios.
+    expect(src).toMatch(/filesystem write \+ read round-trip/);
+    expect(src).toMatch(/path traversal is REJECTED/);
+    expect(src).toMatch(/workspace boundary is ENFORCED: absolute paths \+ symlink escapes/);
+    expect(src).toMatch(/terminal command execution with full capture/);
+    expect(src).toMatch(/terminal cancellation: the caller AbortSignal interrupts/);
+    expect(src).toMatch(/git operations run inside the CORRECT workspace/);
+    expect(src).toMatch(/package\/test execution uses the workspace boundary/);
+    expect(src).toMatch(/browser abstraction: the driver port is decoupled/);
+    expect(src).toMatch(/HTTP abstraction: explicit URL\/method\/headers\/body/);
+    expect(src).toMatch(/invocation identity links execution \+ session \+ workspace/);
+    expect(src).toMatch(/concurrent SAME-invocationId calls execute EXACTLY ONCE/);
+    expect(src).toMatch(/concurrent DIFFERENT invocationIds both execute/);
+    expect(src).toMatch(/retry after a COMPLETED observation REPLAYS/);
+    expect(src).toMatch(/NON-IDEMPOTENT retry after a crash/);
+    expect(src).toMatch(/IDEMPOTENT retry after a crash re-runs safely/);
+    expect(src).toMatch(/tool failure is NEVER reported as success/);
+    expect(src).toMatch(/tool observations NEVER mutate workflow\/verification\/review authority/);
+    expect(src).toMatch(/external provider observations flow through the SAME normalized contract/);
+    expect(src).toMatch(/credentials CANNOT enter durable tool payloads/);
+    expect(src).toMatch(/NO arbitrary host filesystem escape from ANY family/);
+    // The seam + chain-gate scenarios.
+    expect(src).toMatch(/policy seam: deny \+ ask BLOCK execution/);
+    expect(src).toMatch(/chain gates: no session \/ not-running session \/ no workspace \/ not-ready workspace/);
+  });
+
+  it('the PROCESS-SANDBOX regression matrix exists (the PR #40 review-fix scenarios)', () => {
+    expect(existsSync(TR_SANDBOX_TEST), 'process-sandbox.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(TR_SANDBOX_TEST, 'utf8');
+    // cwd confinement ≠ process confinement — the review's framing.
+    expect(src).toMatch(/cwd confinement is NOT process confinement/);
+    // Legitimate workspace-local development commands still run.
+    expect(src).toMatch(/legitimate workspace-local development commands still run/);
+    expect(src).toMatch(/legitimate git operations run inside the worktree THROUGH the shared object store/);
+    expect(src).toMatch(/the review bypass route/);
+    // The escape routes are all blocked.
+    expect(src).toMatch(/absolute host filesystem access is BLOCKED/);
+    expect(src).toMatch(/traversal cannot escape the workspace/);
+    expect(src).toMatch(/git -C <outside repository> is BLOCKED via the terminal family/);
+    expect(src).toMatch(/the host environment and host processes are invisible/);
+    expect(src).toMatch(/direct network access is BLOCKED from the sandbox/);
+    // The hostile-process + seal + fail-closed + shape invariants.
+    expect(src).toMatch(/a hostile process cannot remount, unstack, or unmount the frozen sandbox/);
+    expect(src).toMatch(/an unusable sandbox fails CLOSED/);
+    expect(src).toMatch(/the frozen constant script \+ POSITIONAL argv/);
+    expect(src).toMatch(/extra toolchain roots are validated/);
+    expect(src).toMatch(/never the tamperable \.git pointer/);
+    // PR #40 SECOND review fix — the TWO-PHASE ENVIRONMENT scenarios:
+    // the launcher env is the frozen constant (wrapLaunch shape) and
+    // every caller loader/runtime vector (LD_PRELOAD with a compiled
+    // malicious workspace .so, LD_PRELOAD naming a host .so, LD_AUDIT,
+    // LD_LIBRARY_PATH with a planted bogus libc, caller PATH, LD_DEBUG,
+    // legitimate env passthrough, env-key shape) is regression-proven.
+    expect(src).toMatch(/the TWO-PHASE ENVIRONMENT/);
+    expect(src).toMatch(/caller LD_PRELOAD \(a workspace-resident malicious \.so\) executes ONLY inside the sandbox/);
+    expect(src).toMatch(/naming a HOST-resident library preloads NOTHING anywhere/);
+    expect(src).toMatch(/caller LD_AUDIT \(a workspace-resident audit library\) is confined to the post-boundary target/);
+    expect(src).toMatch(/planted bogus libc\.so\.6 cannot hijack the launcher/);
+    expect(src).toMatch(/a caller-controlled PATH cannot influence the sandbox launcher/);
+    expect(src).toMatch(/caller LD_DEBUG reaches only the TARGET loader/);
+    expect(src).toMatch(/legitimate caller environment variables still work inside the sandbox/);
+    expect(src).toMatch(/environment keys must be valid variable names/);
+  });
+
+  it('the barrel exposes the tool contracts (implementations internal; the sanctioned error + limits constants)', () => {
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/ToolRuntime,/)
+    expect(barrelSrc).toMatch(/ToolInvocationInput,/);
+    expect(barrelSrc).toMatch(/ExternalToolObservationInput,/);
+    expect(barrelSrc).toMatch(/export \{\s*ToolRuntimeError,\s*TOOL_RUNTIME_ERROR_CODES,\s*DEFAULT_TOOL_EXECUTION_LIMITS,?\s*\}/);
+    // The concrete implementations stay internal.
+    expect(barrelSrc).not.toMatch(/DefaultToolRuntime|FsToolExecutor|ProcessToolExecutor|HttpToolExecutor|BrowserToolExecutor|DefaultToolPolicyGate/);
+  });
+});
+
+/** The /agents internal path helper (WORK-036 checks). */
+function AGENTS_INTERNAL_PATH(): string {
+  return join(MODULES_DIR, 'agents', 'internal');
+}
