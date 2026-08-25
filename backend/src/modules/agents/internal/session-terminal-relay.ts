@@ -37,6 +37,11 @@ import type { Logger } from '@platform/logger.js';
 import type { ExecutionSessionRepository } from './execution-session.types.js';
 import type { ExecutionRecordRepository } from './execution.types.js';
 
+/** The reconciliation surface the relay's job handler needs. */
+export interface SessionTerminalReconciler {
+  reconcileTerminalForExecution(executionId: string): Promise<unknown>;
+}
+
 /** The durable relay job type (registered in the WorkerHost registry). */
 export const SESSION_TERMINAL_RELAY_JOB_TYPE = 'agents.session-terminal.reconcile';
 

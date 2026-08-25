@@ -189,6 +189,11 @@ export interface ExecutionSessionRepository {
    * transition and its event commit together; a CAS loser gets ZERO rows →
    * null with NO side effects (no event, no state change). Illegal edges
    * throw the typed error before the statement.
+   *
+   * PR #38 review correction #3: when `obligationId` is provided, the
+   * session-terminal obligation is DISCHARGED in the SAME transaction —
+   * one commit, one authoritative outcome (CAS + event + discharge). A
+   * lost CAS leaves the obligation pending.
    */
   transitionWithEvent(
     id: string,
@@ -197,6 +202,7 @@ export interface ExecutionSessionRepository {
     next: ExecutionSessionStatus,
     eventType: ExecutionSessionEventType,
     payload?: Record<string, unknown>,
+    obligationId?: string,
   ): Promise<SessionTransitionResult | null>;
 
   /**
@@ -265,7 +271,13 @@ export interface SessionTerminalObligation {
   readonly id: string;
   /** The ExecutionRecord's UUID (the session's target). */
   readonly executionId: string;
-  readonly terminalState: 'completed' | 'failed';
+  /**
+   * The session-terminal outcome — the COMPLETE mapping of the execution
+   * terminal states (PR #38 review correction #2): completed→completed,
+   * failed→failed, cancelled→cancelled, expired→failed (with the expired
+   * reason recorded in the terminal event payload).
+   */
+  readonly terminalState: 'completed' | 'failed' | 'cancelled';
   readonly dischargedAt: Date | null;
   readonly createdAt: Date;
 }
@@ -344,6 +356,13 @@ export interface ExecutionSessionService {
   completeSession(executionId: string): Promise<ExecutionSession | null>;
   /** As completeSession, for the failed outcome (with the failure reason). */
   failSession(executionId: string, reason: string): Promise<ExecutionSession | null>;
+  /**
+   * CAS running → cancelled + the cancelled event — the session-terminal
+   * mapping for an execution-record cancellation (the COMPLETE execution
+   * terminal-state mapping; PR #38 review correction #2). Same durable
+   * protocol as complete/fail.
+   */
+  cancelSession(executionId: string): Promise<ExecutionSession | null>;
   /** The (single) session continuing the logical execution (TEXT executionId). */
   getSessionForExecution(executionId: string): Promise<ExecutionSession | null>;
   /** The session's events, ordered by sequence (the existing append-only store). */

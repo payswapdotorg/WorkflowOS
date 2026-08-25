@@ -143,6 +143,7 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
     next: ExecutionSessionStatus,
     eventType: ExecutionSessionEventType,
     payload?: Record<string, unknown>,
+    obligationId?: string,
   ): Promise<SessionTransitionResult | null> {
     // WORK-034 integration: ATOMIC transition + event append — ONE
     // transaction under the session row lock (the same serialized pattern
@@ -264,6 +265,17 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
           )
         : await appendEvent();
       if (!evRes.rows[0]) return null; // unreachable (the CAS won above)
+      // PR #38 review correction #3: discharge the obligation in the SAME
+      // transaction — one commit = CAS + event + discharge (one
+      // authoritative outcome). A lost CAS above leaves it pending.
+      if (obligationId) {
+        await tx.query(
+          `UPDATE wfos_execution_session_terminal_obligations
+              SET discharged_at = NOW()
+            WHERE id = $1 AND discharged_at IS NULL`,
+          [obligationId],
+        );
+      }
       return { session: mapSession(updRes.rows[0]), event: mapEvent(evRes.rows[0]!) };
     });
   }
@@ -412,7 +424,7 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
       obligation: {
         id: String(r.o_id),
         executionId: String(r.o_execution_id),
-        terminalState: r.o_terminal_state as 'completed' | 'failed',
+        terminalState: r.o_terminal_state as 'completed' | 'failed' | 'cancelled',
         dischargedAt: r.o_discharged_at === null || r.o_discharged_at === undefined ? null : toDate(r.o_discharged_at),
         createdAt: toDate(r.o_created_at)!,
       },
@@ -486,7 +498,7 @@ function mapObligation(r: { id: string; execution_id: string; terminal_state: st
   return {
     id: String(r.id),
     executionId: String(r.execution_id),
-    terminalState: r.terminal_state as 'completed' | 'failed',
+    terminalState: r.terminal_state as 'completed' | 'failed' | 'cancelled',
     dischargedAt: r.discharged_at === null || r.discharged_at === undefined ? null : toDate(r.discharged_at),
     createdAt: toDate(r.created_at)!,
   };

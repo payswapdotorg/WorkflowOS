@@ -7849,9 +7849,10 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(m).toMatch(/WHERE discharged_at IS NULL/);
     // ATOMIC creation: the AFTER UPDATE trigger on the EXECUTIONS table
     // (the record's terminal transition writes the obligation in the same
-    // statement's transaction — no window).
+    // statement's transaction — no window). The COMPLETE terminal-state
+    // mapping (round 2) is asserted in the round-2 invariant below.
     expect(m).toMatch(/AFTER UPDATE ON wfos_executions/);
-    expect(m).toMatch(/NEW\.status IN \('completed', 'failed'\)/);
+    expect(m).toMatch(/NEW\.status IN \('completed', 'failed', 'cancelled', 'expired'\)/);
     expect(m).toMatch(/ON CONFLICT \(execution_id\) DO NOTHING/);
     // Append-only intent + at most one obligation per execution.
     expect(m).toMatch(/UNIQUE \(execution_id\)/);
@@ -7907,6 +7908,69 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     // (version, status) — the event is keyed to exactly that transition.
     expect(fn[0]).toMatch(/AND EXISTS \(\s*SELECT 1 FROM wfos_execution_sessions s\s*WHERE s\.id = \$1 AND s\.version = \$4 AND s\.status = \$5\s*\)/);
     void terminalEvIdx;
+  });
+
+  it('PR #38 review round 2: the obligation lifecycle is CORRECT (missing session stays pending, complete terminal mapping, atomic fast-path discharge)', () => {
+    // Correction #1: a pending obligation with a MISSING session must
+    // REMAIN PENDING (never discharged) — the reconciliation ENSURES the
+    // session from the existing record so recovery is autonomous.
+    const svcSrc = strip(readFileSync(SESSION_SERVICE, 'utf8'));
+    const reconcileFn = svcSrc.match(/async reconcileTerminalForExecution[\s\S]*?\n  \}/)![0];
+    // The reconciliation ENSURES the session (never returns early on
+    // missing-session + discharge).
+    expect(reconcileFn).toMatch(/await this\.ensureSession\(executionId\)/);
+    expect(reconcileFn).not.toMatch(/if \(!session\)\s*\{\s*[\s\S]{0,200}dischargeTerminalObligation/);
+    // The reconcileObligation policy: no-session → pending (NO discharge).
+    const oblFn = svcSrc.match(/private async reconcileObligation[\s\S]*?\n  \}/)![0];
+    const noSessionIdx = oblFn.indexOf('if (!session) {');
+    expect(noSessionIdx).toBeGreaterThan(-1);
+    // The no-session branch returns null (stays pending) with NO
+    // discharge call anywhere inside the branch (up to the next 'if ('
+    // branch — stripped comments make brace-matching brittle).
+    const nextBranchIdx = oblFn.indexOf('if (session.status', noSessionIdx);
+    const noSessionBranch = oblFn.slice(noSessionIdx, nextBranchIdx);
+    expect(noSessionBranch).toMatch(/return null;/);
+    expect(noSessionBranch).not.toMatch(/dischargeTerminalObligation/);
+
+    // Correction #2: the COMPLETE execution terminal-state mapping — the
+    // migration's trigger covers completed, failed, cancelled AND expired
+    // (expired → failed).
+    const m35 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0035_session_terminal_obligations.sql'), 'utf8');
+    expect(m35).toMatch(/NEW\.status IN \('completed', 'failed', 'cancelled', 'expired'\)/);
+    expect(m35).toMatch(/CASE WHEN NEW\.status = 'expired' THEN 'failed' ELSE NEW\.status END/);
+    expect(m35).toMatch(/CHECK \(terminal_state IN \('completed', 'failed', 'cancelled'\)\)/);
+    // The contract exposes cancelSession + the cancelled mapping.
+    const typesSrc = readFileSync(SESSION_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/cancelSession\(executionId: string\)/);
+    expect(typesSrc).toMatch(/readonly terminalState: 'completed' \| 'failed' \| 'cancelled';/);
+
+    // Correction #3: the FAST PATH discharges atomically —
+    // transitionWithEvent accepts the obligation id + discharges in the
+    // SAME transaction; terminalForExecution resolves + passes it.
+    const repoSrc = strip(readFileSync(SESSION_REPO, 'utf8'));
+    const fn = repoSrc.match(/async transitionWithEvent[\s\S]*?\n  \}/)![0];
+    expect(fn).toMatch(/obligationId\?: string/);
+    const dischargeIdx = fn.indexOf('UPDATE wfos_execution_session_terminal_obligations');
+    expect(dischargeIdx).toBeGreaterThan(-1);
+    // The discharge is INSIDE the transaction (after the CAS win, before
+    // the return).
+    const casIdx = fn.indexOf('const updRes = await casUpdate();');
+    const returnIdx = fn.indexOf('return { session: mapSession(updRes.rows[0])');
+    expect(dischargeIdx).toBeGreaterThan(casIdx);
+    expect(dischargeIdx).toBeLessThan(returnIdx);
+    // The fast path passes the obligation id.
+    const terminalFn = svcSrc.match(/private async terminalForExecution[\s\S]*?\n  \}/)![0];
+    expect(terminalFn).toMatch(/obligation\?\.obligation\.id/);
+    // The reconciler also passes it (atomic discharge on recovery).
+    expect(oblFn).toMatch(/obligation\.id,\s*\);/);
+
+    // The round-2 regression existence.
+    const t = readFileSync(join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts'), 'utf8');
+    expect(t).toMatch(/the process dies BEFORE the session exists → the obligation REMAINS PENDING/);
+    expect(t).toMatch(/execution CANCELLED → the obligation maps to session cancelled/);
+    expect(t).toMatch(/execution EXPIRED → the obligation maps to session failed/);
+    expect(t).toMatch(/FAST-PATH terminalization discharges its obligation ATOMICALLY/);
+    expect(t).toMatch(/a session terminal with the WRONG outcome → the divergence is retained visibly/);
   });
 
   it('PR #38 review: the terminal-event guard allows exactly the terminal event itself on a terminal row (the atomic transition+event composition)', () => {

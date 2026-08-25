@@ -35,6 +35,9 @@
 --     (the execution-status trigger below writes it in the same statement
 --     that terminalizes the record — no window where the record is
 --     terminal but no obligation exists);
+--   * records the session-terminal outcome for EVERY execution terminal
+--     state (completed→completed, failed→failed, cancelled→cancelled,
+--     expired→failed-with-expired-reason — the complete mapping);
 --   * discharged when the session reaches the matching terminal state
 --     (discharged_at set). The incomplete set = the replay work list;
 --   * APPEND-ONLY intent: an obligation is never mutated after creation
@@ -52,11 +55,21 @@ CREATE TABLE IF NOT EXISTS wfos_execution_session_terminal_obligations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   -- The logical execution (the record's UUID — the session's target).
   execution_id UUID NOT NULL REFERENCES wfos_executions(id) ON DELETE CASCADE,
-  -- The terminal outcome the session must reach, recorded from the
-  -- authoritative execution transition: 'completed' | 'failed'.
-  -- (cancelled executions leave no obligation: session cancellation is an
-  -- explicit session-lifecycle action, not an execution-record outcome.)
-  terminal_state TEXT NOT NULL CHECK (terminal_state IN ('completed', 'failed')),
+  -- The terminal outcome the session must reach — the COMPLETE mapping of
+  -- the existing execution terminal state machine (PR #38 review
+  -- correction #2: cancelled + expired must not be silently ignored —
+  -- the session represents the lifecycle of the SAME logical execution,
+  -- so every execution terminal state reconciles the session):
+  --
+  --   execution completed  → session completed
+  --   execution failed     → session failed
+  --   execution cancelled  → session cancelled
+  --   execution expired    → session failed (with the explicit
+  --                          execution-expired reason in the event payload
+  --                          — the session vocabulary has no 'expired'
+  --                          state; an expired execution is a FAILED
+  --                          execution outcome, recorded precisely)
+  terminal_state TEXT NOT NULL CHECK (terminal_state IN ('completed', 'failed', 'cancelled')),
   -- The durable state of the reconciliation. NULL = pending (the replay
   -- work list); set once the session reaches the matching terminal state.
   discharged_at TIMESTAMPTZ,
@@ -83,11 +96,18 @@ CREATE INDEX IF NOT EXISTS wfos_execution_session_terminal_obligations_pending_i
 CREATE OR REPLACE FUNCTION wfos_session_terminal_obligation_on_execution_terminal()
 RETURNS trigger AS $$
 BEGIN
-  IF NEW.status IN ('completed', 'failed')
+  -- The COMPLETE execution terminal-state mapping (PR #38 review
+  -- correction #2): every terminal execution state creates the durable
+  -- session-terminal obligation. 'expired' maps to session 'failed' (the
+  -- session vocabulary has no 'expired'; an expired execution is a failed
+  -- execution outcome — the reconciliation records the expired reason in
+  -- the terminal event payload).
+  IF NEW.status IN ('completed', 'failed', 'cancelled', 'expired')
      AND OLD.status IS DISTINCT FROM NEW.status THEN
     INSERT INTO wfos_execution_session_terminal_obligations
       (execution_id, terminal_state)
-    VALUES (NEW.id, NEW.status)
+    VALUES (NEW.id,
+            CASE WHEN NEW.status = 'expired' THEN 'failed' ELSE NEW.status END)
     ON CONFLICT (execution_id) DO NOTHING;
   END IF;
   RETURN NEW;

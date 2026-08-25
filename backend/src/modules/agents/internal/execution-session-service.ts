@@ -146,6 +146,16 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
     return this.terminalForExecution(executionId, 'failed', { reason });
   }
 
+  /**
+   * CAS running → cancelled + the cancelled event — the session-terminal
+   * mapping for an execution-record cancellation (PR #38 review
+   * correction #2: the COMPLETE execution terminal-state mapping). Same
+   * durable protocol as complete/fail.
+   */
+  async cancelSession(executionId: string): Promise<ExecutionSession | null> {
+    return this.terminalForExecution(executionId, 'cancelled');
+  }
+
   async getSessionForExecution(executionId: string): Promise<ExecutionSession | null> {
     const record = await this.deps.executionRecordRepository.findByExecutionId(executionId);
     if (!record) return null;
@@ -161,20 +171,25 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
   async reconcileTerminalForExecution(executionId: string): Promise<ExecutionSession | null> {
     // Idempotent, concurrency-safe reconciliation of ONE execution's
     // obligation (the relay job handler + per-execution recovery path):
-    //   resolve logical id → record → session;
+    //   resolve logical id → record;
+    //   ENSURE the session exists (PR #38 review correction #1: a missing
+    //     session is the recoverable crash window — create it from the
+    //     record so the reconciliation is autonomous; it starts 'created'
+    //     and the obligation stays pending until it can be driven to the
+    //     terminal state below);
     //   if the session is already in the obligation's terminal state →
     //     just discharge (a repeated recovery never duplicates the event);
-    //   if the session is running → CAS to the terminal state + event,
-    //     then discharge;
+    //   if the session is running → CAS + event + DISCHARGE atomically;
     //   if the session is created/interrupted → leave it (the strict state
     //     machine forbids terminalizing a paused session; a later resume
     //     flow owns the outcome) — the obligation stays pending for the
     //     next pass;
-    //   no record / no session → nothing to reconcile.
+    //   no record → nothing to reconcile.
     const record = await this.deps.executionRecordRepository.findByExecutionId(executionId);
     if (!record) return null;
-    const session = await this.deps.sessionRepository.getSessionByExecutionId(record.id);
-    if (!session) return null;
+    // Ensure the session (idempotent — one per record; the UNIQUE
+    // constraint + the createSession linkage-FK make this safe).
+    const session = await this.ensureSession(executionId);
 
     // Find the pending obligation for this execution (if any).
     const pending = await this.deps.sessionRepository.listPendingTerminalObligations();
@@ -184,7 +199,20 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
       // the execution never terminalized. Nothing to do.
       return session;
     }
-    return this.reconcileObligation(obligation);
+    // A newly-ensured session starts 'created' — the strict state machine
+    // has NO created→terminal edge (a session must run before it can
+    // terminally complete/fail). For the crash-window case (the record
+    // terminalized before the session ever started), advance created →
+    // running FIRST (CAS; idempotent — a loser means a concurrent path
+    // already advanced it), then reconcile the terminal obligation. This
+    // keeps every transition on the legal graph.
+    if (session.status === 'created') {
+      await this.startSession(session.id);
+    }
+    return this.reconcileObligation({
+      obligation: obligation.obligation,
+      session: await this.deps.sessionRepository.getSession(session.id),
+    });
   }
 
   async reconcileAllPendingTerminals(): Promise<number> {
@@ -204,16 +232,24 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
   private async reconcileObligation(p: PendingSessionTerminal): Promise<ExecutionSession | null> {
     const { obligation, session } = p;
     if (!session) {
-      // The execution has no session (a legacy execution, or the session
-      // creation failed). Nothing to reconcile — discharge so the work
-      // list drains (the obligation remains the auditable record that the
-      // execution DID terminalize).
-      await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
+      // PR #38 review correction #1: a MISSING session is a recoverable
+      // crash window (the record terminalized before/despite the session
+      // creation). The obligation MUST REMAIN PENDING — discharging here
+      // would orphan a session created later (created/running forever with
+      // the obligation gone). The session becomes reconcilable the moment
+      // the normal session-creation path (ensureSession) runs; the relay
+      // ALSO ensures the session from the existing record below, so
+      // recovery is autonomous even if the caller never retries.
+      this.deps.logger.warn('execution-session.terminal-obligation-no-session', {
+        obligationId: obligation.id,
+        executionId: obligation.executionId,
+      });
       return null;
     }
     if (session.status === obligation.terminalState) {
-      // Already reconciled (a repeated recovery / the fast path won the
-      // race): discharge WITHOUT a duplicate terminal event.
+      // Already reconciled (a repeated recovery / a fast path that won the
+      // race before the atomic-discharge correction): discharge WITHOUT a
+      // duplicate terminal event.
       await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
       return session;
     }
@@ -221,8 +257,10 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
       // The session is terminal in a DIFFERENT state than the obligation
       // recorded (e.g. the session was cancelled while the execution
       // completed). The session is immutable — record the divergence
-      // loudly + discharge (the session's own terminal state stands; the
-      // obligation is not a license to violate terminal immutability).
+      // VISIBLY (a loud log; the obligation + the session are both durable
+      // evidence of the divergence) + discharge so the work list drains.
+      // The session's own terminal state stands: terminal immutability is
+      // not negotiable, and the obligation is not a license to violate it.
       this.deps.logger.warn('execution-session.terminal-obligation-divergence', {
         obligationId: obligation.id,
         sessionId: session.id,
@@ -234,8 +272,9 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
     }
     if (session.status !== 'running') {
       // created/interrupted: the strict state machine forbids direct
-      // terminalization (a paused session must be resumed first — the
-      // resume flow owns its outcome). Leave the obligation pending.
+      // terminalization (created→terminal is not an edge; a paused session
+      // must be resumed first — the resume flow owns its outcome). Leave
+      // the obligation pending.
       this.deps.logger.warn('execution-session.terminal-obligation-deferred-not-running', {
         obligationId: obligation.id,
         sessionId: session.id,
@@ -243,20 +282,21 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
       });
       return null;
     }
-    // running → the obligation's terminal state, atomically (CAS + event),
-    // then discharge. Concurrent reconciliations: the CAS has exactly one
-    // winner; the loser sees null and leaves the discharge to the winner
-    // (a later pass re-checks — already-terminal → discharge, no
-    // duplicate event).
-    const eventType: ExecutionSessionEventType = obligation.terminalState === 'completed' ? 'completed' : 'failed';
+    // running → the obligation's terminal state, ATOMICALLY (CAS + event +
+    // DISCHARGE — one transaction, one authoritative outcome; PR #38
+    // review correction #3). Concurrent reconciliations: the CAS has
+    // exactly one winner; a loser performs NO writes (the obligation stays
+    // pending for the next pass).
     const transition = await this.deps.sessionRepository.transitionWithEvent(
-      session.id, session.version, 'running', obligation.terminalState, eventType,
+      session.id, session.version, 'running', obligation.terminalState,
+      obligation.terminalState as ExecutionSessionEventType,
+      obligation.terminalState === 'failed' ? { reason: 'execution-terminal-reconciliation' } : {},
+      obligation.id,
     );
     if (!transition) {
       // Lost the CAS to a concurrent reconciler. Leave pending.
       return null;
     }
-    await this.deps.sessionRepository.dischargeTerminalObligation(obligation.id);
     return transition.session;
   }
 
@@ -275,7 +315,7 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
    */
   private async terminalForExecution(
     executionId: string,
-    next: 'completed' | 'failed',
+    next: 'completed' | 'failed' | 'cancelled',
     payload: Record<string, unknown> = {},
   ): Promise<ExecutionSession | null> {
     // PR #38 review (durable terminalization): the obligation row was
@@ -312,10 +352,21 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
       });
       return session;
     }
-    const eventType: ExecutionSessionEventType = next === 'completed' ? 'completed' : 'failed';
+    // PR #38 review correction #3: the FAST PATH discharges the durable
+    // obligation ATOMICALLY with the terminal transition + event (one
+    // transaction, one authoritative outcome) — a successful synchronous
+    // reconciliation leaves NO pending obligation behind. Resolve the
+    // pending obligation for THIS execution (if any) + pass its id.
+    const pending = await this.deps.sessionRepository.listPendingTerminalObligations();
+    const obligation = pending.find((p) => p.session?.id === session.id);
+    const eventType: ExecutionSessionEventType = next === 'cancelled' ? 'cancelled' : (next as ExecutionSessionEventType);
     const result = await this.deps.sessionRepository.transitionWithEvent(
       session.id, session.version, 'running', next, eventType, payload,
+      obligation?.obligation.id,
     );
+    // If the CAS lost (a concurrent reconciler won + discharged), leave
+    // nothing pending — verify via a re-read (the winner's atomic discharge
+    // covered it).
     return result?.session ?? null;
   }
 }

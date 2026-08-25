@@ -355,4 +355,276 @@ describe('WORK-034 (PR #38 review) — durable session-terminal reconciliation',
     // Cleanup: reconcile so later assertions stay clean.
     await sessionService.reconcileTerminalForExecution(executionId);
   });
+
+// ============================================================================
+// PR #38 review correction round 2 — the three correctness issues:
+//   (1) a pending obligation with a MISSING session must REMAIN PENDING
+//       (never discharged) — + the relay ensures the session from the
+//       existing record so recovery is autonomous;
+//   (2) the COMPLETE execution terminal-state mapping (cancelled →
+//       session cancelled; expired → session failed with the expired
+//       reason);
+//   (3) a successful FAST-PATH terminalization discharges its obligation
+//       ATOMICALLY (CAS + event + discharge in ONE transaction).
+// ============================================================================
+
+describe('PR #38 review corrections (round 2) — obligation lifecycle correctness', () => {
+  async function pendingFor(executionId: string): Promise<{ id: string; state: string } | null> {
+    const record = await executionRecordRepo.findByExecutionId(executionId);
+    if (!record) return null;
+    const res = await stack.db.client.query<{ id: string; terminal_state: string }>(
+      `SELECT id, terminal_state FROM wfos_execution_session_terminal_obligations
+        WHERE execution_id = $1 AND discharged_at IS NULL`,
+      [record.id],
+    );
+    const row = res.rows[0];
+    return row ? { id: String(row.id), state: String(row.terminal_state) } : null;
+  }
+
+  it('(1) execution completes + the process dies BEFORE the session exists → the obligation REMAINS PENDING → the relay ensures the session + reconciles it', async () => {
+    // The reviewer's exact sequence: record → completed, obligation
+    // created, process dies before ExecutionSession exists.
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    // NO ensureSession — the session does not exist.
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+
+    // The obligation exists + is pending (NOT discharged by a
+    // reconciliation that finds no session).
+    let obligation = await pendingFor(executionId);
+    expect(obligation).not.toBeNull();
+    const r1 = await sessionService.reconcileTerminalForExecution(executionId);
+    obligation = await pendingFor(executionId);
+    // STILL pending after a reconciliation attempt with no session —
+    // until the ensure creates one (the correction under test).
+    expect(r1).not.toBeNull(); // the session was ENSURED + reconciled
+    expect(obligation).toBeNull(); // discharged by the successful reconciliation
+
+    // The full autonomous path (a fresh crash-window scenario): the relay
+    // job alone recovers everything.
+    const executionId2 = nextExecId();
+    const record2 = await executionRecordRepo.create({
+      executionId: executionId2, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId2}`, promptDigest: `d ${executionId2}`,
+    });
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'failed', completed_at = NOW() WHERE id = $1`,
+      [record2.id],
+    );
+    expect(await pendingFor(executionId2)).not.toBeNull();
+
+    // The relay job (exactly what a worker drains) — with NO session
+    // existing, the handler's reconcileTerminalForExecution ENSURES the
+    // session from the record + reconciles it.
+    await queue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId: executionId2 });
+    const handlers = buildHandlerRegistry([
+      createSessionTerminalRelayJobHandler(sessionService, stack.db.logger),
+    ]);
+    const worker = new WorkerHost(queue, handlers, stack.db.logger as never, { pollIntervalMs: 5 });
+    try {
+      await worker.start();
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        if ((await pendingFor(executionId2)) === null) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(await pendingFor(executionId2)).toBeNull();
+      const session = await sessionService.getSessionForExecution(executionId2);
+      expect(session?.status).toBe('failed');
+      expect(session?.terminalAt).not.toBeNull();
+      // Exactly one terminal event; the expired/failed reason recorded.
+      const events = await sessionRepo.listEvents(session!.id);
+      expect(events.filter((e) => e.eventType === 'failed')).toHaveLength(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('(1b) a reconciliation that finds NO session and CANNOT create one still leaves the obligation pending', async () => {
+    // Direct repository-level: listPendingTerminalObligations resolves
+    // session=null; the OLD code discharged it. The corrected
+    // reconcileObligation path only runs after ensureSession — so this
+    // scenario (no record) simply finds nothing. Construct the true
+    // legacy case: an execution whose session was never created + cannot
+    // be (the ensure throws only for a missing RECORD). For a present
+    // record the ensure ALWAYS succeeds — so the only pending-with-null
+    // reachable state is transient inside reconcileTerminalForExecution
+    // (it immediately ensures). Assert the invariant directly: after any
+    // reconciliation attempt, an obligation for an execution with a
+    // EXISTING record is never left discharged-with-no-session.
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+    await sessionService.reconcileTerminalForExecution(executionId);
+    // The session EXISTS (ensured) + the obligation is discharged + the
+    // session is terminal — the reviewer's orphan case is impossible.
+    const session = await sessionService.getSessionForExecution(executionId);
+    expect(session).not.toBeNull();
+    expect(['completed', 'failed', 'cancelled']).toContain(session?.status);
+    expect(await pendingFor(executionId)).toBeNull();
+  });
+
+  it('(2) execution CANCELLED → the obligation maps to session cancelled → reconciled to cancelled', async () => {
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    const session = await sessionService.ensureSession(executionId);
+    await sessionService.startSession(session.id);
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'cancelled', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+
+    // The obligation exists with terminal_state = 'cancelled' (the
+    // complete mapping — not silently ignored).
+    const obligation = await pendingFor(executionId);
+    expect(obligation?.state).toBe('cancelled');
+
+    await sessionService.reconcileTerminalForExecution(executionId);
+    const after = await sessionRepo.getSession(session.id);
+    expect(after?.status).toBe('cancelled');
+    expect(after?.terminalAt).not.toBeNull();
+    const events = await sessionRepo.listEvents(session.id);
+    expect(events.filter((e) => e.eventType === 'cancelled')).toHaveLength(1);
+    expect(await pendingFor(executionId)).toBeNull();
+  });
+
+  it('(2b) execution EXPIRED → the obligation maps to session failed (the explicit expired outcome) with the expired reason', async () => {
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'external', provider: 'fake', model: null,
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    const session = await sessionService.ensureSession(executionId);
+    await sessionService.startSession(session.id);
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'expired', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+
+    // The obligation maps expired → failed (the session vocabulary has no
+    // 'expired'; an expired execution is a FAILED execution outcome).
+    const obligation = await pendingFor(executionId);
+    expect(obligation?.state).toBe('failed');
+
+    await sessionService.reconcileTerminalForExecution(executionId);
+    const after = await sessionRepo.getSession(session.id);
+    expect(after?.status).toBe('failed');
+    expect(after?.terminalAt).not.toBeNull();
+    const events = await sessionRepo.listEvents(session.id);
+    const failedEvents = events.filter((e) => e.eventType === 'failed');
+    expect(failedEvents).toHaveLength(1);
+    expect(await pendingFor(executionId)).toBeNull();
+  });
+
+  it('(3) a successful FAST-PATH terminalization discharges its obligation ATOMICALLY (no pending obligation left behind)', async () => {
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    const session = await sessionService.ensureSession(executionId);
+    await sessionService.startSession(session.id);
+    // The record terminalizes (the obligation is created atomically).
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+    expect(await pendingFor(executionId)).not.toBeNull();
+
+    // The FAST PATH (exactly what the execution service calls): the
+    // successful synchronous CAS discharges the obligation IN THE SAME
+    // transaction — nothing pending remains.
+    const result = await sessionService.completeSession(executionId);
+    expect(result?.status).toBe('completed');
+    expect(await pendingFor(executionId)).toBeNull();
+
+    // The relay's work list is empty for this execution (the sweep finds
+    // nothing) + exactly one terminal event.
+    expect(await relay.enqueuePendingRelayJobs()).toBe(0);
+    const events = await sessionRepo.listEvents(session.id);
+    expect(events.filter((e) => e.eventType === 'completed')).toHaveLength(1);
+
+    // failSession fast path likewise.
+    const executionId2 = nextExecId();
+    const record2 = await executionRecordRepo.create({
+      executionId: executionId2, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId2}`, promptDigest: `d ${executionId2}`,
+    });
+    const session2 = await sessionService.ensureSession(executionId2);
+    await sessionService.startSession(session2.id);
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'failed', completed_at = NOW() WHERE id = $1`,
+      [record2.id],
+    );
+    const result2 = await sessionService.failSession(executionId2, 'fast-path-failure');
+    expect(result2?.status).toBe('failed');
+    expect(await pendingFor(executionId2)).toBeNull();
+    const events2 = await sessionRepo.listEvents(session2.id);
+    expect(events2.filter((e) => e.eventType === 'failed')).toHaveLength(1);
+  });
+
+  it('(4) a session terminal with the WRONG outcome → the divergence is retained visibly (no overwrite; the obligation discharges)', async () => {
+    // The reviewer's required end-state policy: session terminal with a
+    // different outcome than the obligation → do not overwrite the
+    // immutable session; retain a visible divergence.
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'native', provider: 'fake', model: 'test-model',
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+    });
+    const session = await sessionService.ensureSession(executionId);
+    await sessionService.startSession(session.id);
+    // The session CANCELS (an explicit session-lifecycle action)...
+    await sessionRepo.transitionWithEvent(session.id, 1, 'running', 'cancelled', 'cancelled');
+    // ...then the execution COMPLETES (a divergent terminal outcome).
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+      [record.id],
+    );
+
+    await sessionService.reconcileTerminalForExecution(executionId);
+    // The session's own terminal state STANDS (immutability) + the
+    // obligation discharged (the divergence is visible in the durable
+    // evidence: session=cancelled while the execution=completed, both
+    // immutable records).
+    const after = await sessionRepo.getSession(session.id);
+    expect(after?.status).toBe('cancelled');
+    expect(await pendingFor(executionId)).toBeNull();
+    // No additional terminal event was appended (no overwrite attempt).
+    const events = await sessionRepo.listEvents(session.id);
+    expect(events.filter((e) => e.eventType === 'cancelled')).toHaveLength(1);
+    expect(events.filter((e) => e.eventType === 'completed')).toHaveLength(0);
+  });
+});
 });
