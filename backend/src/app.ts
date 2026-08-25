@@ -171,6 +171,13 @@ import {
   SessionTerminalOutboxRelay,
   createSessionTerminalRelayJobHandler,
 } from './modules/agents/internal/session-terminal-relay.js';
+import { PgAgentWorkspaceRepository } from './modules/agents/internal/pg-agent-workspace-repository.js';
+import { DefaultAgentWorkspaceService } from './modules/agents/internal/agent-workspace-service.js';
+import { FsWorktreeMaterializer } from './platform/workspace/fs-worktree-materializer.js';
+import {
+  WorkspaceReleaseOutboxRelay,
+  createWorkspaceReleaseRelayJobHandler,
+} from './modules/agents/internal/workspace-release-relay.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
@@ -566,6 +573,10 @@ export async function buildApp(
   // at function scope — constructed inside the agents block, consumed by
   // the WorkerHost boot sweep below).
   let sessionTerminalRelay: OutboxRelay | undefined;
+  // WORK-035: the workspace-release outbox relay (declared at function
+  // scope; constructed inside the agents block).
+  let workspaceReleaseRelay: OutboxRelay | undefined;
+  let agentWorkspaceServiceRef: { reconcilePendingReleases(): Promise<number> } | undefined;
   // The session service is also referenced by the handler registry below.
   let executionSessionServiceRef: { reconcileTerminalForExecution(executionId: string): Promise<unknown> } | undefined;
   let executionPolicyService: ExecutionPolicyService | undefined;
@@ -930,6 +941,40 @@ export async function buildApp(
       logger,
     });
     executionSessionServiceRef = executionSessionService;
+
+    // --- WORK-035: Agent Workspaces and Git Worktrees. ---
+    // The workspace boundary: the filesystem/repository environment for
+    // one logical execution (NOT the execution lifecycle — the session
+    // owns that; NOT a GitHub authority — the /github repository row is
+    // the linkage). The FsWorktreeMaterializer executes git-worktree-class
+    // operations under the configured workspace root (no credentials; the
+    // installation credential stays in /github's SecretStore).
+    // PR #39 review fix #1 — the AUTHORITATIVE BASELINE: base_revision is
+    // the repository's default-branch HEAD commit, resolved through the
+    // EXISTING /github adapter read (githubAdapter.getBranch — the same
+    // source the benchmark snapshot service uses for baseCommit; the
+    // workspace layer itself never holds GitHub credentials — the adapter
+    // is injected through the DI boundary).
+    const agentWorkspaceRepository = new PgAgentWorkspaceRepository({
+      db: database,
+      executionRecordRepository,
+      projectGitHubRepositoryLookup: projectGitHubRepositoryRepository!,
+      baselineResolver: githubAdapter,
+    });
+    const agentWorkspaceService = new DefaultAgentWorkspaceService({
+      workspaceRepository: agentWorkspaceRepository,
+      materializer: new FsWorktreeMaterializer({
+        rootDir: process.env.WFOS_WORKSPACE_ROOT ?? './.workspaces',
+        logger,
+      }),
+      logger,
+    });
+    workspaceReleaseRelay = new WorkspaceReleaseOutboxRelay({
+      workspaceRepository: agentWorkspaceRepository,
+      queue,
+      logger,
+    });
+    agentWorkspaceServiceRef = agentWorkspaceService;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1238,6 +1283,11 @@ export async function buildApp(
   if (executionSessionServiceRef) {
     handlerList.push(createSessionTerminalRelayJobHandler(executionSessionServiceRef, logger));
   }
+  // WORK-035: the workspace-release reconcile relay job handler (the
+  // durable execution-terminal cleanup for workspaces).
+  if (agentWorkspaceServiceRef) {
+    handlerList.push(createWorkspaceReleaseRelayJobHandler(agentWorkspaceServiceRef, logger));
+  }
   const handlers = buildHandlerRegistry(handlerList);
   const worker = new WorkerHost(queue, handlers, logger, {
     ...options.workerOptions,
@@ -1251,6 +1301,8 @@ export async function buildApp(
       // sweep — every worker start re-enqueues reconcile jobs for ALL
       // pending obligations (the durable liveness backstop).
       ...(sessionTerminalRelay ? [sessionTerminalRelay] : []),
+      // WORK-035: the workspace-release obligation boot sweep.
+      ...(workspaceReleaseRelay ? [workspaceReleaseRelay] : []),
     ],
   });
 

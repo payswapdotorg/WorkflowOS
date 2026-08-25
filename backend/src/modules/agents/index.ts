@@ -105,6 +105,25 @@ export type {
 export { ExecutionSessionError, EXECUTION_SESSION_ERROR_CODES } from './internal/execution-session.types.js';
 export type { ExecutionSessionErrorCode } from './internal/execution-session.types.js';
 
+// WORK-035: Agent Workspaces and Git Worktrees — the provider-independent
+// workspace contracts. A Workspace is the FILESYSTEM/REPOSITORY
+// ENVIRONMENT for one logical execution (spec §33.8): it references the
+// existing ExecutionRecord (never a second execution identity) + the
+// existing /github repository authority row (never a GitHub authority
+// itself — no PR/merge state, no credentials). Both native + external
+// execution reference the same abstraction. The materializer port +
+// implementations stay internal/.
+export type {
+  AgentWorkspace,
+  AgentWorkspaceState,
+  AgentWorkspaceRepository,
+  AgentWorkspaceClaim,
+  EnsureAgentWorkspaceInput,
+  WorktreeMaterializer,
+} from './internal/agent-workspace.types.js';
+export { AgentWorkspaceError, AGENT_WORKSPACE_ERROR_CODES } from './internal/agent-workspace.types.js';
+export type { AgentWorkspaceErrorCode } from './internal/agent-workspace.types.js';
+
 export interface AgentsModuleApi {}
 
 export const agentsModule: ModuleContract & AgentsModuleApi = { name: '/agents' };

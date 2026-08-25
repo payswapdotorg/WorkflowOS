@@ -592,6 +592,10 @@ describe('WORK-003 invariants — no provider coupling in domain modules', () =>
     const allowedRuntimeExports = new Set([
       // Module contract
       'FROZEN_MODULE_NAMES',
+      // WORK-035: the worktree-materializer typed error (the same
+      // sanctioned domain-error-class exception as the session/workspace
+      // errors — consumers instanceof-check it; it wires nothing).
+      'WorktreeMaterializerError',
       // Execution context
       'runWithExecutionContext',
       'getExecutionContext',
@@ -820,6 +824,10 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // frozen pure-data error-code list.
       'ExecutionSessionError',      // @modules/agents — the typed domain error
       'EXECUTION_SESSION_ERROR_CODES', // @modules/agents — the stable code list
+      // WORK-035: the workspace-domain typed error (the same sanctioned
+      // exception + reasoning).
+      'AgentWorkspaceError',           // @modules/agents — the typed domain error
+      'AGENT_WORKSPACE_ERROR_CODES',   // @modules/agents — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -7722,6 +7730,8 @@ describe('WORK-034 invariants — persistent agent session core (first slice)', 
 });
 
 describe('WORK-034 invariants — session-aware execution integration', () => {
+  // (WORK-034's invariants continue below; WORK-035's are appended at the
+  // end of the file to keep each work item's invariants self-contained.)
   const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
   const SESSION_TYPES = join(AGENTS_INTERNAL, 'execution-session.types.ts');
   const SESSION_REPO = join(AGENTS_INTERNAL, 'pg-execution-session-repository.ts');
@@ -8060,5 +8070,304 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     // same logical execution identity (best-effort).
     expect(appSrc).toMatch(/executionSessionService\.completeSession\(execId\)/);
     expect(appSrc).toMatch(/executionSessionService\.failSession\(execId/);
+  });
+
+});
+
+describe('WORK-035 invariants — agent workspaces and git worktrees', () => {
+  const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
+  const WS_TYPES = join(AGENTS_INTERNAL, 'agent-workspace.types.ts');
+  const WS_REPO = join(AGENTS_INTERNAL, 'pg-agent-workspace-repository.ts');
+  const WS_SERVICE = join(AGENTS_INTERNAL, 'agent-workspace-service.ts');
+  const WS_MATERIALIZER = join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'fs-worktree-materializer.ts');
+  const WS_RELAY = join(AGENTS_INTERNAL, 'workspace-release-relay.ts');
+  const MIGRATION_PATH = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0036_agent_workspaces.sql',
+  );
+
+  function strip(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*--.*$/gm, '');
+  }
+
+  it('the workspace migration exists with the durable schema (UNIQUE execution + UNIQUE worktree path + composite FK + strict state machine + terminal/identity immutability + release obligations)', () => {
+    expect(existsSync(MIGRATION_PATH), '0036_agent_workspaces.sql must exist').toBe(true);
+    const src = readFileSync(MIGRATION_PATH, 'utf8');
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_workspaces/);
+    // Exactly ONE workspace per execution; ONE worktree path per workspace.
+    expect(src).toMatch(/CONSTRAINT wfos_agent_workspaces_execution_unique UNIQUE \(execution_id\)/);
+    expect(src).toMatch(/CONSTRAINT wfos_agent_workspaces_worktree_path_unique UNIQUE \(worktree_path\)/);
+    // Linkage consistency with the existing ExecutionRecord.
+    expect(src).toMatch(/FOREIGN KEY \(execution_id, project_id\)\s*REFERENCES wfos_executions\(id, project_id\)/);
+    // The strict state vocabulary + CAS token.
+    expect(src).toMatch(/'requested', 'preparing', 'ready', 'released', 'failed', 'cancelled'/);
+    expect(src).toMatch(/version INTEGER NOT NULL DEFAULT 0 CHECK \(version >= 0\)/);
+    // Terminal FULL immutability + identity immutability + the guards.
+    expect(src).toMatch(/agent-workspace-terminal-immutable/);
+    expect(src).toMatch(/agent-workspace-identity-immutable/);
+    expect(src).toMatch(/agent-workspace-illegal-transition/);
+    expect(src).toMatch(/agent-workspace-version-regression/);
+    // The durable release obligations (the execution-terminal cleanup
+    // contract — atomic with the record's terminal transition).
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_workspace_release_obligations/);
+    expect(src).toMatch(/AFTER UPDATE ON wfos_executions/);
+    expect(src).toMatch(/agent-workspace-release-obligation-immutable/);
+  });
+
+  it('NO second execution engine + NO GitHub authority duplication (the workspace references the EXISTING ExecutionRecord + the EXISTING /github repository row)', () => {
+    for (const [name, p] of [['types', WS_TYPES], ['repository', WS_REPO], ['service', WS_SERVICE], ['materializer', WS_MATERIALIZER]] as const) {
+      const src = strip(readFileSync(p, 'utf8'));
+      // Never creates executions (the workspace CONTINUES one).
+      expect(src, `${name}: no execution creation`).not.toMatch(/INSERT INTO wfos_executions\b/);
+      expect(src, `${name}: no ExecutionService construction`).not.toMatch(/new \w*ExecutionService|implements ExecutionService\b|class \w*ExecutionService/);
+      // Never a GitHub authority: no PR/merge operations, no adapter calls.
+      expect(src, `${name}: no GitHub PR/merge authority`).not.toMatch(/createPullRequest|mergePullRequest|\.merge\(/);
+          }
+    // The repository linkage goes through the EXISTING /github row: the
+    // workspace row stores the /github repository id, and the repository
+    // resolves it via the injected /github lookup (the DI boundary keeps
+    // /github authoritative — the workspace never queries GitHub itself).
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    expect(repoSrc).toMatch(/project_github_repository_id/);
+    expect(repoSrc).toMatch(/ProjectGitHubRepositoryLookup/);
+  });
+
+  it('NO provider SDKs + NO credentials + NO workflow/verification/review mutation (the workspace is execution infrastructure only)', () => {
+    for (const [name, p] of [['types', WS_TYPES], ['repository', WS_REPO], ['service', WS_SERVICE], ['materializer', WS_MATERIALIZER], ['relay', WS_RELAY]] as const) {
+      const src = strip(readFileSync(p, 'utf8'));
+      expect(src, `${name}: no provider SDKs`).not.toMatch(/from ['"]@octokit|from ['"]openai|from ['"]anthropic|zai-sdk/);
+      expect(src, `${name}: no credential access`).not.toMatch(/process\.env\.[A-Z_]*(API_KEY|SECRET|TOKEN)/);
+      expect(src, `${name}: no workflow mutation`).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+      expect(src, `${name}: no verification mutation`).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+      expect(src, `${name}: no review mutation`).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+      // Not a permission system / tool runtime / adaptive router.
+      expect(src, `${name}: no permission system`).not.toMatch(/permission|allowlist|denylist|capability policy/i);
+      expect(src, `${name}: no tool runtime`).not.toMatch(/toolRuntime|ToolExecution|executeTool/);
+      expect(src, `${name}: no adaptive routing`).not.toMatch(/adaptiveRoute|routeProvider/);
+    }
+    // The migration stores no credentials (safe columns only).
+    const migrationSrc = strip(readFileSync(MIGRATION_PATH, 'utf8'));
+    expect(migrationSrc).not.toMatch(/secret|token|cookie|api_key/i);
+    // The materializer's filesystem boundary: the path-traversal guard
+    // (the token whitelist + the explicit '..' rejection).
+    const matSrc = readFileSync(WS_MATERIALIZER, 'utf8');
+    expect(matSrc).toMatch(/function assertSafeToken/);
+    expect(matSrc).toMatch(/token\.includes\('/);
+    expect(matSrc).toMatch(/resolve\(deps\.rootDir\)/);
+  });
+
+  it('the workspace contract is provider-independent + CAS-based (no read-check-write ownership)', () => {
+    const typesSrc = readFileSync(WS_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/export interface AgentWorkspace\b/);
+    // The materializer PORT is platform-owned; /agents re-exports it
+    // (domain → platform dependency direction).
+    expect(typesSrc).toMatch(/export type \{[\s\S]*?WorktreeMaterializer,[\s\S]*?\} from '@platform\/workspace\/worktree-materializer\.types\.js'/);
+    expect(typesSrc).toMatch(/export class AgentWorkspaceError extends Error/);
+    // No mode/provider fields on the workspace (mode-independent).
+    const wsInterface = typesSrc.match(/export interface AgentWorkspace\b[\s\S]*?\n\}/)![0];
+    expect(wsInterface).not.toMatch(/\bmode\b|\bprovider\b|\bmodel\b/);
+    // The repository CAS transitions.
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    const claim = repoSrc.match(/async claimForPreparation[\s\S]*?\n  \}/)![0];
+    expect(claim).toMatch(/AND version = \$2\s+AND state = 'requested'/);
+    const ready = repoSrc.match(/async markReady[\s\S]*?\n  \}/)![0];
+    expect(ready).toMatch(/AND version = \$2\s+AND state = 'preparing'/);
+    const reclaim = repoSrc.match(/async reclaimStalePreparation[\s\S]*?\n  \}/)![0];
+    expect(reclaim).toMatch(/AND state = 'preparing'/);
+    expect(reclaim).toMatch(/prepare_lease_expires_at < NOW\(\)/);
+    // ensureWorkspace is lookup-or-create (idempotent).
+    const ensure = repoSrc.match(/async ensureWorkspace[\s\S]*?\n  \}/)![0];
+    expect(ensure).toMatch(/getWorkspaceForExecution/);
+    // The deterministic worktree token — derived ONLY by the EXPLICIT
+    // platform layout module (PR #39 review fix #2: never inline string
+    // surgery at the call site; the layout cannot drift between the
+    // durable identity and the filesystem).
+    expect(repoSrc).toMatch(/from '@platform\/workspace\/worktree-layout\.js'/);
+    expect(ensure).toMatch(/buildWorktreePathToken\(\{[\s\S]*?executionRecordId: record\.id/);
+  });
+
+  it('PR #39 review fix #1 — the AUTHORITATIVE baseline: base_revision is the /github default-branch HEAD commit (fail-closed; never prompt metadata, never a placeholder)', () => {
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    const typesSrc = readFileSync(WS_TYPES, 'utf8');
+    // The typed fail-closed error exists + is in the frozen code list.
+    expect(typesSrc).toMatch(/'agent-workspace-baseline-unresolvable'/);
+    // The baseline resolves through the INJECTED /github authority read
+    // (the WorkspaceBaselineResolver port — the workspace layer itself
+    // never holds GitHub credentials).
+    expect(repoSrc).toMatch(/interface WorkspaceBaselineResolver/);
+    expect(repoSrc).toMatch(/baselineResolver: WorkspaceBaselineResolver/);
+    const resolve = repoSrc.match(/private async resolveBaseline[\s\S]*?\n  \}/)![0];
+    expect(resolve).toMatch(/getBranch\(/);
+    // A REAL commit SHA only (SHA-1 or SHA-256 object ids) — the recorded
+    // baseline must be a materializable Git revision.
+    expect(resolve).toMatch(/\^\[0-9a-f\]\{40\}\$\|\^\[0-9a-f\]\{64\}\$/);
+    expect(resolve).toMatch(/agent-workspace-baseline-unresolvable/);
+    // NEVER prompt metadata: the repository does not read promptDigest at
+    // all (the first implementation's placeholder is gone).
+    expect(repoSrc).not.toMatch(/promptDigest/);
+    // The ensure path resolves the baseline ONLY on first creation (an
+    // existing row returns its immutable recorded baseline — retries never
+    // re-resolve and never diverge).
+    const ensure = repoSrc.match(/async ensureWorkspace[\s\S]*?\n  \}/)![0];
+    expect(ensure.indexOf('getWorkspaceForExecution')).toBeLessThan(ensure.indexOf('resolveBaseline'));
+    // app.ts injects the EXISTING /github adapter (the same getBranch the
+    // benchmark snapshot service uses — no new authority, no credentials).
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/baselineResolver: githubAdapter/);
+  });
+
+  it('PR #39 review fix #2 — the EXPLICIT worktree layout: one platform module derives repositoryDir/worktreeDir/token (path-traversal-safe; validated, never trusted)', () => {
+    const layoutPath = join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'worktree-layout.ts');
+    expect(existsSync(layoutPath), 'worktree-layout.ts must exist').toBe(true);
+    const layoutSrc = readFileSync(layoutPath, 'utf8');
+    // The single source of truth: build (token) + resolve (layout) + parse
+    // (validated re-read of persisted tokens).
+    expect(layoutSrc).toMatch(/export function buildWorktreePathToken/);
+    expect(layoutSrc).toMatch(/export function resolveWorktreeLayout/);
+    expect(layoutSrc).toMatch(/export function parseWorktreeToken/);
+    // The exact durable shape: owner/repository/exec/<executionRecordId>.
+    expect(layoutSrc).toMatch(/exec\/\$\{input\.executionRecordId\}/);
+    // Path-segment safety on EVERY coordinate.
+    expect(layoutSrc).toContain("const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;");
+    expect(layoutSrc).toMatch(/includes\('\.\.'\)/);
+    const matSrc = strip(readFileSync(WS_MATERIALIZER, 'utf8'));
+    // The materializer derives its layout ONLY through the module — the
+    // dirname()-chaining bug (which resolved the WRONG repository
+    // directory) is structurally impossible now.
+    expect(matSrc).toMatch(/from '\.\/worktree-layout\.js'/);
+    expect(matSrc).toMatch(/resolveWorktreeLayout\(/);
+    expect(matSrc).toMatch(/parseWorktreeToken\(/);
+    expect(matSrc).not.toMatch(/dirname\(dirname\(/);
+    // The persisted token + the declared repository coordinates are
+    // cross-validated (a drifted row fails closed — never operate in the
+    // wrong repository).
+    expect(matSrc).toMatch(/token-invalid[\s\S]*?inconsistent with the repository coordinates/);
+    // Fail-closed pre-checks with TYPED stages (the workspace records WHERE).
+    expect(matSrc).toMatch(/'git-repository-missing'/);
+    expect(matSrc).toMatch(/'base-revision-missing'/);
+    // Deterministic re-materialization: `-B` (create OR reset the branch to
+    // the recorded base) — never `--no-checkout` + `-b` (which left the
+    // worktree unchecked-out and never reset a half-created branch).
+    expect(matSrc).toMatch(/'worktree', 'add',/);
+    expect(matSrc).toMatch(/'-B', input\.branch/);
+    expect(matSrc).not.toMatch(/--no-checkout/);
+  });
+
+  it('PR #39 review fix #3 — the acquisition/cleanup race: lease-gated cancel + CAS-loser reconciliation + removal-gated discharge (no orphaned worktree in ANY interleaving)', () => {
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    const svcSrc = strip(readFileSync(WS_SERVICE, 'utf8'));
+    // (a) The LEASE-GATED cancel: from 'preparing' the cancel CAS wins ONLY
+    // when no live preparation claim is in flight — cleanup can never
+    // cancel an ACTIVE preparation out from under the materializer.
+    const cancel = repoSrc.match(/async cancel[\s\S]*?\n  \}/)![0];
+    expect(cancel).toMatch(/AND \(state <> 'preparing'/);
+    expect(cancel).toMatch(/OR prepare_lease_expires_at IS NULL/);
+    expect(cancel).toMatch(/OR prepare_lease_expires_at < NOW\(\)\)/);
+    // (b) The CAS-LOSER RECONCILIATION: a materializer that loses the
+    // markReady CAS after creating the worktree REMOVES it when the row can
+    // no longer become ready (terminal) — the loser never orphans what it
+    // created. A row still preparing belongs to a recovery re-claimer (the
+    // deterministic path is idempotently re-usable) — observed, not touched.
+    const acquireFn = svcSrc.match(/private async materializeAndReady[\s\S]*?\n  \}/)![0];
+    const loserBranch = acquireFn.match(/if \(!ready\) \{[\s\S]*?\n      \}/)![0];
+    const terminalIdx = loserBranch.indexOf('terminalAt !== null');
+    const loserRemoveIdx = loserBranch.indexOf('materializer.remove');
+    expect(terminalIdx).toBeGreaterThan(-1);
+    expect(loserRemoveIdx).toBeGreaterThan(terminalIdx);
+    // (c) The removal-gated discharge on the cancel path: cancel → remove →
+    // discharge (the "worktree created → DB write crashed" window heals).
+    const releaseFn = svcSrc.match(/async releaseWorkspace[\s\S]*?\n  \}/)![0];
+    const cancelIdx = releaseFn.indexOf('workspaceRepository.cancel(');
+    const cancelRemoveIdx = releaseFn.indexOf('materializer.remove', cancelIdx);
+    const cancelDischargeIdx = releaseFn.indexOf('dischargeReleaseObligation', cancelIdx);
+    expect(cancelIdx).toBeGreaterThan(-1);
+    expect(cancelRemoveIdx).toBeGreaterThan(cancelIdx);
+    expect(cancelDischargeIdx).toBeGreaterThan(cancelRemoveIdx);
+    // The terminal re-entry ALSO re-drives the removal BEFORE discharging
+    // (a crash between a terminal transition and its removal heals here —
+    // the obligation was still pending).
+    const terminalBranch = releaseFn.match(/if \(workspace\.terminalAt !== null\) \{[\s\S]*?\n    \}/)![0];
+    expect(terminalBranch.indexOf('materializer.remove')).toBeLessThan(
+      terminalBranch.indexOf('dischargeReleaseObligation'),
+    );
+    // A materialization failure best-effort-removes the PARTIAL worktree
+    // BEFORE recording the durable failure (a failed workspace must not
+    // orphan one) — never masking the primary error.
+    const failHandler = svcSrc.match(/if \(err instanceof WorktreeMaterializerError\) \{[\s\S]*?\n      \}/)![0];
+    expect(failHandler.indexOf('removeQuietly')).toBeLessThan(failHandler.indexOf('markFailed'));
+  });
+
+  it('the barrel exposes the provider-independent workspace contracts (implementations internal)', () => {
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/AgentWorkspace,\s*\n\s*AgentWorkspaceState,/);
+    expect(barrelSrc).toMatch(/export \{ AgentWorkspaceError, AGENT_WORKSPACE_ERROR_CODES \}/);
+    // The implementations stay internal (not exported).
+    expect(barrelSrc).not.toMatch(/PgAgentWorkspaceRepository|FsWorktreeMaterializer|DefaultAgentWorkspaceService/);
+    // Provider-independent: no provider names in the contract files.
+    for (const p of [WS_TYPES, WS_SERVICE]) {
+      expect(readFileSync(p, 'utf8'), `${p}: no provider specifics`).not.toMatch(/\bopenai\b|\banthropic\b|\bzai\b|\bcodex\b|\bclaude\b|\bchatgpt\b/i);
+    }
+  });
+
+  it('the durable release protocol is wired (relay + handler + boot sweep + the materializer remove-before-CAS ordering)', () => {
+    const relaySrc = readFileSync(WS_RELAY, 'utf8');
+    expect(relaySrc).toMatch(/class WorkspaceReleaseOutboxRelay implements OutboxRelay/);
+    expect(relaySrc).toMatch(/'agents\.workspace-release\.reconcile'/);
+    expect(relaySrc).toMatch(/redeliveryPolicy: \{ maxAttempts: 5 \}/);
+    const relayCode = relaySrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(relayCode).not.toMatch(/setInterval|setTimeout|setImmediate/);
+    // app.ts wiring.
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/new WorkspaceReleaseOutboxRelay\(/);
+    expect(appSrc).toMatch(/createWorkspaceReleaseRelayJobHandler\(/);
+    expect(appSrc).toMatch(/\.\.\.\(workspaceReleaseRelay \? \[workspaceReleaseRelay\] : \[\]\)/);
+    // The release ordering: remove the worktree FIRST, then the CAS.
+    const svcSrc = strip(readFileSync(WS_SERVICE, 'utf8'));
+    const releaseFn = svcSrc.match(/async releaseWorkspace[\s\S]*?\n  \}/)![0];
+    const removeIdx = releaseFn.indexOf('materializer.remove');
+    const casIdx = releaseFn.indexOf('workspaceRepository.release(');
+    expect(removeIdx).toBeGreaterThan(-1);
+    expect(casIdx).toBeGreaterThan(removeIdx);
+  });
+
+  it('the WORK-035 regression matrix exists (the required scenarios)', () => {
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'agent-workspace.regression.test.ts');
+    expect(existsSync(testPath)).toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    expect(src).toMatch(/workspace creation: ensure → requested → acquired ready/);
+    expect(src).toMatch(/duplicate execution\/workspace prevention/);
+    expect(src).toMatch(/worktree isolation: two executions → two DISTINCT worktrees/);
+    expect(src).toMatch(/concurrent workspace acquisition/);
+    expect(src).toMatch(/concurrent worktree creation is impossible by construction/);
+    expect(src).toMatch(/retry after workspace-record crash/);
+    expect(src).toMatch(/retry after worktree-creation crash/);
+    expect(src).toMatch(/materialization FAILURE/);
+    expect(src).toMatch(/cleanup idempotency/);
+    expect(src).toMatch(/cleanup racing with execution/);
+    expect(src).toMatch(/no linked \/github repository → FAIL-CLOSED/);
+    expect(src).toMatch(/unknown execution → the typed not-found error/);
+    expect(src).toMatch(/terminal immutability \+ illegal transitions/);
+    expect(src).toMatch(/native \+ external execution reference the SAME workspace abstraction/);
+    expect(src).toMatch(/no workflow\/verification\/review mutation/);
+    // PR #39 review fixes #1 + #3 — the new frozen scenarios.
+    expect(src).toMatch(/baseline UNRESOLVABLE/);
+    expect(src).toMatch(/baseline NOT-A-COMMIT/);
+    expect(src).toMatch(/LIVE preparation lease BLOCKS cancellation/);
+    expect(src).toMatch(/EXPIRED-lease interleaving/);
+    expect(src).toMatch(/isolated CAS-loser rule/);
+    expect(src).toMatch(/crash window reconciliation/);
+    // PR #39 review fix #2 — the materializer BEHAVIORAL matrix (real
+    // git, no execGit fake): the layout, `-B`, the fail-closed pre-checks,
+    // the cross-validation, the idempotent removal.
+    const matTestPath = join(BACKEND_ROOT, 'tests', 'unit', 'worktree-materializer.test.ts');
+    expect(existsSync(matTestPath), 'the real-git materializer test must exist').toBe(true);
+    const matTestSrc = readFileSync(matTestPath, 'utf8');
+    expect(matTestSrc).toMatch(/dirname-chaining bug stays fixed/);
+    expect(matTestSrc).toMatch(/RESETS a lingering branch ref/);
+    expect(matTestSrc).toMatch(/re-used AS-IS/);
+    expect(matTestSrc).toMatch(/git-repository-missing/);
+    expect(matTestSrc).toMatch(/base-revision-missing/);
+    expect(matTestSrc).toMatch(/inconsistent with the repository coordinates/);
+    expect(matTestSrc).toMatch(/path-traversal-safe/);
   });
 });

@@ -59,6 +59,14 @@ export { buildHandlerRegistry } from './worker/job-handler.js';
 export { WorkerHost } from './worker/worker-host.js';
 export type { WorkerHostOptions } from './worker/worker-host.js';
 export type { OutboxRelay } from './worker/outbox-relay.js';
+// WORK-035: the worktree-materializer port (execution infrastructure —
+// the concrete implementations live alongside in platform/workspace).
+export type {
+  WorktreeMaterializer,
+  WorktreeMaterializerInput,
+  WorktreeRemoveInput,
+} from './workspace/worktree-materializer.types.js';
+export { WorktreeMaterializerError } from './workspace/worktree-materializer.types.js';
 
 export {
   createEchoJobHandler,
