@@ -98,6 +98,13 @@ function codedErrorBody(err: unknown): { status: number; body: Record<string, un
       return { status: 410, body: { error: 'callback-token-expired', message } };
     case 'execution-expired':
       return { status: 410, body: { error: 'execution-expired', message } };
+    case 'handoff-policy-denied':
+      return { status: 403, body: { error: 'handoff-policy-denied', message } };
+    case 'handoff-policy-approval-required':
+      // An ask decision is a client-actionable conflict: the caller resolves
+      // the pending approval, then re-requests the handoff. 422 (the policy
+      // authority requires an approval that does not yet exist).
+      return { status: 422, body: { error: 'handoff-policy-approval-required', message } };
     case 'not-external-execution':
     case 'invalid-execution-state':
       return { status: 409, body: { error: coded.code, message } };

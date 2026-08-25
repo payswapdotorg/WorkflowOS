@@ -393,7 +393,12 @@ export class ExecutionHandoffError extends Error {
       | 'handoff-token-invalid'
       | 'handoff-token-expired'
       | 'handoff-token-already-used'
-      | 'execution-expired',
+      | 'execution-expired'
+      // WORK-037 (additive): the agent-policy external-handoff eligibility
+      // gate (PolicyGatedExecutionHandoffService). The route maps these to
+      // 403 / 422 respectively. Non-breaking for existing callers.
+      | 'handoff-policy-denied'
+      | 'handoff-policy-approval-required',
   ) {
     super(message);
     this.name = 'ExecutionHandoffError';
@@ -412,6 +417,15 @@ export interface RedeemedExecutionPackage {
   readonly executionId: string;
   readonly status: ExecutionState;
   readonly package: ExternalExecutionPackage;
+  /**
+   * WORK-037 (additive, advisory): when the agent-policy external-handoff
+   * decision is 'constrained', the redeemed package carries the policy
+   * constraints (timeoutMs/maxOutputBytes/readOnly) for the external
+   * runtime to honor. The external runtime is NOT a WorkflowOS host; these
+   * constraints are communicated, not enforced host-side. Absent when the
+   * decision is 'allow'.
+   */
+  readonly policyConstraints?: import('./tool-runtime.types.js').ToolPolicyConstraints;
 }
 /**
  * WORK-028: result of a COMPANION redemption (token-only, no API key). The

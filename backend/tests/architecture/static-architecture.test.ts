@@ -841,6 +841,14 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'ToolRuntimeError',              // @modules/agents — the typed domain error
       'TOOL_RUNTIME_ERROR_CODES',      // @modules/agents — the stable code list
       'DEFAULT_TOOL_EXECUTION_LIMITS', // @modules/agents — frozen pure-data limits
+      // WORK-037: the agent-policy typed error (the same sanctioned
+      // exception + reasoning) + the frozen pure-data domain list +
+      // the platform default document (a frozen literal: rule selectors +
+      // effects + reasons; no wiring, no credentials).
+      'AgentPolicyError',                   // @modules/agents — the typed domain error
+      'AGENT_POLICY_ERROR_CODES',           // @modules/agents — the stable code list
+      'PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT', // @modules/agents — frozen pure-data default policy
+      'AGENT_POLICY_DOMAINS',              // @modules/agents — frozen pure-data domain list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -8891,3 +8899,237 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
 function AGENTS_INTERNAL_PATH(): string {
   return join(MODULES_DIR, 'agents', 'internal');
 }
+
+// ============================================================================
+// WORK-037 — Agent Policy & Permissions invariants
+// ============================================================================
+//
+// The durable execution-policy authority BEHIND the WORK-036 ToolPolicyGate
+// seam. The invariant under test (the one-way dependency):
+//
+//   Auth / Project Authorization → Execution Policy → Tool Runtime → Sandbox
+//
+//   NO reverse dependency: the engine imports no workflow/verification/review
+//   /github/work-items/authorization module. Only the ROUTE layer calls
+//   requireProjectAuthorization (who-may-resolve) — the engine decides
+//   what-agents-may-do (execution-specific policy). These are two separate
+//   concerns; the engine is the second.
+describe('WORK-037 invariants — Agent Policy and Permissions (the engine behind the ToolPolicyGate seam)', () => {
+  const AP_TYPES = join(MODULES_DIR, 'agents', 'internal', 'agent-policy.types.ts');
+  const AP_ENGINE = join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts');
+  const AP_REPO = join(MODULES_DIR, 'agents', 'internal', 'pg-agent-policy-repository.ts');
+  const AP_HANDOFF = join(MODULES_DIR, 'agents', 'internal', 'policy-gated-handoff-service.ts');
+  const AP_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'agent-policy.route.ts');
+  const AP_REGRESSION = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'agent-policy.regression.test.ts');
+  const AP_MIGRATION = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0037_agent_policy.sql');
+
+  // The workflow/authority modules the engine MUST NOT import (the one-way
+  // dependency). Audit + logger are infrastructure PORTS (allowed — the
+  // engine consumes the AuditEventWriter TYPE + Logger TYPE, never the
+  // audit module's logic, never workflow state).
+  const FORBIDDEN_ENGINE_IMPORTS = [
+    "@modules/auth",
+    "@modules/workflows",
+    "@modules/work-items",
+    "@modules/verification",
+    "@modules/reviews",
+    "@modules/github",
+    "@modules/architecture",
+    "@modules/requirements",
+    "@modules/notifications",
+    "@modules/organizations",
+    "@modules/projects",
+  ];
+  const ENGINE_FILES: ReadonlyArray<string> = [AP_TYPES, AP_ENGINE, AP_REPO, AP_HANDOFF];
+
+  it('the engine + repository + decorator NEVER import a workflow/authority module (the one-way dependency)', () => {
+    for (const file of ENGINE_FILES) {
+      const src = readFileSync(file, 'utf8');
+      for (const forbidden of FORBIDDEN_ENGINE_IMPORTS) {
+        expect(src, `${file} must not import ${forbidden} (the one-way dependency)`).not.toContain(
+          `from '${forbidden}`,
+        );
+        expect(src, `${file} must not import ${forbidden} (the one-way dependency)`).not.toContain(
+          `from "${forbidden}`,
+        );
+      }
+    }
+  });
+
+  it('the engine implements the frozen ToolPolicyGate seam (the runtime diff is zero)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/export class AgentPolicyEngine implements ToolPolicyGate/);
+    expect(engineSrc).toMatch(/async decide\(request: ToolPolicyRequest\): Promise<ToolPolicyDecision>/);
+    // The decision vocabulary is the FROZEN ToolPolicyDecisionValue
+    // (reused, NOT extended — the engine imports it from the seam).
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/ToolPolicyDecisionValue/);
+    // The four control domains + the external-handoff subject.
+    expect(typesSrc).toMatch(/'tool' \| 'network' \| 'secrets' \| 'deployment' \| 'external'/);
+  });
+
+  it('app.ts wires the ENGINE as the runtime policyGate (NOT DefaultToolPolicyGate)', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    // The engine is constructed + wired as the gate.
+    expect(appSrc).toMatch(/new AgentPolicyEngine\(/);
+    expect(appSrc).toMatch(/policyGate: agentPolicyEngine,/);
+    // DefaultToolPolicyGate is no longer imported (the engine replaces it).
+    expect(appSrc).not.toMatch(/DefaultToolPolicyGate/);
+    // The handoff decorator wraps the inner service (external eligibility).
+    expect(appSrc).toMatch(/new PolicyGatedExecutionHandoffService\(/);
+    expect(appSrc).toMatch(/inner: new DefaultExecutionHandoffService\(/);
+  });
+
+  it('fail-closed: decide() returns deny on resolution failure (NEVER silently allow)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The catch → deny path + the fail-closed reason codes.
+    expect(engineSrc).toMatch(/agent-policy-scope-unresolvable/);
+    expect(engineSrc).toMatch(/agent-policy-unavailable/);
+    expect(engineSrc).toMatch(/this\.failClosed\(/);
+    expect(engineSrc).toMatch(/return this\.failClosed\(/);
+    // The fail-closed decision is always 'deny'.
+    expect(engineSrc).toMatch(/return \{ decision: 'deny', reason: `agent-policy/);
+  });
+
+  it('the ASK interaction: a pending approval is ensured (never silently allow)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // The engine delegates pending creation to the repository (idempotent
+    // under the partial unique index) + owns the approval-consultation flow.
+    expect(engineSrc).toMatch(/private async ensurePending\(/);
+    expect(engineSrc).toMatch(/this\.deps\.repository\.ensurePendingApproval\(/);
+    expect(engineSrc).toMatch(/decision: 'ask'/);
+    // An APPROVED approval resolves to allow; a DENIED to deny (durable).
+    expect(engineSrc).toMatch(/approval\.status === 'approved'/);
+    expect(engineSrc).toMatch(/approval\.status === 'denied'/);
+  });
+
+  it('no workflow/verification/review/github state mutation (SQL-level)', () => {
+    const FORBIDDEN_TABLES = [
+      'wfos_workflow_states',
+      'wfos_work_items',
+      'wfos_work_orders',
+      'wfos_verification_runs',
+      'wfos_reviews',
+      'wfos_pull_request_associations',
+      'wfos_github_',
+    ];
+    for (const file of [AP_REPO, AP_ENGINE]) {
+      const src = readFileSync(file, 'utf8');
+      for (const table of FORBIDDEN_TABLES) {
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`INSERT INTO ${table}`);
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`UPDATE ${table}`);
+        expect(src, `${file} must not mutate ${table}`).not.toContain(`DELETE FROM ${table}`);
+      }
+    }
+    // The engine persists ONLY to wfos_agent_policies + wfos_agent_policy_approvals.
+    const repoSrc = readFileSync(AP_REPO, 'utf8');
+    expect(repoSrc).toMatch(/INSERT INTO wfos_agent_policies/);
+    expect(repoSrc).toMatch(/INSERT INTO wfos_agent_policy_approvals/);
+    expect(repoSrc).toMatch(/UPDATE wfos_agent_policy_approvals/);
+    expect(repoSrc).toMatch(/DELETE FROM wfos_agent_policies/);
+  });
+
+  it('the migration exists: two tables + partial unique indexes + the version-bump trigger', () => {
+    expect(existsSync(AP_MIGRATION), '0037_agent_policy.sql must exist').toBe(true);
+    const sql = readFileSync(AP_MIGRATION, 'utf8');
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_policies/);
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS wfos_agent_policy_approvals/);
+    // The partial unique indexes (one org default, one project override per
+    // project; one pending approval per execution+subject).
+    expect(sql).toMatch(/wfos_agent_policies_org_unique/);
+    expect(sql).toMatch(/WHERE scope = 'organization'/);
+    expect(sql).toMatch(/wfos_agent_policies_project_unique/);
+    expect(sql).toMatch(/WHERE scope = 'project'/);
+    expect(sql).toMatch(/wfos_agent_policy_approvals_pending_unique/);
+    expect(sql).toMatch(/WHERE status = 'pending'/);
+    // The version-bump trigger.
+    expect(sql).toMatch(/wfos_agent_policies_bump_version/);
+    expect(sql).toMatch(/NEW\.policy_version := OLD\.policy_version \+ 1/);
+    // The migration documents the no-credential intent (policy config +
+    // subject identifiers only — no tokens/secrets/passwords stored).
+    expect(sql).toMatch(/No secrets\./);
+  });
+
+  it('the route layer enforces user authorization (who-may-resolve; the engine never imports auth)', () => {
+    const routeSrc = readFileSync(AP_ROUTE, 'utf8');
+    expect(routeSrc).toContain('requireProjectAuthorization');
+    expect(routeSrc).toContain('requireOrganizationAuthorization');
+    // Mutations + approval resolution require project.admin (user authority).
+    expect(routeSrc).toMatch(/permission: 'project\.admin'/);
+    // Reads require project.read.
+    expect(routeSrc).toMatch(/permission: 'project\.read'/);
+    // The approval resolution verifies the approval belongs to the path project
+    // (a project.admin on A cannot resolve an approval for B).
+    expect(routeSrc).toMatch(/approval\.projectId !== projectId/);
+    // The route depends on the AgentPolicyService INTERFACE (not the concrete
+    // engine) — the api layer does not reach into modules/agents/internal.
+    expect(routeSrc).toMatch(/from '@modules\/agents\/index\.js'/);
+    expect(routeSrc).not.toMatch(/\.\.\/\.\.\/modules\/agents\/internal\//);
+  });
+
+  it('the barrel exposes the agent-policy types + the platform default + the error (no concrete impls)', () => {
+    const barrelSrc = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrelSrc).toMatch(/AgentPolicyDocument,/);
+    expect(barrelSrc).toMatch(/AgentPolicyService,/);
+    expect(barrelSrc).toMatch(/AgentPolicyError,/);
+    expect(barrelSrc).toMatch(/PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT,/);
+    // The concrete engine + repository stay internal (wired by app.ts).
+    expect(barrelSrc).not.toMatch(/export \{[^}]*AgentPolicyEngine[^}]*\}/);
+    expect(barrelSrc).not.toMatch(/export \{[^}]*PgAgentPolicyRepository[^}]*\}/);
+  });
+
+  it('the platform default document is a safe out-of-box posture (secrets/deployment/network-mutating controlled)', () => {
+    const typesSrc = readFileSync(AP_TYPES, 'utf8');
+    // secrets → ask; deployment → deny; network-mutating → ask; terminal/package → constrained.
+    expect(typesSrc).toMatch(/id: 'platform-secrets-ask'/);
+    expect(typesSrc).toMatch(/id: 'platform-deployment-deny'/);
+    expect(typesSrc).toMatch(/id: 'platform-network-mutating-ask'/);
+    expect(typesSrc).toMatch(/id: 'platform-terminal-constrained'/);
+    expect(typesSrc).toMatch(/id: 'platform-package-constrained'/);
+    // The default effect is allow (read-oriented + worktree-confined dev).
+    expect(typesSrc).toMatch(/defaultEffect: 'allow'/);
+    // The document + its rules are frozen (Object.freeze).
+    expect(typesSrc).toMatch(/Object\.freeze\(\{\s*description:/);
+  });
+
+  it('the external-handoff eligibility is enforced at the handoff decorator (no host authority gained)', () => {
+    const handoffSrc = readFileSync(AP_HANDOFF, 'utf8');
+    expect(handoffSrc).toMatch(/class PolicyGatedExecutionHandoffService implements ExecutionHandoffService/);
+    // issue() + redeem() both consult the policy (deny/ask → throw; constrained → attach constraints).
+    expect(handoffSrc).toMatch(/evaluateExternalHandoff\(/);
+    expect(handoffSrc).toMatch(/'handoff-policy-denied'/);
+    expect(handoffSrc).toMatch(/'handoff-policy-approval-required'/);
+    // redeemByToken is NOT gated (post-issuance delivery; documented).
+    expect(handoffSrc).toMatch(/companion path is post-issuance delivery/);
+  });
+
+  it('the regression matrix exists with the frozen scenarios', () => {
+    expect(existsSync(AP_REGRESSION), 'agent-policy.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(AP_REGRESSION, 'utf8');
+    // The three layers of proof.
+    expect(src).toMatch(/ENGINE DECISION LOGIC/);
+    expect(src).toMatch(/PERSISTENCE/);
+    expect(src).toMatch(/SEAM INTEGRATION/);
+    // The four control domains are exercised.
+    expect(src).toMatch(/deployment-class/);
+    expect(src).toMatch(/secrets-bearing/);
+    expect(src).toMatch(/network-mutating/);
+    // The ASK approval flow (approved → allow; denied → deny; pending; expired).
+    expect(src).toMatch(/APPROVED approval for the same subject → allow/);
+    expect(src).toMatch(/DENIED approval for the same subject → deny/);
+    expect(src).toMatch(/EXPIRED approved approval/);
+    // Fail-closed (policy failure cannot execute).
+    expect(src).toMatch(/unresolvable scope → deny/);
+    expect(src).toMatch(/repository throws → deny/);
+    // Concurrency (the pending-approval idempotency).
+    expect(src).toMatch(/two parallel asks for the same subject/);
+    // The seam integration (deny/ask → blocked; constrained → limits; allow → executes).
+    expect(src).toMatch(/deny → durable blocked observation; the executor is NEVER called/);
+    expect(src).toMatch(/ask → durable blocked observation/);
+    expect(src).toMatch(/constrained → the executor runs UNDER the tightened limits/);
+    expect(src).toMatch(/constrained readOnly → a mutating invocation is BLOCKED/);
+    expect(src).toMatch(/policy failure cannot execute/);
+    // The external handoff eligibility.
+    expect(src).toMatch(/external handoff eligibility/);
+  });
+});

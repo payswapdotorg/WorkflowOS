@@ -174,7 +174,9 @@ import {
 import { PgAgentWorkspaceRepository } from './modules/agents/internal/pg-agent-workspace-repository.js';
 import { DefaultAgentWorkspaceService } from './modules/agents/internal/agent-workspace-service.js';
 import { DefaultToolRuntime } from './modules/agents/internal/tool-runtime-service.js';
-import { DefaultToolPolicyGate } from './modules/agents/internal/tool-runtime.types.js';
+import { AgentPolicyEngine } from './modules/agents/internal/agent-policy-engine.js';
+import { PgAgentPolicyRepository } from './modules/agents/internal/pg-agent-policy-repository.js';
+import { PolicyGatedExecutionHandoffService } from './modules/agents/internal/policy-gated-handoff-service.js';
 import { FsToolExecutor } from './platform/tools/fs-tool-executor.js';
 import { ProcessToolExecutor } from './platform/tools/process-tool-executor.js';
 import { NamespaceProcessSandbox } from './platform/tools/process-sandbox.js';
@@ -390,6 +392,13 @@ export interface AppDeps {
    *  observations (session events + audit) and never mutate workflow,
    *  verification, review, merge, or architecture state. */
   toolRuntime?: ToolRuntime;
+  /** WORK-037: the agent-policy engine behind the ToolPolicyGate seam.
+   *  Present when DB + agents are configured. Decides allow/deny/ask/
+   *  constrained for native tool invocations + external handoff eligibility;
+   *  the durable ASK interaction; versioned document CRUD. Distinct from
+   *  project authorization — the engine never imports the authorization
+   *  service (only the route layer does, for who-may-resolve). */
+  agentPolicyEngine?: AgentPolicyEngine;
   /** WORK-032: Native vs External Execution Benchmark service. Present when
    *  DB + execution + workflow + verification + review are configured. */
   benchmarkService?: BenchmarkService;
@@ -594,6 +603,10 @@ export async function buildApp(
   // agents block constructs it — exposed for the future native-execution
   // path that drives governed tools inside the workspace).
   let toolRuntimeRef: ToolRuntime | undefined;
+  // WORK-037: the agent-policy engine behind the ToolPolicyGate seam
+  // (declared at function scope; the agents block constructs it — exposed
+  // for the agent-policy route surface + the policy-gated handoff decorator).
+  let agentPolicyEngineRef: AgentPolicyEngine | undefined;
   // The session service is also referenced by the handler registry below.
   let executionSessionServiceRef: { reconcileTerminalForExecution(executionId: string): Promise<unknown> } | undefined;
   let executionPolicyService: ExecutionPolicyService | undefined;
@@ -1026,6 +1039,19 @@ export async function buildApp(
           .filter((entry) => entry.length > 0),
       logger,
     });
+    // WORK-037: the agent-policy engine behind the WORK-036 ToolPolicyGate
+    // seam. The platform default document (allow-oriented + ask for
+    // secrets/network-mutating + deny for deployment) is the out-of-box
+    // posture; orgs/projects override per their authority. The engine
+    // fails CLOSED on any resolution error (deny + observed). It NEVER
+    // imports the authorization service — only the route layer calls
+    // requireProjectAuthorization for the user-authorization concern.
+    const agentPolicyRepository = new PgAgentPolicyRepository({ db: database });
+    const agentPolicyEngine = new AgentPolicyEngine({
+      repository: agentPolicyRepository,
+      auditWriter: auditService,
+      logger,
+    });
     const toolRuntime = new DefaultToolRuntime({
       sessionService: executionSessionService,
       sessionRepository: executionSessionRepository,
@@ -1039,11 +1065,12 @@ export async function buildApp(
         http: new HttpToolExecutor({ logger }),
         browser: new BrowserToolExecutor({ logger }),
       },
-      policyGate: new DefaultToolPolicyGate(),
+      policyGate: agentPolicyEngine,
       auditWriter: auditService,
       logger,
     });
     toolRuntimeRef = toolRuntime;
+    agentPolicyEngineRef = agentPolicyEngine;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1051,10 +1078,14 @@ export async function buildApp(
       logger,
       sessionService: executionSessionService,
     });
-    executionHandoffService = new DefaultExecutionHandoffService({
-      executionRecordRepository,
-      handoffRepository: executionHandoffRepository,
-      auditService,
+    executionHandoffService = new PolicyGatedExecutionHandoffService({
+      inner: new DefaultExecutionHandoffService({
+        executionRecordRepository,
+        handoffRepository: executionHandoffRepository,
+        auditService,
+        logger,
+      }),
+      policy: agentPolicyEngine,
       logger,
     });
     // PR #30 review fix #2: scoped event-ingestion callback credentials —
@@ -1449,6 +1480,11 @@ export async function buildApp(
       // WORK-036: the governed tool runtime (present when DB + agents
       // configured). Capabilities, never authorities — observations only.
       toolRuntime: toolRuntimeRef,
+      // WORK-037: the agent-policy engine behind the ToolPolicyGate seam
+      // (present when DB + agents configured). Distinct from project
+      // authorization — the engine decides what agents may do; the route
+      // layer decides who may resolve approvals.
+      agentPolicyEngine: agentPolicyEngineRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +
