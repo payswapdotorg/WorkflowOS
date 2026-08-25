@@ -13,6 +13,25 @@ export interface JobHandler {
   readonly type: string;
   /** Process a single job. Throw to signal failure; the worker re-acks. */
   handle(job: JobRecord): Promise<void>;
+  /**
+   * PR #38 review (durable redelivery): OPT-IN bounded redelivery on
+   * handler failure. When a handler declares a policy and its handle()
+   * throws, the WorkerHost re-enqueues the job onto the SAME durable queue
+   * with attempt+1 (up to maxAttempts total deliveries) BEFORE
+   * acknowledging the failed delivery — so a transient failure (e.g. a DB
+   * blip during a session-terminal reconciliation) produces another
+   * DURABLE attempt without a process restart. Handlers WITHOUT a policy
+   * keep the historical acknowledge-regardless semantics exactly (the
+   * default path is unchanged).
+   *
+   * A handler opting in MUST be idempotent per delivery attempt (its
+   * side effects safe to re-apply) — the same contract as the outbox
+   * relay consumers.
+   */
+  readonly redeliveryPolicy?: {
+    /** Total delivery attempts including the first (>= 1). */
+    readonly maxAttempts: number;
+  };
 }
 
 /**

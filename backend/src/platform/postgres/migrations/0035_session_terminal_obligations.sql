@@ -70,6 +70,13 @@ CREATE TABLE IF NOT EXISTS wfos_execution_session_terminal_obligations (
   --                          state; an expired execution is a FAILED
   --                          execution outcome, recorded precisely)
   terminal_state TEXT NOT NULL CHECK (terminal_state IN ('completed', 'failed', 'cancelled')),
+  -- The SOURCE execution terminal status that created the obligation
+  -- (PR #38 review round 3: preserve the expired distinction — the
+  -- obligation maps expired→failed, but the session's terminal EVENT
+  -- payload records the true source ('execution-expired') so the durable
+  -- evidence never lies about WHY the session failed).
+  source_execution_status TEXT NOT NULL CHECK (source_execution_status IN (
+    'completed', 'failed', 'cancelled', 'expired')),
   -- The durable state of the reconciliation. NULL = pending (the replay
   -- work list); set once the session reaches the matching terminal state.
   discharged_at TIMESTAMPTZ,
@@ -105,9 +112,10 @@ BEGIN
   IF NEW.status IN ('completed', 'failed', 'cancelled', 'expired')
      AND OLD.status IS DISTINCT FROM NEW.status THEN
     INSERT INTO wfos_execution_session_terminal_obligations
-      (execution_id, terminal_state)
+      (execution_id, terminal_state, source_execution_status)
     VALUES (NEW.id,
-            CASE WHEN NEW.status = 'expired' THEN 'failed' ELSE NEW.status END)
+            CASE WHEN NEW.status = 'expired' THEN 'failed' ELSE NEW.status END,
+            NEW.status)
     ON CONFLICT (execution_id) DO NOTHING;
   END IF;
   RETURN NEW;

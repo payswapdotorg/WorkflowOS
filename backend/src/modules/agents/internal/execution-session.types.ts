@@ -278,6 +278,14 @@ export interface SessionTerminalObligation {
    * reason recorded in the terminal event payload).
    */
   readonly terminalState: 'completed' | 'failed' | 'cancelled';
+  /**
+   * The SOURCE execution terminal status that created the obligation
+   * (round 3: preserves the expired distinction — the obligation maps
+   * expired→failed, but the terminal event payload records the true
+   * source so the durable evidence never lies about WHY the session
+   * failed).
+   */
+  readonly sourceExecutionStatus: 'completed' | 'failed' | 'cancelled' | 'expired';
   readonly dischargedAt: Date | null;
   readonly createdAt: Date;
 }

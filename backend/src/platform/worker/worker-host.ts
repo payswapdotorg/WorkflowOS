@@ -190,10 +190,54 @@ export class WorkerHost {
           error: errorMessage(err),
           durationMs: Date.now() - startedAt,
         });
+        // PR #38 review (durable redelivery): for handlers that OPT IN via
+        // a redeliveryPolicy, re-enqueue the job onto the SAME durable
+        // queue with attempt+1 BEFORE the finally-ack consumes the failed
+        // delivery — a transient failure therefore produces another
+        // DURABLE attempt without a process restart (the boot sweep
+        // remains the restart-time backstop; exhaustion leaves the durable
+        // outbox row pending for the next sweep). Handlers WITHOUT a
+        // policy are entirely unaffected (the historical ack-regardless
+        // semantics).
+        const policy = handler.redeliveryPolicy;
+        const attempt = job.attempt ?? 1;
+        if (policy && attempt < policy.maxAttempts) {
+          try {
+            await this.queue.enqueue(job.type, job.payload, {
+              executionId: job.executionId,
+              correlationId: job.correlationId,
+              attempt: attempt + 1,
+            });
+            this.logger.warn('worker.job.redelivered', {
+              jobId: job.id,
+              jobType: job.type,
+              attempt,
+              nextAttempt: attempt + 1,
+              maxAttempts: policy.maxAttempts,
+            });
+          } catch (redeliverErr) {
+            // The queue itself is failing — the redelivery is lost until
+            // the next boot sweep (a restart-time backstop, loudly logged).
+            this.logger.error('worker.job.redelivery-failed', {
+              jobId: job.id,
+              jobType: job.type,
+              attempt,
+              error: errorMessage(redeliverErr),
+            });
+          }
+        } else if (policy) {
+          this.logger.error('worker.job.redelivery-exhausted', {
+            jobId: job.id,
+            jobType: job.type,
+            attempt,
+            maxAttempts: policy.maxAttempts,
+          });
+        }
       } finally {
         // The foundation acknowledges regardless of success/failure to keep
-        // the queue moving. Future work items may implement retries / DLQs by
-        // extending the Queue interface — out of scope for WORK-001.
+        // the queue moving. For redelivery-policy handlers the retry job
+        // was already re-enqueued above, so the ack only retires THIS
+        // delivery. Handlers without a policy are unchanged.
         await this.queue.ack(job.id);
       }
     });

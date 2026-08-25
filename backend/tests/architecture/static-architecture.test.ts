@@ -7973,6 +7973,61 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(t).toMatch(/a session terminal with the WRONG outcome → the divergence is retained visibly/);
   });
 
+  it('PR #38 review round 3: durable redelivery on the existing worker path (opt-in; unrelated handlers unchanged) + the expired distinction preserved', () => {
+    // The liveness blocker: WorkerHost acked EVERY job in finally — a
+    // failed relay job was lost until a process restart (the boot sweep
+    // only runs at start), so a healthy worker could leave a pending
+    // terminal obligation unattempted indefinitely. The fix: an OPT-IN
+    // handler redeliveryPolicy — on failure the WorkerHost re-enqueues the
+    // job (attempt+1, bounded) onto the SAME durable queue BEFORE the ack.
+    // Handlers WITHOUT the policy keep the historical ack-regardless
+    // semantics exactly.
+    const queueSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'queue', 'queue.ts'), 'utf8');
+    expect(queueSrc).toMatch(/readonly attempt\?: number;/);
+    const handlerSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'job-handler.ts'), 'utf8');
+    expect(handlerSrc).toMatch(/redeliveryPolicy\?: \{[\s\S]*?maxAttempts: number;/);
+    const hostSrc = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'worker', 'worker-host.ts'), 'utf8');
+    const hostCode = hostSrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The failure path re-enqueues (attempt+1) BEFORE the finally-ack.
+    const catchIdx = hostCode.indexOf('} catch (err) {');
+    const reenqueueIdx = hostCode.indexOf('await this.queue.enqueue(job.type, job.payload,');
+    const finallyIdx = hostCode.indexOf('} finally {', catchIdx);
+    expect(catchIdx).toBeGreaterThan(-1);
+    expect(reenqueueIdx).toBeGreaterThan(catchIdx);
+    expect(reenqueueIdx).toBeLessThan(finallyIdx);
+    expect(hostCode).toMatch(/attempt: attempt \+ 1/);
+    // OPT-IN ONLY: the redelivery is gated on the handler's policy.
+    expect(hostCode).toMatch(/const policy = handler\.redeliveryPolicy;/);
+    // The session relay handler declares the policy.
+    const relaySrc = readFileSync(join(AGENTS_INTERNAL, 'session-terminal-relay.ts'), 'utf8');
+    expect(relaySrc).toMatch(/redeliveryPolicy: \{ maxAttempts: 5 \}/);
+    // Unrelated handlers (benchmark trial / start-delivery relay / echo)
+    // declare NO policy — their semantics are unchanged.
+    for (const [name, p] of [
+      ['benchmark trial handler', join(BACKEND_ROOT, 'src', 'benchmark', 'internal', 'benchmark-trial-job-handler.ts')],
+      ['benchmark start-delivery relay handler', join(BACKEND_ROOT, 'src', 'benchmark', 'internal', 'start-delivery-relay.ts')],
+      ['echo fixture handler', join(BACKEND_ROOT, 'src', 'platform', 'worker', 'fixtures', 'echo.job.ts')],
+    ] as const) {
+      if (existsSync(p)) {
+        expect(readFileSync(p, 'utf8'), `${name}: no redelivery policy (unchanged semantics)`).not.toMatch(/redeliveryPolicy/);
+      }
+    }
+    // The expired distinction: the obligation records the SOURCE execution
+    // status + the terminal event payload preserves it.
+    const m35 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0035_session_terminal_obligations.sql'), 'utf8');
+    expect(m35).toMatch(/source_execution_status TEXT NOT NULL CHECK \(source_execution_status IN \(/);
+    expect(m35).toMatch(/'completed', 'failed', 'cancelled', 'expired'/);
+    expect(m35).toMatch(/NEW\.status,\s*\)\s*ON CONFLICT|NEW\.status\)\s*ON CONFLICT|NEW\.status,\)[\s\S]*?ON CONFLICT/);
+    const svcSrc = strip(readFileSync(SESSION_SERVICE, 'utf8'));
+    expect(svcSrc).toMatch(/reason: `execution-\$\{obligation\.sourceExecutionStatus\}`/);
+    // The round-3 regression existence.
+    const t = readFileSync(join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'session-terminal-durability.regression.test.ts'), 'utf8');
+    expect(t).toMatch(/attempt 1 fails transiently → the job is NOT lost \(durable redelivery\)/);
+    expect(t).toMatch(/redelivery is BOUNDED/);
+    expect(t).toMatch(/UNRELATED handlers keep the historical ack-regardless semantics/);
+    expect(t).toMatch(/the expired distinction is PRESERVED in the terminal event payload/);
+  });
+
   it('PR #38 review: the terminal-event guard allows exactly the terminal event itself on a terminal row (the atomic transition+event composition)', () => {
     const m34 = readFileSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0034_execution_sessions.sql'), 'utf8');
     // The refined guard: a terminal event whose event_type EQUALS the

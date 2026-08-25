@@ -407,10 +407,11 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
     // reconciliation skips those but the obligation remains auditable...
     // and still drains when a session is later ensured + the relay runs).
     const res = await this.db.query<
-      { o_id: string; o_execution_id: string; o_terminal_state: string; o_discharged_at: Date | string | null; o_created_at: Date | string } & Partial<SessionRow>
+      { o_id: string; o_execution_id: string; o_terminal_state: string; o_source_execution_status: string; o_discharged_at: Date | string | null; o_created_at: Date | string } & Partial<SessionRow>
     >(
       `SELECT o.id AS o_id, o.execution_id AS o_execution_id,
               o.terminal_state AS o_terminal_state,
+              o.source_execution_status AS o_source_execution_status,
               o.discharged_at AS o_discharged_at, o.created_at AS o_created_at,
               s.id, s.execution_id, s.project_id, s.work_item_id, s.work_order_id,
               s.status, s.version, s.current_turn, s.created_at, s.updated_at,
@@ -425,6 +426,7 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
         id: String(r.o_id),
         executionId: String(r.o_execution_id),
         terminalState: r.o_terminal_state as 'completed' | 'failed' | 'cancelled',
+        sourceExecutionStatus: r.o_source_execution_status as 'completed' | 'failed' | 'cancelled' | 'expired',
         dischargedAt: r.o_discharged_at === null || r.o_discharged_at === undefined ? null : toDate(r.o_discharged_at),
         createdAt: toDate(r.o_created_at)!,
       },
@@ -435,11 +437,11 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
   async dischargeTerminalObligation(obligationId: string): Promise<SessionTerminalObligation | null> {
     // Idempotent discharge (CAS on discharged_at IS NULL): repeated
     // recovery attempts discharge exactly once; later attempts → null.
-    const res = await this.db.query<{ id: string; execution_id: string; terminal_state: string; discharged_at: Date | string | null; created_at: Date | string }>(
+    const res = await this.db.query<{ id: string; execution_id: string; terminal_state: string; source_execution_status: string; discharged_at: Date | string | null; created_at: Date | string }>(
       `UPDATE wfos_execution_session_terminal_obligations
           SET discharged_at = NOW()
         WHERE id = $1 AND discharged_at IS NULL
-        RETURNING id, execution_id, terminal_state, discharged_at, created_at`,
+        RETURNING id, execution_id, terminal_state, source_execution_status, discharged_at, created_at`,
       [obligationId],
     );
     const r = res.rows[0];
@@ -494,11 +496,12 @@ function mapSession(r: SessionRow): ExecutionSession {
   };
 }
 
-function mapObligation(r: { id: string; execution_id: string; terminal_state: string; discharged_at: Date | string | null; created_at: Date | string }): SessionTerminalObligation {
+function mapObligation(r: { id: string; execution_id: string; terminal_state: string; source_execution_status?: string; discharged_at: Date | string | null; created_at: Date | string }): SessionTerminalObligation {
   return {
     id: String(r.id),
     executionId: String(r.execution_id),
     terminalState: r.terminal_state as 'completed' | 'failed' | 'cancelled',
+    sourceExecutionStatus: (r.source_execution_status ?? r.terminal_state) as 'completed' | 'failed' | 'cancelled' | 'expired',
     dischargedAt: r.discharged_at === null || r.discharged_at === undefined ? null : toDate(r.discharged_at),
     createdAt: toDate(r.created_at)!,
   };

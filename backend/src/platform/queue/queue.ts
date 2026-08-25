@@ -33,6 +33,14 @@ export interface JobRecord<TPayload = unknown> {
   readonly executionId: string;
   /** Optional correlation id linking related jobs. Defaults to executionId. */
   readonly correlationId?: string;
+  /**
+   * PR #38 review (durable redelivery): the 1-based delivery attempt
+   * number. Absent on first delivery (undefined === 1); incremented by the
+   * WorkerHost when it re-enqueues a failed job whose handler opted into a
+   * redeliveryPolicy. PURELY bookkeeping for bounded retries — handlers
+   * that did not opt in never see an attempt > 1.
+   */
+  readonly attempt?: number;
   /** Epoch milliseconds when the job was enqueued. */
   readonly enqueuedAt: number;
 }
@@ -46,6 +54,12 @@ export interface EnqueueOptions {
   executionId?: string;
   /** Optional correlation id; defaults to the (resolved) execution id. */
   correlationId?: string;
+  /**
+   * PR #38 review (durable redelivery): the 1-based attempt number to
+   * stamp on the record (used by the WorkerHost's failure-path
+   * re-enqueue). Callers normally omit it.
+   */
+  attempt?: number;
 }
 
 /**

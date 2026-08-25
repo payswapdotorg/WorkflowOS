@@ -114,6 +114,13 @@ export function createSessionTerminalRelayJobHandler(
 ): JobHandler {
   return {
     type: SESSION_TERMINAL_RELAY_JOB_TYPE,
+    // PR #38 review (durable redelivery): the session-terminal
+    // reconciliation is IDEMPOTETIC per attempt (CAS + atomic discharge),
+    // so a transient failure (e.g. a DB blip) is safely retried on the
+    // durable queue — up to 5 total delivery attempts without a process
+    // restart. Exhaustion leaves the obligation pending for the boot
+    // sweep; the outbox row is the durable source of truth either way.
+    redeliveryPolicy: { maxAttempts: 5 },
     async handle(job: JobRecord): Promise<void> {
       const payload = job.payload as SessionTerminalRelayJobPayload | null;
       const executionId = payload?.executionId;

@@ -37,6 +37,7 @@ export class InMemoryQueue implements Queue {
       payload,
       executionId,
       correlationId: options?.correlationId ?? executionId,
+      attempt: options?.attempt,
       enqueuedAt: Date.now(),
     };
     this.pending.push(record);

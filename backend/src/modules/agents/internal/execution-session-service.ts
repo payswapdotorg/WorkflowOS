@@ -287,10 +287,18 @@ export class DefaultExecutionSessionService implements ExecutionSessionService {
     // review correction #3). Concurrent reconciliations: the CAS has
     // exactly one winner; a loser performs NO writes (the obligation stays
     // pending for the next pass).
+    // The terminal event payload preserves the TRUE execution outcome:
+    // an expired execution is a failed SESSION, but the event records
+    // 'execution-expired' (round 3: the durable evidence never lies about
+    // WHY the session failed).
+    const eventPayload =
+      obligation.terminalState === 'failed'
+        ? { reason: `execution-${obligation.sourceExecutionStatus}` }
+        : {};
     const transition = await this.deps.sessionRepository.transitionWithEvent(
       session.id, session.version, 'running', obligation.terminalState,
       obligation.terminalState as ExecutionSessionEventType,
-      obligation.terminalState === 'failed' ? { reason: 'execution-terminal-reconciliation' } : {},
+      eventPayload,
       obligation.id,
     );
     if (!transition) {

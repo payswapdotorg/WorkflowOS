@@ -627,4 +627,212 @@ describe('PR #38 review corrections (round 2) — obligation lifecycle correctne
     expect(events.filter((e) => e.eventType === 'completed')).toHaveLength(0);
   });
 });
+
+  // ---------------------------------------------------------------------------
+  // PR #38 review round 3 — durable redelivery on the existing worker path:
+  //   the reviewer's exact scenario:
+  //     attempt 1 → transient failure → the job is NOT permanently lost
+  //     attempt 2 → succeeds → session terminal → obligation discharged
+  //   + exhaustion bounds + the unrelated-handler ack audit + the expired
+  //     distinction preserved in the event payload.
+  // ---------------------------------------------------------------------------
+  describe('PR #38 review round 3 — durable redelivery + the expired distinction', () => {
+    // A FRESH queue + relay for this describe (the outer queue carries
+    // leftovers from the earlier tests in this file). Constructed in
+    // beforeAll (the outer stack is initialized there).
+    const localQueue = new InMemoryQueue();
+    let localRelay: SessionTerminalOutboxRelay;
+    beforeAll(() => {
+      localRelay = new SessionTerminalOutboxRelay({
+        sessionRepository: sessionRepo,
+        executionRecordRepository: executionRecordRepo,
+        queue: localQueue,
+        logger: stack.db.logger,
+      });
+    });
+
+    /** A reconciler that fails N times then delegates to the real one. */
+    function flakyReconciler(failTimes: number): {
+      reconciler: { reconcileTerminalForExecution(executionId: string): Promise<unknown> };
+      calls: { executionId: string }[];
+    } {
+      const calls: { executionId: string }[] = [];
+      return {
+        calls,
+        reconciler: {
+          reconcileTerminalForExecution: async (executionId: string) => {
+            calls.push({ executionId });
+            if (calls.length <= failTimes) {
+              throw new Error(`transient-reconciliation-failure-${calls.length}`);
+            }
+            return sessionService.reconcileTerminalForExecution(executionId);
+          },
+        },
+      };
+    }
+
+    it('attempt 1 fails transiently → the job is NOT lost (durable redelivery) → attempt 2 succeeds → session terminal + obligation discharged', async () => {
+      // The crash-window execution + obligation.
+      const executionId = nextExecId();
+      const record = await executionRecordRepo.create({
+        executionId, projectId, workItemId, workOrderId,
+        implementationContextId: sharedContextId,
+        mode: 'native', provider: 'fake', model: 'test-model',
+        prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      });
+      const session = await sessionService.ensureSession(executionId);
+      await sessionService.startSession(session.id);
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+        [record.id],
+      );
+
+      // The relay job with a handler whose reconciliation fails ONCE (a
+      // transient DB blip) — the handler opts into the redelivery policy
+      // (exactly what createSessionTerminalRelayJobHandler declares).
+      const flaky = flakyReconciler(1);
+      const handler = createSessionTerminalRelayJobHandler(flaky.reconciler, stack.db.logger);
+      expect(handler.redeliveryPolicy).toEqual({ maxAttempts: 5 });
+      await localQueue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId });
+
+      const worker = new WorkerHost(localQueue, buildHandlerRegistry([handler]), stack.db.logger as never, { pollIntervalMs: 5 });
+      try {
+        await worker.start();
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const s = await sessionRepo.getSession(session.id);
+          if (s?.status === 'completed') break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        // Attempt 2 SUCCEEDED: the session terminalized + the obligation
+        // discharged — the failed first delivery was NOT permanently lost.
+        expect(flaky.calls).toHaveLength(2);
+        const after = await sessionRepo.getSession(session.id);
+        expect(after?.status).toBe('completed');
+        const pending = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_session_terminal_obligations WHERE execution_id = $1 AND discharged_at IS NULL`,
+          [record.id],
+        );
+        expect(Number(pending.rows[0]?.c ?? 0)).toBe(0);
+        // Exactly ONE terminal event (the retry did not duplicate it).
+        const events = await sessionRepo.listEvents(session.id);
+        expect(events.filter((e) => e.eventType === 'completed')).toHaveLength(1);
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    it('redelivery is BOUNDED: an always-failing handler is attempted exactly maxAttempts times (no infinite loop), and the obligation survives for the boot sweep', async () => {
+      const executionId = nextExecId();
+      const record = await executionRecordRepo.create({
+        executionId, projectId, workItemId, workOrderId,
+        implementationContextId: sharedContextId,
+        mode: 'native', provider: 'fake', model: 'test-model',
+        prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      });
+      const session = await sessionService.ensureSession(executionId);
+      await sessionService.startSession(session.id);
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'failed', completed_at = NOW() WHERE id = $1`,
+        [record.id],
+      );
+
+      const flaky = flakyReconciler(Number.MAX_SAFE_INTEGER); // always fails
+      const handler = createSessionTerminalRelayJobHandler(flaky.reconciler, stack.db.logger);
+      await localQueue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId });
+      const worker = new WorkerHost(localQueue, buildHandlerRegistry([handler]), stack.db.logger as never, { pollIntervalMs: 5 });
+      try {
+        await worker.start();
+        const deadline = Date.now() + 4000;
+        while (Date.now() < deadline && flaky.calls.length < 5) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        await new Promise((r) => setTimeout(r, 300)); // allow any stray redelivery
+        // Exactly maxAttempts (5) delivery attempts — bounded, no loop.
+        expect(flaky.calls).toHaveLength(5);
+        // The obligation REMAINS pending (durable) — the boot sweep (a
+        // worker restart) re-enqueues it; the session stays running.
+        const pending = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_session_terminal_obligations WHERE execution_id = $1 AND discharged_at IS NULL`,
+          [record.id],
+        );
+        expect(Number(pending.rows[0]?.c ?? 0)).toBe(1);
+        expect((await sessionRepo.getSession(session.id))?.status).toBe('running');
+
+        // THE BOOT SWEEP recovers it once the transient failures stop: swap
+        // in the real reconciler, restart the worker (the sweep runs at
+        // start), and the obligation drains.
+        const realHandler = createSessionTerminalRelayJobHandler(sessionService, stack.db.logger);
+        const worker2 = new WorkerHost(localQueue, buildHandlerRegistry([realHandler]), stack.db.logger as never, {
+          pollIntervalMs: 5,
+          outboxRelays: [localRelay],
+        });
+        try {
+          await worker2.start();
+          const deadline2 = Date.now() + 8000;
+          while (Date.now() < deadline2) {
+            const s = await sessionRepo.getSession(session.id);
+            if (s?.status === 'failed') break;
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          expect((await sessionRepo.getSession(session.id))?.status).toBe('failed');
+        } finally {
+          await worker2.stop();
+        }
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    it('UNRELATED handlers keep the historical ack-regardless semantics (no policy → no redelivery, exactly ONE attempt)', async () => {
+      // The audit the reviewer required: a failing handler WITHOUT a
+      // redeliveryPolicy is acknowledged once — never redelivered.
+      let attempts = 0;
+      const plainFailingHandler = {
+        type: 'unrelated.failing',
+        async handle(): Promise<void> {
+          attempts += 1;
+          throw new Error('unrelated-transient-failure');
+        },
+      };
+      await localQueue.enqueue('unrelated.failing', {});
+      const worker = new WorkerHost(localQueue, buildHandlerRegistry([plainFailingHandler]), stack.db.logger as never, { pollIntervalMs: 5 });
+      try {
+        await worker.start();
+        const deadline = Date.now() + 1500;
+        while (Date.now() < deadline && attempts === 0) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        await new Promise((r) => setTimeout(r, 300));
+        expect(attempts).toBe(1); // acked once; NOT redelivered
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    it('the expired distinction is PRESERVED in the terminal event payload (reason: execution-expired)', async () => {
+      const executionId = nextExecId();
+      const record = await executionRecordRepo.create({
+        executionId, projectId, workItemId, workOrderId,
+        implementationContextId: sharedContextId,
+        mode: 'external', provider: 'fake', model: null,
+        prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      });
+      const session = await sessionService.ensureSession(executionId);
+      await sessionService.startSession(session.id);
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'expired', completed_at = NOW() WHERE id = $1`,
+        [record.id],
+      );
+
+      await sessionService.reconcileTerminalForExecution(executionId);
+      const after = await sessionRepo.getSession(session.id);
+      expect(after?.status).toBe('failed');
+      const events = await sessionRepo.listEvents(session.id);
+      const failedEvent = events.find((e) => e.eventType === 'failed');
+      expect(failedEvent).toBeTruthy();
+      // The TRUE source is recorded — the durable evidence says WHY.
+      expect(failedEvent!.payload.reason).toBe('execution-expired');
+    });
+  });
 });
