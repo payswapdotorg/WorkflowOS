@@ -124,6 +124,56 @@ export type {
 export { AgentWorkspaceError, AGENT_WORKSPACE_ERROR_CODES } from './internal/agent-workspace.types.js';
 export type { AgentWorkspaceErrorCode } from './internal/agent-workspace.types.js';
 
+// WORK-036: Tool Runtime — the governed tool boundary BENEATH the
+// execution/session/workspace authority (spec §33.8: execution
+// infrastructure, not workflow authority). Tools are CAPABILITIES: their
+// outcomes are observations/evidence and never decide workflow,
+// verification, review, merge, or architecture state. The runtime
+// consumes the WORK-035 workspace abstraction, dispatches the frozen
+// families (filesystem/terminal/git/package/http/browser) through the
+// platform executor ports, and observes every outcome through the
+// EXISTING ExecutionSession event vocabulary (tool_call + observation)
+// plus the audit boundary — no parallel tool-event store. The policy GATE
+// is the WORK-037 enforcement seam (allow/deny/ask/constrained), not a
+// permission engine. Implementations stay internal/.
+export type {
+  ToolRuntime,
+  ToolInvocationInput,
+  ToolResult,
+  ToolInvocationRecord,
+  ToolInvocationStatus,
+  ToolInvocationIdempotency,
+  ToolIdentity,
+  ExternalToolObservationInput,
+  ToolPolicyGate,
+  ToolPolicyRequest,
+  ToolPolicyDecision,
+  ToolPolicyDecisionValue,
+  ToolPolicyConstraints,
+  // The platform tool contracts re-exported through this barrel.
+  ToolFamily,
+  ToolFamilyRequest,
+  ToolExecutionLimits,
+  ToolExecutor,
+  ToolExecutorContext,
+  ToolExecutionOutcome,
+  FilesystemToolRequest,
+  FilesystemToolOperation,
+  TerminalToolRequest,
+  GitToolRequest,
+  PackageToolRequest,
+  HttpToolRequest,
+  HttpToolMethod,
+  BrowserToolRequest,
+  BrowserToolOperation,
+} from './internal/tool-runtime.types.js';
+export {
+  ToolRuntimeError,
+  TOOL_RUNTIME_ERROR_CODES,
+  DEFAULT_TOOL_EXECUTION_LIMITS,
+} from './internal/tool-runtime.types.js';
+export type { ToolRuntimeErrorCode } from './internal/tool-runtime.types.js';
+
 export interface AgentsModuleApi {}
 
 export const agentsModule: ModuleContract & AgentsModuleApi = { name: '/agents' };

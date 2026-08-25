@@ -235,6 +235,43 @@ export interface ExecutionSessionRepository {
   /** The session's events, ordered by sequence number (ascending). */
   listEvents(sessionId: string): Promise<readonly ExecutionSessionEvent[]>;
 
+  // --- WORK-036: the durable tool-invocation key + observation appends ---
+  // (Both run under the SAME session row lock as appendEvent — the
+  // existing serialized CAS/transactional pattern; the invocation key is
+  // matched against the event payloads, so NO parallel tool-event store
+  // exists: the session evidence log IS the observation store.)
+
+  /**
+   * WORK-036: claim the durable tool-invocation key by appending the
+   * `tool_call` request marker. Under the session row lock: if ANY
+   * tool_call/observation event already carries
+   * payload->>'invocationId' = invocationId, NOTHING is appended and the
+   * existing event is returned (claimed: false) — a durable, cross-
+   * process idempotency claim (concurrent same-key invocations have
+   * exactly one claimant). Throws the same typed errors as appendEvent
+   * (not-found / terminal).
+   */
+  claimToolInvocation(
+    sessionId: string,
+    invocationId: string,
+    payload?: Record<string, unknown>,
+  ): Promise<{ claimed: true } | { claimed: false; existing: ExecutionSessionEvent }>;
+
+  /**
+   * WORK-036: append the `observation` event for a tool invocation,
+   * idempotent on the invocation key. Under the session row lock: if an
+   * OBSERVATION event already carries payload->>'invocationId' =
+   * invocationId, NOTHING is appended and the existing observation is
+   * returned (appended: false — a concurrent completer won). A dangling
+   * tool_call marker for the same key is EXPECTED and does not conflict.
+   * Throws the same typed errors as appendEvent (not-found / terminal).
+   */
+  appendToolObservation(
+    sessionId: string,
+    invocationId: string,
+    payload?: Record<string, unknown>,
+  ): Promise<{ appended: true } | { appended: false; existing: ExecutionSessionEvent }>;
+
   // --- WORK-034 (PR #38 review): durable terminal reconciliation ---
 
   /**

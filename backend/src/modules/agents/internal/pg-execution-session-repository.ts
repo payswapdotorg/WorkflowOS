@@ -21,7 +21,7 @@
  * REFERENCES an existing ExecutionRecord — it never INSERTs into
  * wfos_executions); never imports provider SDKs; stores no secrets.
  */
-import type { DatabaseClient } from '@platform/index.js';
+import type { DatabaseClient, DatabaseTx } from '@platform/index.js';
 import type {
   CreateExecutionSessionInput,
   ExecutionSession,
@@ -395,6 +395,106 @@ export class PgExecutionSessionRepository implements ExecutionSessionRepository 
       [sessionId],
     );
     return res.rows.map(mapEvent);
+  }
+
+  // --- WORK-036: the durable tool-invocation key + observation appends.
+  //     Both run under the SAME session row lock as appendEvent (the
+  //     serialized CAS/transactional pattern), so concurrent same-key
+  //     callers have EXACTLY ONE claimant/completer — and the invocation
+  //     key lives in the event payloads (no parallel tool-event store).
+
+  async claimToolInvocation(
+    sessionId: string,
+    invocationId: string,
+    payload?: Record<string, unknown>,
+  ): Promise<{ claimed: true } | { claimed: false; existing: ExecutionSessionEvent }> {
+    return this.db.transaction(async (tx) => {
+      await this.lockSessionRow(tx, sessionId);
+      const existing = await this.findInvocationEvent(tx, sessionId, invocationId, 'any');
+      if (existing) return { claimed: false as const, existing };
+      await tx.query<EventRow>(
+        `INSERT INTO wfos_execution_session_events
+            (session_id, sequence_number, event_type, payload)
+         SELECT $1, COALESCE(MAX(e.sequence_number), 0) + 1, 'tool_call', $2::jsonb
+           FROM wfos_execution_session_events e
+          WHERE e.session_id = $1
+         RETURNING ${EVENT_COLUMNS}`,
+        [sessionId, JSON.stringify({ invocationId, ...(payload ?? {}) })],
+      );
+      return { claimed: true as const };
+    });
+  }
+
+  async appendToolObservation(
+    sessionId: string,
+    invocationId: string,
+    payload?: Record<string, unknown>,
+  ): Promise<{ appended: true } | { appended: false; existing: ExecutionSessionEvent }> {
+    return this.db.transaction(async (tx) => {
+      await this.lockSessionRow(tx, sessionId);
+      const existing = await this.findInvocationEvent(tx, sessionId, invocationId, 'observation');
+      if (existing) return { appended: false as const, existing };
+      await tx.query<EventRow>(
+        `INSERT INTO wfos_execution_session_events
+            (session_id, sequence_number, event_type, payload)
+         SELECT $1, COALESCE(MAX(e.sequence_number), 0) + 1, 'observation', $2::jsonb
+           FROM wfos_execution_session_events e
+          WHERE e.session_id = $1
+         RETURNING ${EVENT_COLUMNS}`,
+        [sessionId, JSON.stringify({ invocationId, ...(payload ?? {}) })],
+      );
+      return { appended: true as const };
+    });
+  }
+
+  /** Lock the session row (serializes appends); enforce the terminal guard. */
+  private async lockSessionRow(tx: DatabaseTx, sessionId: string): Promise<void> {
+    const locked = await tx.query<{ status: string }>(
+      `SELECT status FROM wfos_execution_sessions WHERE id = $1 FOR UPDATE`,
+      [sessionId],
+    );
+    if (!locked.rows[0]) {
+      throw new ExecutionSessionError(
+        'execution-session-not-found',
+        `execution-session-not-found: ${sessionId}`,
+        { sessionId },
+      );
+    }
+    const status = locked.rows[0].status;
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      throw new ExecutionSessionError(
+        'execution-session-terminal',
+        `execution-session-terminal: session ${sessionId} is terminal (${status}) — no further events`,
+        { sessionId, status },
+      );
+    }
+  }
+
+  /**
+   * Find the event carrying the invocation key (JSONB payload match —
+   * pglite + real PostgreSQL compatible). scope 'any': tool_call OR
+   * observation; 'observation': observations only (a dangling tool_call
+   * marker for the same key is expected and does not conflict).
+   */
+  private async findInvocationEvent(
+    tx: DatabaseTx,
+    sessionId: string,
+    invocationId: string,
+    scope: 'any' | 'observation',
+  ): Promise<ExecutionSessionEvent | null> {
+    const typeFilter =
+      scope === 'observation' ? `AND event_type = 'observation'` : `AND event_type IN ('tool_call', 'observation')`;
+    const res = await tx.query<EventRow>(
+      `SELECT ${EVENT_COLUMNS}
+         FROM wfos_execution_session_events
+        WHERE session_id = $1
+          AND payload->>'invocationId' = $2
+          ${typeFilter}
+        ORDER BY sequence_number ASC
+        LIMIT 1`,
+      [sessionId, invocationId],
+    );
+    return res.rows[0] ? mapEvent(res.rows[0]) : null;
   }
 
   // --- WORK-034 (PR #38 review): durable terminal reconciliation ---
