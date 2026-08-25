@@ -835,4 +835,178 @@ describe('PR #38 review corrections (round 2) — obligation lifecycle correctne
       expect(failedEvent!.payload.reason).toBe('execution-expired');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // PR #38 review round 4 — the remaining durability hole:
+  //   dequeue removes the job; the finally always acked — so when the
+  //   handler fails AND the retry enqueue fails, acking the original
+  //   permanently lost the live retry (nothing redelivered until a
+  //   restart). The corrected boundary:
+  //     handler fails → retry enqueue succeeds → ack original
+  //     handler fails → retry enqueue FAILS → REQUEUE THE ORIGINAL
+  //     DURABLY (same attempt) → ack original
+  //     handler fails → retry enqueue fails → requeue fails → do NOT ack
+  //     (durability lost — loudly logged; the boot sweep recovers on the
+  //     next process start).
+  // ---------------------------------------------------------------------------
+  describe('PR #38 review round 4 — durable retention when the retry enqueue fails', () => {
+    /**
+     * A Queue wrapper whose enqueue FAILS on configured call numbers
+     * (1-based) — models a transient queue-write blip. dequeue/ack/size/
+     * close delegate to the wrapped queue.
+     */
+    class FlakyEnqueueQueue {
+      private readonly inner: InMemoryQueue;
+      private readonly failOnCalls: Set<number>;
+      private callCount = 0;
+      constructor(failOnCalls: readonly number[]) {
+        this.inner = new InMemoryQueue();
+        this.failOnCalls = new Set(failOnCalls);
+      }
+      async enqueue<T>(type: string, payload: T, options?: { executionId?: string; correlationId?: string; attempt?: number }): Promise<{ id: string }> {
+        this.callCount += 1;
+        if (this.failOnCalls.has(this.callCount)) {
+          throw new Error(`transient-queue-write-failure-on-call-${this.callCount}`);
+        }
+        return this.inner.enqueue(type, payload, options as never) as Promise<{ id: string }>;
+      }
+      async dequeue(): Promise<unknown> {
+        return this.inner.dequeue();
+      }
+      async ack(jobId: string): Promise<void> {
+        return this.inner.ack(jobId);
+      }
+      async size(): Promise<number> {
+        return this.inner.size();
+      }
+      async close(): Promise<void> {
+        return this.inner.close();
+      }
+    }
+
+    /** A reconciler that fails N times then delegates to the real one. */
+    function flakyReconciler2(failTimes: number): {
+      reconciler: { reconcileTerminalForExecution(executionId: string): Promise<unknown> };
+      calls: { executionId: string }[];
+    } {
+      const calls: { executionId: string }[] = [];
+      return {
+        calls,
+        reconciler: {
+          reconcileTerminalForExecution: async (executionId: string) => {
+            calls.push({ executionId });
+            if (calls.length <= failTimes) {
+              throw new Error(`transient-reconciliation-failure-${calls.length}`);
+            }
+            return sessionService.reconcileTerminalForExecution(executionId);
+          },
+        },
+      };
+    }
+
+    it("the reviewer's exact scenario: attempt 1 fails + the RETRY ENQUEUE fails → the original is REQUEUED durably → the subsequent delivery succeeds → obligation discharged", async () => {
+      // The crash-window execution + obligation.
+      const executionId = nextExecId();
+      const record = await executionRecordRepo.create({
+        executionId, projectId, workItemId, workOrderId,
+        implementationContextId: sharedContextId,
+        mode: 'native', provider: 'fake', model: 'test-model',
+        prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      });
+      const session = await sessionService.ensureSession(executionId);
+      await sessionService.startSession(session.id);
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+        [record.id],
+      );
+
+      // The flaky queue: enqueue call #1 (the initial relay job) succeeds;
+      // call #2 (the retry enqueue after the handler failure) FAILS; call
+      // #3 (the original-requeue fallback) succeeds.
+      const flakyQueue = new FlakyEnqueueQueue([2]);
+      const flaky = flakyReconciler2(1); // the reconciler fails once
+      const handler = createSessionTerminalRelayJobHandler(flaky.reconciler, stack.db.logger);
+      expect(handler.redeliveryPolicy).toEqual({ maxAttempts: 5 });
+      await flakyQueue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId }); // call 1 — OK
+
+      const worker = new WorkerHost(flakyQueue as never, buildHandlerRegistry([handler]), stack.db.logger as never, { pollIntervalMs: 5 });
+      try {
+        await worker.start();
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const s = await sessionRepo.getSession(session.id);
+          if (s?.status === 'completed') break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        // The subsequent delivery SUCCEEDED via the durably requeued
+        // original — the job was NOT permanently lost despite BOTH the
+        // handler failure AND the retry-enqueue failure.
+        expect(flaky.calls).toHaveLength(2);
+        const after = await sessionRepo.getSession(session.id);
+        expect(after?.status).toBe('completed');
+        expect(after?.terminalAt).not.toBeNull();
+        const pending = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_session_terminal_obligations WHERE execution_id = $1 AND discharged_at IS NULL`,
+          [record.id],
+        );
+        expect(Number(pending.rows[0]?.c ?? 0)).toBe(0);
+        // Exactly ONE terminal event (the redelivery did not duplicate it).
+        const events = await sessionRepo.listEvents(session.id);
+        expect(events.filter((e) => e.eventType === 'completed')).toHaveLength(1);
+        // The queue drained: nothing pending.
+        expect(await flakyQueue.size()).toBe(0);
+      } finally {
+        await worker.stop();
+        await flakyQueue.close();
+      }
+    });
+
+    it('durability-lost bound: the retry enqueue AND the requeue BOTH fail → no live retry (the obligation stays pending for the boot sweep) + exactly one handler attempt', async () => {
+      const executionId = nextExecId();
+      const record = await executionRecordRepo.create({
+        executionId, projectId, workItemId, workOrderId,
+        implementationContextId: sharedContextId,
+        mode: 'native', provider: 'fake', model: 'test-model',
+        prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      });
+      const session = await sessionService.ensureSession(executionId);
+      await sessionService.startSession(session.id);
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+        [record.id],
+      );
+
+      // Every enqueue after the initial one fails: the retry AND the
+      // requeue both fail → durability lost (no ack, loudly logged) — the
+      // documented bound: the boot sweep recovers on the next process
+      // start.
+      const flakyQueue = new FlakyEnqueueQueue([2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      const flaky = flakyReconciler2(1);
+      const handler = createSessionTerminalRelayJobHandler(flaky.reconciler, stack.db.logger);
+      await flakyQueue.enqueue(SESSION_TERMINAL_RELAY_JOB_TYPE, { executionId }); // call 1 — OK
+
+      const worker = new WorkerHost(flakyQueue as never, buildHandlerRegistry([handler]), stack.db.logger as never, { pollIntervalMs: 5 });
+      try {
+        await worker.start();
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline && flaky.calls.length === 0) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        await new Promise((r) => setTimeout(r, 500));
+        // Exactly ONE handler attempt (no live retry was possible) + the
+        // obligation REMAINS pending (durable) for the boot sweep.
+        expect(flaky.calls).toHaveLength(1);
+        const pending = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_session_terminal_obligations WHERE execution_id = $1 AND discharged_at IS NULL`,
+          [record.id],
+        );
+        expect(Number(pending.rows[0]?.c ?? 0)).toBe(1);
+        expect((await sessionRepo.getSession(session.id))?.status).toBe('running');
+        expect(await flakyQueue.size()).toBe(0);
+      } finally {
+        await worker.stop();
+        await flakyQueue.close();
+      }
+    });
+  });
 });

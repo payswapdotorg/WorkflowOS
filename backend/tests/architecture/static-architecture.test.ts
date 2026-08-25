@@ -7998,6 +7998,16 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(hostCode).toMatch(/attempt: attempt \+ 1/);
     // OPT-IN ONLY: the redelivery is gated on the handler's policy.
     expect(hostCode).toMatch(/const policy = handler\.redeliveryPolicy;/);
+    // ROUND 4 — the durable-retention fallback: when the retry enqueue
+    // fails, the ORIGINAL delivery is REQUEUED durably (the same attempt
+    // number — a queue blip must not consume the handler budget); when
+    // even the requeue fails, the original is NOT acknowledged
+    // (durability-lost; the boot sweep is the restart backstop). The ack
+    // is conditional.
+    expect(hostCode).toMatch(/worker\.job\.redelivery-requeued-original/);
+    expect(hostCode).toMatch(/worker\.job\.durability-lost/);
+    expect(hostCode).toMatch(/ackOriginal = false/);
+    expect(hostCode).toMatch(/if \(ackOriginal\) \{/);
     // The session relay handler declares the policy.
     const relaySrc = readFileSync(join(AGENTS_INTERNAL, 'session-terminal-relay.ts'), 'utf8');
     expect(relaySrc).toMatch(/redeliveryPolicy: \{ maxAttempts: 5 \}/);
@@ -8026,6 +8036,9 @@ describe('WORK-034 invariants — session-aware execution integration', () => {
     expect(t).toMatch(/redelivery is BOUNDED/);
     expect(t).toMatch(/UNRELATED handlers keep the historical ack-regardless semantics/);
     expect(t).toMatch(/the expired distinction is PRESERVED in the terminal event payload/);
+    // Round 4: the durable-retention regressions.
+    expect(t).toMatch(/the original is REQUEUED durably → the subsequent delivery succeeds → obligation discharged/);
+    expect(t).toMatch(/durability-lost bound: the retry enqueue AND the requeue BOTH fail/);
   });
 
   it('PR #38 review: the terminal-event guard allows exactly the terminal event itself on a terminal row (the atomic transition+event composition)', () => {

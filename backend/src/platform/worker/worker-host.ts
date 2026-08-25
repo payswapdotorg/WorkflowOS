@@ -172,6 +172,12 @@ export class WorkerHost {
         await this.queue.ack(job.id);
         return;
       }
+      // PR #38 review round 4 (durable retention): the original delivery
+      // is acknowledged only when it is durably RETIRED (the handler
+      // succeeded / no redelivery is owed) or durably RETAINED (the retry
+      // or the original re-enqueue succeeded). The durability-lost path
+      // (every enqueue attempt failed) leaves it UNacknowledged.
+      let ackOriginal = true;
       try {
         await handler.handle(job);
         metrics().counter('worker.job.completed', 1, { jobType: job.type });
@@ -192,13 +198,12 @@ export class WorkerHost {
         });
         // PR #38 review (durable redelivery): for handlers that OPT IN via
         // a redeliveryPolicy, re-enqueue the job onto the SAME durable
-        // queue with attempt+1 BEFORE the finally-ack consumes the failed
-        // delivery — a transient failure therefore produces another
-        // DURABLE attempt without a process restart (the boot sweep
-        // remains the restart-time backstop; exhaustion leaves the durable
-        // outbox row pending for the next sweep). Handlers WITHOUT a
-        // policy are entirely unaffected (the historical ack-regardless
-        // semantics).
+        // queue with attempt+1 — a transient failure therefore produces
+        // another DURABLE attempt without a process restart (the boot
+        // sweep remains the restart-time backstop; exhaustion leaves the
+        // durable outbox row pending for the next sweep). Handlers WITHOUT
+        // a policy are entirely unaffected (the historical
+        // acknowledge-regardless semantics).
         const policy = handler.redeliveryPolicy;
         const attempt = job.attempt ?? 1;
         if (policy && attempt < policy.maxAttempts) {
@@ -216,14 +221,39 @@ export class WorkerHost {
               maxAttempts: policy.maxAttempts,
             });
           } catch (redeliverErr) {
-            // The queue itself is failing — the redelivery is lost until
-            // the next boot sweep (a restart-time backstop, loudly logged).
-            this.logger.error('worker.job.redelivery-failed', {
-              jobId: job.id,
-              jobType: job.type,
-              attempt,
-              error: errorMessage(redeliverErr),
-            });
+            // PR #38 review round 4 (the remaining durability hole): the
+            // RETRY enqueue itself failed. Simply acking the original here
+            // would permanently lose the live retry (dequeue already
+            // removed the job; the finally-ack would retire it; nothing
+            // would redeliver it until a process restart). Instead, RETAIN
+            // THE ORIGINAL DELIVERY DURABLY: re-enqueue the original job
+            // (SAME attempt number — a queue-level blip must not consume
+            // the handler's attempt budget). If even this requeue fails,
+            // the delivery cannot be durably retained: do NOT acknowledge
+            // (loudly logged; the boot sweep recovers on the next process
+            // start).
+            try {
+              await this.queue.enqueue(job.type, job.payload, {
+                executionId: job.executionId,
+                correlationId: job.correlationId,
+                attempt,
+              });
+              this.logger.error('worker.job.redelivery-requeued-original', {
+                jobId: job.id,
+                jobType: job.type,
+                attempt,
+                retryError: errorMessage(redeliverErr),
+              });
+            } catch (requeueErr) {
+              ackOriginal = false;
+              this.logger.error('worker.job.durability-lost', {
+                jobId: job.id,
+                jobType: job.type,
+                attempt,
+                retryError: errorMessage(redeliverErr),
+                requeueError: errorMessage(requeueErr),
+              });
+            }
           }
         } else if (policy) {
           this.logger.error('worker.job.redelivery-exhausted', {
@@ -234,11 +264,15 @@ export class WorkerHost {
           });
         }
       } finally {
-        // The foundation acknowledges regardless of success/failure to keep
-        // the queue moving. For redelivery-policy handlers the retry job
-        // was already re-enqueued above, so the ack only retires THIS
-        // delivery. Handlers without a policy are unchanged.
-        await this.queue.ack(job.id);
+        // The foundation acknowledges to keep the queue moving. For
+        // redelivery-policy handlers the durable retention was already
+        // established above (the retry or the original re-enqueue), so the
+        // ack only retires THIS delivery. The durability-lost path
+        // (every enqueue failed) deliberately does NOT acknowledge.
+        // Handlers without a policy are unchanged (always acknowledged).
+        if (ackOriginal) {
+          await this.queue.ack(job.id);
+        }
       }
     });
   }
