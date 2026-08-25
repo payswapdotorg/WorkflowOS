@@ -417,6 +417,33 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     observationId: string,
     confirmedBy: string,
   ): Promise<BaselineObservation> {
+    // PR #42 fix (Blocker 3): confirmObservation must check the parent
+    // baseline state. The invariant (migration 0038): "a failed baseline
+    // NEVER carries a confirmed observation (failed analysis cannot produce
+    // a false confirmed baseline)." markFailed enforces the symmetric side
+    // (refuses when a confirmed observation exists); confirmObservation must
+    // enforce THIS side — refuse to confirm when the parent baseline is
+    // already failed. Without this check, a failed → confirmed transition
+    // was possible (the architect identified the loophole on PR #42).
+    const baselineRow = await this.db.query<{ state: string }>(
+      `SELECT state FROM wfos_project_baselines WHERE id = $1`,
+      [baselineId],
+    );
+    if (baselineRow.rowCount === 0) {
+      throw new ProjectBaselineError(
+        'project-baseline-not-found',
+        `project-baseline-not-found: baseline ${baselineId} does not exist (cannot confirm observation ${observationId})`,
+        { baselineId, observationId },
+      );
+    }
+    const baselineState = baselineRow.rows[0]!.state;
+    if (baselineState === 'failed') {
+      throw new ProjectBaselineError(
+        'project-baseline-no-confirmed-on-failed',
+        `project-baseline-no-confirmed-on-failed: baseline ${baselineId} is failed — a failed baseline must never carry a confirmed observation (failed analysis cannot produce a false confirmed baseline)`,
+        { baselineId, observationId, baselineState },
+      );
+    }
     // The authorized confirmation path: inferred/proposed → confirmed +
     // confirmed_by/at. The observation-guard trigger is the final backstop
     // (no silent promotion; proposed→observed forbidden; claim immutable).

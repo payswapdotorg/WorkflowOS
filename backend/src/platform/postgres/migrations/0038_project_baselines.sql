@@ -268,6 +268,10 @@ CREATE INDEX IF NOT EXISTS wfos_project_baseline_evidence_baseline_idx
 --   * a row's provenance is immutable once written EXCEPT the authorized
 --     confirmation path (inferred/proposed → confirmed) which sets
 --     confirmed_by/confirmed_at atomically
+--   * a DIRECT DELETE is forbidden (observations are append-only historical
+--     evidence — the idempotent re-drive is an upsert-on-claim-digest, never
+--     a delete); the ONLY legitimate removal path is the CASCADE from
+--     baseline deletion
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS wfos_project_baseline_observations (
@@ -313,10 +317,20 @@ CREATE OR REPLACE FUNCTION wfos_project_baseline_observation_guard()
 RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    -- Observations are append-only historical evidence. A terminal baseline's
-    -- observations are immutable. (Non-terminal baselines may have their
-    -- analyzing-phase observations replaced by re-analysis, which is the
-    -- idempotent re-drive — implemented as upsert-on-claim-digest, not delete.)
+    -- Observations are append-only historical evidence. A DIRECT DELETE is
+    -- forbidden — the idempotent re-drive is an upsert-on-claim-digest (ON
+    -- CONFLICT DO NOTHING), never a delete. The ONLY legitimate removal path
+    -- is the CASCADE from baseline deletion (which itself only fires via the
+    -- project / repository-link CASCADE). When the CASCADE fires, the parent
+    -- baseline row is already gone (deleted earlier in the same statement /
+    -- transaction) — so we check: if the parent baseline still exists, this is
+    -- a direct DELETE and must be refused.
+    PERFORM 1 FROM wfos_project_baselines WHERE id = OLD.baseline_id;
+    IF FOUND THEN
+      RAISE EXCEPTION
+        'project-baseline-observation-append-only: direct DELETE on observations is forbidden (the parent baseline % still exists); observations are append-only historical evidence — the only legitimate removal path is the CASCADE from baseline deletion',
+        OLD.baseline_id;
+    END IF;
     RETURN OLD;
   END IF;
 

@@ -26,6 +26,10 @@ import { PgProjectBaselineRepository } from '../../../src/modules/projects/inter
 import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
 import { DefaultOnboardingService } from '../../../src/onboarding/internal/default-onboarding-service.js';
 import { GovernedFilesystemAnalyzer } from '../../../src/onboarding/internal/governed-filesystem-analyzer.js';
+// PR #42 (Blocker 1) fix: the PRODUCTION RepositoryContentPort wiring (delegates
+// to the /github GitHubAdapter — the only SDK caller). Exercised end-to-end
+// against the FakeGitHubAdapter's in-memory content tree.
+import { GitHubRepositoryContentPort } from '../../../src/onboarding/internal/github-content-port.js';
 import { createLogger } from '@platform/logger.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
 import type { RepositoryContentPort, ProjectScopedPolicyGate } from '@onboarding/index.js';
@@ -45,12 +49,24 @@ class InMemoryContentPort implements RepositoryContentPort {
     return this;
   }
 
-  async readFile(_owner: string, _repo: string, _sha: string, path: string) {
+  async readFile(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ) {
     const content = this.files.get(path);
     if (content === undefined) return null;
     return { content, contentDigest: createHash('sha256').update(content, 'utf8').digest('hex') };
   }
-  async listDir(_owner: string, _repo: string, _sha: string, path: string) {
+  async listDir(
+    _owner: string,
+    _repo: string,
+    _sha: string,
+    path: string,
+    _installationId: string,
+  ) {
     return this.dirs.get(path) ?? [];
   }
 }
@@ -426,5 +442,189 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     expect(wfAfter.rows[0]!.n).toBe(wfBefore.rows[0]!.n);
     expect(verAfter.rows[0]!.n).toBe(verBefore.rows[0]!.n);
     expect(reviewAfter.rows[0]!.n).toBe(reviewBefore.rows[0]!.n);
+  });
+
+  // =========================================================================
+  // PR #42 review fixes (three blockers the architect identified).
+  // =========================================================================
+
+  it('23. PR #42 (Blocker 1): the production RepositoryContentPort wiring reads repository files through the /github GitHubAdapter', async () => {
+    // The architect's PR #42 Blocker 1: the production analyzer had NO
+    // RepositoryContentPort — onboarding never inspected repository files
+    // (only metadata-derived observations); the tests used an in-memory
+    // provider and so did not exercise the production wiring. This test
+    // constructs a SECOND onboarding service that uses the PRODUCTION
+    // GitHubRepositoryContentPort (delegating to the FakeGitHubAdapter's
+    // in-memory content tree) instead of the in-memory InMemoryContentPort,
+    // and proves the production wiring reads repository files end-to-end
+    // through the /github GitHubAdapter.
+    //
+    // Use a UNIQUE ref so this creates a fresh baseline (the main-sha
+    // baseline may already be complete from earlier tests, which would make
+    // onboard return early without re-running the analyzer).
+    const ref = 'production-port-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    // Set content on the FakeGitHubAdapter — the production port reads
+    // through it (the GitHubAdapter is the only SDK caller in production;
+    // the fake provides the deterministic content tree here).
+    githubAdapter.setFile(
+      'test-org', 'existing-repo', branch.sha, 'package.json',
+      JSON.stringify({
+        name: 'production-wired-repo',
+        version: '2.0.0',
+        scripts: { build: 'tsc', test: 'vitest' },
+        dependencies: { next: '^14.0.0' },
+      }),
+    );
+    githubAdapter.setDir(
+      'test-org', 'existing-repo', branch.sha, '.github/workflows',
+      [{ name: 'ci.yml', type: 'file' }],
+    );
+    githubAdapter.setFile(
+      'test-org', 'existing-repo', branch.sha, 'Dockerfile', 'FROM node:20',
+    );
+
+    // The PRODUCTION content port (delegates to the GitHubAdapter).
+    const productionContentPort = new GitHubRepositoryContentPort(githubAdapter);
+    const productionAnalyzer = new GovernedFilesystemAnalyzer({
+      contentPort: productionContentPort,
+      policyGate,
+      logger,
+    });
+    const productionService = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer: productionAnalyzer,
+      logger,
+    });
+
+    const result = await productionService.onboard({ projectId, ref });
+    expect(result.baseline.state).toBe('complete');
+    expect(result.analyzed).toBe(true);
+    expect(result.baseline.baselineCommitSha).toBe(branch.sha);
+    // The package_managers observation reflects the content read THROUGH the
+    // production port (the GitHubAdapter's setFile content), proving the
+    // production wiring inspects repository files.
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    const pkg = observations.find((o) => o.kind === 'package_managers');
+    expect(pkg, 'package_managers observation produced via the production content port').toBeDefined();
+    expect((pkg!.claim as { name: string }).name).toBe('production-wired-repo');
+    // The evidence records the governed read (the policy decision + the
+    // content digest from the GitHubAdapter — non-null because content was read).
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    const pkgEvidence = evidence.find((e) => e.locator === 'package.json');
+    expect(pkgEvidence, 'package.json evidence exists').toBeDefined();
+    expect(pkgEvidence!.policyDecision).toBe('allow');
+    expect(pkgEvidence!.contentDigest).not.toBeNull();
+    // The CI observation was derived from the .github/workflows listing the
+    // production port returned through the GitHubAdapter.
+    const ci = observations.find((o) => o.kind === 'ci');
+    expect(ci, 'ci observation produced via the production content port').toBeDefined();
+    expect((ci!.claim as { workflows: string[] }).workflows).toContain('ci.yml');
+  });
+
+  it('24. PR #42 (Blocker 2): a direct DELETE on an observation is forbidden (append-only); the CASCADE from baseline deletion still works', async () => {
+    // The architect's PR #42 Blocker 2: the migration's DELETE trigger
+    // explicitly permitted deletion (`RETURN OLD`) despite describing
+    // observations as append-only historical evidence. The fix: a direct
+    // DELETE is forbidden (the parent baseline still exists); the ONLY
+    // legitimate removal path is the CASCADE from baseline deletion (the
+    // parent baseline is already gone when the observation DELETE trigger
+    // fires — PERFORM returns NOT FOUND, so the trigger allows it).
+    const result = await onboardingService.onboard({ projectId });
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    const obs = observations[0]!;
+    // A DIRECT DELETE on an observation is forbidden. Wrap in a transaction
+    // so the RAISE EXCEPTION aborts only this transaction (the helper issues
+    // ROLLBACK; the session stays clean for the CASCADE verification below).
+    await expect(
+      stack.db.client.transaction(async (tx) => {
+        await tx.query(
+          'DELETE FROM wfos_project_baseline_observations WHERE id = $1',
+          [obs.id],
+        );
+      }),
+    ).rejects.toThrow(/append-only/);
+    // The observation still exists (the forbidden DELETE was rolled back).
+    const stillThere = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(stillThere.find((o) => o.id === obs.id), 'the observation survives the forbidden direct DELETE').toBeDefined();
+    // The CASCADE from baseline deletion still works (the parent baseline is
+    // already gone when the observation DELETE trigger fires — PERFORM
+    // returns NOT FOUND, so the trigger allows the CASCADE).
+    await stack.db.client.query(
+      'DELETE FROM wfos_project_baselines WHERE id = $1',
+      [result.baseline.id],
+    );
+    const gone = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(gone.length, 'observations cascade-deleted with the baseline').toBe(0);
+    const baselineGone = await projectBaselineRepository.findById(result.baseline.id);
+    expect(baselineGone, 'the baseline is gone').toBeNull();
+  });
+
+  it('25. PR #42 (Blocker 3): a failed baseline cannot have an observation confirmed (failed → confirmed is forbidden)', async () => {
+    // The architect's PR #42 Blocker 3: confirmObservation did not check the
+    // parent baseline state, allowing failed → confirmed. The invariant
+    // (migration 0038): "a failed baseline NEVER carries a confirmed
+    // observation (failed analysis cannot produce a false confirmed
+    // baseline)." markFailed enforces the symmetric side (refuses when a
+    // confirmed observation exists); confirmObservation must enforce THIS
+    // side — refuse when the parent baseline is already failed.
+    //
+    // Use a UNIQUE ref so this creates a fresh 'analyzing' baseline (the
+    // main-sha baseline may already be complete/failed from earlier tests).
+    const ref = 'failed-confirmation-branch';
+    const branch = await githubAdapter.getBranch({
+      owner: 'test-org',
+      repository: 'existing-repo',
+      branchName: ref,
+      installationId: '12345',
+    });
+    const partial = await projectBaselineRepository.ensureBaseline({
+      projectId,
+      organizationId: orgId,
+      projectGithubRepositoryId: repoLinkRowId,
+      repositoryOwner: 'test-org',
+      repositoryName: 'existing-repo',
+      baselineCommitSha: branch.sha,
+      revisionRef: ref,
+      analysisMode: 'native',
+      analysisRunId: `onboarding:${projectId}:${repoLinkRowId}:${branch.sha}`,
+    });
+    expect(partial.state).toBe('analyzing');
+    // Insert an inferred observation on the analyzing baseline.
+    const inferredClaim = { frameworks: ['next'], inferredFrom: 'test' };
+    await projectBaselineRepository.upsertObservations(partial.id, [
+      {
+        kind: 'frameworks',
+        provenance: 'inferred',
+        claim: inferredClaim,
+        claimDigest: createHash('sha256').update(JSON.stringify(inferredClaim)).digest('hex'),
+        evidenceRef: [],
+      },
+    ]);
+    // markFailed succeeds (no confirmed observation exists).
+    const failed = await projectBaselineRepository.markFailed(partial.id, 'forced-fail', 0);
+    expect(failed, 'markFailed must succeed (no confirmed observation exists)').not.toBeNull();
+    expect(failed!.state).toBe('failed');
+    // confirmObservation must refuse — the baseline is failed (a failed
+    // baseline must never carry a confirmed observation).
+    const obs = await projectBaselineRepository.listObservations(partial.id);
+    const inferred = obs.find((o) => o.provenance === 'inferred')!;
+    await expect(
+      projectBaselineRepository.confirmObservation(partial.id, inferred.id, userId),
+    ).rejects.toThrow(/no-confirmed-on-failed|failed/);
+    // The observation remains inferred (no silent promotion — the
+    // confirmation path is the only way to 'confirmed', and it is refused).
+    const after = await projectBaselineRepository.listObservations(partial.id);
+    const stillInferred = after.find((o) => o.id === inferred.id)!;
+    expect(stillInferred.provenance).toBe('inferred');
+    expect(stillInferred.confirmedBy).toBeNull();
   });
 });

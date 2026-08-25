@@ -167,6 +167,16 @@ export async function onboardingRoutes(
               message: 'Only inferred/proposed observations can be confirmed; observed/confirmed observations cannot be promoted.',
             });
           }
+          if (msg.includes('no-confirmed-on-failed')) {
+            // PR #42 fix (Blocker 3): a failed baseline must never carry a
+            // confirmed observation. The repository refuses to confirm an
+            // observation whose parent baseline is failed (failed analysis
+            // cannot produce a false confirmed baseline).
+            return reply.code(409).send({
+              error: 'no-confirmed-on-failed',
+              message: 'This baseline is failed; a failed baseline cannot carry a confirmed observation.',
+            });
+          }
           return reply.code(500).send({ error: 'confirmation-failed', message: msg.slice(0, 500) });
         }
       });

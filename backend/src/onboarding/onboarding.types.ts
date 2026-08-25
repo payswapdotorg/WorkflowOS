@@ -64,13 +64,14 @@ export interface ProjectScopedPolicyGate {
 /**
  * The seam for reading file content at a precise repository revision. The
  * onboarding domain holds NO GitHub credentials and NO GitHub SDK — this port
- * is the boundary. The default production wiring (app.ts) injects a content
- * provider that fetches via the /github authority when it exposes content
- * reads; tests inject an in-memory provider for deterministic governed
- * analysis. When no provider is wired, the analyzer produces only
- * metadata-derived observations (the governed path is still consulted for
- * every candidate read — the policy decision is recorded as evidence even
- * when content is unavailable).
+ * is the boundary. The PRODUCTION wiring (app.ts) injects
+ * {@link GitHubRepositoryContentPort} (src/onboarding/internal/
+ * github-content-port.ts), which delegates to the /github authority's
+ * GitHubAdapter.getFileContent/listDir — the adapter is the only SDK caller.
+ * Tests inject an in-memory provider for deterministic governed analysis.
+ * The `installationId` is resolved by the orchestrator from the project's
+ * /github repository link and carried in the AnalysisContext; the analyzer
+ * passes it to the port per-call (the port holds no credential state).
  */
 export interface RepositoryContentPort {
   /**
@@ -83,6 +84,7 @@ export interface RepositoryContentPort {
     repository: string,
     commitSha: string,
     path: string,
+    installationId: string,
   ): Promise<{ readonly content: string; readonly contentDigest: string } | null>;
 
   /**
@@ -94,6 +96,7 @@ export interface RepositoryContentPort {
     repository: string,
     commitSha: string,
     path: string,
+    installationId: string,
   ): Promise<readonly { readonly name: string; readonly type: 'file' | 'dir' }[]>;
 }
 

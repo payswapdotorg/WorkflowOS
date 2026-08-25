@@ -31,3 +31,7 @@ export type { DefaultOnboardingService } from './internal/default-onboarding-ser
 export type { DefaultOnboardingServiceDeps } from './internal/default-onboarding-service.js';
 export type { GovernedFilesystemAnalyzer } from './internal/governed-filesystem-analyzer.js';
 export type { GovernedFilesystemAnalyzerDeps } from './internal/governed-filesystem-analyzer.js';
+// WORK-038 PR #42 fix: the PRODUCTION RepositoryContentPort wiring (delegates
+// to the /github GitHubAdapter — the only SDK caller). Type-only re-export
+// (the composition root in app.ts instantiates it).
+export type { GitHubRepositoryContentPort } from './internal/github-content-port.js';

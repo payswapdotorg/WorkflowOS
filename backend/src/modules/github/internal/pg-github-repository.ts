@@ -18,6 +18,10 @@ import type {
   CreateRepositoryResult,
   GetBranchInput,
   GetBranchResult,
+  GetFileContentInput,
+  GetFileContentResult,
+  ListDirInput,
+  ListDirResult,
 } from './project-github-repository.types.js';
 
 // ===========================================================================
@@ -248,6 +252,36 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
 
   async getBranch(_input: GetBranchInput): Promise<GetBranchResult> {
     throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  // --- WORK-038: repository content-read extensions ---
+  //
+  // These are the production content-read surfaces consumed by the
+  // existing-project-onboarding capability (through the production
+  // RepositoryContentPort at src/onboarding/internal/github-content-port.ts).
+  // The onboarding domain holds NO GitHub SDK — it consumes these methods
+  // through the /github barrel; the adapter is the only SDK caller.
+  //
+  // The live GitHub REST getContent API call (fetch against
+  // /repos/{owner}/{repo}/contents/{path}?ref={ref}) is a follow-on step
+  // gated on GITHUB_APP_* credentials being wired (same as the WORK-026
+  // provisioning methods). Until then, the production adapter throws a
+  // deterministic 'github-not-configured' error so the analyzer's per-candidate
+  // try/catch records the failure as evidence + continues (the baseline
+  // completes with metadata-only observations; the governed path is still
+  // consulted for every candidate read). The FakeGitHubAdapter provides a
+  // deterministic in-memory content tree for the integration suite that
+  // exercises the production content-port wiring end-to-end.
+
+  async getFileContent(_input: GetFileContentInput): Promise<GetFileContentResult | null> {
+    throw new Error('github-not-configured: live GitHub content-read API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
+  async listDir(_input: ListDirInput): Promise<ListDirResult> {
+    // Same credential gate as getFileContent — a soft return of [] would
+    // falsely imply the directory is empty. The analyzer's per-candidate
+    // try/catch records the failure as evidence + continues.
+    throw new Error('github-not-configured: live GitHub content-read API requires GITHUB_APP_PRIVATE_KEY');
   }
 
   async health(): Promise<'connected' | 'not-configured' | 'error' | 'test-mode'> {

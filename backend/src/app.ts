@@ -50,6 +50,11 @@ import { PgProjectBaselineRepository } from './modules/projects/internal/pg-proj
 // Project Baseline proposals. NOT a module, NOT an authority; owns NO tables.
 import { DefaultOnboardingService } from './onboarding/internal/default-onboarding-service.js';
 import { GovernedFilesystemAnalyzer } from './onboarding/internal/governed-filesystem-analyzer.js';
+// WORK-038 PR #42 fix: the PRODUCTION RepositoryContentPort wiring. The
+// analyzer is constructed with this port so production onboarding actually
+// inspects repository files (delegates to the /github GitHubAdapter — the
+// only SDK caller; no GitHub SDK in the onboarding domain).
+import { GitHubRepositoryContentPort } from './onboarding/internal/github-content-port.js';
 import type {
   SpecificationRepository,
   SpecificationVersionRepository,
@@ -1101,7 +1106,18 @@ export async function buildApp(
     // authority). No GitHub SDK, no credentials, no DB access in the
     // orchestrator domain — it delegates to the injected authorities.
     const projectBaselineRepository = new PgProjectBaselineRepository(database);
+    // WORK-038 PR #42 fix: wire the PRODUCTION RepositoryContentPort. The
+    // analyzer delegates every candidate read to this port, which delegates
+    // to the /github GitHubAdapter (the only SDK caller). Without this
+    // wiring, production onboarding never inspected repository files (only
+    // metadata-derived observations); tests used an in-memory provider and
+    // so did not exercise the production wiring. The GitHubAdapter throws
+    // 'github-not-configured' until GITHUB_APP_* credentials are wired
+    // (same gate as WORK-026 provisioning); the analyzer's per-candidate
+    // try/catch records the failure as evidence and continues.
+    const onboardingContentPort = new GitHubRepositoryContentPort(githubAdapter);
     const onboardingAnalyzer = new GovernedFilesystemAnalyzer({
+      contentPort: onboardingContentPort,
       policyGate: agentPolicyEngine,
       logger,
     });

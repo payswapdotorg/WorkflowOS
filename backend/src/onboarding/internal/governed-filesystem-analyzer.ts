@@ -75,7 +75,15 @@ function claimDigest(claim: Record<string, unknown>): string {
 }
 
 export interface GovernedFilesystemAnalyzerDeps {
-  /** Optional — when absent, the analyzer produces metadata-only observations. */
+  /**
+   * The repository content port. The PRODUCTION wiring (app.ts) injects
+   * GitHubRepositoryContentPort (delegates to the /github GitHubAdapter);
+   * tests inject an in-memory provider for deterministic governed analysis.
+   * The port is consulted only for ALLOWED reads (deny/ask blocks the
+   * content); a content-read failure is logged as evidence and the analyzer
+   * continues with remaining candidates (the baseline completes with the
+   * observations it could derive).
+   */
   readonly contentPort?: RepositoryContentPort;
   readonly policyGate: ProjectScopedPolicyGate;
   readonly logger: Logger;
@@ -144,6 +152,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
               ctx.repositoryName,
               ctx.baselineCommitSha,
               candidate.path,
+              ctx.installationId,
             );
             if (entries.length > 0) {
               const listing = entries.map((e) => `${e.type}:${e.name}`).sort().join('\n');
@@ -155,6 +164,7 @@ export class GovernedFilesystemAnalyzer implements RepositoryAnalyzer {
               ctx.repositoryName,
               ctx.baselineCommitSha,
               candidate.path,
+              ctx.installationId,
             );
           }
         } catch (err) {

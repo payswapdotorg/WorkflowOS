@@ -9788,5 +9788,136 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(route).toMatch(/baseline\.projectId !== projectId/);
     expect(route).toMatch(/requireProjectAuthorization/);
   });
+
+  // =========================================================================
+  // PR #42 review fixes (three blockers the architect identified).
+  // =========================================================================
+
+  it('PR #42 (Blocker 1): the GitHubAdapter interface declares getFileContent + listDir (content-read through /github)', () => {
+    // The /github authority is the natural home for content-read — the
+    // onboarding domain holds no GitHub SDK. The GitHubAdapter interface
+    // must declare getFileContent (returns null when the path does not exist
+    // at that revision) + listDir. The DTOs live in
+    // project-github-repository.types.ts and are exported through the
+    // /github barrel.
+    const githubTypes = readFileSync(
+      join(MODULES_DIR, 'github', 'internal', 'github.types.ts'),
+      'utf8',
+    );
+    expect(githubTypes).toMatch(/getFileContent\(input: GetFileContentInput\): Promise<GetFileContentResult \| null>/);
+    expect(githubTypes).toMatch(/listDir\(input: ListDirInput\): Promise<ListDirResult>/);
+    const dtoTypes = readFileSync(
+      join(MODULES_DIR, 'github', 'internal', 'project-github-repository.types.ts'),
+      'utf8',
+    );
+    expect(dtoTypes).toMatch(/export interface GetFileContentInput/);
+    expect(dtoTypes).toMatch(/export interface GetFileContentResult/);
+    expect(dtoTypes).toMatch(/export interface ListDirInput/);
+    expect(dtoTypes).toMatch(/export interface ListDirResult/);
+    expect(dtoTypes).toMatch(/export interface RepoDirEntry/);
+    // The /github barrel exports the new DTOs (the sanctioned surface).
+    const ghBarrel = readFileSync(join(MODULES_DIR, 'github', 'index.ts'), 'utf8');
+    expect(ghBarrel).toMatch(/GetFileContentInput/);
+    expect(ghBarrel).toMatch(/GetFileContentResult/);
+    expect(ghBarrel).toMatch(/ListDirInput/);
+    expect(ghBarrel).toMatch(/ListDirResult/);
+    expect(ghBarrel).toMatch(/RepoDirEntry/);
+  });
+
+  it('PR #42 (Blocker 1): a PRODUCTION RepositoryContentPort implementation exists + delegates to the /github GitHubAdapter (no GitHub SDK in onboarding)', () => {
+    // The PR #42 review identified that the production analyzer had NO
+    // RepositoryContentPort — onboarding never inspected repository files
+    // (only metadata-derived observations); tests used an in-memory
+    // provider. The fix: a production GitHubRepositoryContentPort that
+    // delegates to the /github GitHubAdapter (the only SDK caller). The
+    // onboarding domain imports ONLY the /github barrel (the GitHubAdapter
+    // TYPE) — never /github internal/, never @octokit, never provider SDKs.
+    const contentPortPath = join(ONBOARDING_DIR, 'internal', 'github-content-port.ts');
+    expect(existsSync(contentPortPath), 'src/onboarding/internal/github-content-port.ts must exist').toBe(true);
+    const src = readFileSync(contentPortPath, 'utf8');
+    expect(src, 'implements RepositoryContentPort').toMatch(/implements RepositoryContentPort/);
+    expect(src, 'delegates readFile to GitHubAdapter.getFileContent').toMatch(/githubAdapter\.getFileContent/);
+    expect(src, 'delegates listDir to GitHubAdapter.listDir').toMatch(/githubAdapter\.listDir/);
+    expect(src, 'imports the GitHubAdapter TYPE from the /github barrel').toMatch(/from\s+['"]@modules\/github\/index\.js['"]/);
+    // No GitHub SDK, no /github internal/, no provider SDKs, no credentials.
+    expect(src, 'must not import @octokit').not.toMatch(/from\s+['"]@octokit/);
+    expect(src, 'must not import /github internal/').not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+    expect(src, 'must not import pg').not.toMatch(/from\s+['"]pg['"]/);
+    expect(src, 'must not import pglite').not.toMatch(/from\s+['"]@electric-sql\/pglite/);
+    // The onboarding barrel re-exports the production port (type-only).
+    const barrel = readFileSync(join(ONBOARDING_DIR, 'index.ts'), 'utf8');
+    expect(barrel).toMatch(/GitHubRepositoryContentPort/);
+  });
+
+  it('PR #42 (Blocker 1): app.ts wires the production RepositoryContentPort into the GovernedFilesystemAnalyzer (production onboarding inspects files)', () => {
+    // The composition root MUST construct the GovernedFilesystemAnalyzer with
+    // a contentPort (the production GitHubRepositoryContentPort delegating to
+    // the /github GitHubAdapter). Without this wiring, production onboarding
+    // never inspected repository files — the analyzer's
+    // `if (allowed && this.deps.contentPort)` branch was never taken.
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc, 'imports GitHubRepositoryContentPort').toMatch(/GitHubRepositoryContentPort/);
+    expect(appSrc, 'constructs GitHubRepositoryContentPort').toMatch(/new GitHubRepositoryContentPort\(/);
+    expect(appSrc, 'passes contentPort to GovernedFilesystemAnalyzer').toMatch(/contentPort:\s*onboardingContentPort/);
+  });
+
+  it('PR #42 (Blocker 2): the observation DELETE trigger forbids direct DELETE (append-only historical evidence)', () => {
+    // The PR #42 review identified that the migration's DELETE trigger
+    // explicitly permitted deletion (`RETURN OLD`) despite describing
+    // observations as append-only historical evidence. The fix: the trigger
+    // refuses a direct DELETE when the parent baseline still exists; the
+    // ONLY legitimate removal path is the CASCADE from baseline deletion
+    // (which fires AFTER the parent row is gone — the PERFORM check returns
+    // NOT FOUND during a CASCADE, so the trigger allows it).
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql, 'the DELETE branch checks the parent baseline still exists').toMatch(/PERFORM 1 FROM wfos_project_baselines WHERE id = OLD\.baseline_id/);
+    expect(sql, 'the DELETE branch raises the append-only exception').toMatch(/project-baseline-observation-append-only/);
+    expect(sql, 'documents the only-legitimate-removal path (CASCADE)').toMatch(/CASCADE from baseline deletion/);
+    // The old permissive `RETURN OLD`-only DELETE branch must be GONE
+    // (replaced by the FOUND check + RAISE). The regex matches the OLD
+    // permissive pattern: a DELETE branch that returns OLD unconditionally
+    // without the FOUND guard. We assert the permissive pattern is absent by
+    // checking the DELETE branch is immediately followed by the PERFORM
+    // check (not a bare RETURN OLD).
+    expect(sql, 'no permissive DELETE branch (RETURN OLD without the FOUND guard)').not.toMatch(/TG_OP = 'DELETE' THEN\s+-- Observations are append-only historical evidence\. A terminal baseline's\s+-- observations are immutable/);
+  });
+
+  it('PR #42 (Blocker 2): the append-only DELETE guard permits the CASCADE from baseline deletion (the parent baseline is already gone)', () => {
+    // The trigger must ALLOW the CASCADE (when the parent baseline row is
+    // already gone). The PERFORM-FOUND check returns NOT FOUND during a
+    // CASCADE (the parent DELETE happened earlier in the same statement /
+    // transaction), so the trigger falls through to RETURN OLD. This is
+    // verified structurally: the RAISE is INSIDE `IF FOUND`, so a NOT-FOUND
+    // result skips the RAISE and reaches RETURN OLD.
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // The RAISE is gated by `IF FOUND` (direct DELETE); a CASCADE (NOT
+    // FOUND) falls through to RETURN OLD.
+    expect(sql).toMatch(/IF FOUND THEN\s+RAISE EXCEPTION\s+'project-baseline-observation-append-only/);
+    expect(sql).toMatch(/RETURN OLD;/);
+  });
+
+  it('PR #42 (Blocker 3): confirmObservation checks the parent baseline state — a failed baseline NEVER carries a confirmed observation', () => {
+    // The PR #42 review identified that confirmObservation did not check
+    // the parent baseline state, allowing failed → confirmed. The invariant
+    // (migration 0038): "a failed baseline NEVER carries a confirmed
+    // observation (failed analysis cannot produce a false confirmed
+    // baseline)." markFailed enforces the symmetric side; confirmObservation
+    // must enforce THIS side — refuse when the parent baseline is failed.
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    // The confirmObservation method must SELECT the parent baseline state
+    // BEFORE issuing the UPDATE.
+    expect(src, 'selects the parent baseline state before confirming').toMatch(/SELECT state FROM wfos_project_baselines WHERE id = \$1/);
+    expect(src, 'refuses to confirm a failed baseline').toMatch(/baselineState === 'failed'/);
+    expect(src, 'throws the sanctioned no-confirmed-on-failed error').toMatch(/project-baseline-no-confirmed-on-failed/);
+  });
+
+  it('PR #42 (Blocker 3): the route surfaces the no-confirmed-on-failed error as 409 (not 500)', () => {
+    // The confirm route must translate the repository's
+    // no-confirmed-on-failed error into a 409 (conflict) so the caller
+    // distinguishes the invariant violation from a server error.
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/msg\.includes\('no-confirmed-on-failed'\)/);
+    expect(route).toMatch(/reply\.code\(409\)\.send\(\{[^}]*error: 'no-confirmed-on-failed'/);
+  });
 });
 

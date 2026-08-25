@@ -176,6 +176,77 @@ export interface GetBranchResult {
   isDefault: boolean;
 }
 
+// --- WORK-038: repository content-read DTOs (existing-project onboarding) ---
+//
+// WORK-038 (Existing Project Onboarding) needs to read repository file
+// content at a PRECISE revision (the baseline commit SHA resolved through
+// getBranch) to produce evidence-backed OBSERVED observations. The /github
+// authority is the natural home for content-read: it already owns the
+// GitHubAdapter contract (the ONLY place that talks to the GitHub API).
+// The onboarding domain holds no GitHub credentials and no GitHub SDK — it
+// consumes this contract through the /github barrel, then wraps it in a
+// thin production RepositoryContentPort (src/onboarding/internal/
+// github-content-port.ts).
+//
+// `ref` accepts a real Git commit SHA (the onboarding invariant — the
+// baseline is pinned to an immutable SHA) OR a branch/tag name (for
+// ad-hoc reads outside onboarding; the onboarding path always passes the
+// resolved SHA). The GitHub getContent API accepts both forms.
+
+/** Input for {@link GitHubAdapter.getFileContent}. */
+export interface GetFileContentInput {
+  owner: string;
+  repository: string;
+  /**
+   * The precise revision to read at. The onboarding path always passes the
+   * immutable baseline commit SHA (resolved through getBranch); a branch
+   * name is accepted for ad-hoc reads but is NOT used for baseline identity.
+   */
+  ref: string;
+  /** The repository-relative path of the file to read. */
+  path: string;
+  installationId: string;
+}
+
+/** Result of {@link GitHubAdapter.getFileContent}. */
+export interface GetFileContentResult {
+  owner: string;
+  repository: string;
+  ref: string;
+  path: string;
+  /** The file's text content at the revision. */
+  content: string;
+  /** sha256 of the content (reproducibility — same content, same digest). */
+  contentDigest: string;
+}
+
+/** A directory entry at a revision. */
+export interface RepoDirEntry {
+  readonly name: string;
+  readonly type: 'file' | 'dir';
+}
+
+/** Input for {@link GitHubAdapter.listDir}. */
+export interface ListDirInput {
+  owner: string;
+  repository: string;
+  /** The precise revision (SHA or branch/tag; onboarding passes the SHA). */
+  ref: string;
+  /** The repository-relative path of the directory to list. */
+  path: string;
+  installationId: string;
+}
+
+/** Result of {@link GitHubAdapter.listDir}. */
+export interface ListDirResult {
+  owner: string;
+  repository: string;
+  ref: string;
+  path: string;
+  /** The directory entries (empty when the directory does not exist). */
+  entries: readonly RepoDirEntry[];
+}
+
 // --- GitHubAdapter extension (implemented in ./github.types.ts) ---
 //
 // EXTEND GitHubAdapter with these new methods (the GitHubAdapter interface
@@ -186,4 +257,6 @@ export interface GetBranchResult {
 //   createBranch(input: CreateBranchInput): Promise<CreateBranchResult>;
 //   createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult>;
 //   getBranch(input: GetBranchInput): Promise<GetBranchResult>;
+//   getFileContent(input: GetFileContentInput): Promise<GetFileContentResult | null>;
+//   listDir(input: ListDirInput): Promise<ListDirResult>;
 //   health(): Promise<'connected' | 'not-configured' | 'error' | 'test-mode'>;
