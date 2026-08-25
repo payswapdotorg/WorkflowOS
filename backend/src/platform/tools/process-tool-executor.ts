@@ -55,7 +55,17 @@
  *     anywhere in the argv (the workspace holds no GitHub credentials;
  *     remote authority stays /github);
  *   * PACKAGE family: the runner is a BARE executable name (path
- *     separators rejected — no arbitrary binaries).
+ *     separators rejected — no arbitrary binaries). Registry-publication
+ *     subcommands (`publish`/`unpublish`/`deprecate` for the
+ *     publish-capable runners npm/pnpm/yarn/bun) are rejected fail-closed
+ *     via the CANONICAL package-argv classifier (./package-argv.js — shared
+ *     with the WORK-037 policy engine's deployment-domain tagging). The
+ *     classifier finds the EFFECTIVE subcommand by skipping the runner's
+ *     global/config options (`npm --registry=<url> publish` is still
+ *     rejected — a positional args[0] check would miss it). Non-publish-
+ *     capable runners (node/npx/tsx/vitest/jest/tsc/…) are NOT rejected
+ *     (they have no `publish` subcommand; `publish` is a script/argument
+ *     name for them).
  */
 import { execFile } from 'node:child_process';
 import type { ExecFileException, ExecFileOptionsWithStringEncoding } from 'node:child_process';
@@ -83,6 +93,20 @@ import type { ProcessSandbox, WrappedProcessLaunch } from './process-sandbox.js'
 // flag set live HERE (no second copy in the engine — a mismatch would let
 // policy-allow what the executor rejects, or vice versa).
 import { isGitDeploymentInvocation, GIT_REDIRECT_FLAGS, classifyGitSubcommand } from './git-argv.js';
+// WORK-037 PR-#41 FIX (round 2): the CANONICAL package-command classifier
+// — the package-family twin of the git argv classifier. ONE vocabulary
+// shared by this executor (publish-rejection governance gate) and the
+// agent policy engine (deployment-domain tagging). Package runners
+// (npm/pnpm/yarn/bun) permit global/config options BEFORE the effective
+// subcommand (`npm --registry=<url> publish`), so a positional args[0]
+// check could fail to reject a registry publication at the governance
+// gate (the sandbox's network isolation is defense-in-depth, NOT the
+// authority). The classifier skips the runner's global options to find the
+// effective subcommand + fails-closed on ambiguity. The publish-capable
+// runner set + the deployment subcommand set live HERE (no second copy in
+// the engine — a mismatch would let policy-allow what the executor rejects,
+// or vice versa).
+import { isPackageDeploymentInvocation, classifyPackageSubcommand } from './package-argv.js';
 
 /**
  * The teardown grace: after SIGTERM the group gets this long before the
@@ -228,6 +252,30 @@ export class ProcessToolExecutor implements ToolExecutor {
       return toolOutcomeError(
         'package-runner-path-forbidden',
         `the package runner must be a bare executable name resolved via PATH (got ${JSON.stringify(req.runner)}) — arbitrary binaries are not a capability`,
+      );
+    }
+    // Fail-closed governance BEFORE any process spawn. WORK-037 PR-#41 FIX
+    // (round 2): classify the EFFECTIVE package subcommand via the CANONICAL
+    // classifier (shared with the policy engine). Package runners
+    // (npm/pnpm/yarn/bun) permit global/config options BEFORE the effective
+    // subcommand (`npm --registry=<url> publish`, `npm --silent publish`,
+    // `pnpm --filter <pkg> publish`, `pnpm -C /path publish`,
+    // `yarn --cwd /path publish`), so a positional req.args[0] check could
+    // fail to reject a registry publication at the governance gate. The
+    // classifier skips the runner's global options to find the effective
+    // subcommand + fails-closed on ambiguity (treats it as deployment-class
+    // → rejected). This is the GOVERNANCE-gate rejection (defense-in-depth
+    // on top of the policy authorization decision); the workspace holds no
+    // publish credentials and a registry publication is deployment-class.
+    // Non-publish-capable runners (node/npx/tsx/vitest/jest/tsc/…) are
+    // NOT rejected here (the runner gate returns false — they have no
+    // `publish` subcommand; `publish` is a script/argument name for them).
+    if (isPackageDeploymentInvocation(req.runner, req.args)) {
+      const { subcommand } = classifyPackageSubcommand(req.args);
+      const named = subcommand ?? '(ambiguous)';
+      return toolOutcomeError(
+        'package-publish-forbidden',
+        `${req.runner} ${named} is a registry-publication operation — the workspace holds no publish credentials and publication authority is deployment-class (local package/test execution only)`,
       );
     }
     return this.runProcess([req.runner, ...req.args], {

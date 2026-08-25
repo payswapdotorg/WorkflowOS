@@ -659,6 +659,97 @@ describe('WORK-036 — Tool Runtime (governed tools inside the WORK-035 workspac
   });
 
   // ---------------------------------------------------------------------------
+  // 9b: package publish governance gate (PR #41 round 2 — the canonical
+  // package-argv classifier, shared with the policy engine).
+  // ---------------------------------------------------------------------------
+
+  it('package publish operations are DENIED at the governance gate (PR #41 round 2 — the canonical classifier)', async () => {
+    // The architect's review of PR #41 at `35420da` flagged the package
+    // family's positional `args[0] === 'publish'` shortcut (the executor
+    // did not classify publish at all; the policy engine checked args[0]
+    // positionally). Package runners permit global/config options BEFORE
+    // the effective subcommand (`npm --registry=<url> publish`), so a
+    // positional args[0] check could let a registry publication spawn
+    // (relying on the sandbox to block the network egress —
+    // defense-in-depth, NOT the authority). The canonical classifier skips
+    // the runner's global options to find the effective subcommand →
+    // publish/unpublish/deprecate behind options are still rejected at the
+    // gate (a POLICY reason, before any spawn).
+    const chain = await makeReadyChain();
+    for (const [id, runner, args] of [
+      ['w037-pkg-npm-publish', 'npm', ['publish']],
+      ['w037-pkg-npm-registry-eq-publish', 'npm', ['--registry=http://x', 'publish']], // the architect's exact example
+      ['w037-pkg-npm-registry-sp-publish', 'npm', ['--registry', 'http://x', 'publish']], // space form
+      ['w037-pkg-npm-silent-publish', 'npm', ['--silent', 'publish']],
+      ['w037-pkg-npm-q-publish', 'npm', ['-q', 'publish']],
+      ['w037-pkg-npm-workspace-sp-publish', 'npm', ['--workspace', 'foo', 'publish']],
+      ['w037-pkg-npm-workspace-eq-publish', 'npm', ['--workspace=foo', 'publish']],
+      ['w037-pkg-npm-publish-tag-after', 'npm', ['publish', '--tag', 'beta']], // option AFTER the subcommand
+      ['w037-pkg-npm-stacked-opts-publish', 'npm', ['--silent', '--registry=http://x', '--workspace=foo', 'publish']],
+      ['w037-pkg-npm-dd-terminator-publish', 'npm', ['--', 'publish']],
+      ['w037-pkg-npm-registry-eq-unpublish', 'npm', ['--registry=http://x', 'unpublish']],
+      ['w037-pkg-npm-silent-deprecate', 'npm', ['--silent', 'deprecate']],
+      // The equivalent supported-runner forms (pnpm / yarn / bun).
+      ['w037-pkg-pnpm-publish', 'pnpm', ['publish']],
+      ['w037-pkg-pnpm-filter-publish', 'pnpm', ['--filter', 'foo', 'publish']],
+      ['w037-pkg-pnpm-C-publish', 'pnpm', ['-C', '/path', 'publish']],
+      ['w037-pkg-pnpm-registry-publish', 'pnpm', ['--registry=http://x', 'publish']],
+      ['w037-pkg-yarn-publish', 'yarn', ['publish']],
+      ['w037-pkg-yarn-cwd-publish', 'yarn', ['--cwd', '/path', 'publish']],
+      ['w037-pkg-yarn-C-publish', 'yarn', ['-C', '/path', 'publish']],
+      ['w037-pkg-bun-publish', 'bun', ['publish']],
+      ['w037-pkg-bun-cwd-publish', 'bun', ['--cwd', '/path', 'publish']],
+      // Ambiguity → fail-closed (treat as deployment → rejected).
+      ['w037-pkg-npm-unknown-short-publish', 'npm', ['-Z', 'publish']],
+      ['w037-pkg-npm-unknown-long-publish', 'npm', ['--future-flag', 'publish']],
+      ['w037-pkg-pnpm-unknown-long-publish', 'pnpm', ['--future-flag', 'publish']],
+    ] as const) {
+      const res = await runtime.invoke({
+        invocationId: id,
+        executionId: chain.executionId,
+        family: 'package',
+        input: { runner, args: [...args] },
+        idempotency: 'idempotent',
+      });
+      expect(res.record.status, id).toBe('failed');
+      expect(res.record.error?.code, id).toBe('package-publish-forbidden');
+    }
+  });
+
+  it('package LOCAL commands + non-publish-capable runners still run (PR #41 round 2 — the fix does NOT over-restrict)', async () => {
+    // `npm --version` / `npm --silent --version` (print-and-exit) and the
+    // non-publish-capable runners (node) with `publish` as a positional
+    // must NOT be publish-rejected (the boolean/value option is skipped;
+    // `--version` is print-and-exit; node has no `publish` subcommand so
+    // `publish` is a script/argument name). This proves the fix is surgical:
+    // it catches the publication, not the local dev workflow. The cases are
+    // chosen to complete INSTANTLY (print-and-exit / `node -e` with no
+    // network) so the test does not depend on the sandbox's network
+    // egress-fail timing. A short timeoutMs is the safety bound.
+    const chain = await makeReadyChain();
+    for (const [id, runner, args] of [
+      ['w037-pkg-npm-version', 'npm', ['--version']], // print-and-exit, no subcommand
+      ['w037-pkg-npm-silent-version', 'npm', ['--silent', '--version']],
+      ['w037-pkg-npm-registry-version', 'npm', ['--registry=http://x', '--version']], // value option + print-and-exit
+      // Non-publish-capable runners — `publish` as a script/arg name.
+      ['w037-pkg-node-version', 'node', ['--version']],
+      ['w037-pkg-node-e-publish-arg', 'node', ['-e', 'process.exit(0)', 'publish']], // publish is an ignored arg
+    ] as const) {
+      const res = await runtime.invoke({
+        invocationId: id,
+        executionId: chain.executionId,
+        family: 'package',
+        input: { runner, args: [...args], timeoutMs: 5000 },
+        idempotency: 'idempotent',
+      });
+      // The record must NOT carry the publish-forbidden code (it may
+      // succeed OR fail for OTHER reasons — e.g. the runner prints to
+      // stdout and exits 0 — but NEVER publish-forbidden).
+      expect(res.record.error?.code, id).not.toBe('package-publish-forbidden');
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // 10: browser
   // ---------------------------------------------------------------------------
 

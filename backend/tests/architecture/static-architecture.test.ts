@@ -8414,6 +8414,12 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
   // @platform/tools (the correct one-way dependency direction).
   const TR_GIT_ARGV = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'git-argv.ts');
   const TR_GIT_ARGV_TEST = join(BACKEND_ROOT, 'tests', 'unit', 'git-argv.test.ts');
+  // WORK-037 PR-#41 FIX (round 2): the CANONICAL package-command classifier
+  // — the package-family twin of the git argv classifier. ONE vocabulary
+  // shared by the policy engine (deployment-domain tagging) and the
+  // process executor (publish-rejection governance gate). Pure (no IO).
+  // Lives in @platform/tools (the same one-way dependency direction).
+  const TR_PACKAGE_ARGV = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
   const TR_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
   const TR_SANDBOX_TEST = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'process-sandbox.regression.test.ts');
 
@@ -8429,6 +8435,7 @@ describe('WORK-036 invariants — the governed Tool Runtime', () => {
     ['confinement', TR_CONFINEMENT],
     ['redaction', TR_REDACTION],
     ['git-argv-classifier', TR_GIT_ARGV],
+    ['package-argv-classifier', TR_PACKAGE_ARGV],
   ] as const;
 
   function strip(src: string): string {
@@ -9347,6 +9354,131 @@ describe('WORK-037 invariants — Agent Policy and Permissions (the engine behin
     expect(execRegressionSrc).toMatch(/git remote-network operations BEHIND global\/config options/);
     expect(execRegressionSrc).toMatch(/git-remote-operation-forbidden/);
     // The fix does NOT over-restrict LOCAL subcommands behind options.
+    expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
+  });
+
+  // ==========================================================================
+  // THE CANONICAL PACKAGE-ARGV CLASSIFIER INVARIANTS (architect's PR-#41
+  // round-2 review at `35420da`: the git-argv canonical classifier was
+  // approved; the package family's positional `args[0] === 'publish'`
+  // shortcut was flagged as the analogous remaining gap — package runners
+  // permit global/config options before the effective subcommand, so
+  // `npm --registry=<url> publish` could be misclassified as ordinary
+  // `tool` activity. ONE classifier shared by policy + executor; the
+  // sandbox's network isolation is defense-in-depth, NOT the authority).
+  // ==========================================================================
+  it('the canonical package-argv classifier exists + is shared by BOTH the policy engine and the process executor (ONE vocabulary, no second copy)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
+    expect(existsSync(classifierPath), 'package-argv.ts must exist').toBe(true);
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The canonical exports (one source of truth).
+    expect(classifierSrc).toMatch(/export function classifyPackageSubcommand/);
+    expect(classifierSrc).toMatch(/export function isPackageDeploymentInvocation/);
+    expect(classifierSrc).toMatch(/export const PACKAGE_PUBLISH_CAPABLE_RUNNERS/);
+    expect(classifierSrc).toMatch(/export const PACKAGE_DEPLOYMENT_SUBCOMMANDS/);
+    // BOTH layers import the SAME classifier — the engine via the @platform
+    // alias (the correct one-way dependency direction: Execution Policy →
+    // Tool Runtime); the executor same-layer (./package-argv.js).
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    expect(engineSrc).toMatch(/from '@platform\/tools\/package-argv\.js'/);
+    expect(engineSrc).toMatch(/isPackageDeploymentInvocation/);
+    const procPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'process-tool-executor.ts');
+    const procSrc = readFileSync(procPath, 'utf8');
+    expect(procSrc).toMatch(/from '\.\/package-argv\.js'/);
+    expect(procSrc).toMatch(/isPackageDeploymentInvocation/);
+    // NEITHER layer keeps a local divergent copy of the publish-capable
+    // runner set or the deployment subcommand set (a mismatch would let
+    // policy-allow what the executor rejects, or vice versa). The
+    // architect's round-2 finding was precisely this duplication with a
+    // positional args[0] check on the engine side.
+    expect(engineSrc, 'the engine has NO local PACKAGE_DEPLOYMENT copy').not.toMatch(/const PACKAGE_DEPLOYMENT_SUBCOMMANDS/);
+    expect(procSrc, 'the executor has NO local PACKAGE_PUBLISH_CAPABLE copy').not.toMatch(/const PACKAGE_PUBLISH_CAPABLE_RUNNERS/);
+  });
+
+  it('the engine classifies the EFFECTIVE package subcommand (NOT a positional args[0] === \'publish\' shortcut — the architect\'s round-2 finding)', () => {
+    const engineSrc = readFileSync(AP_ENGINE, 'utf8');
+    // tagInvocation calls isPackageDeploymentInvocation(runner, args) — the
+    // canonical classifier that skips the runner's global/config options
+    // before the effective subcommand (`npm --registry=<url> publish` is
+    // still publish → deployment).
+    expect(engineSrc).toMatch(/isPackageDeploymentInvocation\(runner, args\)/);
+    // The positional args[0] === 'publish' shortcut is GONE (the
+    // architect's round-2 finding: args[0] was `--registry=...`, not
+    // `publish` → not deployment → WRONG). This is the static invariant
+    // the architect required: the shortcut cannot reappear.
+    expect(engineSrc, 'the engine NO LONGER uses the positional args[0] === \'publish\' shortcut').not.toMatch(/args\[0\]\s*===\s*['"]publish['"]/);
+  });
+
+  it('the canonical package classifier skips the runner\'s GLOBAL/CONFIG options before the effective subcommand (the architect\'s `npm --registry=<...> publish` example)', () => {
+    const classifierPath = join(BACKEND_ROOT, 'src', 'platform', 'tools', 'package-argv.ts');
+    const classifierSrc = readFileSync(classifierPath, 'utf8');
+    // The global-option vocabulary the classifier skips to find the
+    // effective subcommand (value-taking long + short, boolean long + short).
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_VALUE_OPTIONS\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_VALUE_OPTIONS_SHORT\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_BOOLEAN_OPTIONS\b/);
+    expect(classifierSrc).toMatch(/PACKAGE_GLOBAL_BOOLEAN_OPTIONS_SHORT\b/);
+    // The architect's exact example: `--registry=<url>` (long, value-taking,
+    // the `=` attached form). The space form `--registry <url>` is also
+    // handled (the value-taking long set consumes the next token).
+    expect(classifierSrc).toMatch(/'--registry'/);
+    // The `--` options terminator + the `=value` attached form.
+    expect(classifierSrc).toMatch(/tok === '--'/);
+    expect(classifierSrc).toMatch(/tok\.includes\('='\)/);
+    // The fail-closed ambiguity path (unknown option before the subcommand
+    // → treat as deployment so a crafted unknown option cannot smuggle a
+    // publication past the deployment rule).
+    expect(classifierSrc).toMatch(/ambiguous/);
+    // The runner gate (publish-capable only) — non-publish-capable runners
+    // (node/npx/tsx/…) never get a false deployment-deny.
+    expect(classifierSrc).toMatch(/PACKAGE_PUBLISH_CAPABLE_RUNNERS\.has\(runner\)/);
+    // The publish family (the frozen contract's "package 'publish' commands").
+    expect(classifierSrc).toMatch(/'publish'/);
+    expect(classifierSrc).toMatch(/'unpublish'/);
+    expect(classifierSrc).toMatch(/'deprecate'/);
+  });
+
+  it('the regression matrix covers options-before-subcommand (the architect\'s round-2 scenarios) at all three layers', () => {
+    // Layer 0: the canonical classifier unit proof.
+    const classifierTest = join(BACKEND_ROOT, 'tests', 'unit', 'package-argv.test.ts');
+    expect(existsSync(classifierTest), 'package-argv.test.ts must exist').toBe(true);
+    const unitSrc = readFileSync(classifierTest, 'utf8');
+    // The architect's exact example + the family of options-before-publish.
+    expect(unitSrc).toMatch(/npm --registry=http:\/\/x publish/);
+    expect(unitSrc).toMatch(/npm --silent publish/);
+    expect(unitSrc).toMatch(/npm --workspace foo publish/);
+    // Options before publish for the other publish-capable runners.
+    expect(unitSrc).toMatch(/pnpm --filter foo publish/);
+    expect(unitSrc).toMatch(/pnpm -C \/path publish/);
+    expect(unitSrc).toMatch(/yarn --cwd \/path publish/);
+    // The publish-family siblings behind options.
+    expect(unitSrc).toMatch(/npm --registry=http:\/\/x unpublish/);
+    expect(unitSrc).toMatch(/npm --silent deprecate/);
+    // The normal (local) case — `npm test` must NOT be deployment.
+    expect(unitSrc).toMatch(/`npm test` → NOT deployment/);
+    // The non-publish-capable runner case (node + publish as a script arg).
+    expect(unitSrc).toMatch(/node --inspect publish\.js/);
+    // The fail-closed ambiguity scenario.
+    expect(unitSrc).toMatch(/fail-closed/);
+    // The value-taking option's value cannot smuggle a publish-looking token.
+    expect(unitSrc).toMatch(/cannot smuggle a publish-looking token/);
+
+    // Layer 1: the engine integration (agent-policy.regression.test.ts) —
+    // the POLICY authorization decision is correct for the scenarios.
+    const engineRegressionSrc = readFileSync(AP_REGRESSION, 'utf8');
+    expect(engineRegressionSrc).toMatch(/PR#41 round 2: `npm --registry=http:\/\/x publish`/);
+    expect(engineRegressionSrc).toMatch(/platform-deployment-deny/);
+    expect(engineRegressionSrc).toMatch(/fail-closed on ambiguity/);
+    expect(engineRegressionSrc).toMatch(/non-publish-capable runner/);
+
+    // Layer 2: the executor integration (tool-runtime.regression.test.ts)
+    // — the governance-gate rejection before any process spawns.
+    const execRegressionPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'tool-runtime.regression.test.ts');
+    const execRegressionSrc = readFileSync(execRegressionPath, 'utf8');
+    expect(execRegressionSrc).toMatch(/package publish operations are DENIED at the governance gate/);
+    expect(execRegressionSrc).toMatch(/package-publish-forbidden/);
+    // The fix does NOT over-restrict LOCAL commands / non-publish-capable
+    // runners (the architect's surgical principle).
     expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
   });
 });

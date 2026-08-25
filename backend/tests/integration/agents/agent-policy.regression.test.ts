@@ -339,6 +339,199 @@ describe('WORK-037 — Agent Policy Engine (decision logic, stub repository)', (
   it('platform default: package publish → deny (deployment-class)', async () => {
     const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['publish'] } }));
     expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  // ==========================================================================
+  // PR #41 FIX (round 2) — options BEFORE the effective package subcommand.
+  //
+  // The architect's review of PR #41 at `35420da` approved the git-argv
+  // canonical classifier and flagged the package family's positional
+  // `args[0] === 'publish'` shortcut as the analogous remaining gap:
+  // package runners (npm/pnpm/yarn/bun) permit global/config options
+  // BEFORE the effective subcommand (e.g. `npm --registry=<url> publish`),
+  // so a positional args[0] check could classify a REGISTRY publication as
+  // ordinary `tool` activity → allow/constrained instead of the required
+  // deployment deny. The engine now classifies the EFFECTIVE subcommand
+  // via the CANONICAL package-argv classifier (shared with the executor).
+  // These prove the POLICY authorization decision is correct for the
+  // architect's scenarios. (The canonical classifier itself is unit-proven
+  // in tests/unit/package-argv.test.ts; these are the engine integration.)
+  // ==========================================================================
+  it('PR#41 round 2: `npm --registry=http://x publish` (the architect\'s exact example) → deny (deployment-class, NOT allow)', async () => {
+    // The positional args[0] check saw `--registry=http://x` → NOT deployment
+    // → allow/constrained. WRONG. The canonical classifier skips the
+    // `--registry=http://x` single token (the value is attached) → effective
+    // `publish` → deployment → the platform default's deployment-deny fires.
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--registry=http://x', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm --registry http://x publish` (space form) → deny (deployment-class)', async () => {
+    // The space form: --registry consumes the NEXT token (the URL) as its
+    // value, so the URL is NOT mistaken for the subcommand; `publish` is.
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--registry', 'http://x', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm --silent publish` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--silent', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm -q publish` (short --quiet) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['-q', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm --workspace foo publish` (value option, space form) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--workspace', 'foo', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm --workspace=foo publish` (= form) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--workspace=foo', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm publish --tag beta` (option AFTER the subcommand) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['publish', '--tag', 'beta'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: stacked options `npm --silent --registry=http://x --workspace=foo publish` → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--silent', '--registry=http://x', '--workspace=foo', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  // The equivalent supported-runner forms (pnpm / yarn / bun) — the
+  // classifier is appropriate to ALL publish-capable runners.
+  it('PR#41 round 2: `pnpm publish` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.pnpm', input: { runner: 'pnpm', args: ['publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `pnpm --filter foo publish` (workspace filter) → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.pnpm', input: { runner: 'pnpm', args: ['--filter', 'foo', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `pnpm -C /path publish` (cwd short option) → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.pnpm', input: { runner: 'pnpm', args: ['-C', '/path', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `yarn --cwd /path publish` → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.yarn', input: { runner: 'yarn', args: ['--cwd', '/path', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `bun publish` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.bun', input: { runner: 'bun', args: ['publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  // The publish-family siblings (unpublish / deprecate) behind options.
+  it('PR#41 round 2: `npm --registry=http://x unpublish` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--registry=http://x', 'unpublish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npm --silent deprecate` → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--silent', 'deprecate'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  // Normal (local) package commands must NOT be deployment (the fix is
+  // surgical — it catches the publication, not the local dev workflow).
+  it('PR#41 round 2: `npm test` → constrained (NOT deployment-deny)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['test'] } }));
+    expect(d.decision).toBe('constrained');
+  });
+
+  it('PR#41 round 2: `npm --silent test` → constrained (boolean option skipped, NOT deployment-deny)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--silent', 'test'] } }));
+    expect(d.decision).toBe('constrained');
+  });
+
+  it('PR#41 round 2: `npm --registry=http://x test` → constrained (the architect\'s example with a LOCAL subcommand)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--registry=http://x', 'test'] } }));
+    expect(d.decision).toBe('constrained');
+  });
+
+  it('PR#41 round 2: `npm --workspace foo test` → constrained (value option skipped, local subcommand)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--workspace', 'foo', 'test'] } }));
+    expect(d.decision).toBe('constrained');
+  });
+
+  // Non-publish-capable runners (node/npx/tsx/vitest/jest/tsc) — `publish`
+  // as a positional is a script/argument name, NOT a registry publication →
+  // the runner gate returns false → NOT deployment (no false deny).
+  it('PR#41 round 2: `node publish.js` → NOT deployment (non-publish-capable runner)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.node', input: { runner: 'node', args: ['publish.js'] } }));
+    expect(d.decision).not.toBe('deny');
+    expect(d.reason).not.toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `node --inspect publish.js` (node flag + script named publish.js) → NOT deployment', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.node', input: { runner: 'node', args: ['--inspect', 'publish.js'] } }));
+    expect(d.decision).not.toBe('deny');
+    expect(d.reason).not.toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: `npx publish` (npx, not publish-capable) → NOT deployment', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npx', input: { runner: 'npx', args: ['publish'] } }));
+    expect(d.decision).not.toBe('deny');
+    expect(d.reason).not.toMatch(/platform-deployment-deny/);
+  });
+
+  // The print-and-exit helpers (no subcommand) are NOT deployment.
+  it('PR#41 round 2: `npm --version` → NOT deployment (print-and-exit, no subcommand)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--version'] } }));
+    expect(d.decision).not.toBe('deny');
+    expect(d.reason).not.toMatch(/platform-deployment-deny/);
+  });
+
+  // Ambiguity → fail-closed (treat as deployment so a crafted unknown
+  // option cannot smuggle a publication past the deployment rule).
+  it('PR#41 round 2: fail-closed on ambiguity — `npm -Z publish` (unknown short option) → deny (deployment-class)', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['-Z', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: fail-closed on ambiguity — `npm --future-flag publish` (unknown long option) → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--future-flag', 'publish'] } }));
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/platform-deployment-deny/);
+  });
+
+  it('PR#41 round 2: fail-closed on ambiguity — `npm --future-flag test` (unknown option before LOCAL subcommand) → deny', async () => {
+    // test is local, but the unknown option before it → fail-closed →
+    // deployment → deny. Over-restrictive but SAFE (the architect's
+    // principle: the policy authorization decision is the authority).
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--future-flag', 'test'] } }));
+    expect(d.decision).toBe('deny');
+  });
+
+  it('PR#41 round 2: fail-closed on ambiguity — `npm --future-opt=val test` (unknown = form) → deny', async () => {
+    const d = await engine.decide(req({ family: 'package', operation: 'package.npm', input: { runner: 'npm', args: ['--future-opt=val', 'test'] } }));
+    expect(d.decision).toBe('deny');
   });
 
   // ==========================================================================

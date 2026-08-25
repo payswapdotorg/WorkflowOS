@@ -30,6 +30,18 @@ import { REDACTED } from '@platform/tools/observation-redaction.js';
 // subcommand. Lives in @platform/tools (the correct one-way dependency
 // direction: Execution Policy → Tool Runtime).
 import { isGitDeploymentInvocation } from '@platform/tools/git-argv.js';
+// WORK-037 PR-#41 FIX (round 2): the CANONICAL package-command classifier —
+// the package-family twin of the git argv classifier. Package runners
+// (npm/pnpm/yarn/bun) permit global/config options BEFORE the effective
+// subcommand (e.g. `npm --registry=<url> publish`), so a positional
+// args[0] check could misclassify a REGISTRY publication as ordinary
+// `tool` activity → allow/constrained instead of the required deployment
+// deny. The classifier skips the runner's global options to find the
+// effective subcommand + fails-closed on ambiguity. ONE vocabulary shared
+// with the process executor (publish-rejection governance gate) — a
+// mismatch would let policy-allow what the executor rejects, or vice
+// versa. Lives in @platform/tools (the same one-way dependency direction).
+import { isPackageDeploymentInvocation } from '@platform/tools/package-argv.js';
 import type {
   AgentPolicyApproval,
   AgentPolicyApprovalStatus,
@@ -633,8 +645,25 @@ function tagInvocation(request: ToolPolicyRequest): InvocationTags {
     const args = Array.isArray(request.input?.args) ? (request.input.args as readonly string[]) : [];
     if (isGitDeploymentInvocation(args)) domains.add('deployment');
   } else if (family === 'package') {
-    const args = Array.isArray(request.input?.args) ? (request.input.args as readonly string[]) : [];
-    if (args[0] === 'publish') domains.add('deployment');
+    // WORK-037 PR-#41 FIX (round 2): classify the EFFECTIVE package
+    // subcommand via the CANONICAL classifier (shared with the executor).
+    // Package runners (npm/pnpm/yarn/bun) permit global/config options
+    // BEFORE the effective subcommand (`npm --registry=<url> publish`,
+    // `npm --silent publish`, `pnpm --filter <pkg> publish`,
+    // `pnpm -C /path publish`, `yarn --cwd /path publish`), so a positional
+    // args[0] check could classify a REGISTRY publication as ordinary
+    // `tool` activity → allow/constrained instead of the required
+    // deployment deny. The classifier skips the runner's global options to
+    // find the effective subcommand + fails-closed on ambiguity. This is
+    // the POLICY authorization decision (the authority); the sandbox's
+    // network isolation is valuable defense-in-depth but does NOT replace
+    // it. The runner gate (publish-capable only) lets non-publish-capable
+    // runners (node/npx/tsx/vitest/jest/tsc/…) run `publish` as a script
+    // arg without a false deployment-deny.
+    const input = request.input as { runner?: unknown; args?: unknown } | undefined;
+    const runner = typeof input?.runner === 'string' ? input.runner : '';
+    const args = Array.isArray(input?.args) ? (input!.args as readonly string[]) : [];
+    if (isPackageDeploymentInvocation(runner, args)) domains.add('deployment');
   }
 
   return { family, operation: request.operation, domains, host, secretBearing };
