@@ -949,10 +949,17 @@ export async function buildApp(
     // the linkage). The FsWorktreeMaterializer executes git-worktree-class
     // operations under the configured workspace root (no credentials; the
     // installation credential stays in /github's SecretStore).
+    // PR #39 review fix #1 — the AUTHORITATIVE BASELINE: base_revision is
+    // the repository's default-branch HEAD commit, resolved through the
+    // EXISTING /github adapter read (githubAdapter.getBranch — the same
+    // source the benchmark snapshot service uses for baseCommit; the
+    // workspace layer itself never holds GitHub credentials — the adapter
+    // is injected through the DI boundary).
     const agentWorkspaceRepository = new PgAgentWorkspaceRepository({
       db: database,
       executionRecordRepository,
       projectGitHubRepositoryLookup: projectGitHubRepositoryRepository!,
+      baselineResolver: githubAdapter,
     });
     const agentWorkspaceService = new DefaultAgentWorkspaceService({
       workspaceRepository: agentWorkspaceRepository,

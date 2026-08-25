@@ -2,25 +2,44 @@
  * WORK-035: FsWorktreeMaterializer — the real WorktreeMaterializer port
  * implementation: `git worktree`-class operations under a configured root.
  *
+ * PR #39 REVIEW FIX #2 — the EXPLICIT LAYOUT:
+ *   The repository/worktree layout is derived ONLY by
+ *   `resolveWorktreeLayout` (platform/workspace/worktree-layout.ts):
+ *
+ *     <root>/<owner>/<repository>                  → repositoryDir (the
+ *       git repository / main checkout the worktree attaches to — created
+ *       by the platform bootstrap; the materializer NEVER clones/fetches)
+ *     <root>/<owner>/<repository>/exec/<exec-id>   → worktreeDir
+ *
+ *   The persisted worktree-path token must be EXACTLY
+ *   `owner/repository/exec/<executionRecordId>` AND consistent with the
+ *   declared repository coordinates (validated on every call — persisted
+ *   tokens are never trusted blindly). The previous implementation derived
+ *   the repository directory by chaining three dirname() calls off the
+ *   worktree host path — which produced `<root>/<owner>` and ran git
+ *   against the WRONG directory. The derivation is now explicit + tested.
+ *
  * SECURITY BOUNDARY:
- *   * The worktree path token is sanitized (path-traversal-safe: only
- *     [A-Za-z0-9._-] and the single '/' separator we derive ourselves);
+ *   * The token is sanitized (path-traversal-safe) + structurally parsed;
  *     the resolved path can never escape the configured root.
- *   * The token is ALWAYS derived from the repository coordinates + the
+ *   * The token is ALWAYS derived from repository coordinates + the
  *     execution UUID (never caller-supplied free text).
- *   * No credentials (the git operations run against the local workspace
- *     root's repository mirrors/checkout mechanics — the /github
- *     installation credential is NOT used here; remote fetch/push stay
- *     /github's authority).
+ *   * No credentials (git runs against the local workspace root's
+ *     repository only; remote fetch/push stay /github's authority).
  *
  * IDEMPOTENCE (the crash-safety contract):
- *   * materialize: `git worktree add` at the deterministic path. If the
- *     worktree already exists (a crashed attempt created it), verify the
- *     branch: same branch → re-use (idempotent); different branch →
- *     remove + re-add (the stale worktree from the crashed attempt is
- *     replaced deterministically).
+ *   * materialize: `git worktree add -B <branch> <path> <base>` — `-B`
+ *     creates the branch OR deterministically resets it to the base
+ *     revision, so re-materialization after any crash lands on the SAME
+ *     path at the SAME base. If a worktree already exists at the path on
+ *     the SAME branch, it is re-used as-is; a different branch is replaced.
  *   * remove: `git worktree remove --force` (absent → success — cleanup
  *     idempotency).
+ *
+ * FAIL-CLOSED PRE-CHECKS (typed stages — the workspace records where):
+ *   * 'git-repository-missing'  — repositoryDir is not a git repository.
+ *   * 'base-revision-missing'   — the base revision is not a commit in
+ *     the repository (the workspace cannot be reproducible from it).
  *
  * This implementation shells out to the local `git` binary ONLY for
  * worktree-local operations under the root. It is NOT a GitHub authority
@@ -30,15 +49,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir } from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { Logger } from '@platform/logger.js';
-import type { WorktreeMaterializer } from './worktree-materializer.types.js';
+import type { WorktreeMaterializer, WorktreeMaterializerInput, WorktreeRemoveInput } from './worktree-materializer.types.js';
 import { WorktreeMaterializerError } from './worktree-materializer.types.js';
+import { parseWorktreeToken, resolveWorktreeLayout } from './worktree-layout.js';
 
 const execFileAsync = promisify(execFile);
 
-/** Path-traversal-safe token check (the token structure we derive). */
-function assertSafeToken(token: string): void {
+/** The host path a worktree-path token resolves to (within the root). */
+export function assertSafeToken(token: string): void {
   if (!/^[A-Za-z0-9._\-]+(\/[A-Za-z0-9._\-]+)*$/.test(token)) {
     throw new WorktreeMaterializerError(
       'token-invalid',
@@ -74,74 +94,78 @@ export class FsWorktreeMaterializer implements WorktreeMaterializer {
       });
   }
 
-  async materialize(input: {
-    readonly worktreePathToken: string;
-    readonly repositoryOwner: string;
-    readonly repositoryName: string;
-    readonly branch: string;
-    readonly baseRevision: string;
-  }): Promise<string> {
-    assertSafeToken(input.worktreePathToken);
-    const hostPath = join(this.root, input.worktreePathToken);
-
-    // The repo checkout directory (the worktree's main checkout lives at
-    // <root>/<owner>/<repo>/repo; worktrees under
-    // <root>/<owner>/<repo>/exec/<executionId>). The repo dir is created
-    // lazily; in a full deployment the mirror/clone step is part of the
-    // platform bootstrap (WORK-035 keeps the materializer's contract
-    // worktree-local).
-    const repoDir = dirname(dirname(dirname(hostPath)));
+  async materialize(input: WorktreeMaterializerInput): Promise<string> {
+    const layout = this.layoutFor(input.worktreePathToken, input.repositoryOwner, input.repositoryName);
 
     try {
-      // Idempotent materialization: if the worktree already exists at the
+      // Fail-closed pre-checks — the materializer MUST be operating in the
+      // intended repository with an existing base commit (reproducibility).
+      await this.assertGitRepository(layout.repositoryDir);
+      await this.assertBaseRevision(layout.repositoryDir, input.baseRevision);
+
+      // Idempotent materialization: if a worktree already exists at the
       // deterministic path (a crashed attempt), verify the branch + reuse
       // or replace.
-      const existing = await this.worktreeBranch(hostPath);
+      const existing = await this.worktreeBranch(layout.worktreeDir);
       if (existing !== null) {
         if (existing === input.branch) {
           this.deps.logger.info('workspace.worktree.reused', {
             worktreePathToken: input.worktreePathToken,
             branch: input.branch,
           });
-          return hostPath; // idempotent re-use
+          return layout.worktreeDir; // idempotent re-use
         }
         // A stale worktree from a crashed attempt on a different branch:
         // remove + re-add deterministically.
-        await this.git(['worktree', 'remove', '--force', hostPath], repoDir);
+        await this.git(['worktree', 'remove', '--force', layout.worktreeDir], layout.repositoryDir);
+      } else {
+        await mkdir(dirname(layout.worktreeDir), { recursive: true });
       }
-      await mkdir(dirname(hostPath), { recursive: true });
+      // `-B` (not `-b`): create the branch OR deterministically reset it to
+      // the base revision — a re-materialization after ANY crash lands on
+      // the same path at the same base (idempotent by construction). The
+      // checkout happens from the recorded base revision (no --no-checkout:
+      // the worktree is the environment the agent executes in).
       await this.git(
         [
           'worktree', 'add',
-          '--no-checkout', // the checkout happens with the recorded base
-          '-b', input.branch, hostPath,
+          '-B', input.branch, layout.worktreeDir,
           input.baseRevision,
         ],
-        repoDir,
+        layout.repositoryDir,
       );
       this.deps.logger.info('workspace.worktree.materialized', {
         worktreePathToken: input.worktreePathToken,
+        repositoryDir: layout.repositoryDir,
+        worktreeDir: layout.worktreeDir,
         branch: input.branch,
         baseRevision: input.baseRevision,
       });
-      return hostPath;
+      return layout.worktreeDir;
     } catch (err) {
       if (err instanceof WorktreeMaterializerError) throw err;
       throw new WorktreeMaterializerError(
         'git-worktree-add',
-        `git worktree add failed for ${input.worktreePathToken} (${input.branch} @ ${input.baseRevision}): ${(err as Error).message}`,
+        `git worktree add failed for ${input.worktreePathToken} (${input.branch} @ ${input.baseRevision}) in ${layout.repositoryDir}: ${(err as Error).message}`,
       );
     }
   }
 
-  async remove(input: { readonly worktreePathToken: string }): Promise<void> {
+  async remove(input: WorktreeRemoveInput): Promise<void> {
+    // The removal path resolves the SAME explicit layout from the persisted
+    // token (the token IS the durable identity being cleaned up).
     assertSafeToken(input.worktreePathToken);
-    const hostPath = join(this.root, input.worktreePathToken);
-    const repoDir = dirname(dirname(dirname(hostPath)));
+    let parsed;
     try {
-      const existing = await this.worktreeBranch(hostPath);
+      parsed = parseWorktreeToken(input.worktreePathToken);
+    } catch (err) {
+      throw new WorktreeMaterializerError('token-invalid', (err as Error).message);
+    }
+    const layout = resolveWorktreeLayout(this.root, parsed);
+    try {
+      const existing = await this.worktreeBranch(layout.worktreeDir);
       if (existing === null) return; // absent → success (idempotent)
-      await this.git(['worktree', 'remove', '--force', hostPath], repoDir);
+      await this.git(['worktree', 'remove', '--force', layout.worktreeDir], layout.repositoryDir);
       this.deps.logger.info('workspace.worktree.removed', {
         worktreePathToken: input.worktreePathToken,
       });
@@ -154,10 +178,59 @@ export class FsWorktreeMaterializer implements WorktreeMaterializer {
     }
   }
 
-  /** The branch checked out at the path, or null when absent. */
-  private async worktreeBranch(hostPath: string): Promise<string | null> {
+  // ------------------------------------------------------------------ private
+
+  /**
+   * Resolve the explicit layout for a persisted token + the declared
+   * repository coordinates, validating BOTH the token structure AND their
+   * consistency (a drifted/corrupted row must fail closed, never operate
+   * in the wrong repository).
+   */
+  private layoutFor(token: string, repositoryOwner: string, repositoryName: string) {
+    assertSafeToken(token);
+    let parsed;
     try {
-      const { stdout } = await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], hostPath);
+      parsed = parseWorktreeToken(token);
+    } catch (err) {
+      throw new WorktreeMaterializerError('token-invalid', (err as Error).message);
+    }
+    if (parsed.repositoryOwner !== repositoryOwner || parsed.repositoryName !== repositoryName) {
+      throw new WorktreeMaterializerError(
+        'token-invalid',
+        `worktree path token ${token} is inconsistent with the repository coordinates ${repositoryOwner}/${repositoryName} — the durable identity and the /github linkage disagree`,
+      );
+    }
+    return resolveWorktreeLayout(this.root, parsed);
+  }
+
+  /** The repository directory must be a git repository (fail-closed). */
+  private async assertGitRepository(repositoryDir: string): Promise<void> {
+    try {
+      await this.git(['rev-parse', '--git-dir'], repositoryDir);
+    } catch {
+      throw new WorktreeMaterializerError(
+        'git-repository-missing',
+        `the workspace repository directory ${repositoryDir} is not a git repository — the platform bootstrap/mirror step must create it before worktrees can attach`,
+      );
+    }
+  }
+
+  /** The base revision must exist as a commit (reproducibility, fail-closed). */
+  private async assertBaseRevision(repositoryDir: string, baseRevision: string): Promise<void> {
+    try {
+      await this.git(['cat-file', '-e', `${baseRevision}^{commit}`], repositoryDir);
+    } catch {
+      throw new WorktreeMaterializerError(
+        'base-revision-missing',
+        `the base revision ${baseRevision} is not a commit in ${repositoryDir} — the workspace cannot be materialized reproducibly from it`,
+      );
+    }
+  }
+
+  /** The branch checked out at the path, or null when absent. */
+  private async worktreeBranch(worktreeDir: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreeDir);
       return stdout.trim() || null;
     } catch {
       return null; // not a worktree / does not exist

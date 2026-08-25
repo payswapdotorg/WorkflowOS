@@ -99,7 +99,14 @@ export interface AgentWorkspace {
   readonly worktreePath: string;
   /** The branch checked out in the worktree. */
   readonly branch: string;
-  /** The immutable base revision the worktree was materialized from. */
+  /**
+   * The immutable base revision the worktree is materialized from: the
+   * repository's default-branch HEAD COMMIT SHA, resolved at workspace
+   * creation through the EXISTING /github authority (PR #39 review fix
+   * #1 — never prompt metadata, never a placeholder; fail-closed when
+   * unresolvable). The worktree branch is created AT this commit — the
+   * workspace is reproducible from a real Git revision.
+   */
   readonly baseRevision: string;
   readonly state: AgentWorkspaceState;
   /** CAS token (>= 0); incremented by every transition. */
@@ -118,6 +125,15 @@ export interface AgentWorkspace {
 export interface EnsureAgentWorkspaceInput {
   /** The LOGICAL execution identity (the TEXT executionId). */
   readonly executionId: string;
+  /**
+   * The branch the worktree will check out (the execution's
+   * implementation branch — existing execution branch semantics).
+   *
+   * The BASE REVISION is NOT caller-supplied: it is resolved
+   * authoritatively from the /github repository row's default-branch HEAD
+   * at creation time (fail-closed) — a caller can never fabricate a
+   * baseline.
+   */
   readonly branch: string;
 }
 
@@ -136,11 +152,15 @@ export interface AgentWorkspaceClaim {
 export interface AgentWorkspaceRepository {
   /**
    * Idempotent: the ONE workspace for the logical execution (resolves the
-   * record + the /github repository row; creates the row on first call
-   * with the deterministic worktree token). Typed errors:
+   * record + the /github repository row; resolves the AUTHORITATIVE
+   * baseline — the default-branch HEAD commit — on first creation;
+   * creates the row with the deterministic worktree token). Typed errors:
    *   'agent-workspace-not-found' — no ExecutionRecord for the executionId;
    *   'agent-workspace-no-repository' — the project has no linked /github
-   *     repository row (fail-closed: no repository = no workspace).
+   *     repository row (fail-closed: no repository = no workspace);
+   *   'agent-workspace-baseline-unresolvable' — the default-branch HEAD
+   *     commit could not be resolved through the /github authority (PR
+   *     #39 review fix #1: fail-closed — never a fabricated baseline).
    */
   ensureWorkspace(input: EnsureAgentWorkspaceInput): Promise<AgentWorkspace>;
 
@@ -178,6 +198,11 @@ export interface AgentWorkspaceRepository {
   /**
    * CAS → released (cleanup; from ready) / → cancelled (from any
    * non-terminal). Idempotent for terminal rows (returns the row).
+   *
+   * PR #39 review fix #3 — the cancel is LEASE-GATED: from 'preparing' it
+   * only wins when no live preparation claim is in flight (the lease is
+   * absent or expired) — cleanup can never cancel an ACTIVE preparation;
+   * a live lease makes the CAS lose (null) and the caller retries later.
    */
   release(id: string, expectedVersion: number): Promise<AgentWorkspace | null>;
   cancel(id: string, expectedVersion: number): Promise<AgentWorkspace | null>;
@@ -207,6 +232,7 @@ export const AGENT_WORKSPACE_ERROR_CODES = [
   'agent-workspace-no-repository',
   'agent-workspace-illegal-transition',
   'agent-workspace-materialization-failed',
+  'agent-workspace-baseline-unresolvable',
 ] as const;
 
 export type AgentWorkspaceErrorCode = (typeof AGENT_WORKSPACE_ERROR_CODES)[number];

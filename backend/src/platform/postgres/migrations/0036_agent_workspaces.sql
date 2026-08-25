@@ -96,8 +96,11 @@ CREATE TABLE IF NOT EXISTS wfos_agent_workspaces (
   -- The branch checked out in the worktree (the execution's
   -- implementation branch — existing execution branch semantics).
   branch TEXT NOT NULL,
-  -- The immutable base revision the worktree is materialized from
-  -- (the branch HEAD at preparation time — reproducibility).
+  -- The immutable base revision the worktree is materialized from: the
+  -- repository's default-branch HEAD COMMIT SHA, resolved through the
+  -- EXISTING /github authority at workspace creation (PR #39 review fix
+  -- #1 — never prompt metadata, never a placeholder; fail-closed when
+  -- unresolvable). Reproducibility from a REAL Git revision.
   base_revision TEXT NOT NULL,
   -- Strict state machine.
   state TEXT NOT NULL DEFAULT 'requested' CHECK (state IN (

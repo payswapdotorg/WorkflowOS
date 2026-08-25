@@ -8178,8 +8178,123 @@ describe('WORK-035 invariants — agent workspaces and git worktrees', () => {
     // ensureWorkspace is lookup-or-create (idempotent).
     const ensure = repoSrc.match(/async ensureWorkspace[\s\S]*?\n  \}/)![0];
     expect(ensure).toMatch(/getWorkspaceForExecution/);
-    // The deterministic worktree token.
-    expect(ensure).toMatch(/exec\/\$\{record\.id\}/);
+    // The deterministic worktree token — derived ONLY by the EXPLICIT
+    // platform layout module (PR #39 review fix #2: never inline string
+    // surgery at the call site; the layout cannot drift between the
+    // durable identity and the filesystem).
+    expect(repoSrc).toMatch(/from '@platform\/workspace\/worktree-layout\.js'/);
+    expect(ensure).toMatch(/buildWorktreePathToken\(\{[\s\S]*?executionRecordId: record\.id/);
+  });
+
+  it('PR #39 review fix #1 — the AUTHORITATIVE baseline: base_revision is the /github default-branch HEAD commit (fail-closed; never prompt metadata, never a placeholder)', () => {
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    const typesSrc = readFileSync(WS_TYPES, 'utf8');
+    // The typed fail-closed error exists + is in the frozen code list.
+    expect(typesSrc).toMatch(/'agent-workspace-baseline-unresolvable'/);
+    // The baseline resolves through the INJECTED /github authority read
+    // (the WorkspaceBaselineResolver port — the workspace layer itself
+    // never holds GitHub credentials).
+    expect(repoSrc).toMatch(/interface WorkspaceBaselineResolver/);
+    expect(repoSrc).toMatch(/baselineResolver: WorkspaceBaselineResolver/);
+    const resolve = repoSrc.match(/private async resolveBaseline[\s\S]*?\n  \}/)![0];
+    expect(resolve).toMatch(/getBranch\(/);
+    // A REAL commit SHA only (SHA-1 or SHA-256 object ids) — the recorded
+    // baseline must be a materializable Git revision.
+    expect(resolve).toMatch(/\^\[0-9a-f\]\{40\}\$\|\^\[0-9a-f\]\{64\}\$/);
+    expect(resolve).toMatch(/agent-workspace-baseline-unresolvable/);
+    // NEVER prompt metadata: the repository does not read promptDigest at
+    // all (the first implementation's placeholder is gone).
+    expect(repoSrc).not.toMatch(/promptDigest/);
+    // The ensure path resolves the baseline ONLY on first creation (an
+    // existing row returns its immutable recorded baseline — retries never
+    // re-resolve and never diverge).
+    const ensure = repoSrc.match(/async ensureWorkspace[\s\S]*?\n  \}/)![0];
+    expect(ensure.indexOf('getWorkspaceForExecution')).toBeLessThan(ensure.indexOf('resolveBaseline'));
+    // app.ts injects the EXISTING /github adapter (the same getBranch the
+    // benchmark snapshot service uses — no new authority, no credentials).
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc).toMatch(/baselineResolver: githubAdapter/);
+  });
+
+  it('PR #39 review fix #2 — the EXPLICIT worktree layout: one platform module derives repositoryDir/worktreeDir/token (path-traversal-safe; validated, never trusted)', () => {
+    const layoutPath = join(BACKEND_ROOT, 'src', 'platform', 'workspace', 'worktree-layout.ts');
+    expect(existsSync(layoutPath), 'worktree-layout.ts must exist').toBe(true);
+    const layoutSrc = readFileSync(layoutPath, 'utf8');
+    // The single source of truth: build (token) + resolve (layout) + parse
+    // (validated re-read of persisted tokens).
+    expect(layoutSrc).toMatch(/export function buildWorktreePathToken/);
+    expect(layoutSrc).toMatch(/export function resolveWorktreeLayout/);
+    expect(layoutSrc).toMatch(/export function parseWorktreeToken/);
+    // The exact durable shape: owner/repository/exec/<executionRecordId>.
+    expect(layoutSrc).toMatch(/exec\/\$\{input\.executionRecordId\}/);
+    // Path-segment safety on EVERY coordinate.
+    expect(layoutSrc).toContain("const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;");
+    expect(layoutSrc).toMatch(/includes\('\.\.'\)/);
+    const matSrc = strip(readFileSync(WS_MATERIALIZER, 'utf8'));
+    // The materializer derives its layout ONLY through the module — the
+    // dirname()-chaining bug (which resolved the WRONG repository
+    // directory) is structurally impossible now.
+    expect(matSrc).toMatch(/from '\.\/worktree-layout\.js'/);
+    expect(matSrc).toMatch(/resolveWorktreeLayout\(/);
+    expect(matSrc).toMatch(/parseWorktreeToken\(/);
+    expect(matSrc).not.toMatch(/dirname\(dirname\(/);
+    // The persisted token + the declared repository coordinates are
+    // cross-validated (a drifted row fails closed — never operate in the
+    // wrong repository).
+    expect(matSrc).toMatch(/token-invalid[\s\S]*?inconsistent with the repository coordinates/);
+    // Fail-closed pre-checks with TYPED stages (the workspace records WHERE).
+    expect(matSrc).toMatch(/'git-repository-missing'/);
+    expect(matSrc).toMatch(/'base-revision-missing'/);
+    // Deterministic re-materialization: `-B` (create OR reset the branch to
+    // the recorded base) — never `--no-checkout` + `-b` (which left the
+    // worktree unchecked-out and never reset a half-created branch).
+    expect(matSrc).toMatch(/'worktree', 'add',/);
+    expect(matSrc).toMatch(/'-B', input\.branch/);
+    expect(matSrc).not.toMatch(/--no-checkout/);
+  });
+
+  it('PR #39 review fix #3 — the acquisition/cleanup race: lease-gated cancel + CAS-loser reconciliation + removal-gated discharge (no orphaned worktree in ANY interleaving)', () => {
+    const repoSrc = strip(readFileSync(WS_REPO, 'utf8'));
+    const svcSrc = strip(readFileSync(WS_SERVICE, 'utf8'));
+    // (a) The LEASE-GATED cancel: from 'preparing' the cancel CAS wins ONLY
+    // when no live preparation claim is in flight — cleanup can never
+    // cancel an ACTIVE preparation out from under the materializer.
+    const cancel = repoSrc.match(/async cancel[\s\S]*?\n  \}/)![0];
+    expect(cancel).toMatch(/AND \(state <> 'preparing'/);
+    expect(cancel).toMatch(/OR prepare_lease_expires_at IS NULL/);
+    expect(cancel).toMatch(/OR prepare_lease_expires_at < NOW\(\)\)/);
+    // (b) The CAS-LOSER RECONCILIATION: a materializer that loses the
+    // markReady CAS after creating the worktree REMOVES it when the row can
+    // no longer become ready (terminal) — the loser never orphans what it
+    // created. A row still preparing belongs to a recovery re-claimer (the
+    // deterministic path is idempotently re-usable) — observed, not touched.
+    const acquireFn = svcSrc.match(/private async materializeAndReady[\s\S]*?\n  \}/)![0];
+    const loserBranch = acquireFn.match(/if \(!ready\) \{[\s\S]*?\n      \}/)![0];
+    const terminalIdx = loserBranch.indexOf('terminalAt !== null');
+    const loserRemoveIdx = loserBranch.indexOf('materializer.remove');
+    expect(terminalIdx).toBeGreaterThan(-1);
+    expect(loserRemoveIdx).toBeGreaterThan(terminalIdx);
+    // (c) The removal-gated discharge on the cancel path: cancel → remove →
+    // discharge (the "worktree created → DB write crashed" window heals).
+    const releaseFn = svcSrc.match(/async releaseWorkspace[\s\S]*?\n  \}/)![0];
+    const cancelIdx = releaseFn.indexOf('workspaceRepository.cancel(');
+    const cancelRemoveIdx = releaseFn.indexOf('materializer.remove', cancelIdx);
+    const cancelDischargeIdx = releaseFn.indexOf('dischargeReleaseObligation', cancelIdx);
+    expect(cancelIdx).toBeGreaterThan(-1);
+    expect(cancelRemoveIdx).toBeGreaterThan(cancelIdx);
+    expect(cancelDischargeIdx).toBeGreaterThan(cancelRemoveIdx);
+    // The terminal re-entry ALSO re-drives the removal BEFORE discharging
+    // (a crash between a terminal transition and its removal heals here —
+    // the obligation was still pending).
+    const terminalBranch = releaseFn.match(/if \(workspace\.terminalAt !== null\) \{[\s\S]*?\n    \}/)![0];
+    expect(terminalBranch.indexOf('materializer.remove')).toBeLessThan(
+      terminalBranch.indexOf('dischargeReleaseObligation'),
+    );
+    // A materialization failure best-effort-removes the PARTIAL worktree
+    // BEFORE recording the durable failure (a failed workspace must not
+    // orphan one) — never masking the primary error.
+    const failHandler = svcSrc.match(/if \(err instanceof WorktreeMaterializerError\) \{[\s\S]*?\n      \}/)![0];
+    expect(failHandler.indexOf('removeQuietly')).toBeLessThan(failHandler.indexOf('markFailed'));
   });
 
   it('the barrel exposes the provider-independent workspace contracts (implementations internal)', () => {
@@ -8234,5 +8349,25 @@ describe('WORK-035 invariants — agent workspaces and git worktrees', () => {
     expect(src).toMatch(/terminal immutability \+ illegal transitions/);
     expect(src).toMatch(/native \+ external execution reference the SAME workspace abstraction/);
     expect(src).toMatch(/no workflow\/verification\/review mutation/);
+    // PR #39 review fixes #1 + #3 — the new frozen scenarios.
+    expect(src).toMatch(/baseline UNRESOLVABLE/);
+    expect(src).toMatch(/baseline NOT-A-COMMIT/);
+    expect(src).toMatch(/LIVE preparation lease BLOCKS cancellation/);
+    expect(src).toMatch(/EXPIRED-lease interleaving/);
+    expect(src).toMatch(/isolated CAS-loser rule/);
+    expect(src).toMatch(/crash window reconciliation/);
+    // PR #39 review fix #2 — the materializer BEHAVIORAL matrix (real
+    // git, no execGit fake): the layout, `-B`, the fail-closed pre-checks,
+    // the cross-validation, the idempotent removal.
+    const matTestPath = join(BACKEND_ROOT, 'tests', 'unit', 'worktree-materializer.test.ts');
+    expect(existsSync(matTestPath), 'the real-git materializer test must exist').toBe(true);
+    const matTestSrc = readFileSync(matTestPath, 'utf8');
+    expect(matTestSrc).toMatch(/dirname-chaining bug stays fixed/);
+    expect(matTestSrc).toMatch(/RESETS a lingering branch ref/);
+    expect(matTestSrc).toMatch(/re-used AS-IS/);
+    expect(matTestSrc).toMatch(/git-repository-missing/);
+    expect(matTestSrc).toMatch(/base-revision-missing/);
+    expect(matTestSrc).toMatch(/inconsistent with the repository coordinates/);
+    expect(matTestSrc).toMatch(/path-traversal-safe/);
   });
 });

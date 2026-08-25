@@ -1,18 +1,36 @@
 /**
  * WORK-035: PgAgentWorkspaceRepository — the durable workspace boundary.
  *
+ * PR #39 REVIEW FIX #1 — the AUTHORITATIVE BASELINE:
+ *   base_revision is the repository's default-branch HEAD COMMIT SHA,
+ *   resolved at workspace creation through the EXISTING /github authority
+ *   (the ProjectGitHubRepository row + the injected branch-head resolver —
+ *   the same getBranch read the benchmark snapshot service uses). It is
+ *   NEVER derived from prompt metadata (promptDigest is the SHA-256 of the
+ *   implementation prompt, not a Git commit) and NEVER falls back to a
+ *   placeholder: when the baseline cannot be resolved the ensure
+ *   FAILS CLOSED (typed 'agent-workspace-baseline-unresolvable') — no
+ *   workspace row, no worktree. The recorded baseline is immutable
+ *   (migration 0036's identity guard) — the workspace is reproducible
+ *   from a REAL commit for its entire lifetime.
+ *
  * Mechanical properties (migration 0036's triggers are the backstop):
  *   * ensureWorkspace is lookup-or-create (UNIQUE(execution_id) — a retry
  *     after "record created → crash" returns the SAME row: no second
- *     workspace, no second worktree);
+ *     workspace, no second worktree); the baseline resolves ONLY on first
+ *     creation (existing rows return their immutable recorded baseline —
+ *     retries never re-resolve and never diverge);
  *   * the worktree token is DERIVED DETERMINISTICALLY from (repository,
- *     execution) — UNIQUE(worktree_path): two executions never share a
- *     worktree, one execution never gets two, and re-materialization after
- *     a crash lands on the same path;
+ *     execution) via the EXPLICIT layout module — UNIQUE(worktree_path):
+ *     two executions never share a worktree, one execution never gets
+ *     two, and re-materialization after a crash lands on the same path;
  *   * every state transition is a repository-level CAS (version + state
  *     predicate; lost CAS → null — no read-check-write ownership);
  *   * the preparing claim carries a lease (a crashed preparer is
- *     recoverable when it expires — reclaimStalePreparation);
+ *     recoverable when it expires — reclaimStalePreparation); CANCELLATION
+ *     is LEASE-GATED: a cancel from 'preparing' only wins when no live
+ *     preparation is in flight (PR #39 review fix #3 — cleanup can never
+ *     cancel an ACTIVE preparation out from under the materializer);
  *   * the repository linkage comes from the EXISTING /github authority
  *     row (fail-closed when the project has none).
  *
@@ -32,15 +50,39 @@ import {
   AgentWorkspaceError,
 } from './agent-workspace.types.js';
 import type { ExecutionRecordRepository } from './execution.types.js';
+import { buildWorktreePathToken } from '@platform/workspace/worktree-layout.js';
 
-/** Resolves the project's /github repository row (safe coordinates only). */
+/**
+ * Resolves the project's /github repository row (safe coordinates only:
+ * owner/name/defaultBranch/installationId — the fields the authoritative
+ * baseline resolution needs; never credentials).
+ */
 export interface ProjectGitHubRepositoryLookup {
   findByProject(projectId: string): Promise<{
     readonly id: string;
     readonly projectId: string;
     readonly owner: string;
     readonly repository: string;
+    readonly defaultBranch: string;
+    readonly installationId: string;
   } | null>;
+}
+
+/**
+ * The AUTHORITATIVE baseline-resolution contract (PR #39 review fix #1):
+ * resolves a branch's HEAD COMMIT SHA through the EXISTING /github
+ * adapter surface (a READ — structurally `GitHubAdapter.getBranch`; the
+ * same source the benchmark snapshot service uses for baseCommit). The
+ * workspace layer itself holds no GitHub credentials — the resolver is
+ * injected at the composition root with /github's adapter.
+ */
+export interface WorkspaceBaselineResolver {
+  getBranch(input: {
+    readonly owner: string;
+    readonly repository: string;
+    readonly branchName: string;
+    readonly installationId: string;
+  }): Promise<{ readonly sha: string }>;
 }
 
 export interface PgAgentWorkspaceRepositoryFullDeps {
@@ -49,6 +91,8 @@ export interface PgAgentWorkspaceRepositoryFullDeps {
   readonly executionRecordRepository: Pick<ExecutionRecordRepository, 'findByExecutionId'>;
   /** The EXISTING /github authority lookup (fail-closed when absent). */
   readonly projectGitHubRepositoryLookup: ProjectGitHubRepositoryLookup;
+  /** The authoritative branch-head resolver (the /github adapter read). */
+  readonly baselineResolver: WorkspaceBaselineResolver;
 }
 
 const WS_COLUMNS = `id, execution_id, project_id, project_github_repository_id,
@@ -110,12 +154,24 @@ export class PgAgentWorkspaceRepository implements AgentWorkspaceRepository {
         { projectId: record.projectId, executionId: input.executionId },
       );
     }
-    // Idempotent lookup-or-create.
+    // Idempotent lookup-or-create. An EXISTING row returns as-is — its
+    // recorded baseline is immutable (retries never re-resolve).
     const existing = await this.getWorkspaceForExecution(input.executionId);
     if (existing) return existing;
-    // The deterministic worktree token: (owner/repo, executionId) — stable
-    // across retries + crashes (UNIQUE: no uncontrolled second worktree).
-    const worktreeToken = `${repo.owner}/${repo.repository}/exec/${record.id}`;
+
+    // PR #39 review fix #1 — the AUTHORITATIVE baseline: the default-branch
+    // HEAD COMMIT SHA through the /github authority read. NEVER prompt
+    // metadata; NEVER a placeholder; fail-closed below.
+    const baseRevision = await this.resolveBaseline(repo, input.executionId);
+
+    // The deterministic worktree token — derived ONLY by the explicit
+    // layout module (stable across retries + crashes; UNIQUE: no
+    // uncontrolled second worktree).
+    const worktreeToken = buildWorktreePathToken({
+      repositoryOwner: repo.owner,
+      repositoryName: repo.repository,
+      executionRecordId: record.id,
+    });
     try {
       const res = await this.deps.db.query<WorkspaceRow>(
         `INSERT INTO wfos_agent_workspaces
@@ -126,7 +182,7 @@ export class PgAgentWorkspaceRepository implements AgentWorkspaceRepository {
         [
           record.id, record.projectId, repo.id,
           repo.owner, repo.repository, worktreeToken,
-          input.branch, record.promptDigest || 'unknown',
+          input.branch, baseRevision,
         ],
       );
       return mapWorkspace(res.rows[0]!);
@@ -263,6 +319,13 @@ export class PgAgentWorkspaceRepository implements AgentWorkspaceRepository {
         { workspaceId: id, from: current.state, to: 'cancelled' },
       );
     }
+    // PR #39 review fix #3 — the LEASE-GATED cancel: a cancellation from
+    // 'preparing' only wins when NO live preparation is in flight (no
+    // lease, or the lease already expired). While a materializer actively
+    // holds the claim, cleanup CANNOT cancel it out from under the
+    // in-flight `git worktree add` — the CAS loses and the release
+    // obligation stays pending for a later reconciliation (after the
+    // preparer reaches ready, or its lease expires).
     const res = await this.deps.db.query<WorkspaceRow>(
       `UPDATE wfos_agent_workspaces
           SET state = 'cancelled',
@@ -272,6 +335,9 @@ export class PgAgentWorkspaceRepository implements AgentWorkspaceRepository {
         WHERE id = $1
           AND version = $2
           AND terminal_at IS NULL
+          AND (state <> 'preparing'
+               OR prepare_lease_expires_at IS NULL
+               OR prepare_lease_expires_at < NOW())
         RETURNING ${WS_COLUMNS}`,
       [id, expectedVersion],
     );
@@ -307,6 +373,54 @@ export class PgAgentWorkspaceRepository implements AgentWorkspaceRepository {
       [workspaceId],
     );
     return (res.rowCount ?? 0) > 0;
+  }
+
+  // ------------------------------------------------------------------ private
+
+  /**
+   * The authoritative baseline (PR #39 review fix #1): the repository's
+   * default-branch HEAD commit SHA, resolved through the injected
+   * /github adapter read. FAIL-CLOSED: an unreachable repository, a
+   * missing branch, or a non-SHA response yields the typed
+   * 'agent-workspace-baseline-unresolvable' error — NO workspace row is
+   * created (never a fabricated or placeholder baseline).
+   */
+  private async resolveBaseline(
+    repo: {
+      readonly owner: string;
+      readonly repository: string;
+      readonly defaultBranch: string;
+      readonly installationId: string;
+    },
+    executionId: string,
+  ): Promise<string> {
+    let sha = '';
+    try {
+      const branch = await this.deps.baselineResolver.getBranch({
+        owner: repo.owner,
+        repository: repo.repository,
+        branchName: repo.defaultBranch,
+        installationId: repo.installationId,
+      });
+      sha = (branch?.sha ?? '').trim();
+    } catch (err) {
+      throw new AgentWorkspaceError(
+        'agent-workspace-baseline-unresolvable',
+        `agent-workspace-baseline-unresolvable: failed to resolve the default branch (${repo.defaultBranch}) HEAD for ${repo.owner}/${repo.repository} via the /github authority — ${err instanceof Error ? err.message : String(err)}`,
+        { executionId, owner: repo.owner, repository: repo.repository, branch: repo.defaultBranch },
+      );
+    }
+    // A real commit SHA only (GitHub SHA-1 or SHA-256 object ids) — the
+    // baseline must be a materializable Git revision, never prompt
+    // metadata or a placeholder.
+    if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(sha)) {
+      throw new AgentWorkspaceError(
+        'agent-workspace-baseline-unresolvable',
+        `agent-workspace-baseline-unresolvable: the /github authority returned a non-commit baseline for ${repo.owner}/${repo.repository}@${repo.defaultBranch} (${JSON.stringify(sha)}) — a workspace requires a real commit SHA`,
+        { executionId, owner: repo.owner, repository: repo.repository, branch: repo.defaultBranch, resolved: sha },
+      );
+    }
+    return sha;
   }
 }
 
