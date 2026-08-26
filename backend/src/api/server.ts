@@ -25,6 +25,10 @@ import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.rou
 import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
+import {
+  repositoryIntelligenceRoutes,
+  type RepositoryIntelligenceRouteDeps,
+} from './routes/repository-intelligence.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -92,6 +96,11 @@ export interface ServerDeps extends JobsRouteDeps {
   /** WORK-038: Existing Project Onboarding routes (connect + analyze a
    *  repository revision + the authorized confirmation path). Backend-authorized. */
   onboarding?: OnboardingRouteDeps;
+  /** WORK-039: Repository and Context Intelligence routes (build + retrieve +
+   *  inspect + stale-advisory for a revision-bound context index). Backend-
+   *  authorized. The orchestrator composes /projects + /github + /architecture
+   *  + /requirements + /work-items; the index is stored THROUGH /projects. */
+  repositoryIntelligence?: RepositoryIntelligenceRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -190,6 +199,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.onboarding) {
     await onboardingRoutes(app, deps.onboarding);
+  }
+  if (deps.auth && deps.repositoryIntelligence) {
+    await repositoryIntelligenceRoutes(app, deps.repositoryIntelligence);
   }
   return app;
 }

@@ -37,7 +37,10 @@ import type {
   ProjectRepositoryAssociationRepository,
   ProjectAccessRepository,
   ProjectBaselineRepository,
+  ProjectContextIndexRepository,
 } from '@modules/projects/index.js';
+// WORK-039: the repository-intelligence capability (the orchestrator type).
+import type { RepositoryIntelligenceService } from '@repository-intelligence/index.js';
 import type { OnboardingService } from '@onboarding/index.js';
 import {
   PgProjectRepository,
@@ -45,6 +48,17 @@ import {
   PgProjectRepositoryAssociationRepository,
 } from './modules/projects/internal/pg-project-repository.js';
 import { PgProjectBaselineRepository } from './modules/projects/internal/pg-project-baseline-repository.js';
+// WORK-039: Repository and Context Intelligence — the application/context-
+// intelligence capability that composes /projects + /github + /architecture
+// + /requirements + /work-items (+ optional /agents host inspection) to
+// produce ranked, explainable, provenance-preserving context selections
+// stored THROUGH the existing /projects authority (the context index is a
+// PROJECT artifact, like ProjectBaseline). NOT a module, NOT an authority;
+// owns NO tables.
+import { PgProjectContextIndexRepository } from './modules/projects/internal/pg-project-context-index-repository.js';
+import { DefaultRepositoryIntelligenceService } from './repository-intelligence/internal/default-repository-intelligence-service.js';
+import { DeterministicContextRanker } from './repository-intelligence/internal/deterministic-context-ranker.js';
+import { BaselineContextSource } from './repository-intelligence/internal/baseline-context-source.js';
 // WORK-038: Existing Project Onboarding — the application-layer orchestrator
 // that composes /github + /agents + /projects to produce evidence-backed
 // Project Baseline proposals. NOT a module, NOT an authority; owns NO tables.
@@ -437,6 +451,17 @@ export interface AppDeps {
   /** WORK-038: the /projects Project Baseline storage repository (the single
    *  project authority for baselines). Present when DB is configured. */
   projectBaselineRepository?: ProjectBaselineRepository;
+  /** WORK-039: the /projects context-index storage repository (the single
+   *  project authority for the revision-bound context index — a PROJECT
+   *  artifact, like ProjectBaseline). Present when DB is configured. */
+  projectContextIndexRepository?: ProjectContextIndexRepository;
+  /** WORK-039: Repository and Context Intelligence — the application/context-
+   *  intelligence orchestrator (NOT a module, NOT an authority). Composes
+   *  /projects + /github + /architecture + /requirements + /work-items
+   *  (+ optional /agents host inspection) to produce ranked, explainable,
+   *  provenance-preserving context selections stored through /projects.
+   *  Present when DB + the authority repos are configured. */
+  repositoryIntelligenceService?: RepositoryIntelligenceService;
 }
 
 export interface BuildAppOptions {
@@ -649,6 +674,12 @@ export async function buildApp(
   // block — exposed for the onboarding route surface).
   let onboardingServiceRef: OnboardingService | undefined;
   let projectBaselineRepositoryRef: ProjectBaselineRepository | undefined;
+  // WORK-039: the repository-intelligence orchestrator + the /projects
+  // context-index storage repository (declared at function scope; constructed
+  // inside the database block — exposed for the repository-intelligence route
+  // surface).
+  let projectContextIndexRepositoryRef: ProjectContextIndexRepository | undefined;
+  let repositoryIntelligenceServiceRef: RepositoryIntelligenceService | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
@@ -1164,6 +1195,32 @@ export async function buildApp(
     });
     onboardingServiceRef = onboardingService;
     projectBaselineRepositoryRef = projectBaselineRepository;
+    // WORK-039: Repository and Context Intelligence — the application/context-
+    // intelligence orchestrator. Composes /projects (context-index storage +
+    // the baseline the index is derived from) + /github (read-only repo
+    // structure + the current-HEAD advisory) + /architecture, /requirements,
+    // /work-items (read-only authority REFERENCES — the context items POINT
+    // at architecture versions / requirements / work items, they never
+    // become them). The orchestrator owns NO tables; the index is stored
+    // THROUGH /projects (the single project authority). The governed host
+    // inspector defaults to NoOp (no host inspection; '[]' toolInvocationIds;
+    // no fabrication). Provenance re-uses the WORK-038 vocabulary; the
+    // ranker NEVER promotes provenance. Repository revision is fundamental —
+    // an index is pinned to a concrete baseline_commit_sha, never swapped.
+    const projectContextIndexRepository = new PgProjectContextIndexRepository(database);
+    const contextSource = new BaselineContextSource(logger);
+    const contextRanker = new DeterministicContextRanker();
+    const repositoryIntelligenceService = new DefaultRepositoryIntelligenceService({
+      ranker: contextRanker,
+      source: contextSource,
+      // hostInspector defaults to NoOpHostInspector inside the service (no
+      // host inspection; '[]' toolInvocationIds; the no-fabrication
+      // invariant). A real GovernedHostInspector (Workspace +
+      // ToolRuntime.invoke) is a future slice.
+      logger,
+    });
+    projectContextIndexRepositoryRef = projectContextIndexRepository;
+    repositoryIntelligenceServiceRef = repositoryIntelligenceService;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1584,6 +1641,14 @@ export async function buildApp(
       // evidence-backed Project Baseline proposals stored through /projects.
       onboardingService: onboardingServiceRef,
       projectBaselineRepository: projectBaselineRepositoryRef,
+      // WORK-039: Repository and Context Intelligence — the application/context-
+      // intelligence orchestrator + the /projects context-index storage
+      // repository (present when DB + the authority repos are configured).
+      // NOT an authority; composes /projects + /github + /architecture +
+      // /requirements + /work-items to produce ranked, explainable,
+      // provenance-preserving context selections stored through /projects.
+      projectContextIndexRepository: projectContextIndexRepositoryRef,
+      repositoryIntelligenceService: repositoryIntelligenceServiceRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +

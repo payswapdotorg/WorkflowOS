@@ -217,13 +217,31 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   }
 
   async getBranch(input: GetBranchInput): Promise<GetBranchResult> {
+    const baseSha = `fakesha${sha8(input.branchName)}`;
+    // WORK-039: when the SHA nonce is bumped (via advanceSha), prepend the
+    // nonce so subsequent getBranch calls return a DIFFERENT SHA (for the
+    // stale-detection + distinct-revisions tests). When nonce=0 (the default),
+    // the SHA is unchanged (backward compatible with every WORK-038 test).
+    const sha = this.shaNonce > 0 ? `${baseSha}-nonce${this.shaNonce}` : baseSha;
     return {
       owner: input.owner,
       repository: input.repository,
       branchName: input.branchName,
-      sha: `fakesha${sha8(input.branchName)}`,
+      sha,
       isDefault: input.branchName === 'main',
     };
+  }
+
+  /**
+   * WORK-039: bump the SHA nonce so subsequent getBranch calls return a
+   * different SHA. Used by the repository-intelligence stale-detection +
+   * distinct-revisions tests to simulate the repo HEAD advancing past the
+   * baseline's pinned commit. Default nonce=0 (backward compatible — the
+   * SHA matches the WORK-038 deterministic scheme).
+   */
+  private shaNonce = 0;
+  advanceSha(): void {
+    this.shaNonce += 1;
   }
 
   // --- WORK-038: repository content-read methods (in-memory content tree) ---

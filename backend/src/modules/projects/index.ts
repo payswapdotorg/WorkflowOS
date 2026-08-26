@@ -60,6 +60,40 @@ export {
   ProjectBaselineError,
   PROJECT_BASELINE_ERROR_CODES,
 } from './internal/project-baseline.types.js';
+// WORK-039: Repository and Context Intelligence — the revision-bound context
+// index + the explainable, provenance-preserving context-item layer. Like
+// ProjectBaseline, the context index is a PROJECT artifact stored THROUGH
+// the existing /projects authority (the single project authority). It is
+// NOT a second project/repo/architecture/requirements/workflow/verification/
+// review authority. The context-intelligence ORCHESTRATION (the ranker +
+// the retrieval service + the baseline-context source + the governed host
+// inspector) lives in the application-layer src/repository-intelligence/
+// capability (not a module, not an authority). Provenance re-uses the
+// WORK-038 vocabulary (observed/inferred/confirmed/proposed); the ranker
+// NEVER promotes provenance. Repository revision is fundamental — an index
+// is pinned to a concrete baseline_commit_sha, never silently swapped.
+export type {
+  ContextIndexState,
+  ContextIndexQueryKind,
+  ContextItemKind,
+  ContextItemSource,
+  ContextItemProvenance,
+  ProjectContextIndex,
+  ContextItem,
+  NewContextItem,
+  EnsureContextIndexInput,
+  EnsureContextIndexResult,
+  MarkContextIndexCompleteInput,
+  MarkContextIndexCompleteResult,
+  MarkContextIndexFailedInput,
+  MarkContextIndexStaleInput,
+  ProjectContextIndexRepository,
+  RepositoryIntelligenceErrorCode,
+} from './internal/project-context-index.types.js';
+export {
+  RepositoryIntelligenceError,
+  REPOSITORY_INTELLIGENCE_ERROR_CODES,
+} from './internal/project-context-index.types.js';
 
 /**
  * Public capabilities exposed by the /projects module to other modules.
