@@ -23,6 +23,10 @@ import type {
   CreateRepositoryResult,
   GetBranchInput,
   GetBranchResult,
+  GetFileContentInput,
+  GetFileContentResult,
+  ListDirInput,
+  ListDirResult,
 } from './project-github-repository.types.js';
 
 // --- Webhook event receipt ---
@@ -138,6 +142,36 @@ export interface GitHubAdapter {
    * detect whether a branch has moved since the last poll.
    */
   getBranch(input: GetBranchInput): Promise<GetBranchResult>;
+
+  /**
+   * Read a file's text content at a precise revision (WORK-038).
+   *
+   * Returns `null` when the path does not exist at that revision (a 404 from
+   * the GitHub getContent API). The returned `contentDigest` is sha256 of
+   * the content (reproducibility — same content, same digest).
+   *
+   * WORK-038: used by the existing-project-onboarding capability to produce
+   * evidence-backed OBSERVED observations (package.json fields, CI config,
+   * Dockerfile, etc.) at the immutable baseline commit SHA. The onboarding
+   * domain holds no GitHub credentials and no GitHub SDK — it consumes this
+   * method through the /github barrel, wrapped in a thin production
+   * `RepositoryContentPort` (src/onboarding/internal/github-content-port.ts).
+   *
+   * `ref` accepts a real Git commit SHA (the onboarding invariant — the
+   * baseline is pinned to an immutable SHA) OR a branch/tag name (for ad-hoc
+   * reads outside onboarding; the onboarding path always passes the resolved
+   * SHA). The GitHub getContent API accepts both forms.
+   */
+  getFileContent(input: GetFileContentInput): Promise<GetFileContentResult | null>;
+
+  /**
+   * List a directory's entries at a precise revision (WORK-038).
+   *
+   * Returns an empty `entries` array when the directory does not exist at
+   * that revision. Used by onboarding to enumerate candidate paths (e.g.
+   * `.github/workflows` for CI discovery) without reading each file.
+   */
+  listDir(input: ListDirInput): Promise<ListDirResult>;
 
   /**
    * Adapter readiness probe.

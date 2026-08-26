@@ -30,10 +30,18 @@
  *   - `createPullRequest({ head })` → `number: 1`, `headSha: 'fakesha' + head[0:8].padEnd(8,'0')`.
  *   - `getBranch({ branchName })` → same sha scheme as createBranch,
  *     `isDefault: branchName === 'main'`.
+ *   - `getFileContent({ owner, repository, ref, path })` → the content set
+ *     via `setFile(owner, repository, ref, path, content)` (sha256 digest);
+ *     `null` when no file was set for that exact key (the path "does not
+ *     exist at that revision"). Deterministic given the setup.
+ *   - `listDir({ owner, repository, ref, path })` → the entries set via
+ *     `setDir(owner, repository, ref, path, entries)`; `[]` when no dir was
+ *     set for that exact key. Deterministic given the setup.
  *   - `health()` → `'test-mode'`.
  *
- * No `Math.random`, no `Date.now` — fully deterministic. This file is private
- * to /github (PLAT-AC-02).
+ * No `Math.random`, no `Date.now` — fully deterministic (stateful content
+ * storage is deterministic given the same setup). This file is private to
+ * /github (PLAT-AC-02).
  */
 import type {
   GitHubAdapter,
@@ -50,7 +58,13 @@ import type {
   CreateRepositoryResult,
   GetBranchInput,
   GetBranchResult,
+  GetFileContentInput,
+  GetFileContentResult,
+  ListDirInput,
+  ListDirResult,
+  RepoDirEntry,
 } from './project-github-repository.types.js';
+import { createHash } from 'node:crypto';
 
 /**
  * Pads a string's first 8 characters with trailing '0' to exactly 8 chars.
@@ -62,6 +76,48 @@ function sha8(input: string): string {
 
 export class FakeGitHubAdapter implements GitHubAdapter {
   readonly name = 'github-fake';
+
+  // --- WORK-038: in-memory content tree for content-read tests ---
+  //
+  // Keyed by `${owner}/${repository}/${ref}/${path}` so the same (owner, repo,
+  // ref, path) tuple deterministically yields the same content/entries across
+  // calls. Setters are used by tests that exercise the production
+  // RepositoryContentPort wiring end-to-end (the port delegates to the
+  // GitHubAdapter; the fake provides the deterministic content the port
+  // reads through). No Math.random / Date.now — fully deterministic given
+  // the setup.
+  private files = new Map<string, string>();
+  private dirs = new Map<string, RepoDirEntry[]>();
+
+  /** sha256 hex of text (reproducibility — matches the production digest). */
+  private static digest(text: string): string {
+    return createHash('sha256').update(text, 'utf8').digest('hex');
+  }
+
+  /** Compose the content-tree key for a (owner, repo, ref, path) tuple. */
+  private static contentKey(owner: string, repository: string, ref: string, path: string): string {
+    return `${owner}/${repository}/${ref}/${path}`;
+  }
+
+  /**
+   * Set a file's content at a precise (owner, repo, ref, path) tuple. The
+   * content-read surfaces (`getFileContent`) return this content (sha256
+   * digest) until cleared. Used by tests that exercise the production
+   * RepositoryContentPort wiring against the fake adapter.
+   */
+  setFile(owner: string, repository: string, ref: string, path: string, content: string): this {
+    this.files.set(FakeGitHubAdapter.contentKey(owner, repository, ref, path), content);
+    return this;
+  }
+
+  /**
+   * Set a directory's entries at a precise (owner, repo, ref, path) tuple.
+   * The listDir surface returns these entries until cleared.
+   */
+  setDir(owner: string, repository: string, ref: string, path: string, entries: RepoDirEntry[]): this {
+    this.dirs.set(FakeGitHubAdapter.contentKey(owner, repository, ref, path), entries);
+    return this;
+  }
 
   // --- Existing GitHubAdapter methods (synthetic for tests) ---
 
@@ -167,6 +223,44 @@ export class FakeGitHubAdapter implements GitHubAdapter {
       branchName: input.branchName,
       sha: `fakesha${sha8(input.branchName)}`,
       isDefault: input.branchName === 'main',
+    };
+  }
+
+  // --- WORK-038: repository content-read methods (in-memory content tree) ---
+
+  async getFileContent(input: GetFileContentInput): Promise<GetFileContentResult | null> {
+    const key = FakeGitHubAdapter.contentKey(
+      input.owner,
+      input.repository,
+      input.ref,
+      input.path,
+    );
+    const content = this.files.get(key);
+    if (content === undefined) return null; // the path "does not exist at that revision"
+    return {
+      owner: input.owner,
+      repository: input.repository,
+      ref: input.ref,
+      path: input.path,
+      content,
+      contentDigest: FakeGitHubAdapter.digest(content),
+    };
+  }
+
+  async listDir(input: ListDirInput): Promise<ListDirResult> {
+    const key = FakeGitHubAdapter.contentKey(
+      input.owner,
+      input.repository,
+      input.ref,
+      input.path,
+    );
+    const entries = this.dirs.get(key) ?? [];
+    return {
+      owner: input.owner,
+      repository: input.repository,
+      ref: input.ref,
+      path: input.path,
+      entries,
     };
   }
 

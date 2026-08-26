@@ -123,6 +123,53 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     return res.rows[0] ? mapPolicy(res.rows[0]) : null;
   }
 
+  // =========================================================================
+  // PR #42 round-8 (the atomic mutation fence): every mutation that can
+  // change the EFFECTIVE policy resolution for a scope must acquire the
+  // SAME anchor row lock the persistence fence holds AND apply the actual
+  // INSERT / UPDATE / DELETE INSIDE THE SAME POSTGRESQL TRANSACTION. The
+  // round-7 mutation paths issued `SELECT ... FOR UPDATE` as a STANDALONE
+  // pool query (which auto-commits + releases the lock immediately) and
+  // then ran the actual `INSERT` / `UPDATE` / `DELETE` in a SEPARATE
+  // auto-commit transaction. So the lock was RELEASED BEFORE the mutation
+  // landed — the round-7 mutation-side `FOR UPDATE` was structurally a
+  // no-op for serialization (the round-7 fence still serialized correctly
+  // only because the fence-side step-3/4 row locks fenced the mutation
+  // indirectly; the mutation-side anchor lock did NOT fence anything).
+  //
+  // THE ROUND-8 FIX (implemented below): each of the four mutation paths
+  // wraps the anchor lock + the actual write in a SINGLE
+  // `db.transaction(async (tx) => { ... })` callback so the lock is held
+  // from the SELECT FOR UPDATE THROUGH the INSERT/UPDATE/DELETE COMMIT:
+  //
+  //   BEGIN
+  //     SELECT id FROM wfos_projects / wfos_organizations WHERE id = $1 FOR UPDATE
+  //     INSERT / UPDATE / DELETE wfos_agent_policies ...
+  //   COMMIT
+  //
+  // This makes the mutation-side a REAL fence (mirroring the persistence
+  // fence's atomicity): a concurrent persistence transaction (T1) that
+  // tries to acquire the SAME anchor lock while this mutation (T2) is
+  // in-flight BLOCKS on T2's lock until T2 commits. The serialization is
+  // now SYMMETRIC — either T1 commits first (T2 blocks on T1's lock → T2
+  // applies after — happens-before in serialization order) OR T2 commits
+  // first (T1 blocks on T2's lock → T1 acquires → T1's locked re-resolution
+  // sees T2's mutation → source/version mismatch → ROLLBACK →
+  // `fence-stale`). There is no third option where T1 sneaks between T2's
+  // lock release and T2's mutation commit (the round-7 hole the architect
+  // identified in commit `776cbc2`).
+  //
+  // The anchor is the `wfos_projects` (or `wfos_organizations`) row itself
+  // — the authoritative scope boundary that EXISTS for every valid scope
+  // and that every policy row references via FK. The FK-induced
+  // `FOR KEY SHARE` on the parent row, taken automatically by an INSERT,
+  // also conflicts with the fence's `FOR UPDATE` (so the INSERT alone would
+  // block) — but the explicit `FOR UPDATE` here (a) documents the
+  // invariant, (b) covers the DELETE path (which PostgreSQL does NOT
+  // auto-lock the parent for), and (c) survives a future schema change
+  // that drops or weakens the FK.
+  // =========================================================================
+
   async setProjectPolicy(input: {
     organizationId: string;
     projectId: string;
@@ -130,28 +177,71 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     userId: string;
   }): Promise<AgentPolicyResolution> {
     const json = JSON.stringify(input.document);
+    // PR #42 round-8: the anchor lock + the INSERT/ON CONFLICT UPDATE
+    // run in ONE transaction so the lock is held THROUGH the COMMIT —
+    // closing the round-7 hole where the standalone FOR UPDATE
+    // auto-committed + released the lock before the INSERT landed. A
+    // concurrent baseline persistence run (T1) that tries to acquire the
+    // SAME project anchor lock while this mutation (T2) is in-flight
+    // BLOCKS on T2's lock until T2 commits (then T1's locked
+    // re-resolution sees T2's mutation → mismatch → ROLLBACK →
+    // `fence-stale`). The reverse ordering (T1 holds the lock first → T2
+    // blocks) is the round-7 scenario E; this round-8 fix is the symmetric
+    // inverse (T2 holds the lock first → T1 blocks) — the persistence
+    // fence REJECTS rather than committing stale evidence.
+    //
     // ON CONFLICT on the partial unique index
     // (organization_id, project_id) WHERE scope='project'. The trigger
     // bumps policy_version on the UPDATE branch; INSERT sets it to 1.
-    const res = await this.deps.db.query<PolicyRow>(
-      `INSERT INTO wfos_agent_policies
-         (organization_id, project_id, scope, document, created_by)
-       VALUES ($1, $2, 'project', $3::jsonb, $4)
-       ON CONFLICT (organization_id, project_id) WHERE scope = 'project'
-       DO UPDATE SET document = EXCLUDED.document, created_by = EXCLUDED.created_by, updated_at = NOW()
-       RETURNING ${POLICY_COLUMNS}`,
-      [input.organizationId, input.projectId, json, input.userId],
-    );
-    return mapPolicy(res.rows[0]!);
+    return this.deps.db.transaction(async (tx) => {
+      await tx.query(
+        `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+        [input.projectId],
+      );
+      const res = await tx.query<PolicyRow>(
+        `INSERT INTO wfos_agent_policies
+           (organization_id, project_id, scope, document, created_by)
+         VALUES ($1, $2, 'project', $3::jsonb, $4)
+         ON CONFLICT (organization_id, project_id) WHERE scope = 'project'
+         DO UPDATE SET document = EXCLUDED.document, created_by = EXCLUDED.created_by, updated_at = NOW()
+         RETURNING ${POLICY_COLUMNS}`,
+        [input.organizationId, input.projectId, json, input.userId],
+      );
+      return mapPolicy(res.rows[0]!);
+    });
   }
 
   async clearProjectPolicy(organizationId: string, projectId: string): Promise<boolean> {
-    const res = await this.deps.db.query(
-      `DELETE FROM wfos_agent_policies
-        WHERE scope = 'project' AND organization_id = $1 AND project_id = $2`,
-      [organizationId, projectId],
-    );
-    return (res.rowCount ?? 0) > 0;
+    // PR #42 round-8: the anchor lock + the DELETE run in ONE transaction
+    // so the lock is held THROUGH the COMMIT. The DELETE itself does NOT
+    // auto-lock the parent (PostgreSQL's FK machinery locks the parent only
+    // on INSERT/UPDATE of the FK column) — the explicit FOR UPDATE is the
+    // ONLY thing that fences the DELETE against a concurrent persistence
+    // transaction. Without the round-8 atomic wrapper, the standalone
+    // FOR UPDATE auto-committed + released the lock BEFORE the DELETE
+    // landed, so the DELETE was unfenced (the round-7 hole — the DELETE
+    // could proceed concurrently with a persistence transaction that held
+    // no row lock on the deleted row at the moment the DELETE ran, only
+    // fencing the fence-side step-3 row lock indirectly).
+    //
+    // "clearProjectPolicy" (the architect's missing-row case 2 — the
+    // project policy is deleted and resolution falls back to organization)
+    // now serializes against the persistence fence: the fence either sees
+    // the project policy still present (commits under it) OR sees it gone
+    // (the re-resolution sees the org fallback → source differs from the
+    // snapshot's 'project' source → ROLLBACK → zero stale evidence).
+    return this.deps.db.transaction(async (tx) => {
+      await tx.query(
+        `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+        [projectId],
+      );
+      const res = await tx.query(
+        `DELETE FROM wfos_agent_policies
+          WHERE scope = 'project' AND organization_id = $1 AND project_id = $2`,
+        [organizationId, projectId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
   }
 
   async setOrganizationPolicy(input: {
@@ -160,24 +250,53 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     userId: string;
   }): Promise<AgentPolicyResolution> {
     const json = JSON.stringify(input.document);
-    const res = await this.deps.db.query<PolicyRow>(
-      `INSERT INTO wfos_agent_policies
-         (organization_id, project_id, scope, document, created_by)
-       VALUES ($1, NULL, 'organization', $2::jsonb, $3)
-       ON CONFLICT (organization_id) WHERE scope = 'organization'
-       DO UPDATE SET document = EXCLUDED.document, created_by = EXCLUDED.created_by, updated_at = NOW()
-       RETURNING ${POLICY_COLUMNS}`,
-      [input.organizationId, json, input.userId],
-    );
-    return mapPolicy(res.rows[0]!);
+    // PR #42 round-8: the org anchor lock + the INSERT/ON CONFLICT
+    // UPDATE run in ONE transaction so the lock is held THROUGH the
+    // COMMIT. Creating or replacing the org default policy can change the
+    // effective resolution for EVERY project in the org that lacks a
+    // project override — the round-8 atomic wrapper makes the mutation a
+    // REAL fence against any concurrent baseline persistence in the org
+    // (the round-7 standalone FOR UPDATE was a no-op: the lock released
+    // before the INSERT landed).
+    return this.deps.db.transaction(async (tx) => {
+      await tx.query(
+        `SELECT id FROM wfos_organizations WHERE id = $1 FOR UPDATE`,
+        [input.organizationId],
+      );
+      const res = await tx.query<PolicyRow>(
+        `INSERT INTO wfos_agent_policies
+           (organization_id, project_id, scope, document, created_by)
+         VALUES ($1, NULL, 'organization', $2::jsonb, $3)
+         ON CONFLICT (organization_id) WHERE scope = 'organization'
+         DO UPDATE SET document = EXCLUDED.document, created_by = EXCLUDED.created_by, updated_at = NOW()
+         RETURNING ${POLICY_COLUMNS}`,
+        [input.organizationId, json, input.userId],
+      );
+      return mapPolicy(res.rows[0]!);
+    });
   }
 
   async clearOrganizationPolicy(organizationId: string): Promise<boolean> {
-    const res = await this.deps.db.query(
-      `DELETE FROM wfos_agent_policies WHERE scope = 'organization' AND organization_id = $1`,
-      [organizationId],
-    );
-    return (res.rowCount ?? 0) > 0;
+    // PR #42 round-8: the org anchor lock + the DELETE run in ONE
+    // transaction so the lock is held THROUGH the COMMIT. Clearing the
+    // org default changes the effective resolution for every project in
+    // the org that lacks a project override (falls back to
+    // platform-default). The DELETE does NOT auto-lock the org parent
+    // (no FK column is being mutated on the parent), so the explicit
+    // FOR UPDATE is the ONLY thing that fences the DELETE — and the
+    // round-8 atomic wrapper is what makes that fence REAL (the round-7
+    // standalone FOR UPDATE released the lock before the DELETE landed).
+    return this.deps.db.transaction(async (tx) => {
+      await tx.query(
+        `SELECT id FROM wfos_organizations WHERE id = $1 FOR UPDATE`,
+        [organizationId],
+      );
+      const res = await tx.query(
+        `DELETE FROM wfos_agent_policies WHERE scope = 'organization' AND organization_id = $1`,
+        [organizationId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
   }
 
   async getLatestApproval(executionId: string, subjectKey: string): Promise<AgentPolicyApproval | null> {

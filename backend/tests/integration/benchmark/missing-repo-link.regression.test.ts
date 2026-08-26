@@ -95,6 +95,10 @@ import type {
   CreateRepositoryResult,
   GetBranchInput,
   GetBranchResult,
+  GetFileContentInput,
+  GetFileContentResult,
+  ListDirInput,
+  ListDirResult,
 } from '../../../src/modules/github/internal/project-github-repository.types.js';
 
 /**
@@ -132,6 +136,15 @@ class SpyGitHubAdapter implements GitHubAdapter {
   }
   async getBranch(input: GetBranchInput): Promise<GetBranchResult> {
     return this.inner.getBranch(input);
+  }
+  // WORK-038 PR #42: delegate the content-read surface to the wrapped
+  // FakeGitHubAdapter (the spy doesn't intercept content reads — it only
+  // counts createBranch calls).
+  async getFileContent(input: GetFileContentInput): Promise<GetFileContentResult | null> {
+    return this.inner.getFileContent(input);
+  }
+  async listDir(input: ListDirInput): Promise<ListDirResult> {
+    return this.inner.listDir(input);
   }
   async health(): Promise<'connected' | 'not-configured' | 'error' | 'test-mode'> {
     return this.inner.health();

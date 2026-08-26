@@ -30,6 +30,7 @@ export default defineConfig({
       '@platform': fileURLToPath(new URL('./src/platform', import.meta.url)),
       '@api': fileURLToPath(new URL('./src/api', import.meta.url)),
       '@modules': fileURLToPath(new URL('./src/modules', import.meta.url)),
+      '@onboarding': fileURLToPath(new URL('./src/onboarding', import.meta.url)),
       '@root': fileURLToPath(new URL('./src', import.meta.url)),
       '@': fileURLToPath(new URL('../frontend/src', import.meta.url)),
     },

@@ -36,12 +36,34 @@ import type {
   ProjectRepository,
   ProjectRepositoryAssociationRepository,
   ProjectAccessRepository,
+  ProjectBaselineRepository,
 } from '@modules/projects/index.js';
+import type { OnboardingService } from '@onboarding/index.js';
 import {
   PgProjectRepository,
   PgProjectAccessRepository,
   PgProjectRepositoryAssociationRepository,
 } from './modules/projects/internal/pg-project-repository.js';
+import { PgProjectBaselineRepository } from './modules/projects/internal/pg-project-baseline-repository.js';
+// WORK-038: Existing Project Onboarding — the application-layer orchestrator
+// that composes /github + /agents + /projects to produce evidence-backed
+// Project Baseline proposals. NOT a module, NOT an authority; owns NO tables.
+import { DefaultOnboardingService } from './onboarding/internal/default-onboarding-service.js';
+import { GovernedFilesystemAnalyzer } from './onboarding/internal/governed-filesystem-analyzer.js';
+// WORK-038 PR #42 fix: the PRODUCTION RepositoryContentPort wiring. The
+// analyzer is constructed with this port so production onboarding actually
+// inspects repository files (delegates to the /github GitHubAdapter — the
+// only SDK caller; no GitHub SDK in the onboarding domain).
+import { GitHubRepositoryContentPort } from './onboarding/internal/github-content-port.js';
+// PR #42 round-3: the governed repository-read boundary — the distinct,
+// atomic decide+enforce+read+record operation for /github reads. The
+// analyzer calls governedRead() per candidate (NOT the policy gate or the
+// content port directly — no check-then-act window). The boundary reuses
+// the WORK-037 decideForProjectScope engine (no parallel engine) and is
+// scoped to the analyzer's candidate allowlist (the boundary refuses reads
+// outside the declared candidate set, even on an allow decision).
+import { DefaultGovernedRepositoryReadPolicy } from './onboarding/internal/governed-repository-read-policy.js';
+import { GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST } from './onboarding/internal/governed-filesystem-analyzer.js';
 import type {
   SpecificationRepository,
   SpecificationVersionRepository,
@@ -406,6 +428,15 @@ export interface AppDeps {
    *  DB + execution + benchmark + agent-provider-registry are configured.
    *  Advisory only — never bypasses ExecutionService.submit() (§34). */
   executionPolicyService?: ExecutionPolicyService;
+  /** WORK-038: Existing Project Onboarding — the application-layer
+   *  orchestrator (NOT a module, NOT an authority). Composes /github
+   *  (revision resolution) + /agents (the project-scoped ToolPolicyGate) +
+   *  /projects (baseline storage) to produce evidence-backed Project
+   *  Baseline proposals. Present when DB + agents + /github are configured. */
+  onboardingService?: OnboardingService;
+  /** WORK-038: the /projects Project Baseline storage repository (the single
+   *  project authority for baselines). Present when DB is configured. */
+  projectBaselineRepository?: ProjectBaselineRepository;
 }
 
 export interface BuildAppOptions {
@@ -613,6 +644,11 @@ export async function buildApp(
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
+  // WORK-038: the onboarding orchestrator + the /projects baseline storage
+  // repository (declared at function scope; constructed inside the agents
+  // block — exposed for the onboarding route surface).
+  let onboardingServiceRef: OnboardingService | undefined;
+  let projectBaselineRepositoryRef: ProjectBaselineRepository | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
@@ -1071,6 +1107,63 @@ export async function buildApp(
     });
     toolRuntimeRef = toolRuntime;
     agentPolicyEngineRef = agentPolicyEngine;
+    // WORK-038: Existing Project Onboarding — the application-layer
+    // orchestrator. Composes /github (revision resolution) + /agents (the
+    // project-scoped ToolPolicyGate via agentPolicyEngine.decideForProjectScope)
+    // + /projects (baseline storage). NOT a module, NOT an authority; owns
+    // NO tables. The baseline is stored THROUGH /projects (the single project
+    // authority). No GitHub SDK, no credentials, no DB access in the
+    // orchestrator domain — it delegates to the injected authorities.
+    const projectBaselineRepository = new PgProjectBaselineRepository(database);
+    // WORK-038 PR #42 fix: wire the PRODUCTION RepositoryContentPort. The
+    // analyzer delegates every candidate read to this port, which delegates
+    // to the /github GitHubAdapter (the only SDK caller). Without this
+    // wiring, production onboarding never inspected repository files (only
+    // metadata-derived observations); tests used an in-memory provider and
+    // so did not exercise the production wiring. The GitHubAdapter throws
+    // 'github-not-configured' until GITHUB_APP_* credentials are wired
+    // (same gate as WORK-026 provisioning); the boundary propagates the
+    // failure as a typed OnboardingAnalysisError so the orchestrator can
+    // markFailed the baseline (PR #42 round-2 Blocker B, preserved).
+    const onboardingContentPort = new GitHubRepositoryContentPort(githubAdapter);
+    // PR #42 round-3: wire the governed repository-read boundary. The
+    // analyzer calls governedRead() per candidate — the boundary atomically
+    // captures the WORK-037 decideForProjectScope decision, enforces it
+    // (deny/ask/path-not-allowed/operation-not-read -> no read), performs
+    // the read under the captured decision, applies the `constrained`
+    // enforcement (maxOutputBytes truncation), and returns the bound
+    // decision+effect+content. There is NO check-then-act window. The
+    // candidate allowlist (the SAME set the analyzer iterates) scopes the
+    // boundary — the analyzer cannot read an arbitrary path through it.
+    const onboardingGovernedReadPolicy = new DefaultGovernedRepositoryReadPolicy({
+      policyGate: agentPolicyEngine,
+      contentPort: onboardingContentPort,
+      candidateAllowlist: GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST,
+      logger,
+    });
+    const onboardingAnalyzer = new GovernedFilesystemAnalyzer({
+      governedReadPolicy: onboardingGovernedReadPolicy,
+      logger,
+    });
+    const onboardingService = new DefaultOnboardingService({
+      projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
+      githubAdapter,
+      analyzer: onboardingAnalyzer,
+      // PR #42 round-5 (the persistence-boundary fence): the same governed
+      // read policy the analyzer uses for per-read fencing is the boundary
+      // the orchestrator uses to capture the persistence-boundary snapshot.
+      // The orchestrator calls capturePersistenceSnapshot() AFTER analyze()
+      // returns + BEFORE the persistence transaction begins; the repository's
+      // persistBaselineWithPolicyFence method revalidates the snapshot
+      // INSIDE the DB transaction (pre-writes + post-writes + per-read
+      // verification) + rolls back if it is stale.
+      governedReadPolicy: onboardingGovernedReadPolicy,
+      logger,
+    });
+    onboardingServiceRef = onboardingService;
+    projectBaselineRepositoryRef = projectBaselineRepository;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1485,6 +1578,12 @@ export async function buildApp(
       // authorization — the engine decides what agents may do; the route
       // layer decides who may resolve approvals.
       agentPolicyEngine: agentPolicyEngineRef,
+      // WORK-038: Existing Project Onboarding — the application-layer
+      // orchestrator (present when DB + agents + /github configured). NOT an
+      // authority; composes /github + /agents + /projects to produce
+      // evidence-backed Project Baseline proposals stored through /projects.
+      onboardingService: onboardingServiceRef,
+      projectBaselineRepository: projectBaselineRepositoryRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +

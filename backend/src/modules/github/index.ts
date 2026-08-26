@@ -59,6 +59,15 @@ export type {
   CreatePullRequestResult,
   GetBranchInput,
   GetBranchResult,
+  // WORK-038: repository content-read contracts (existing-project onboarding).
+  // The /github authority is the natural home for content-read — the
+  // onboarding domain consumes these through the /github barrel, wrapped in a
+  // thin production RepositoryContentPort (no GitHub SDK in onboarding).
+  GetFileContentInput,
+  GetFileContentResult,
+  RepoDirEntry,
+  ListDirInput,
+  ListDirResult,
 } from './internal/project-github-repository.types.js';
 
 /**

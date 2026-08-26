@@ -782,6 +782,41 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'ProjectRepositoryAssociation',
       'AssociateRepositoryInput',
       'ProjectRepositoryAssociationRepository',
+      // WORK-038 Project Baseline types (the evidence-backed reconstruction of
+      // a repository WorkflowOS did not create — a PROJECT artifact stored
+      // through the existing /projects authority; provenance is the central
+      // invariant). These are project-domain contracts: the baseline is a
+      // project sub-artifact, NOT a second project/repo/architecture/
+      // requirements/workflow/verification/review authority.
+      'BaselineProvenance',
+      'BaselineState',
+      'BaselineAnalysisMode',
+      'BaselineObservationKind',
+      'BaselineEvidenceSource',
+      'ProjectBaseline',
+      'BaselineObservation',
+      'BaselineEvidence',
+      'NewBaselineObservation',
+      'NewBaselineEvidence',
+      // PR #42 round-3: the governed repository-read boundary's enforcement
+      // record shape (lives in /projects — the evidence is a /projects
+      // artifact; the onboarding boundary consumes it through the barrel).
+      'RepositoryReadEnforcement',
+      // PR #42 round-5 (the persistence-boundary fence): the captured
+      // policy snapshot + the fenced persist operation's input/result
+      // (lives in /projects — the persistence authority; the onboarding
+      // orchestrator composes them through the barrel).
+      'PersistencePolicySnapshot',
+      'PersistencePolicySource',
+      'PersistBaselineInput',
+      'PersistBaselineResult',
+      'EnsureBaselineInput',
+      'ProjectBaselineRepository',
+      'ProjectBaselineErrorCode',
+      // WORK-038: the baseline typed error (the sanctioned
+      // discriminated-error-class exception — see PURE_DATA_CATALOG_EXPORTS).
+      'ProjectBaselineError',
+      'PROJECT_BASELINE_ERROR_CODES',
       // Module contract marker (every frozen module exports one).
       'projectsModule',
     ]);
@@ -849,6 +884,10 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'AGENT_POLICY_ERROR_CODES',           // @modules/agents — the stable code list
       'PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT', // @modules/agents — frozen pure-data default policy
       'AGENT_POLICY_DOMAINS',              // @modules/agents — frozen pure-data domain list
+      // WORK-038: the project-baseline typed error (the same sanctioned
+      // exception + reasoning) + the frozen pure-data error-code list.
+      'ProjectBaselineError',              // @modules/projects — the typed domain error
+      'PROJECT_BASELINE_ERROR_CODES',       // @modules/projects — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -9482,3 +9521,1089 @@ describe('WORK-037 invariants — Agent Policy and Permissions (the engine behin
     expect(execRegressionSrc).toMatch(/the fix does NOT over-restrict/);
   });
 });
+
+/**
+ * WORK-038 invariants — Existing Project Onboarding (the Project Baseline
+ * boundary + the onboarding application capability).
+ *
+ * The central correctness requirement: WorkflowOS must NEVER pretend
+ * inferred/reconstructed architecture was the historical authoritative
+ * architecture of the original project. Every reconstructed fact carries
+ * provenance (observed/inferred/confirmed/proposed); provenance is never
+ * collapsed into a confidence number; provenance is never silently promoted.
+ *
+ * Authority boundaries preserved:
+ *   /github       — the repository + exact-revision authority (NO GitHub SDK
+ *                   in the onboarding domain; the adapter is the only SDK caller)
+ *   /projects     — the Project Baseline STORAGE authority (the baseline is a
+ *                   project artifact; /projects remains the single project
+ *                   authority; onboarding owns NO tables)
+ *   /architecture — the architecture authority (onboarding NEVER auto-freezes;
+ *                    proposed architecture is a PROPOSED observation, never an
+ *                    ArchitectureVersion)
+ *   /workflows, /verification, /reviews — never mutated by onboarding
+ *
+ * The onboarding capability lives in src/onboarding/ — an APPLICATION-LAYER
+ * orchestrator (like src/execution-policy/ + src/benchmark/), NOT a frozen
+ * module and NOT an authority.
+ */
+describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline + onboarding capability)', () => {
+  const ONBOARDING_DIR = join(SRC_ROOT, 'onboarding');
+  const PROJECTS_BASELINE_REPO = join(MODULES_DIR, 'projects', 'internal', 'pg-project-baseline-repository.ts');
+  const MIGRATION_0038 = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0038_project_baselines.sql');
+  const ENGINE_PATH = join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts');
+
+  /** Recursively list every .ts file under a directory. */
+  function listTsFiles(dir: string): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        out.push(...listTsFiles(full));
+      } else if (entry.endsWith('.ts')) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('WORK-038 is NOT a frozen module — onboarding is an application capability, not a new authority', () => {
+    // The static check at PLAT-AC-01 enforces exactly 17 frozen modules. The
+    // onboarding capability must NOT add an 18th module under src/modules/.
+    // It lives under src/onboarding/ (an application-layer directory, like
+    // src/execution-policy/ and src/benchmark/).
+    expect(existsSync(join(MODULES_DIR, 'onboarding'))).toBe(false);
+    expect(existsSync(ONBOARDING_DIR)).toBe(true);
+  });
+
+  it('no second project authority — onboarding does NOT create projects (it stores baselines under existing /projects authority rows)', () => {
+    // The onboarding orchestrator + analyzer must not create Project rows.
+    // It reads the project (to resolve orgId) + stores baselines THROUGH
+    // /projects (the single project authority).
+    const files = [...listTsFiles(ONBOARDING_DIR), PROJECTS_BASELINE_REPO];
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      // The baseline repository must not expose a project-creation method.
+      // (It may reference ProjectRepository.findById — read-only — but must
+      // not call create/transitionState on the project.)
+      expect(
+        src,
+        `${relative(BACKEND_ROOT, f)} must not create/transition projects`,
+      ).not.toMatch(/projectRepository\.(create|transitionState|update)\s*\(/);
+    }
+  });
+
+  it('no second repository / GitHub authority — onboarding imports NO GitHub SDK + no /github internal/', () => {
+    // The onboarding domain holds no GitHub credentials and no GitHub SDK.
+    // It consumes the /github barrel (GitHubAdapter.getBranch +
+    // ProjectGitHubRepositoryRepository) — the adapter is the only SDK caller.
+    const files = listTsFiles(ONBOARDING_DIR);
+    expect(files.length, 'src/onboarding/ must contain implementation files').toBeGreaterThan(0);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import @octokit (GitHub SDK)`).not.toMatch(/from\s+['"]@octokit/);
+      expect(src, `${rel} must not import /github internal/`).not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+      // The onboarding barrel (index.ts) imports internal/ within its own
+      // module — that's allowed (it's not a cross-module internal/ import).
+    }
+  });
+
+  it('no second architecture authority — onboarding NEVER auto-freezes / never creates ArchitectureVersion rows', () => {
+    // Proposed architecture is a PROPOSED baseline observation, never an
+    // ArchitectureVersion. Onboarding never calls ArchitectureService
+    // mutation methods (freezeVersion / approveChangeAndCreateReplacement /
+    // ArchitectureVersionRepository.create). The /architecture authority is
+    // untouched.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /architecture internal/`).not.toMatch(/from\s+['"][^'"]*modules\/architecture\/internal/);
+      expect(src, `${rel} must not freeze architecture versions`).not.toMatch(/freezeVersion\s*\(/);
+      expect(src, `${rel} must not create architecture versions`).not.toMatch(/architectureVersionRepository\.create\s*\(/);
+      expect(src, `${rel} must not approve architecture change requests`).not.toMatch(/approveChangeAndCreateReplacement\s*\(/);
+    }
+  });
+
+  it('no second requirements authority — onboarding does NOT create Requirement/AcceptanceCriterion rows', () => {
+    // Inferred requirements are OBSERVATIONS (provenance=inferred), never
+    // authoritative requirements. The /requirements authority is untouched.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /requirements internal/`).not.toMatch(/from\s+['"][^'"]*modules\/requirements\/internal/);
+      expect(src, `${rel} must not create requirements`).not.toMatch(/requirementRepository\.create\s*\(/);
+      expect(src, `${rel} must not create acceptance criteria`).not.toMatch(/acceptanceCriterionRepository\.create\s*\(/);
+    }
+  });
+
+  it('no workflow / verification / review mutation — onboarding never mutates those authorities', () => {
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /workflows internal/`).not.toMatch(/from\s+['"][^'"]*modules\/workflows\/internal/);
+      expect(src, `${rel} must not import /verification internal/`).not.toMatch(/from\s+['"][^'"]*modules\/verification\/internal/);
+      expect(src, `${rel} must not import /reviews internal/`).not.toMatch(/from\s+['"][^'"]*modules\/reviews\/internal/);
+    }
+  });
+
+  it('no credentials — onboarding never imports a concrete secret store + never assigns token/password values', () => {
+    // The onboarding domain never handles credentials. Secret-shaped content
+    // is redacted by the platform observation-redaction util before persistence.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import EnvSecretStore`).not.toMatch(/EnvSecretStore/);
+      expect(src, `${rel} must not import the secret-store barrel`).not.toMatch(/from\s+['"]@platform\/secrets/);
+      expect(src, `${rel} must not import /auth internal/`).not.toMatch(/from\s+['"][^'"]*modules\/auth\/internal/);
+    }
+  });
+
+  it('no provider SDK leakage — onboarding domain imports no pg / ioredis / pglite', () => {
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import pg`).not.toMatch(/from\s+['"]pg['"]/);
+      expect(src, `${rel} must not import pglite`).not.toMatch(/from\s+['"]@electric-sql\/pglite/);
+      expect(src, `${rel} must not import ioredis`).not.toMatch(/from\s+['"]ioredis/);
+    }
+  });
+
+  it('no maintenance engine / no continuous scheduler — onboarding is baseline reconstruction, not continuous maintenance', () => {
+    // WORK-041 (maintenance/health) + WORK-040 (continuous planner) are
+    // STRICTLY OUT OF SCOPE. Onboarding produces a ONE-SHOT baseline; it does
+    // not schedule recurring scans or maintenance work items.
+    const files = listTsFiles(ONBOARDING_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not declare a cron/scheduler`).not.toMatch(/setInterval\s*\(|cron\s*\(/);
+      expect(src, `${rel} must not declare a maintenance engine`).not.toMatch(/MaintenanceEngine|HealthEngine/);
+    }
+  });
+
+  it('provenance required on every reconstructed fact — the migration CHECK enforces the four-value vocabulary', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // The observation provenance CHECK.
+    expect(sql).toMatch(/provenance TEXT NOT NULL CHECK \(provenance IN \(\s*'observed',\s*'inferred',\s*'confirmed',\s*'proposed'\s*\)/);
+    // The baseline state CHECK.
+    expect(sql).toMatch(/state TEXT NOT NULL DEFAULT 'analyzing' CHECK \(state IN \(\s*'analyzing',\s*'complete',\s*'failed'\s*\)\)/);
+    // The observation-kind CHECK enumerates the baseline-content categories.
+    expect(sql).toMatch(/kind TEXT NOT NULL CHECK \(kind IN/);
+  });
+
+  it('exact repository revision required — baseline_commit_sha is NOT NULL + immutable', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql).toMatch(/baseline_commit_sha TEXT NOT NULL/);
+    // The identity-immutable guard rejects re-targeting the commit SHA.
+    expect(sql).toMatch(/NEW\.baseline_commit_sha IS DISTINCT FROM OLD\.baseline_commit_sha/);
+    // Idempotency: UNIQUE(project, repo, exact commit).
+    expect(sql).toMatch(/UNIQUE \(project_id, project_github_repository_id, baseline_commit_sha\)/);
+  });
+
+  it('no silent provenance promotion — the observation-guard trigger enforces the authorized confirmation path', () => {
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // confirmed requires confirmed_by + confirmed_at (the authorized path).
+    expect(sql).toMatch(/provenance=confirmed requires confirmed_by \+ confirmed_at/);
+    // Non-confirmed observations must NOT carry confirmation metadata.
+    expect(sql).toMatch(/provenance=% must not carry confirmed_by\/confirmed_at/);
+    // Only inferred/proposed → confirmed is a legal promotion.
+    expect(sql).toMatch(/only inferred\/proposed -> confirmed via the authorized path is permitted/);
+    // The claim is immutable (a row is never rewritten under the same key).
+    expect(sql).toMatch(/observation kind\/claim\/digest is immutable/);
+  });
+
+  it('failed analysis cannot produce a false confirmed baseline — markFailed refuses when a confirmed observation exists', () => {
+    // The pg repository's markFailed refuses if any observation is confirmed
+    // (the "failed analysis cannot produce a false confirmed baseline"
+    // invariant). This is the service-level guard; the trigger is the backstop.
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(src).toMatch(/project-baseline-no-confirmed-on-failed/);
+    expect(src).toMatch(/provenance = 'confirmed'/);
+  });
+
+  it('the onboarding barrel is types-only — no concrete implementations exported', () => {
+    // Mirrors the frozen-module barrel rule (line ~880). The onboarding
+    // barrel exposes only type aliases + interface contracts; the concrete
+    // DefaultOnboardingService + GovernedFilesystemAnalyzer stay in internal/
+    // and are wired by app.ts.
+    const barrel = readFileSync(join(ONBOARDING_DIR, 'index.ts'), 'utf8');
+    // Value re-exports forbidden (only `export type` + the barrel's own type
+    // aliases). The barrel may re-export type aliases of internal classes
+    // (DefaultOnboardingService etc.) via `export type { ... }` — that is a
+    // TYPE-ONLY re-export, not a value export, so it's permitted.
+    const valueExportRe = /export\s+(?!type\b)\{([^}]+)\}\s+from\s+['"]/g;
+    const violations: string[] = [];
+    for (const m of barrel.matchAll(valueExportRe)) {
+      const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+      for (const n of names) {
+        violations.push(`src/onboarding/index.ts value-exports "${n}"`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('decideForProjectScope is ADDITIVE — the engine still implements decide() unchanged (the native execution path)', () => {
+    // The frozen ToolPolicyGate seam is UNCHANGED. The engine gains an
+    // additive project-scoped method for onboarding; the native decide()
+    // path (execution-scoped, with the durable ask→approval interaction) is
+    // preserved.
+    const engine = readFileSync(ENGINE_PATH, 'utf8');
+    expect(engine).toMatch(/async decide\(request: ToolPolicyRequest\)/);
+    expect(engine).toMatch(/async decideForProjectScope\(/);
+    // decide() still resolves scope by executionId (the native path).
+    expect(engine).toMatch(/resolveScope\(request\.executionId\)/);
+    // decide() still routes ask through resolveAsk (the durable approval path).
+    expect(engine).toMatch(/this\.resolveAsk\(scope, request, core\.tags, core\.match, core\.version, core\.document\)/);
+    // The shared core is extracted (no duplicated matcher — the architect's
+    // "no second engine" principle).
+    expect(engine).toMatch(/private async evaluateCore/);
+    // decideForProjectScope is NON-INTERACTIVE (no approval creation for ask).
+    expect(engine).toMatch(/onboarding is NON-INTERACTIVE/);
+  });
+
+  it('the analyzer NEVER produces confirmed observations — confirmation is the authorized human path only', () => {
+    // The "no silent promotion" invariant at the SOURCE: the analyzer can
+    // only emit observed/inferred/proposed. Only the /projects
+    // confirmObservation method (called by the authorized route) can produce
+    // confirmed. This is verified by asserting the analyzer source never
+    // emits provenance: 'confirmed'.
+    const analyzer = readFileSync(join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'), 'utf8');
+    expect(analyzer).not.toMatch(/provenance:\s*['"]confirmed['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]observed['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]inferred['"]/);
+    expect(analyzer).toMatch(/provenance:\s*['"]proposed['"]/);
+  });
+
+  it('tenant isolation — every baseline query is scoped by project_id (+ organization_id denormalized)', () => {
+    // The pg repository's read queries must scope by project_id (which is
+    // org-scoped via wfos_projects). No cross-tenant access (no "list all
+    // baselines" without a project filter).
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    // findById is permitted (it returns the row; the ROUTE checks
+    // baseline.projectId === projectId — verified in onboarding.route.ts).
+    // listForProject scopes by project_id.
+    expect(src).toMatch(/listForProject\(projectId: string\)/);
+    expect(src).toMatch(/WHERE project_id = \$1 ORDER BY created_at DESC/);
+  });
+
+  it('the route layer verifies ownership server-side — a baseline UUID is NOT an authorization credential', () => {
+    // onboarding.route.ts must check baseline.projectId === projectId for
+    // every baseline-scoped mutation/read (no UUID-as-credential).
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/baseline\.projectId !== projectId/);
+    expect(route).toMatch(/requireProjectAuthorization/);
+  });
+
+  // =========================================================================
+  // PR #42 review fixes (three blockers the architect identified).
+  // =========================================================================
+
+  it('PR #42 (Blocker 1): the GitHubAdapter interface declares getFileContent + listDir (content-read through /github)', () => {
+    // The /github authority is the natural home for content-read — the
+    // onboarding domain holds no GitHub SDK. The GitHubAdapter interface
+    // must declare getFileContent (returns null when the path does not exist
+    // at that revision) + listDir. The DTOs live in
+    // project-github-repository.types.ts and are exported through the
+    // /github barrel.
+    const githubTypes = readFileSync(
+      join(MODULES_DIR, 'github', 'internal', 'github.types.ts'),
+      'utf8',
+    );
+    expect(githubTypes).toMatch(/getFileContent\(input: GetFileContentInput\): Promise<GetFileContentResult \| null>/);
+    expect(githubTypes).toMatch(/listDir\(input: ListDirInput\): Promise<ListDirResult>/);
+    const dtoTypes = readFileSync(
+      join(MODULES_DIR, 'github', 'internal', 'project-github-repository.types.ts'),
+      'utf8',
+    );
+    expect(dtoTypes).toMatch(/export interface GetFileContentInput/);
+    expect(dtoTypes).toMatch(/export interface GetFileContentResult/);
+    expect(dtoTypes).toMatch(/export interface ListDirInput/);
+    expect(dtoTypes).toMatch(/export interface ListDirResult/);
+    expect(dtoTypes).toMatch(/export interface RepoDirEntry/);
+    // The /github barrel exports the new DTOs (the sanctioned surface).
+    const ghBarrel = readFileSync(join(MODULES_DIR, 'github', 'index.ts'), 'utf8');
+    expect(ghBarrel).toMatch(/GetFileContentInput/);
+    expect(ghBarrel).toMatch(/GetFileContentResult/);
+    expect(ghBarrel).toMatch(/ListDirInput/);
+    expect(ghBarrel).toMatch(/ListDirResult/);
+    expect(ghBarrel).toMatch(/RepoDirEntry/);
+  });
+
+  it('PR #42 (Blocker 1): a PRODUCTION RepositoryContentPort implementation exists + delegates to the /github GitHubAdapter (no GitHub SDK in onboarding)', () => {
+    // The PR #42 review identified that the production analyzer had NO
+    // RepositoryContentPort — onboarding never inspected repository files
+    // (only metadata-derived observations); tests used an in-memory
+    // provider. The fix: a production GitHubRepositoryContentPort that
+    // delegates to the /github GitHubAdapter (the only SDK caller). The
+    // onboarding domain imports ONLY the /github barrel (the GitHubAdapter
+    // TYPE) — never /github internal/, never @octokit, never provider SDKs.
+    const contentPortPath = join(ONBOARDING_DIR, 'internal', 'github-content-port.ts');
+    expect(existsSync(contentPortPath), 'src/onboarding/internal/github-content-port.ts must exist').toBe(true);
+    const src = readFileSync(contentPortPath, 'utf8');
+    expect(src, 'implements RepositoryContentPort').toMatch(/implements RepositoryContentPort/);
+    expect(src, 'delegates readFile to GitHubAdapter.getFileContent').toMatch(/githubAdapter\.getFileContent/);
+    expect(src, 'delegates listDir to GitHubAdapter.listDir').toMatch(/githubAdapter\.listDir/);
+    expect(src, 'imports the GitHubAdapter TYPE from the /github barrel').toMatch(/from\s+['"]@modules\/github\/index\.js['"]/);
+    // No GitHub SDK, no /github internal/, no provider SDKs, no credentials.
+    expect(src, 'must not import @octokit').not.toMatch(/from\s+['"]@octokit/);
+    expect(src, 'must not import /github internal/').not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+    expect(src, 'must not import pg').not.toMatch(/from\s+['"]pg['"]/);
+    expect(src, 'must not import pglite').not.toMatch(/from\s+['"]@electric-sql\/pglite/);
+    // The onboarding barrel re-exports the production port (type-only).
+    const barrel = readFileSync(join(ONBOARDING_DIR, 'index.ts'), 'utf8');
+    expect(barrel).toMatch(/GitHubRepositoryContentPort/);
+  });
+
+  it('PR #42 (Blocker 1): app.ts wires the production RepositoryContentPort into the GovernedFilesystemAnalyzer (production onboarding inspects files)', () => {
+    // The composition root MUST construct the GovernedFilesystemAnalyzer with
+    // a contentPort (the production GitHubRepositoryContentPort delegating to
+    // the /github GitHubAdapter). Without this wiring, production onboarding
+    // never inspected repository files — the analyzer's
+    // `if (allowed && this.deps.contentPort)` branch was never taken.
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc, 'imports GitHubRepositoryContentPort').toMatch(/GitHubRepositoryContentPort/);
+    expect(appSrc, 'constructs GitHubRepositoryContentPort').toMatch(/new GitHubRepositoryContentPort\(/);
+    expect(appSrc, 'passes contentPort to GovernedFilesystemAnalyzer').toMatch(/contentPort:\s*onboardingContentPort/);
+  });
+
+  it('PR #42 (Blocker 2): the observation DELETE trigger forbids direct DELETE (append-only historical evidence)', () => {
+    // The PR #42 review identified that the migration's DELETE trigger
+    // explicitly permitted deletion (`RETURN OLD`) despite describing
+    // observations as append-only historical evidence. The fix: the trigger
+    // refuses a direct DELETE when the parent baseline still exists; the
+    // ONLY legitimate removal path is the CASCADE from baseline deletion
+    // (which fires AFTER the parent row is gone — the PERFORM check returns
+    // NOT FOUND during a CASCADE, so the trigger allows it).
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql, 'the DELETE branch checks the parent baseline still exists').toMatch(/PERFORM 1 FROM wfos_project_baselines WHERE id = OLD\.baseline_id/);
+    expect(sql, 'the DELETE branch raises the append-only exception').toMatch(/project-baseline-observation-append-only/);
+    expect(sql, 'documents the only-legitimate-removal path (CASCADE)').toMatch(/CASCADE from baseline deletion/);
+    // The old permissive `RETURN OLD`-only DELETE branch must be GONE
+    // (replaced by the FOUND check + RAISE). The regex matches the OLD
+    // permissive pattern: a DELETE branch that returns OLD unconditionally
+    // without the FOUND guard. We assert the permissive pattern is absent by
+    // checking the DELETE branch is immediately followed by the PERFORM
+    // check (not a bare RETURN OLD).
+    expect(sql, 'no permissive DELETE branch (RETURN OLD without the FOUND guard)').not.toMatch(/TG_OP = 'DELETE' THEN\s+-- Observations are append-only historical evidence\. A terminal baseline's\s+-- observations are immutable/);
+  });
+
+  it('PR #42 (Blocker 2): the append-only DELETE guard permits the CASCADE from baseline deletion (the parent baseline is already gone)', () => {
+    // The trigger must ALLOW the CASCADE (when the parent baseline row is
+    // already gone). The PERFORM-FOUND check returns NOT FOUND during a
+    // CASCADE (the parent DELETE happened earlier in the same statement /
+    // transaction), so the trigger falls through to RETURN OLD. This is
+    // verified structurally: the RAISE is INSIDE `IF FOUND`, so a NOT-FOUND
+    // result skips the RAISE and reaches RETURN OLD.
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    // The RAISE is gated by `IF FOUND` (direct DELETE); a CASCADE (NOT
+    // FOUND) falls through to RETURN OLD.
+    expect(sql).toMatch(/IF FOUND THEN\s+RAISE EXCEPTION\s+'project-baseline-observation-append-only/);
+    expect(sql).toMatch(/RETURN OLD;/);
+  });
+
+  it('PR #42 (Blocker 3): confirmObservation checks the parent baseline state — a failed baseline NEVER carries a confirmed observation', () => {
+    // The PR #42 review identified that confirmObservation did not check
+    // the parent baseline state, allowing failed → confirmed. The invariant
+    // (migration 0038): "a failed baseline NEVER carries a confirmed
+    // observation (failed analysis cannot produce a false confirmed
+    // baseline)." markFailed enforces the symmetric side; confirmObservation
+    // must enforce THIS side — refuse when the parent baseline is failed.
+    const src = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    // The confirmObservation method must SELECT the parent baseline state
+    // BEFORE issuing the UPDATE.
+    expect(src, 'selects the parent baseline state before confirming').toMatch(/SELECT state FROM wfos_project_baselines WHERE id = \$1/);
+    expect(src, 'refuses to confirm a failed baseline').toMatch(/baselineState === 'failed'/);
+    expect(src, 'throws the sanctioned no-confirmed-on-failed error').toMatch(/project-baseline-no-confirmed-on-failed/);
+  });
+
+  it('PR #42 (Blocker 3): the route surfaces the no-confirmed-on-failed error as 409 (not 500)', () => {
+    // The confirm route must translate the repository's
+    // no-confirmed-on-failed error into a 409 (conflict) so the caller
+    // distinguishes the invariant violation from a server error.
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/msg\.includes\('no-confirmed-on-failed'\)/);
+    expect(route).toMatch(/reply\.code\(409\)\.send\(\{[^}]*error: 'no-confirmed-on-failed'/);
+  });
+
+  // =========================================================================
+  // PR #42 round-2 review (the two new blockers the architect identified on
+  // the 48c4612 diff). The previous three blockers are substantially
+  // addressed; round-2 closes two remaining correctness/architecture gaps.
+  // =========================================================================
+
+  it('PR #42 r2 (Blocker A): the analyzer does NOT manufacture toolInvocationId for /github-authority reads (no ToolRuntime invocation happened)', () => {
+    // The architect's PR #42 round-2 Blocker A: the production path is
+    //   Onboarding → GovernedFilesystemAnalyzer
+    //     → ToolPolicyGate.decideForProjectScope()
+    //     → GitHubRepositoryContentPort
+    //         → GitHubAdapter.getFileContent/listDir()
+    // The policy gate is consulted, but the actual repository read is
+    // performed directly by /github. There is NO ToolRuntime invocation,
+    // NO real tool claim, NO tool observation. The evidence row must NOT
+    // manufacture a tool_invocation_id for operations that never went
+    // through Tool Runtime. The policy_decision must NOT imply a host
+    // tool run occurred (the schema reserves policy_decision for "host
+    // tool run" audit trail — the /github read is NOT a host tool run).
+    //
+    // The analyzer source must:
+    //   * set toolInvocationId: null on every NewBaselineEvidence it produces;
+    //   * set policyDecision: null on every NewBaselineEvidence it produces;
+    //   * NOT persist the policy-gate invocationId (the stable decision key)
+    //     as the evidence row's tool_invocation_id (that was the
+    //     fabrication the architect identified).
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    // The evidence row's toolInvocationId is NULL (no ToolRuntime invocation).
+    expect(analyzer, 'evidence toolInvocationId is null (no ToolRuntime invocation)').toMatch(/toolInvocationId:\s*null/);
+    // The evidence row's policyDecision is NULL (no host tool run — the
+    // /github read path is not a ToolRuntime invocation).
+    expect(analyzer, 'evidence policyDecision is null (no host tool run)').toMatch(/policyDecision:\s*null/);
+    // The observation→evidence linkage uses the LOCATOR (the path), not a
+    // manufactured toolInvocationId. The orchestrator resolves locator→
+    // evidence id by the composite (source, locator) key.
+    expect(analyzer, 'observations reference evidence by locator').toMatch(/evidenceRef:\s*packageJsonEvidence\s*\?\s*\[packageJsonEvidence\.locator\]/);
+    expect(analyzer, 'ci observation references evidence by locator').toMatch(/evidenceRef:\s*ciEvidence\s*\?\s*\[ciEvidence\.locator\]/);
+    expect(analyzer, 'deployment observation references evidence by locator').toMatch(/evidenceRef:\s*dockerfileEvidence\s*\?\s*\[dockerfileEvidence\.locator\]/);
+    // The policy-gate invocationId (the stable decision key) is INTERNAL
+    // to the policy request — it is NOT persisted on the evidence row.
+    // The analyzer must NOT assign invocationId to ev.toolInvocationId.
+    expect(analyzer, 'must not assign the policy invocationId to evidence toolInvocationId').not.toMatch(/toolInvocationId:\s*invocationId/);
+  });
+
+  it('PR #42 r2 (Blocker A): the migration evidence UNIQUE constraint is (baseline_id, source, locator) — the honest idempotency key (NOT tool_invocation_id)', () => {
+    // The architect's PR #42 round-2 Blocker A: the previous UNIQUE
+    // (baseline_id, tool_invocation_id) could not deduplicate re-drives
+    // once tool_invocation_id became NULL for /github-authority reads
+    // (NULL != NULL in PostgreSQL UNIQUE). The honest composite key is
+    // (baseline_id, source, locator) — one evidence row per read locator
+    // per baseline. A re-drive upserts the same row, no duplicates.
+    const sql = readFileSync(MIGRATION_0038, 'utf8');
+    expect(sql, 'the evidence UNIQUE is on (baseline_id, source, locator)').toMatch(/UNIQUE \(baseline_id, source, locator\)/);
+    // The OLD (baseline_id, tool_invocation_id) constraint name must be
+    // GONE (replaced by the locator-based constraint).
+    expect(sql, 'the old (baseline_id, tool_invocation_id) UNIQUE is removed').not.toMatch(/UNIQUE \(baseline_id, tool_invocation_id\)/);
+    // The pg repository's appendEvidence uses the new composite key for
+    // ON CONFLICT + the re-fetch SELECT.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidence ON CONFLICT uses (baseline_id, source, locator)').toMatch(/ON CONFLICT \(baseline_id, source, locator\) DO NOTHING/);
+    expect(repo, 'appendEvidence re-fetch SELECT uses (source, locator)').toMatch(/WHERE baseline_id = \$1 AND source = \$2 AND locator = \$3/);
+  });
+
+  it('PR #42 r2 (Blocker A): the pg repository appendEvidence uses the honest composite key (no tool_invocation_id in ON CONFLICT)', () => {
+    // The pg repository's appendEvidence must NOT use tool_invocation_id
+    // as the ON CONFLICT key (that would fail when tool_invocation_id is
+    // NULL — NULL != NULL in PostgreSQL UNIQUE, so no conflict would be
+    // detected and a re-drive would duplicate evidence rows).
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'must NOT ON CONFLICT on tool_invocation_id').not.toMatch(/ON CONFLICT \(baseline_id, tool_invocation_id\)/);
+    expect(repo, 'must NOT SELECT evidence by tool_invocation_id alone').not.toMatch(/WHERE baseline_id = \$1 AND tool_invocation_id = \$2/);
+  });
+
+  it('PR #42 r2 (Blocker B): the governed repository-read boundary propagates infrastructure failures (no swallow-and-continue)', () => {
+    // The architect's PR #42 round-2 Blocker B: the analyzer's per-candidate
+    // try/catch around content reads swallowed infrastructure failures
+    // (GitHub unavailable, authentication failure, API failure, content
+    // retrieval infrastructure failure). That meant a production GitHub
+    // configuration failure could result in a COMPLETED Project Baseline
+    // containing effectively only repository metadata, rather than a
+    // failed/incomplete onboarding. False success for the central WORK-038
+    // objective: establishing a baseline FROM REPOSITORY EVIDENCE.
+    //
+    // PR #42 round-3 refactored the throw to the governed repository-read
+    // BOUNDARY (src/onboarding/internal/governed-repository-read-policy.ts) —
+    // the analyzer now calls governedRead() per candidate and propagates the
+    // boundary's typed OnboardingAnalysisError (no try/catch swallowing).
+    // The boundary is the honest home for the throw: it captures the decision
+    // + performs the read + propagates the infrastructure failure with the
+    // bound authorization (decision + policyVersion + ruleId) in the error
+    // context (forensic provenance travels with the failure even though no
+    // evidence row is persisted).
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    expect(boundary, 'the boundary throws OnboardingAnalysisError on content-read failure').toMatch(/throw new OnboardingAnalysisError\(/);
+    expect(boundary, 'uses the sanctioned repository-content-unavailable code').toMatch(/'repository-content-unavailable'/);
+    // The analyzer NO LONGER throws the typed error itself (the boundary
+    // does). The analyzer calls governedRead() per candidate and the boundary
+    // error propagates through the analyzer (no try/catch around the call).
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    expect(analyzer, 'the analyzer calls governedRead() per candidate').toMatch(/await this\.deps\.governedReadPolicy\.governedRead\(/);
+    // The OLD swallow-and-continue pattern (logger.warn +
+    // 'does NOT abort the baseline') is GONE from BOTH files.
+    expect(analyzer, 'analyzer must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
+    expect(boundary, 'boundary must NOT contain the old swallow-and-continue comment').not.toMatch(/does NOT abort the baseline/);
+  });
+
+  it('PR #42 r2 (Blocker B): the orchestrator catches OnboardingAnalysisError + markFailed with the repository-content-unavailable failure stage', () => {
+    // The orchestrator must catch the typed OnboardingAnalysisError and
+    // markFailed the baseline with failure_stage='repository-content-unavailable'
+    // (forensic provenance — the baseline did NOT reach 'complete' on a
+    // content-provider failure; the required repository analysis could not
+    // actually inspect the repository).
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'imports OnboardingAnalysisError').toMatch(/import\s+\{\s*OnboardingAnalysisError\s*\}\s+from\s+['"]\.\.\/onboarding\.types\.js['"]/);
+    expect(orchestrator, 'instanceof check for OnboardingAnalysisError').toMatch(/err instanceof OnboardingAnalysisError/);
+    expect(orchestrator, 'checks the err.code for repository-content-unavailable').toMatch(/err\.code === 'repository-content-unavailable'/);
+    expect(orchestrator, 'markFailed with the repository-content-unavailable failure stage').toMatch(/'repository-content-unavailable'/);
+  });
+
+  it('PR #42 r2 (Blocker B): the route surfaces repository-content-unavailable as 502 (bad gateway — the content provider is unavailable)', () => {
+    // The route must translate the orchestrator's
+    // repository-content-unavailable failure into a 502 (bad gateway —
+    // the content provider is unavailable) so the caller distinguishes
+    // infrastructure failure from a server error. The response surfaces
+    // the failure_stage + baselineState for the caller's forensic
+    // provenance.
+    const route = readFileSync(join(SRC_ROOT, 'api', 'routes', 'onboarding.route.ts'), 'utf8');
+    expect(route).toMatch(/msg\.includes\('repository-content-unavailable'\)/);
+    expect(route).toMatch(/reply\.code\(502\)\.send\(\{[^}]*error: 'repository-content-unavailable'/);
+    expect(route).toMatch(/failureStage: 'repository-content-unavailable'/);
+  });
+
+  it('PR #42 r2 (Blocker B): the typed OnboardingAnalysisError + sanctioned codes live in onboarding.types.ts (the discriminated-class pattern)', () => {
+    // The typed onboarding-analysis error class + the sanctioned failure-code
+    // list follow the WORK-035/036/037 discriminated-class pattern: a stable
+    // machine-readable code + structured context. The orchestrator + the
+    // route layer consume the typed error (no message-string parsing for the
+    // instanceof path; the route still uses message-string matching for
+    // backward compatibility with the existing 'no-repository-link' /
+    // 'revision-unresolvable' patterns).
+    const types = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(types).toMatch(/ONBOARDING_ANALYSIS_ERROR_CODES/);
+    expect(types).toMatch(/'repository-content-unavailable'/);
+    expect(types).toMatch(/class OnboardingAnalysisError extends Error/);
+    expect(types).toMatch(/readonly code: OnboardingAnalysisErrorCode/);
+    expect(types).toMatch(/readonly failingLocator: string \| null/);
+  });
+
+  // =========================================================================
+  // PR #42 round-3 review (the governed repository-read boundary made real).
+  // The architect's round-3 review identified the single remaining
+  // architectural blocker: the round-2 path was a check-then-act
+  // authorization window (PolicyGate.decideForProjectScope -> if allow/
+  // constrained -> GitHubAdapter.getFileContent) with NOTHING atomic tying
+  // the authorization decision to the actual read, and `constrained` having
+  // no concrete enforcement effect. Round-3 introduces a DISTINCT
+  // GovernedRepositoryReadPolicy boundary whose governedRead() atomically
+  // captures the decision, enforces it, performs the read under the captured
+  // decision, applies the `constrained` enforcement, and returns the bound
+  // decision+effect+content. The round-2 invariants (no fake
+  // toolInvocationId; infrastructure failure propagates; append-only
+  // observations; failed-baseline confirmation guard) are PRESERVED.
+  // =========================================================================
+
+  it('PR #42 r3: a DISTINCT GovernedRepositoryReadPolicy boundary exists for /github reads (the atomic governed-read operation)', () => {
+    // The architect's round-3 sanctioned alternative path: a clearly distinct
+    // RepositoryReadPolicy/authorization boundary for /github reads. The
+    // boundary file must exist + implement the boundary interface + reuse the
+    // WORK-037 decideForProjectScope engine (NO parallel engine).
+    const boundaryPath = join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts');
+    expect(existsSync(boundaryPath), 'src/onboarding/internal/governed-repository-read-policy.ts must exist').toBe(true);
+    const boundary = readFileSync(boundaryPath, 'utf8');
+    expect(boundary, 'implements the boundary interface').toMatch(/implements GovernedRepositoryReadPolicy/);
+    expect(boundary, 'exposes the atomic governedRead method').toMatch(/async governedRead\(/);
+    // The boundary REUSES the WORK-037 project-scoped gate (no parallel
+    // engine — same matcher, same document, same decision vocabulary).
+    expect(boundary, 'reuses the WORK-037 project-scoped gate (no parallel engine)').toMatch(/policyGate: ProjectScopedPolicyGate/);
+    // The boundary holds NO GitHub SDK + NO credentials (imports only the
+    // onboarding types + node:crypto + @platform/logger). The content port
+    // is the boundary's leaf dependency (the /github adapter is the only SDK
+    // caller, behind the port).
+    expect(boundary, 'imports no GitHub SDK').not.toMatch(/from '@octokit/);
+    expect(boundary, 'imports no /github internal/').not.toMatch(/from '@modules\/github\/internal/);
+  });
+
+  it('PR #42 r3: the analyzer calls governedRead() per candidate — NO direct policyGate.decide + contentPort.readFile (no check-then-act window)', () => {
+    // The architect's round-3 requirement: "make the policy decision and read
+    // operation a single authoritative operation boundary." The analyzer must
+    // NOT call the policy gate or the content port directly — it calls the
+    // boundary's governedRead() ONLY (the decision + the read are bound in
+    // ONE method). This eliminates the round-2 check-then-act window.
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    expect(analyzer, 'the analyzer depends on the governed-read boundary').toMatch(/governedReadPolicy: GovernedRepositoryReadPolicy/);
+    expect(analyzer, 'the analyzer calls governedRead() per candidate').toMatch(/await this\.deps\.governedReadPolicy\.governedRead\(/);
+    // The analyzer must NOT call the policy gate or the content port directly
+    // (those are now INSIDE the boundary — the analyzer has no check-then-act
+    // window).
+    expect(analyzer, 'the analyzer must NOT call the policy gate directly').not.toMatch(/this\.deps\.policyGate\.decideForProjectScope/);
+    expect(analyzer, 'the analyzer must NOT call the content port directly').not.toMatch(/this\.deps\.contentPort\.(readFile|listDir)/);
+  });
+
+  it('PR #42 r3: `constrained` has a CONCRETE enforcement effect — maxOutputBytes truncation + path-allowlist + read-only', () => {
+    // The architect's round-3 requirement: "define what `constrained` means
+    // for this direct-read operation." The boundary must implement CONCRETE
+    // enforcement (not just consult-and-proceed). The maxOutputBytes
+    // constraint must TRUNCATE the observed content + recompute the digest
+    // on the truncated content; the path-allowlist must REFUSE reads outside
+    // the candidate set; the boundary must be structurally read-only.
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    // maxOutputBytes truncation: the boundary slices the content + recomputes
+    // the digest on the truncated slice (the digest reflects what was
+    // ACTUALLY observed, not the pre-truncation content). Round-4 refactored
+    // the local to `snapshot.maxOutputBytes` (the snapshot's constraint); the
+    // regex matches either form (the round-3 `maxOutputBytes` local OR the
+    // round-4 `snapshot.maxOutputBytes`).
+    expect(boundary, 'the boundary applies maxOutputBytes truncation').toMatch(/maxOutputBytes/);
+    expect(boundary, 'the boundary truncates the content slice').toMatch(/\.slice\(0,\s*(\w+\.)?maxOutputBytes\)/);
+    expect(boundary, 'the boundary recomputes the digest on the truncated content').toMatch(/contentDigest:\s*sha256\(truncatedContent\)/);
+    // path-allowlist: the boundary refuses reads outside the candidate set.
+    expect(boundary, 'the boundary enforces the candidate allowlist').toMatch(/candidateAllowlist\.has\(request\.path\)/);
+    expect(boundary, 'the boundary refuses out-of-allowlist paths').toMatch(/not in the candidate allowlist/);
+    // read-only: the boundary refuses non-read/list operations.
+    expect(boundary, 'the boundary is structurally read-only').toMatch(/SUPPORTED_OPERATIONS/);
+    expect(boundary, 'the boundary refuses non-read operations').toMatch(/is not supported/);
+  });
+
+  it('PR #42 r4: the snapshot/fencing protocol — the boundary REVALIDATES the policy snapshot after the read + DISCARDS stale results (the architect\'s round-4 requirement)', () => {
+    // The architect's round-4 review identified that the round-3 boundary
+    // claimed atomicity but was still a check-then-act window with respect
+    // to POLICY CHANGES. The round-4 fix is an explicit snapshot/fencing
+    // protocol: capture → read → REVALIDATE → discard-if-stale. This test
+    // verifies the boundary source implements the fence (the revalidation
+    // call + the staleness check + the discard + the stale outcome).
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    // The fence: the boundary calls decideForProjectScope a SECOND time after
+    // the read (the revalidation). The comment marks the fence step.
+    expect(boundary, 'the boundary revalidates the snapshot after the read').toMatch(/REVALIDATE THE POLICY SNAPSHOT/);
+    expect(boundary, 'the boundary calls decideForProjectScope for revalidation').toMatch(/decideForProjectScope/);
+    // The staleness check: the boundary compares the snapshot version + rule +
+    // decision against the revalidation (the isSnapshotStale function).
+    expect(boundary, 'the boundary has the staleness check function').toMatch(/function isSnapshotStale/);
+    expect(boundary, 'the staleness check compares policyVersion').toMatch(/snapshot\.policyVersion\s*!==\s*revalidation\.policyVersion/);
+    expect(boundary, 'the staleness check compares ruleId (defense-in-depth)').toMatch(/snapshot\.ruleId\s*!==\s*revalidation\.ruleId/);
+    expect(boundary, 'the staleness check compares decision (defense-in-depth)').toMatch(/snapshot\.decision\.decision\s*!==\s*revalidation\.decision/);
+    // The discard: when stale, the boundary returns content=null +
+    // performed=false + stale=true (the stale outcome).
+    expect(boundary, 'the boundary logs the stale snapshot').toMatch(/repository-read\.policy-snapshot-stale/);
+    expect(boundary, 'the boundary has the stale outcome builder').toMatch(/staleOutcome/);
+    // The revalidation-failure fail-closed path (a revalidation failure must
+    // NOT become an implicit persist).
+    expect(boundary, 'the boundary logs revalidation failures').toMatch(/repository-read\.policy-snapshot-revalidation-failed/);
+    // The enforcement record type (defined in project-baseline.types.ts)
+    // carries the round-4 fencing fields.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'RepositoryReadEnforcement carries revalidated').toMatch(/readonly revalidated: boolean/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedPolicyVersion').toMatch(/readonly revalidatedPolicyVersion: number \| null/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedRuleId').toMatch(/readonly revalidatedRuleId: string \| null/);
+    expect(types, 'RepositoryReadEnforcement carries revalidatedDecision').toMatch(/readonly revalidatedDecision:/);
+    expect(types, 'RepositoryReadEnforcement carries stale').toMatch(/readonly stale: boolean/);
+    // The RepositoryReadGovernance type (defined in onboarding.types.ts)
+    // carries the top-level stale flag for easy analyzer access.
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'RepositoryReadGovernance carries stale').toMatch(/readonly stale: boolean/);
+  });
+
+  it('PR #42 r4: the analyzer SKIPS evidence/observation persistence for stale reads (zero evidence + zero observation for discarded reads)', () => {
+    // The architect's round-4 invariant: "a repository-read result is
+    // persisted only if the policy snapshot that authorized it is still
+    // current when the result is committed." The analyzer must SKIP the
+    // evidence row + observation derivation when the boundary returns a
+    // stale outcome (the read result was discarded by the fence).
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    expect(analyzer, 'the analyzer checks the stale flag').toMatch(/outcome\.governance\.stale/);
+    expect(analyzer, 'the analyzer skips (continue) on stale').toMatch(/if \(outcome\.governance\.stale\)\s*\{[^}]*continue/s);
+  });
+
+  it('PR #42 r4: the migration documents the round-4 fencing jsonb shape + a forensic revalidated index', () => {
+    // The round-4 migration documents the new jsonb fields (revalidated +
+    // revalidatedPolicyVersion + revalidatedRuleId + revalidatedDecision +
+    // stale) + adds a forensic index for "show me every read that was
+    // successfully revalidated current under policy version V."
+    const sql = readFileSync(
+      join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0040_project_baseline_repository_read_fencing.sql'),
+      'utf8',
+    );
+    expect(sql, 'the migration documents the revalidated field').toMatch(/revalidated/);
+    expect(sql, 'the migration documents the revalidatedPolicyVersion field').toMatch(/revalidatedPolicyVersion/);
+    expect(sql, 'the migration documents the revalidatedRuleId field').toMatch(/revalidatedRuleId/);
+    expect(sql, 'the migration documents the stale field').toMatch(/stale/);
+    expect(sql, 'the migration adds the revalidated forensic index').toMatch(/wfos_project_baseline_evidence_read_revalidated_idx/);
+  });
+
+  it('PR #42 r4: the pg repository mapper reads the round-4 fencing fields (with null/false defaults for older rows)', () => {
+    // The pg repository's mapEnforcement must read the round-4 fields
+    // (revalidated + revalidatedPolicyVersion + revalidatedRuleId +
+    // revalidatedDecision + stale) so they flow through the persistence
+    // layer. Older rows (persisted before round-4) default to null/false
+    // (honestly "this row was persisted before the fence existed").
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'mapEnforcement reads revalidated').toMatch(/revalidated:\s*v\.revalidated === true/);
+    expect(repo, 'mapEnforcement reads revalidatedPolicyVersion').toMatch(/revalidatedPolicyVersion/);
+    expect(repo, 'mapEnforcement reads revalidatedRuleId').toMatch(/revalidatedRuleId/);
+    expect(repo, 'mapEnforcement reads revalidatedDecision').toMatch(/revalidatedDecision/);
+    expect(repo, 'mapEnforcement reads stale').toMatch(/stale:\s*v\.stale === true/);
+  });
+
+  it('PR #42 r3: the migration records the actual decision + enforcement in their OWN columns (distinct from the Tool Runtime columns)', () => {
+    // The architect's round-3 requirement: "record the actual decision/effect
+    // without pretending it was a Tool Runtime invocation." The migration must
+    // add DISTINCT columns (repository_read_decision + repository_read_enforcement)
+    // — the round-2 columns (tool_invocation_id + policy_decision) stay NULL
+    // for /github reads (round-2 invariant preserved).
+    const sql = readFileSync(
+      join(SRC_ROOT, 'platform', 'postgres', 'migrations', '0039_project_baseline_repository_read_governance.sql'),
+      'utf8',
+    );
+    expect(sql, 'the migration adds repository_read_decision').toMatch(/ADD COLUMN IF NOT EXISTS repository_read_decision/);
+    expect(sql, 'the migration adds repository_read_enforcement').toMatch(/ADD COLUMN IF NOT EXISTS repository_read_enforcement/);
+    expect(sql, 'repository_read_decision CHECK is the decision vocabulary').toMatch(/repository_read_decision IN \('allow', 'constrained', 'deny', 'ask'\)/);
+    // The migration must NOT alter the round-2 tool_invocation_id /
+    // policy_decision columns (those stay NULL for /github reads — the
+    // round-2 invariants are preserved).
+    expect(sql, 'the migration does NOT drop tool_invocation_id').not.toMatch(/DROP COLUMN.*tool_invocation_id/);
+    expect(sql, 'the migration does NOT drop policy_decision').not.toMatch(/DROP COLUMN.*policy_decision/);
+  });
+
+  it('PR #42 r3: the evidence type + pg repository carry the new decision + enforcement columns (honest recording)', () => {
+    // The NewBaselineEvidence + BaselineEvidence types must carry the two
+    // new fields; the pg repository must INSERT + SELECT + map them.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'NewBaselineEvidence has repositoryReadDecision').toMatch(/readonly repositoryReadDecision:/);
+    expect(types, 'NewBaselineEvidence has repositoryReadEnforcement').toMatch(/readonly repositoryReadEnforcement:/);
+    expect(types, 'BaselineEvidence has repositoryReadDecision').toMatch(/readonly repositoryReadDecision:.*'allow' \| 'constrained' \| 'deny' \| 'ask' \| null/);
+    // The RepositoryReadEnforcement shape (the forensic record).
+    expect(types, 'RepositoryReadEnforcement.policyVersion').toMatch(/readonly policyVersion: number \| null/);
+    expect(types, 'RepositoryReadEnforcement.performed').toMatch(/readonly performed: boolean/);
+    expect(types, 'RepositoryReadEnforcement.truncated').toMatch(/readonly truncated: boolean/);
+    expect(types, 'RepositoryReadEnforcement.pathAllowed').toMatch(/readonly pathAllowed: boolean/);
+    // The pg repository INSERT + SELECT + map the new columns.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidence INSERTs repository_read_decision').toMatch(/repository_read_decision/);
+    expect(repo, 'appendEvidence INSERTs repository_read_enforcement').toMatch(/repository_read_enforcement/);
+    expect(repo, 'listEvidence SELECTs repository_read_decision').toMatch(/repository_read_decision, repository_read_enforcement/);
+    expect(repo, 'mapEvidence maps the new fields').toMatch(/repositoryReadDecision:/);
+  });
+
+  it('PR #42 r3: the analyzer records the ACTUAL decision + enforcement on the evidence row (round-2 honesty preserved + round-3 honesty added)', () => {
+    // The round-2 invariants (tool_invocation_id=NULL, policy_decision=NULL)
+    // are PRESERVED; the round-3 fix ADDS the honest recording of the actual
+    // decision + enforcement in their OWN columns.
+    const analyzer = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-filesystem-analyzer.ts'),
+      'utf8',
+    );
+    // Round-2 invariants PRESERVED.
+    expect(analyzer, 'toolInvocationId is NULL (no ToolRuntime invocation — round-2 preserved)').toMatch(/toolInvocationId:\s*null/);
+    expect(analyzer, 'policyDecision is NULL (no host tool run — round-2 preserved)').toMatch(/policyDecision:\s*null/);
+    // Round-3 honesty ADDED: the actual decision + enforcement are recorded
+    // in their OWN columns.
+    expect(analyzer, 'records the actual repository_read_decision').toMatch(/repositoryReadDecision:\s*g\.decision/);
+    expect(analyzer, 'records the repository_read_enforcement').toMatch(/repositoryReadEnforcement:\s*g\.enforcement/);
+  });
+
+  it('PR #42 r3: app.ts wires the governed-read boundary into the analyzer (production onboarding uses the atomic boundary, not the check-then-act path)', () => {
+    // The composition root must construct the DefaultGovernedRepositoryReadPolicy
+    // (reusing the agentPolicyEngine as the policy gate + the production
+    // GitHubRepositoryContentPort as the content port + the analyzer's
+    // candidate allowlist) and pass it to the GovernedFilesystemAnalyzer. The
+    // analyzer must NOT be constructed with contentPort + policyGate directly
+    // (that was the round-2 check-then-act path).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'imports DefaultGovernedRepositoryReadPolicy').toMatch(/import \{ DefaultGovernedRepositoryReadPolicy \}/);
+    expect(appSrc, 'imports the candidate allowlist').toMatch(/GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST/);
+    expect(appSrc, 'constructs the boundary with policyGate + contentPort + candidateAllowlist').toMatch(/new DefaultGovernedRepositoryReadPolicy\(/);
+    expect(appSrc, 'passes governedReadPolicy to the analyzer').toMatch(/governedReadPolicy:\s*onboardingGovernedReadPolicy/);
+    // The analyzer must NOT be constructed with the round-2 direct deps.
+    expect(appSrc, 'must NOT pass contentPort to the analyzer (round-2 check-then-act path)').not.toMatch(/new GovernedFilesystemAnalyzer\(\{[^}]*contentPort:/);
+    expect(appSrc, 'must NOT pass policyGate to the analyzer (round-2 check-then-act path)').not.toMatch(/new GovernedFilesystemAnalyzer\(\{[^}]*policyGate:/);
+  });
+
+  it('PR #42 r3: the WORK-037 engine surfaces policyVersion + ruleId + scopeSource on the project-scoped decision (additive — the frozen decide() seam is UNCHANGED)', () => {
+    // The architect's round-3 requirement: "prevent policy drift between
+    // decision and read" + "record the actual decision/effect." The
+    // governed-read boundary needs the policy version snapshot (drift
+    // detection) + the matched rule id (forensic provenance) AT DECISION
+    // TIME. The WORK-037 engine must surface these from decideForProjectScope
+    // (additive — the engine already computes them in evaluateCore; the frozen
+    // ToolPolicyGate.decide() seam is UNCHANGED). The decision type lives in
+    // /agents (the engine produces it; the dependency direction is
+    // onboarding → agents).
+    const engine = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts'),
+      'utf8',
+    );
+    expect(engine, 'decideForProjectScope returns ProjectScopedPolicyDecision').toMatch(/Promise<ProjectScopedPolicyDecision>/);
+    expect(engine, 'the engine surfaces policyVersion from evaluateCore').toMatch(/policyVersion:\s*core\.version/);
+    expect(engine, 'the engine surfaces ruleId from evaluateCore').toMatch(/ruleId:\s*core\.match\.rule\?\.id/);
+    expect(engine, 'the engine surfaces scopeSource from evaluateCore').toMatch(/scopeSource:\s*core\.resolutionSource/);
+    // The decision type lives in /agents (NOT /onboarding — the engine
+    // produces it; the dependency direction is onboarding → agents).
+    const policyTypes = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'agent-policy.types.ts'),
+      'utf8',
+    );
+    expect(policyTypes, 'ProjectScopedPolicyDecision is defined in /agents').toMatch(/export interface ProjectScopedPolicyDecision/);
+    // The onboarding types RE-IMPORT it (not define a duplicate — the
+    // dependency direction is onboarding → agents).
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'onboarding re-imports ProjectScopedPolicyDecision from /agents (no duplicate)').toMatch(/import type \{[^}]*ProjectScopedPolicyDecision[^}]*\} from '@modules\/agents\/index\.js'/);
+  });
+
+  // =========================================================================
+  // PR #42 round-5 invariants — the persistence-boundary fence (the double-
+  // CAS protocol that closes the persistence window the round-4 fence left
+  // open). The architect's round-5 review of commit `2a597ed` identified
+  // that the round-4 fence protects the READ window but does NOT protect
+  // the SUBSEQUENT PERSISTENCE window:
+  //
+  //   capture V7 -> read -> revalidate V7 (round-4 fence passes) ->
+  //   policy mutates V7 -> V8 -> appendEvidence(V7) -> markComplete
+  //
+  // The round-5 fix: the orchestrator captures a persistence-boundary
+  // snapshot AFTER analyze() returns + BEFORE the persistence transaction
+  // begins; the /projects repository's `persistBaselineWithPolicyFence`
+  // method wraps the writes in ONE DB transaction + performs a CAS on the
+  // policy version INSIDE the transaction (pre-writes revalidation + per-read
+  // snapshot verification + post-writes revalidation). If ANY check fails,
+  // the transaction is ROLLED BACK — zero stale evidence/observations are
+  // committed.
+  // =========================================================================
+
+  it('PR #42 r5: the boundary exposes capturePersistenceSnapshot (the orchestrator captures the persistence-boundary snapshot AFTER analyze() returns + BEFORE the persistence transaction begins)', () => {
+    // The architect's round-5 requirement: a "persistence-boundary CAS /
+    // transactional policy snapshot guard." The boundary must expose a
+    // SECOND method (capturePersistenceSnapshot) that the orchestrator calls
+    // after analyze() returns. The snapshot is the persistence fence's
+    // reference value.
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    expect(boundary, 'the boundary exposes capturePersistenceSnapshot').toMatch(/async capturePersistenceSnapshot\(/);
+    // The capture uses a synthetic 'persist-baseline' request (NOT a real
+    // read request — the fence uses ONLY the policyVersion + ruleId for
+    // drift detection; the decision is NOT enforced at the persistence
+    // boundary — the per-read fence already enforced it for each individual
+    // read).
+    expect(boundary, 'the capture uses a synthetic persist-baseline operation').toMatch(/operation:\s*'persist-baseline'/);
+    // The fail-closed path: if the gate throws on the capture call, the
+    // boundary returns a null snapshot (the persistence fence's revalidation
+    // will compare it against a fresh revalidation that also fails-closed —
+    // both null = no drift signal = stale=false, best-effort).
+    expect(boundary, 'the capture fails closed on a gate failure').toMatch(/persistence-snapshot-capture-failed/);
+    // The GovernedRepositoryReadPolicy INTERFACE (in onboarding.types.ts)
+    // declares the method.
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'the interface declares capturePersistenceSnapshot').toMatch(/capturePersistenceSnapshot\(/);
+  });
+
+  it('PR #42 r5: the /projects repository exposes persistBaselineWithPolicyFence (the transactional CAS guard)', () => {
+    // The architect's round-5 requirement: "persistence-boundary CAS /
+    // transactional policy snapshot guard." The /projects repository must
+    // expose a method that wraps the appendEvidence + upsertObservations +
+    // markComplete in ONE DB transaction + performs a CAS on the policy
+    // version INSIDE the transaction.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'the repository exposes persistBaselineWithPolicyFence').toMatch(/async persistBaselineWithPolicyFence\(/);
+    // The fence wraps the writes in a DB transaction (the throw-to-rollback
+    // pattern: any fence check failure throws a FenceStaleSignal which the
+    // outer catch translates to the typed result; the db.transaction()
+    // callback rolls back on the throw).
+    expect(repo, 'the fence uses db.transaction').toMatch(/this\.db\.transaction\(/);
+    expect(repo, 'the fence has the FenceStaleSignal sentinel').toMatch(/class FenceStaleSignal extends Error/);
+    // PR #42 round-7: the fence is the SCOPE-RESOLUTION fence. It locks the
+    // scope ANCHOR rows (wfos_projects + wfos_organizations) + the
+    // relevant policy rows (project + org, present OR absent) + RE-
+    // RESOLVES the effective policy INSIDE the transaction. The round-6
+    // fence locked ONLY the row represented by `snapshot.source`; the
+    // architect's round-7 review established that locking a single row
+    // does NOT fence policy RESOLUTION (a NEW project policy row can
+    // override the org default mid-flight without changing the locked org
+    // row). The round-7 fence serializes the ENTIRE scope-resolution
+    // decision — assert against the EFFECTIVE policy version/source, NOT
+    // merely the old policy row's version.
+    expect(repo, 'round-7: the fence locks the project scope anchor (wfos_projects) FOR UPDATE').toMatch(/SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the organization scope anchor (wfos_organizations) FOR UPDATE').toMatch(/SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the project-scope policy row FOR UPDATE').toMatch(/scope = 'project' AND organization_id = \$1 AND project_id = \$2[\s\S]*FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the organization-scope policy row FOR UPDATE').toMatch(/scope = 'organization' AND organization_id = \$1 AND project_id IS NULL[\s\S]*FOR UPDATE/);
+    // The fence RE-RESOLVES the effective policy from the locked rows
+    // (project-override → org-default → platform-default).
+    expect(repo, 'round-7: the fence RE-RESOLVES the effective policy (project → org → platform-default)').toMatch(/effectiveSource/);
+    // The fence VERIFY step compares (source, policyVersion) against the
+    // snapshot — NOT just version. The source comparison catches the
+    // missing-row cases (a row was CREATED or DELETED mid-flight, changing
+    // the effective resolution).
+    expect(repo, 'round-7: the fence compares the effective source against the snapshot source').toMatch(/effectiveSource !== input\.snapshot\.source/);
+    expect(repo, 'round-7: the fence compares the effective version against the snapshot version').toMatch(/input\.snapshot\.policyVersion !== effectiveVersion/);
+    // The fence protocol: LOCK the scope anchors + the relevant policy
+    // rows + RE-RESOLVE + VERIFY (round-7 scope-resolution fence) + per-
+    // read snapshot verification (Check B — retained from round-5). NO
+    // post-writes revalidation — the locks held since the LOCK step
+    // serialize against ANY concurrent mutation for the duration of the
+    // writes + commit.
+    expect(repo, 'round-7: the SCOPE-RESOLUTION fence step').toMatch(/SCOPE-RESOLUTION fence/);
+    expect(repo, 'Check B — per-read snapshot verification').toMatch(/PER-READ SNAPSHOT VERIFICATION/);
+    expect(repo, 'round-7: NO post-writes revalidation (the locks are the fence)').toMatch(/NO post-writes revalidation/);
+    // The willMutate test seam (for the real-PG concurrency regression).
+    expect(repo, 'round-7: the willMutate test seam').toMatch(/input\.willMutate/);
+    // The fence rejects (ROLLBACK) when ANY check fails. The reject
+    // messages reference the per-read verification (the architect's exact
+    // regression scenario).
+    expect(repo, 'Check B rejects on a per-read version mismatch').toMatch(/per-read snapshot.*does NOT match the persistence-boundary snapshot/s);
+    // The orchestrator logs the fence rejection (forensic audit) — the
+    // repository returns the typed result; the orchestrator's catch path
+    // emits the log + markFailed with the 'policy-snapshot-stale-at-
+    // persistence' / 'policy-snapshot-revalidation-failed' failure stage.
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'the orchestrator logs the fence rejection').toMatch(/persistence-fence-rejected/);
+    // The fail-closed path: a revalidation FAILURE (the gate throws on the
+    // revalidation call) is treated as STALE — the transaction is ROLLED BACK
+    // (a revalidation failure must NOT become an implicit persist).
+    expect(repo, 'a revalidation failure fails closed').toMatch(/fence-revalidation-failed/);
+    // The repository interface (project-baseline.types.ts) declares the
+    // method + the input/result types.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'the interface declares persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
+    expect(types, 'PersistencePolicySnapshot type is defined').toMatch(/export interface PersistencePolicySnapshot/);
+    expect(types, 'PersistBaselineInput type is defined').toMatch(/export interface PersistBaselineInput/);
+    expect(types, 'PersistBaselineResult type is defined').toMatch(/export type PersistBaselineResult/);
+    expect(types, 'PersistBaselineResult has the persisted kind').toMatch(/kind: 'persisted'/);
+    expect(types, 'PersistBaselineResult has the cas-lost kind').toMatch(/kind: 'cas-lost'/);
+    expect(types, 'PersistBaselineResult has the fence-stale kind').toMatch(/kind: 'fence-stale'/);
+    expect(types, 'PersistBaselineResult has the fence-revalidation-failed kind').toMatch(/kind: 'fence-revalidation-failed'/);
+    // PR #42 round-7 type-level invariants: the snapshot carries `source`
+    // (which effective scope the gate surfaced) + the input carries
+    // organizationId / projectId (the scope anchor lock targets) + the
+    // optional willMutate test seam.
+    expect(types, 'round-7: PersistencePolicySource type is defined').toMatch(/export type PersistencePolicySource/);
+    expect(types, 'round-7: PersistencePolicySnapshot carries source').toMatch(/readonly source: PersistencePolicySource \| null/);
+    expect(types, 'round-7: PersistBaselineInput carries organizationId').toMatch(/readonly organizationId: string/);
+    expect(types, 'round-7: PersistBaselineInput carries projectId').toMatch(/readonly projectId: string/);
+    expect(types, 'round-7: PersistBaselineInput carries the willMutate test seam').toMatch(/readonly willMutate\?: \(\) => Promise<void>/);
+    // The /projects barrel re-exports the new types so the onboarding
+    // orchestrator can compose them.
+    const barrel = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
+    expect(barrel, 'the /projects barrel re-exports PersistencePolicySnapshot').toMatch(/PersistencePolicySnapshot/);
+    expect(barrel, 'round-7: the /projects barrel re-exports PersistencePolicySource').toMatch(/PersistencePolicySource/);
+    expect(barrel, 'the /projects barrel re-exports PersistBaselineInput').toMatch(/PersistBaselineInput/);
+    expect(barrel, 'the /projects barrel re-exports PersistBaselineResult').toMatch(/PersistBaselineResult/);
+  });
+
+  it('PR #42 r7: the policy mutation paths acquire the SAME scope-anchor lock the fence holds (the missing-row cases are fenced)', () => {
+    // The architect's round-7 requirement: policy mutations that can
+    // change resolution must acquire the SAME anchor lock before
+    // create/replace/clear project policy or modify/clear organization
+    // policy. The fence holds SELECT ... FOR UPDATE on wfos_projects +
+    // wfos_organizations; the mutation paths in
+    // pg-agent-policy-repository.ts acquire the SAME locks BEFORE the
+    // INSERT/UPDATE/DELETE so the two transactions SERIALIZE even when
+    // the effective policy changes because a row is CREATED (the
+    // architect's missing-row case 1) or DELETED (case 2).
+    const repo = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'pg-agent-policy-repository.ts'),
+      'utf8',
+    );
+    // setProjectPolicy acquires the project-scope anchor lock.
+    expect(repo, 'setProjectPolicy acquires the project anchor lock').toMatch(/async setProjectPolicy\([\s\S]*?SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE[\s\S]*?INSERT INTO wfos_agent_policies/s);
+    // clearProjectPolicy acquires the project-scope anchor lock (the DELETE
+    // itself does NOT auto-lock the parent — the explicit lock is required
+    // to fence the missing-row case 2: project policy deleted → resolution
+    // falls back to organization).
+    expect(repo, 'clearProjectPolicy acquires the project anchor lock').toMatch(/async clearProjectPolicy\([\s\S]*?SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE[\s\S]*?DELETE FROM wfos_agent_policies/s);
+    // setOrganizationPolicy acquires the organization-scope anchor lock.
+    expect(repo, 'setOrganizationPolicy acquires the org anchor lock').toMatch(/async setOrganizationPolicy\([\s\S]*?SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE[\s\S]*?INSERT INTO wfos_agent_policies/s);
+    // clearOrganizationPolicy acquires the organization-scope anchor lock.
+    expect(repo, 'clearOrganizationPolicy acquires the org anchor lock').toMatch(/async clearOrganizationPolicy\([\s\S]*?SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE[\s\S]*?DELETE FROM wfos_agent_policies/s);
+  });
+
+  it('PR #42 r5: the orchestrator captures the persistence snapshot + delegates to persistBaselineWithPolicyFence (the persistence window is fenced)', () => {
+    // The orchestrator must:
+    //   1. call analyzer.analyze(ctx) -> evidence[] + observations[]
+    //   2. call governedReadPolicy.capturePersistenceSnapshot(ctx) -> V_p
+    //   3. call repository.persistBaselineWithPolicyFence({ snapshot: V_p,
+    //      ... }, revalidate) -> PersistBaselineResult
+    //   4. handle the result: persisted (success) | cas-lost (convergence) |
+    //      fence-stale / fence-revalidation-failed (markFailed with the
+    //      'policy-snapshot-stale-at-persistence' or 'policy-snapshot-
+    //      revalidation-failed' failure stage).
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'the orchestrator captures the persistence snapshot').toMatch(/capturePersistenceSnapshot\(/);
+    expect(orchestrator, 'the orchestrator delegates to persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
+    expect(orchestrator, 'the orchestrator passes the snapshot through the input').toMatch(/snapshot:\s*persistenceSnapshot/);
+    // PR #42 round-7: the orchestrator passes organizationId + projectId
+    // (the fence locks the scope ANCHOR rows wfos_projects +
+    // wfos_organizations for this org/project, plus the relevant policy
+    // rows). The round-5 revalidate() closure is REMOVED — the round-7
+    // scope-resolution fence replaces it.
+    expect(orchestrator, 'round-7: the orchestrator passes organizationId').toMatch(/organizationId:\s*analysisContext\.organizationId/);
+    expect(orchestrator, 'round-7: the orchestrator passes projectId').toMatch(/projectId:\s*analysisContext\.projectId/);
+    // The fence-rejection paths: markFailed with the 'policy-snapshot-stale-
+    // at-persistence' / 'policy-snapshot-revalidation-failed' failure stage.
+    expect(orchestrator, 'the fence-stale path markFailed').toMatch(/policy-snapshot-stale-at-persistence/);
+    expect(orchestrator, 'the fence-revalidation-failed path markFailed').toMatch(/policy-snapshot-revalidation-failed/);
+    // The orchestrator's deps interface includes the governedReadPolicy
+    // (the same boundary the analyzer uses for per-read fencing — the
+    // orchestrator uses it for persistence-boundary snapshot capture).
+    expect(orchestrator, 'the deps interface includes governedReadPolicy').toMatch(/readonly governedReadPolicy:\s*GovernedRepositoryReadPolicy/);
+  });
+
+  it('PR #42 r5: app.ts wires the governedReadPolicy into the orchestrator (production onboarding uses the persistence fence)', () => {
+    // The composition root must wire the SAME governedReadPolicy the analyzer
+    // uses into the orchestrator (the orchestrator calls
+    // capturePersistenceSnapshot on it after analyze() returns).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts passes governedReadPolicy to the orchestrator').toMatch(/governedReadPolicy:\s*onboardingGovernedReadPolicy/);
+  });
+
+  it('PR #42 r5: the *In helpers run inside the transaction (the writes are atomic with the fence checks)', () => {
+    // The /projects repository must have private *In(q, ...) helpers that
+    // run against either the pool OR a transaction-scoped DatabaseTx. The
+    // persistBaselineWithPolicyFence method calls them with the tx-scoped
+    // queryable so the writes are atomic with the fence checks (a rollback
+    // undoes the writes + the markComplete CAS together).
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidenceIn helper exists').toMatch(/private async appendEvidenceIn\(/);
+    expect(repo, 'upsertObservationsIn helper exists').toMatch(/private async upsertObservationsIn\(/);
+    expect(repo, 'markCompleteIn helper exists').toMatch(/private async markCompleteIn\(/);
+    expect(repo, 'the legacy methods delegate to the helpers').toMatch(/return this\.appendEvidenceIn\(this\.db,/);
+    // The Queryable interface (structural — accepts DatabaseClient OR
+    // DatabaseTx; the /projects module stays free of a direct pg dependency,
+    // matching the convention every other pg-*.ts repository follows).
+    expect(repo, 'the Queryable structural interface is defined').toMatch(/interface Queryable/);
+    expect(repo, 'the Queryable uses the DatabaseClient query signature').toMatch(/query:\s*DatabaseClient\['query'\]/);
+  });
+});
+

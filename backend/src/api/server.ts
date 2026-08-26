@@ -24,6 +24,7 @@ import { companionRoutes, type CompanionRouteDeps } from './routes/companion.rou
 import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.route.js';
 import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
+import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -88,6 +89,9 @@ export interface ServerDeps extends JobsRouteDeps {
   executionPolicy?: ExecutionPolicyRouteDeps;
   /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
   agentPolicy?: AgentPolicyRouteDeps;
+  /** WORK-038: Existing Project Onboarding routes (connect + analyze a
+   *  repository revision + the authorized confirmation path). Backend-authorized. */
+  onboarding?: OnboardingRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -183,6 +187,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.agentPolicy) {
     await agentPolicyRoutes(app, deps.agentPolicy);
+  }
+  if (deps.auth && deps.onboarding) {
+    await onboardingRoutes(app, deps.onboarding);
   }
   return app;
 }

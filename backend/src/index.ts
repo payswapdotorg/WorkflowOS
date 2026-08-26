@@ -324,6 +324,26 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-038: Existing Project Onboarding routes (connect + analyze a
+      // repository revision + the authorized confirmation path). Backend-
+      // authorized (project.read / project.write / project.admin). The
+      // orchestrator composes /github + /agents + /projects; the baseline is
+      // stored THROUGH /projects (the single project authority). A repository
+      // or baseline UUID is NOT an authorization credential — every route
+      // resolves the resource + verifies authorization server-side.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.projectBaselineRepository &&
+      app.deps.onboardingService
+        ? {
+            onboarding: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              projectBaselineRepository: app.deps.projectBaselineRepository,
+              onboardingService: app.deps.onboardingService,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

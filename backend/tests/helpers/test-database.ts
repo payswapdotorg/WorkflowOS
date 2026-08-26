@@ -37,6 +37,17 @@ export interface TestDatabase {
   capture: CaptureStream;
   reset: () => Promise<void>;
   close: () => Promise<void>;
+  /**
+   * PR #42 round-6 (real-PG concurrency regression): open a SECOND
+   * independent `pg.Client` against the SAME test schema (same
+   * `WORKFLOWOS_DATABASE_URL` + same `search_path`). Used by the
+   * persistence-fence concurrency regression as T2 (the concurrent policy
+   * mutator) — T2's UPDATE blocks on T1's FOR UPDATE row lock. Only
+   * implemented on the real-PostgreSQL path (pglite is single-threaded +
+   * cannot demonstrate true blocking); undefined on the pglite path (the
+   * concurrency test skips when this is absent).
+   */
+  createSecondClient?: () => Promise<{ client: DatabaseClient; close: () => Promise<void> }>;
 }
 
 /**
@@ -105,6 +116,7 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
   const databaseUrl = process.env.WORKFLOWOS_DATABASE_URL;
   let client: DatabaseClient;
   let cleanup: (() => Promise<void>) | undefined;
+  let createSecondClientImpl: (() => Promise<{ client: DatabaseClient; close: () => Promise<void> }>) | undefined;
 
   if (databaseUrl && databaseUrl.startsWith('postgres')) {
     // --- Real PostgreSQL path with per-call schema isolation. ---
@@ -140,6 +152,23 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
         await dropper.end();
       }
     };
+
+    // PR #42 round-6: a factory for a SECOND independent `pg.Client`
+    // against the same test schema (for the real-PG concurrency
+    // regression's T2 mutator). Each call opens a fresh connection + sets
+    // the same search_path; the caller closes it when done.
+    createSecondClientImpl = async () => {
+      const second = new PgClient(databaseUrl);
+      await second.connect();
+      await second.query(`SET search_path TO ${schemaName}, public`);
+      const scoped = new SchemaScopedPgDatabaseClient(second);
+      return {
+        client: scoped,
+        close: async () => {
+          await second.end();
+        },
+      };
+    };
   } else {
     // --- Pglite path (already isolated per-instance). ---
     client = await createPgliteDatabaseClient();
@@ -173,6 +202,12 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
       TRUNCATE wfos_execution_callbacks RESTART IDENTITY CASCADE;
       TRUNCATE wfos_execution_events RESTART IDENTITY CASCADE;
       TRUNCATE wfos_executions RESTART IDENTITY CASCADE;
+      -- WORK-038: Project Baseline observations + evidence (child tables
+      -- first), then the baseline header. Scoped to project + repo +
+      -- exact-commit (idempotent unique).
+      TRUNCATE wfos_project_baseline_observations RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_project_baseline_evidence RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_project_baselines RESTART IDENTITY CASCADE;
       TRUNCATE wfos_llm_execution_records RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_transitions RESTART IDENTITY CASCADE;
       TRUNCATE wfos_workflow_executions RESTART IDENTITY CASCADE;
@@ -244,5 +279,5 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
     if (cleanup) await cleanup();
   };
 
-  return { client, logger, capture, reset, close };
+  return { client, logger, capture, reset, close, createSecondClient: createSecondClientImpl };
 }

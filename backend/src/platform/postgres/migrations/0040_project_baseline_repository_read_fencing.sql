@@ -1,0 +1,92 @@
+-- WORK-038 PR #42 round-4: the snapshot/fencing protocol for governed
+-- repository reads.
+--
+-- The architect's round-4 review of commit `228acfe` identified that the
+-- round-3 `governedRead()` claimed atomicity but was still a check-then-act
+-- window with respect to POLICY CHANGES. `decideForProjectScope()` (V7) and
+-- the GitHub read are two separate asynchronous operations against two
+-- different authorities (the WORK-037 policy store vs the GitHub API). A
+-- concurrent policy update CAN commit between them:
+--
+--   T1  policy = ALLOW, version 7
+--       ↓
+--   T1  governedRead() captures V7
+--       ↓
+--   T2  policy mutates to DENY, version 8        ← commits BETWEEN capture + read
+--       ↓
+--   T1  GitHubAdapter.getFileContent(...)
+--       ↓
+--   T1  read succeeds — UNDER A POLICY (V8) THAT WOULD HAVE DENIED IT
+--
+-- Being inside one JavaScript method does not make those operations atomic.
+-- The round-3 `policyVersion` snapshot made the race OBSERVABLE, but did NOT
+-- prevent it. The round-4 fix is an explicit SNAPSHOT/FENCING PROTOCOL:
+--
+--   1. Resolve policy snapshot (capture decision + policyVersion + rule + constraints)
+--   2. Enforce the snapshot decision (deny/ask/path-not-allowed -> NO read)
+--   3. Perform the repository read under the captured snapshot
+--   4. Apply the `constrained` enforcement (maxOutputBytes) on the snapshot's constraints
+--   5. REVALIDATE the policy snapshot (call decideForProjectScope AGAIN)
+--   6. If the snapshot is STALE (version/rule/decision changed): DISCARD the
+--      read result (content=null, performed=false, stale=true) — do NOT
+--      persist an evidence row or observation for that path
+--   7. Else: persist the bound outcome (the snapshot is still current)
+--
+-- THE INVARIANT: "a repository-read result is persisted only if the policy
+-- snapshot that authorized it is still current when the result is committed."
+-- That is achievable even though the GitHub API itself cannot participate in
+-- the database transaction the WORK-037 policy store uses.
+--
+-- This migration documents the round-4 EXTENSIONS to the
+-- `repository_read_enforcement` jsonb shape (the column itself is UNCHANGED —
+-- it is jsonb, so additive fields require no ALTER). The shape consumed by
+-- the pg repository mapper + the onboarding boundary is now:
+--
+--   {
+--     // round-3 fields (the SNAPSHOT that authorized the read):
+--     "policyVersion": number|null,           // the snapshot's policy version
+--     "ruleId": string|null,                  // the snapshot's matched rule id
+--     "performed": boolean,                    // whether the read was persisted
+--     "truncated": boolean,                   // whether maxOutputBytes truncated
+--     "maxOutputBytes": number|null,          // the snapshot's maxOutputBytes
+--     "truncatedAtBytes": number|null,        // the byte offset of truncation
+--     "pathAllowed": boolean,                 // whether the allowlist admitted the path
+--     "reason": string|null,                  // the decision/refusal reason
+--
+--     // round-4 fields (the FENCE — the revalidation metadata + stale flag):
+--     "revalidated": boolean,                  // whether the fence ran
+--     "revalidatedPolicyVersion": number|null,// the version the revalidation saw
+--     "revalidatedRuleId": string|null,       // the rule the revalidation saw
+--     "revalidatedDecision": "allow"|"constrained"|"deny"|"ask"|null,
+--     "stale": boolean                         // whether the snapshot was stale (result discarded)
+--   }
+--
+-- IMPORTANT: stale reads do NOT produce an evidence row at all (the analyzer
+-- skips the evidence row + observation for that path — the architect's
+-- invariant: "zero baseline evidence/observation is persisted"). So the
+-- `stale=true` flag on a persisted evidence row is ALWAYS false (only
+-- successfully-authorized-and-revalidated reads produce evidence rows). The
+-- `stale` field is recorded on the OUTCOME (the boundary's return value,
+-- consumed by the analyzer) and would only appear on a persisted evidence row
+-- if a future change intentionally persisted a stale marker row (NOT the
+-- current behavior). The field is documented here for forward-completeness +
+-- so the mapper reads it correctly if it ever appears.
+--
+-- Older evidence rows (persisted before round-4) will not have the round-4
+-- fields. The pg mapper defaults them to null/false (revalidated=false,
+-- stale=false — honestly "this row was persisted before the fence existed").
+--
+-- The forensic index from migration 0039 already covers "show me every read
+-- that was denied/constrained under policy version V". This migration adds a
+-- forensic index for "show me every read that was successfully REVALIDATED
+-- current under policy version V" (the fence's success surface — useful for
+-- audit queries like "was this evidence row's snapshot revalidated, and
+-- against which version").
+--
+-- No ALTER to the column (jsonb is flexible). The new fields are additive;
+-- the mapper reads them with null/false defaults for older rows.
+
+CREATE INDEX IF NOT EXISTS wfos_project_baseline_evidence_read_revalidated_idx
+  ON wfos_project_baseline_evidence (baseline_id)
+  WHERE repository_read_enforcement IS NOT NULL
+    AND (repository_read_enforcement->>'revalidated')::boolean = true;

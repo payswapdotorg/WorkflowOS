@@ -53,6 +53,7 @@ import type {
   AgentPolicyResolution,
   AgentPolicyRule,
   AgentPolicyScopeSource,
+  ProjectScopedPolicyDecision,
 } from './agent-policy.types.js';
 import {
   AGENT_POLICY_DOMAINS,
@@ -136,30 +137,13 @@ export class AgentPolicyEngine implements ToolPolicyGate {
           { executionId: request.executionId, invocationId: request.invocationId },
         );
       }
-      const resolution = await this.deps.repository.getEffectivePolicy(
-        scope.organizationId,
-        scope.projectId,
-      );
-      const document = resolution?.document ?? PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT;
-      const version = resolution?.policyVersion ?? 0;
-      const tags = tagInvocation(request);
-      const match = matchDocument(document, tags);
-
-      if (match.effect === 'ask') {
-        return this.resolveAsk(scope, request, tags, match, version, document);
+      const core = await this.evaluateCore(scope, request);
+      // The native execution path resolves an 'ask' through the durable
+      // approval interaction (pending approval → human resolve → allow/deny).
+      if (core.decision.decision === 'ask') {
+        return this.resolveAsk(scope, request, core.tags, core.match, core.version, core.document);
       }
-      if (match.effect === 'constrained') {
-        const constraints: ToolPolicyConstraints = match.rule?.constraints ?? {};
-        return {
-          decision: 'constrained',
-          constraints,
-          reason: reasonFor(version, match, 'constrained by policy'),
-        };
-      }
-      return {
-        decision: match.effect as 'allow' | 'deny',
-        reason: reasonFor(version, match, undefined),
-      };
+      return core.decision;
     } catch (err) {
       this.deps.logger.warn('agent-policy.decide-failed', {
         executionId: request.executionId,
@@ -172,6 +156,148 @@ export class AgentPolicyEngine implements ToolPolicyGate {
         { executionId: request.executionId, invocationId: request.invocationId },
       );
     }
+  }
+
+  // ====================================================================
+  // WORK-038: project-scoped policy gate for onboarding analysis
+  // ====================================================================
+  //
+  // Onboarding analysis is an agent/tool execution activity that must respect
+  // the existing execution authority/policy boundary — but it is NOT a Work
+  // Item execution and therefore has no wfos_executions row (the full chain
+  // WorkItem→WorkOrder→ImplementationContext→ExecutionRecord is required by
+  // the executions integrity trigger, and inventing a fake Work Item would
+  // violate the work-items authority). The engine's decide() resolves scope
+  // BY executionId (wfos_executions.project_id), so it cannot serve onboarding
+  // directly.
+  //
+  // decideForProjectScope is the ADDITIVE project-scoped entry: it takes the
+  // (projectId, organizationId) scope directly (the onboarding orchestrator
+  // resolves it from the /projects + /github authority rows), then runs the
+  // SAME evaluateCore path (the SAME policy document, the SAME matcher, the
+  // SAME decision vocabulary) as decide(). It does NOT create pending
+  // approvals for an 'ask' (onboarding is NON-INTERACTIVE — there is no human
+  // in the loop to resolve a mid-analysis ask, and polluting the approvals
+  // table would be wrong); the 'ask' decision is returned as-is and the
+  // onboarding analyzer records it as a blocked observation, exactly as the
+  // ToolPolicyGate contract specifies for deny/ask. Existing decide()
+  // behavior is UNCHANGED (the native execution ask path still resolves
+  // through the durable approval interaction). The frozen ToolPolicyGate seam
+  // (tool-runtime.types.ts) is UNCHANGED — this is an additive method on the
+  // engine implementation, not a new seam.
+
+  async decideForProjectScope(
+    request: ToolPolicyRequest,
+    projectId: string,
+    organizationId: string,
+  ): Promise<ProjectScopedPolicyDecision> {
+    try {
+      const scope = { organizationId, projectId };
+      const core = await this.evaluateCore(scope, request);
+      // Non-interactive: return the decision as-is (ask stays ask → the
+      // analyzer treats it as blocked; no pending approval is created).
+      //
+      // PR #42 round-3: surface the policy version snapshot + the matched
+      // rule id + the scope source the engine already computed in
+      // evaluateCore. The governed repository-read boundary
+      // (src/onboarding/internal/governed-repository-read-policy.ts) needs
+      // these to (a) record the ACTUAL decision on the evidence row in its
+      // OWN column (repository_read_decision + repository_read_enforcement)
+      // and (b) snapshot the policy version at decision time so policy drift
+      // between the decision and the read is OBSERVABLE (not just
+      // prevented-by-construction). This is additive — the frozen
+      // ToolPolicyGate.decide() seam is UNCHANGED; only the onboarding-
+      // local project-scoped entry surfaces the version/rule/scope the
+      // engine already computes. Test fakes returning { decision: 'allow' }
+      // still satisfy ProjectScopedPolicyDecision (every added field is
+      // optional — a fake that does not surface them records policyVersion
+      // = null, honestly "not surfaced by the gate").
+      return {
+        ...core.decision,
+        policyVersion: core.version,
+        ruleId: core.match.rule?.id ?? null,
+        scopeSource: core.resolutionSource,
+      };
+    } catch (err) {
+      this.deps.logger.warn('agent-policy.decide-project-scope-failed', {
+        projectId,
+        organizationId,
+        invocationId: request.invocationId,
+        error: (err as Error).message,
+      });
+      return this.failClosed(
+        'agent-policy-unavailable',
+        `the project-scoped policy gate could not resolve a decision (${(err as Error).message}) — failing closed`,
+        { projectId, organizationId, invocationId: request.invocationId },
+      );
+    }
+  }
+
+  /**
+   * The shared core decision: resolve the effective policy for a scope →
+   * tag the invocation → match the document → format the decision. Returns
+   * the intermediate match/version/tags/document so the caller can run the
+   * ask-approval path without re-deriving them. For 'ask' the decision is a
+   * placeholder (decide() replaces it via resolveAsk; decideForProjectScope
+   * returns it as-is for the non-interactive onboarding path).
+   */
+  private async evaluateCore(
+    scope: { organizationId: string; projectId: string },
+    request: ToolPolicyRequest,
+  ): Promise<{
+    tags: InvocationTags;
+    match: MatchResult;
+    version: number;
+    document: AgentPolicyDocument;
+    decision: ToolPolicyDecision;
+    resolutionSource: AgentPolicyScopeSource;
+  }> {
+    const resolution = await this.deps.repository.getEffectivePolicy(
+      scope.organizationId,
+      scope.projectId,
+    );
+    const document = resolution?.document ?? PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT;
+    const version = resolution?.policyVersion ?? 0;
+    const resolutionSource = resolution?.source ?? 'platform-default';
+    const tags = tagInvocation(request);
+    const match = matchDocument(document, tags);
+
+    if (match.effect === 'ask') {
+      return {
+        tags,
+        match,
+        version,
+        document,
+        resolutionSource,
+        decision: { decision: 'ask', reason: reasonFor(version, match, 'requires approval') },
+      };
+    }
+    if (match.effect === 'constrained') {
+      const constraints: ToolPolicyConstraints = match.rule?.constraints ?? {};
+      return {
+        tags,
+        match,
+        version,
+        document,
+        resolutionSource,
+        decision: {
+          decision: 'constrained',
+          constraints,
+          reason: reasonFor(version, match, 'constrained by policy'),
+        },
+      };
+    }
+    return {
+      tags,
+      match,
+      version,
+      document,
+      resolutionSource,
+      decision: {
+        decision: match.effect as 'allow' | 'deny',
+        reason: reasonFor(version, match, undefined),
+      },
+    };
   }
 
   // ====================================================================

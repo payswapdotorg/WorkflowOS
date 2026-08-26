@@ -194,6 +194,7 @@ export type {
   AgentPolicyApproval,
   AgentPolicyApprovalStatus,
   AgentPolicyExternalDecision,
+  ProjectScopedPolicyDecision,
   AgentPolicyRepository,
   AgentPolicyEngineDeps,
   AgentPolicyService,
