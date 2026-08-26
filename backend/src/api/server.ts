@@ -29,6 +29,10 @@ import {
   repositoryIntelligenceRoutes,
   type RepositoryIntelligenceRouteDeps,
 } from './routes/repository-intelligence.route.js';
+import {
+  developmentPlannerRoutes,
+  type DevelopmentPlannerRouteDeps,
+} from './routes/development-planner.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -101,6 +105,15 @@ export interface ServerDeps extends JobsRouteDeps {
    *  authorized. The orchestrator composes /projects + /github + /architecture
    *  + /requirements + /work-items; the index is stored THROUGH /projects. */
   repositoryIntelligence?: RepositoryIntelligenceRouteDeps;
+  /** WORK-040: Continuous Development Planner routes (evaluate + evaluate-async
+   *  + read-only recommendations list/inspect). Backend-authorized
+   *  (project.read / project.write). The orchestrator composes /work-items
+   *  (authoritative Work Item creation through the existing
+   *  WorkItemRepository.create) + /architecture + /requirements + /projects.
+   *  The planner NEVER mutates the dependency graph, NEVER mutates workflow /
+   *  verification / review state, NEVER starts execution, NEVER selects a
+   *  provider. */
+  developmentPlanner?: DevelopmentPlannerRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -202,6 +215,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.repositoryIntelligence) {
     await repositoryIntelligenceRoutes(app, deps.repositoryIntelligence);
+  }
+  if (deps.auth && deps.developmentPlanner) {
+    await developmentPlannerRoutes(app, deps.developmentPlanner);
   }
   return app;
 }

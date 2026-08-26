@@ -59,6 +59,15 @@ import { PgProjectContextIndexRepository } from './modules/projects/internal/pg-
 import { DefaultRepositoryIntelligenceService } from './repository-intelligence/internal/default-repository-intelligence-service.js';
 import { DeterministicContextRanker } from './repository-intelligence/internal/deterministic-context-ranker.js';
 import { BaselineContextSource } from './repository-intelligence/internal/baseline-context-source.js';
+// WORK-040: Continuous Development Planner — the application/planning
+// capability that turns signals into governed Work Items THROUGH the existing
+// /work-items WorkItemRepository.create. NOT a module, NOT an authority; owns
+// NO tables (planning evidence is embedded in the Work Item's existing
+// metadata.planner JSONB field).
+import type { DevelopmentPlannerService } from '@development-planner/index.js';
+import { DefaultDevelopmentPlannerService } from './development-planner/internal/default-development-planner-service.js';
+import { DeterministicPlanningPrioritizer } from './development-planner/internal/deterministic-planning-prioritizer.js';
+import { PlanningEvaluateJobHandler } from './development-planner/internal/planning-evaluate-job-handler.js';
 // WORK-038: Existing Project Onboarding — the application-layer orchestrator
 // that composes /github + /agents + /projects to produce evidence-backed
 // Project Baseline proposals. NOT a module, NOT an authority; owns NO tables.
@@ -462,6 +471,18 @@ export interface AppDeps {
    *  provenance-preserving context selections stored through /projects.
    *  Present when DB + the authority repos are configured. */
   repositoryIntelligenceService?: RepositoryIntelligenceService;
+  /** WORK-040: Continuous Development Planner — the application/planning
+   *  orchestrator (NOT a module, NOT an authority). Composes /work-items
+   *  (authoritative Work Item creation — the planner CREATES through the
+   *  existing WorkItemRepository.create with the deterministic
+   *  proposedWorkItemId as the dedup key; the existing
+   *  UNIQUE(architecture_version_id, work_item_id) DB constraint fences
+   *  concurrent runs) + /architecture + /requirements + /projects to decide
+   *  "what should be done next?" + convergently create governed Work Items.
+   *  The planner NEVER mutates the dependency graph, NEVER mutates workflow /
+   *  verification / review state, NEVER starts execution, NEVER selects a
+   *  provider. Present when DB + the authority repos are configured. */
+  developmentPlannerService?: DevelopmentPlannerService;
 }
 
 export interface BuildAppOptions {
@@ -680,6 +701,14 @@ export async function buildApp(
   // surface).
   let projectContextIndexRepositoryRef: ProjectContextIndexRepository | undefined;
   let repositoryIntelligenceServiceRef: RepositoryIntelligenceService | undefined;
+  // WORK-040: the development-planner orchestrator + the durable
+  // planning.evaluate job handler (declared at function scope; constructed
+  // inside the database block — exposed for the planning route surface + the
+  // existing WorkerHost handler registry).
+  let developmentPlannerServiceRef: DevelopmentPlannerService | undefined;
+  let planningEvaluateJobHandlerRef:
+    | import('@platform/index.js').JobHandler
+    | undefined;
   const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
@@ -1234,6 +1263,42 @@ export async function buildApp(
     });
     projectContextIndexRepositoryRef = projectContextIndexRepository;
     repositoryIntelligenceServiceRef = repositoryIntelligenceService;
+    // WORK-040: Continuous Development Planner — the application/planning
+    // orchestrator. Composes /work-items (authoritative Work Item creation —
+    // the planner CREATES through the existing WorkItemRepository.create with
+    // the deterministic proposedWorkItemId as the dedup key; the existing
+    // UNIQUE(architecture_version_id, work_item_id) DB constraint fences
+    // concurrent runs → convergent Work Item creation, no duplicates) +
+    // /architecture + /requirements + /projects to decide "what should be
+    // done next?" + convergently create governed Work Items. The planner NEVER
+    // mutates the dependency graph, NEVER mutates workflow / verification /
+    // review state, NEVER starts execution, NEVER selects a provider. Planning
+    // evidence is embedded in the Work Item's existing metadata.planner (NO new
+    // table). Provenance re-uses the WORK-038 vocabulary; the prioritizer
+    // NEVER promotes provenance (a recommendation stays `proposed`).
+    const planningPrioritizer = new DeterministicPlanningPrioritizer();
+    const developmentPlannerService = new DefaultDevelopmentPlannerService({
+      prioritizer: planningPrioritizer,
+      logger,
+    });
+    developmentPlannerServiceRef = developmentPlannerService;
+    // WORK-040: the durable planning.evaluate job handler — reuses the
+    // EXISTING platform Queue + WorkerHost (NO new scheduler, NO setInterval,
+    // NO cron, NO forever-loop). Idempotent (the planner is convergent via the
+    // DB constraint) + redeliveryPolicy maxAttempts: 3 (crash/retry safe). The
+    // handler RE-RESOLVES the PlanningContext from the payload's projectId at
+    // processing time (the runtime authority handles are NOT serializable).
+    planningEvaluateJobHandlerRef = new PlanningEvaluateJobHandler({
+      plannerService: developmentPlannerService,
+      projectRepository: projectRepository!,
+      workItemRepository: workItemRepository!,
+      workItemDependencyRepository: workItemDependencyRepository!,
+      architectureVersionRepository: architectureVersionRepository!,
+      architectureRepository: architectureRepository!,
+      requirementRepository: requirementRepository!,
+      acceptanceCriterionRepository: acceptanceCriterionRepository!,
+      logger,
+    });
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
@@ -1551,6 +1616,11 @@ export async function buildApp(
   if (agentWorkspaceServiceRef) {
     handlerList.push(createWorkspaceReleaseRelayJobHandler(agentWorkspaceServiceRef, logger));
   }
+  // WORK-040: the durable planning.evaluate job handler — reuses the EXISTING
+  // WorkerHost registry (NO new scheduler). Idempotent + redeliveryPolicy.
+  if (planningEvaluateJobHandlerRef) {
+    handlerList.push(planningEvaluateJobHandlerRef);
+  }
   const handlers = buildHandlerRegistry(handlerList);
   const worker = new WorkerHost(queue, handlers, logger, {
     ...options.workerOptions,
@@ -1662,6 +1732,16 @@ export async function buildApp(
       // provenance-preserving context selections stored through /projects.
       projectContextIndexRepository: projectContextIndexRepositoryRef,
       repositoryIntelligenceService: repositoryIntelligenceServiceRef,
+      // WORK-040: Continuous Development Planner — the application/planning
+      // orchestrator (present when DB + the authority repos are configured).
+      // NOT an authority; composes /work-items (authoritative Work Item
+      // creation through the existing WorkItemRepository.create) +
+      // /architecture + /requirements + /projects to decide "what should be
+      // done next?" + convergently create governed Work Items. The planner
+      // NEVER mutates the dependency graph, NEVER mutates workflow /
+      // verification / review state, NEVER starts execution, NEVER selects a
+      // provider.
+      developmentPlannerService: developmentPlannerServiceRef,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +
