@@ -156,6 +156,24 @@ async function resolveMaintenanceContext(
 }
 
 /**
+ * CROSS-TENANT BASELINE OWNERSHIP GUARD (PR #45 architect review). A
+ * caller-supplied baselineId MUST NOT cause the detectors to read another
+ * project's baseline observations. The scan + scan-async routes call this
+ * BEFORE detectAndEvaluate (sync) / enqueue (async) + return a clean 403 if
+ * the baseline does not exist OR belongs to a different project. This is
+ * defense in depth alongside the AdvisoryDetector's own check (which protects
+ * programmatic calls + the async job handler). A UUID is NEVER a credential.
+ */
+async function assertBaselineInProject(
+  deps: MaintenanceRouteDeps,
+  projectId: string,
+  baselineId: string,
+): Promise<boolean> {
+  const baseline = await deps.projectBaselineRepository.findById(baselineId);
+  return !!baseline && baseline.projectId === projectId;
+}
+
+/**
  * The FORBIDDEN signal-authority fields — a public caller MUST NOT supply
  * these on the evaluate/evaluate-async routes. The server constructs them from
  * the authenticated principal + the frozen maintenance vocabulary. The
@@ -407,6 +425,19 @@ export async function maintenanceRoutes(
           .code(400)
           .send({ error: 'architectureVersionId required' });
       }
+      // CROSS-TENANT BASELINE OWNERSHIP GUARD (PR #45): if a caller supplied a
+      // baselineId, verify it belongs to the authorized projectId BEFORE
+      // detectAndEvaluate. A foreign baselineId returns 403 + the detectors
+      // are NEVER invoked (no listObservations call). This is the route-layer
+      // gate; the AdvisoryDetector ALSO checks (defense in depth).
+      if (body.baselineId) {
+        const ok = await assertBaselineInProject(deps, projectId, body.baselineId);
+        if (!ok) {
+          return reply
+            .code(403)
+            .send({ error: 'forbidden', reason: 'baseline-not-in-project' });
+        }
+      }
       const { organizationId } = await resolveMaintenanceContext(
         deps,
         projectId,
@@ -436,6 +467,15 @@ export async function maintenanceRoutes(
           return reply
             .code(403)
             .send({ error: 'forbidden', reason: 'version-not-in-project' });
+        }
+        // Defense in depth: if the detector's own ownership check fires
+        // (maintenance-baseline-not-in-project) despite the route gate above
+        // (e.g. a race where the baseline was deleted between the route check
+        // + the detector call), surface it as a 403 too.
+        if (msg.includes('maintenance-baseline-not-in-project')) {
+          return reply
+            .code(403)
+            .send({ error: 'forbidden', reason: 'baseline-not-in-project' });
         }
         return reply
           .code(500)
@@ -481,6 +521,20 @@ export async function maintenanceRoutes(
           return reply
             .code(400)
             .send({ error: 'architectureVersionId required' });
+        }
+        // CROSS-TENANT BASELINE OWNERSHIP GUARD (PR #45): same gate as the
+        // sync scan route, applied BEFORE enqueue so a foreign baselineId is
+        // rejected with 403 immediately + the maintenance.run job is NEVER
+        // enqueued (the async job handler's detector ALSO checks — defense in
+        // depth — but the route gate gives clean HTTP semantics + avoids
+        // enqueuing a job that would only fail).
+        if (body.baselineId) {
+          const ok = await assertBaselineInProject(deps, projectId, body.baselineId);
+          if (!ok) {
+            return reply
+              .code(403)
+              .send({ error: 'forbidden', reason: 'baseline-not-in-project' });
+          }
         }
         const project = await deps.projectRepository.findById(projectId);
         if (!project) {

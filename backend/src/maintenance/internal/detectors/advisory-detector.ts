@@ -35,6 +35,15 @@
  * ProjectBaselineRepository.listObservations (read-only) + queries the
  * AdvisorySource (pluggable). The revision-bound baselineCommitSha is the
  * baseline's baselineCommitSha (the commit the manifest was observed at).
+ *
+ * CROSS-TENANT OWNERSHIP GUARD (PR #45 architect review): when a caller
+ * supplies input.baselineId (the scan/scan-async routes pass it through), the
+ * detector verifies the baseline belongs to input.projectId via findById +
+ * projectId comparison BEFORE calling listObservations. A foreign baselineId
+ * throws maintenance-baseline-not-in-project; listObservations is NEVER called
+ * for a baseline that does not belong to the authorized project. The route
+ * also checks (returns 403) before detectAndEvaluate; this detector check is
+ * defense in depth (protects programmatic calls + the async job handler).
  */
 
 import type {
@@ -80,7 +89,26 @@ export class AdvisoryDetector implements MaintenanceDetector {
     // Resolve the baseline.
     let baselineId = input.baselineId;
     let baselineCommitSha = input.baselineCommitSha;
-    if (!baselineId) {
+    if (baselineId) {
+      // CROSS-TENANT OWNERSHIP CHECK (PR #45 architect review — defense in
+      // depth). A caller-controlled baselineId MUST NOT cause a read of
+      // another project's baseline observations. The scan route checks this
+      // BEFORE detectAndEvaluate (sync) / enqueue (async) + returns a clean
+      // 403; this detector check protects programmatic calls + the async job
+      // handler + any future path that bypasses the route. The check uses
+      // findById (which returns the baseline's projectId) + compares to the
+      // authorized input.projectId — a UUID is NEVER a credential. If the
+      // baseline does not exist OR belongs to a different project, throw
+      // maintenance-baseline-not-in-project; the orchestrator catches + logs +
+      // continues with 0 signals from this detector (the run is NOT aborted;
+      // listObservations is NEVER called for the foreign baselineId).
+      const baseline =
+        await ctx.projectBaselineRepository.findById(baselineId);
+      if (!baseline || baseline.projectId !== input.projectId) {
+        throw new Error('maintenance-baseline-not-in-project');
+      }
+      baselineCommitSha = baselineCommitSha ?? baseline.baselineCommitSha;
+    } else {
       const baselines = await ctx.projectBaselineRepository.listForProject(
         input.projectId,
       );
@@ -96,7 +124,9 @@ export class AdvisoryDetector implements MaintenanceDetector {
       baselineId = latest.id;
       baselineCommitSha = baselineCommitSha ?? latest.baselineCommitSha;
     }
-    // Read the package_managers observation.
+    // Read the package_managers observation. At this point baselineId is
+    // GUARANTEED to belong to input.projectId (either resolved via the
+    // project-scoped listForProject path OR verified via findById above).
     const observations =
       await ctx.projectBaselineRepository.listObservations(baselineId);
     const pkgManagers = observations.find((o) => o.kind === 'package_managers');

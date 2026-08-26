@@ -106,8 +106,13 @@ class StubProjectBaselineRepository implements ProjectBaselineRepository {
   async ensureBaseline(_input: EnsureBaselineInput): Promise<ProjectBaseline> {
     throw new Error('stub-baseline-not-implemented: ensureBaseline');
   }
-  async findById(_id: string): Promise<ProjectBaseline | null> {
-    throw new Error('stub-baseline-not-implemented: findById');
+  // PR #45: findById returns the stub baseline when the id matches (the
+  // AdvisoryDetector's cross-tenant ownership guard calls findById to verify
+  // baseline.projectId === input.projectId before listObservations). The stub
+  // baseline is constructed with projectId: projectA.id, so the guard passes
+  // for projectA scans + the detector proceeds to listObservations.
+  async findById(id: string): Promise<ProjectBaseline | null> {
+    return this.baseline.id === id ? this.baseline : null;
   }
   async findByRevision(
     _projectId: string,
@@ -184,7 +189,96 @@ class RecordingCiEvidenceRepository implements CiEvidenceIngestionRepository {
   }
 }
 
-describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regressions)', () => {
+/**
+ * A SEEDED + RECORDING wrapper around ProjectBaselineRepository for the
+ * cross-tenant baseline regressions (PR #45 architect review, #13 + #14 +
+ * #15). It delegates EVERY method to the real repo (transparent for the
+ * non-cross-tenant tests 1-12) + adds two capabilities:
+ *   * SEED — seed(baseline, observations?) makes findById(baseline.id) return
+ *     the seeded baseline (so a cross-tenant test can simulate "Project B has
+ *     a baseline with this id" without the verbosity of ensureBaseline +
+ *     a ProjectGitHubRepository FK). listObservations(baseline.id) returns
+ *     the seeded observations (or [] if none seeded).
+ *   * RECORD — listObservationsCalls + findByIdCalls record every call so the
+ *     test can PROVE the detector / route NEVER read a foreign baseline's
+ *     observations (the ownership guard rejects BEFORE listObservations).
+ * Mirrors the RecordingCiEvidenceRepository pattern (#12).
+ */
+class SeededRecordingProjectBaselineRepository implements ProjectBaselineRepository {
+  readonly listObservationsCalls: string[] = [];
+  readonly findByIdCalls: string[] = [];
+  private readonly seeded = new Map<string, { baseline: ProjectBaseline; observations: BaselineObservation[] }>();
+  constructor(private readonly real: ProjectBaselineRepository) {}
+  seed(baseline: ProjectBaseline, observations: BaselineObservation[] = []): void {
+    this.seeded.set(baseline.id, { baseline, observations });
+  }
+  async ensureBaseline(input: EnsureBaselineInput): Promise<ProjectBaseline> {
+    return this.real.ensureBaseline(input);
+  }
+  async findById(id: string): Promise<ProjectBaseline | null> {
+    this.findByIdCalls.push(id);
+    if (this.seeded.has(id)) return this.seeded.get(id)!.baseline;
+    return this.real.findById(id);
+  }
+  async findByRevision(
+    projectId: string,
+    projectGithubRepositoryId: string,
+    baselineCommitSha: string,
+  ): Promise<ProjectBaseline | null> {
+    return this.real.findByRevision(projectId, projectGithubRepositoryId, baselineCommitSha);
+  }
+  async listForProject(projectId: string): Promise<ProjectBaseline[]> {
+    return this.real.listForProject(projectId);
+  }
+  async appendEvidence(
+    baselineId: string,
+    evidence: readonly NewBaselineEvidence[],
+  ): Promise<BaselineEvidence[]> {
+    return this.real.appendEvidence(baselineId, evidence);
+  }
+  async upsertObservations(
+    baselineId: string,
+    observations: readonly NewBaselineObservation[],
+  ): Promise<BaselineObservation[]> {
+    return this.real.upsertObservations(baselineId, observations);
+  }
+  async listObservations(baselineId: string): Promise<BaselineObservation[]> {
+    this.listObservationsCalls.push(baselineId);
+    if (this.seeded.has(baselineId)) return this.seeded.get(baselineId)!.observations;
+    return this.real.listObservations(baselineId);
+  }
+  async listEvidence(baselineId: string): Promise<BaselineEvidence[]> {
+    return this.real.listEvidence(baselineId);
+  }
+  async markComplete(
+    baselineId: string,
+    contentDigest: string,
+    expectedVersion: number,
+  ): Promise<ProjectBaseline | null> {
+    return this.real.markComplete(baselineId, contentDigest, expectedVersion);
+  }
+  async markFailed(
+    baselineId: string,
+    failureStage: string,
+    expectedVersion: number,
+  ): Promise<ProjectBaseline | null> {
+    return this.real.markFailed(baselineId, failureStage, expectedVersion);
+  }
+  async confirmObservation(
+    baselineId: string,
+    observationId: string,
+    confirmedBy: string,
+  ): Promise<BaselineObservation> {
+    return this.real.confirmObservation(baselineId, observationId, confirmedBy);
+  }
+  async persistBaselineWithPolicyFence(
+    input: PersistBaselineInput,
+  ): Promise<PersistBaselineResult> {
+    return this.real.persistBaselineWithPolicyFence(input);
+  }
+}
+
+describe('WORK-041 — Maintenance + Project Health Engine (15 frozen regressions)', () => {
   let stack: TestAuthStack;
   let server: FastifyInstance;
   let userA: User;
@@ -198,6 +292,11 @@ describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regression
   let orgB: { id: string };
   let planner: DefaultDevelopmentPlannerService;
   let maintenanceService: DefaultMaintenanceService;
+  // PR #45: the shared recording baseline repo (wraps the real
+  // stack.projectBaselineRepository). Transparent for tests 1-12 (delegates
+  // to the real repo). Tests 13/14 seed a foreign Project B baseline into it
+  // + assert the route returns 403 + listObservations is NEVER called.
+  let recordingBaselineRepo: SeededRecordingProjectBaselineRepository;
   const capture = new CaptureStream();
 
   beforeAll(async () => {
@@ -237,6 +336,13 @@ describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regression
       prioritizer: new DeterministicPlanningPrioritizer(),
       logger,
     });
+    // PR #45: wrap the real baseline repo in the recording wrapper. The
+    // wrapper delegates every call to the real repo (transparent for tests
+    // 1-12) + records listObservations/findById calls + allows seeding a
+    // foreign baseline for the cross-tenant route tests (13/14).
+    recordingBaselineRepo = new SeededRecordingProjectBaselineRepository(
+      stack.projectBaselineRepository,
+    );
     maintenanceService = new DefaultMaintenanceService({
       detectors: [
         new CiRegressionDetector(),
@@ -251,7 +357,7 @@ describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regression
       requirementRepository: stack.requirementRepository,
       acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
       ciEvidenceRepository: stack.ciEvidenceRepository,
-      projectBaselineRepository: stack.projectBaselineRepository,
+      projectBaselineRepository: recordingBaselineRepo,
       // No advisory source in the main service (the AdvisoryDetector produces
       // no signals when absent — honest; does NOT fabricate advisories).
       logger,
@@ -304,7 +410,10 @@ describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regression
         workItemRepository: stack.workItemRepository,
         workItemDependencyRepository: stack.workItemDependencyRepository,
         ciEvidenceRepository: stack.ciEvidenceRepository,
-        projectBaselineRepository: stack.projectBaselineRepository,
+        // PR #45: the route uses the SAME recording baseline repo as the
+        // maintenanceService (so assertBaselineInProject's findById is
+        // recorded + a seeded foreign baseline is visible to the route).
+        projectBaselineRepository: recordingBaselineRepo,
         plannerService: planner,
         maintenanceService,
         logger: stack.db.logger,
@@ -865,5 +974,206 @@ describe('WORK-041 — Maintenance + Project Health Engine (12 frozen regression
       const canonicalGoal = meta.canonicalGoal ?? '';
       expect(canonicalGoal).not.toContain('CrossTenant');
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #45 architect review — cross-tenant baseline isolation. The scan /
+  // scan-async routes accept a caller-controlled baselineId; the
+  // AdvisoryDetector reads listObservations(baselineId). A Project A caller
+  // MUST NOT cause the detector to inspect Project B's baseline evidence.
+  // The fix is layered: route-layer assertBaselineInProject gate (403 before
+  // detectAndEvaluate / enqueue) + detector-layer findById+projectId guard
+  // (defense in depth). #13 covers the sync route, #14 covers the async
+  // route, #15 covers the detector-level guard (programmatic call bypassing
+  // the route).
+  // -------------------------------------------------------------------------
+
+  // A shared factory for the Project B baseline + its package_managers
+  // observation (used by #13, #14, #15). baselineB.projectId = projectB.id
+  // — this is the cross-tenant payload a Project A caller must NOT reach.
+  // Each test passes a DISTINCT id so the shared recording repo's
+  // findById/listObservations assertions are independent per test.
+  const buildBaselineB = (
+    baselineId: string,
+  ): { baseline: ProjectBaseline; observations: BaselineObservation[] } => {
+    const baseline: ProjectBaseline = {
+      id: baselineId,
+      projectId: projectB.id,
+      organizationId: orgB.id,
+      projectGithubRepositoryId: 'stub-repo-b',
+      repositoryOwner: 'stub-owner-b',
+      repositoryName: 'stub-repo-b',
+      baselineCommitSha: 'baseline-b-sha',
+      revisionRef: 'main',
+      state: 'complete' as BaselineState,
+      version: 1,
+      analysisMode: 'governed' as BaselineAnalysisMode,
+      contentDigest: 'baseline-b-digest',
+      failureStage: null,
+      analysisRunId: null,
+      createdAt: new Date('2024-01-01T00:00:00Z'),
+      updatedAt: new Date('2024-01-01T00:00:00Z'),
+      finalizedAt: new Date('2024-01-01T00:00:00Z'),
+      terminalAt: new Date('2024-01-01T00:00:00Z'),
+    };
+    const observations: BaselineObservation[] = [
+      {
+        id: `${baselineId}-observation`,
+        baselineId,
+        kind: 'package_managers',
+        provenance: 'observed',
+        // IF the detector ever read this, it would match the lodash advisory
+        // (proving the guard PREVENTED the read — the advisory signal is
+        // NEVER produced for a cross-tenant baseline).
+        claim: { dependencies: { lodash: '^4.17.20' } },
+        claimDigest: 'baseline-b-claim-digest',
+        evidenceRef: [],
+        confirmedBy: null,
+        confirmedAt: null,
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+      },
+    ];
+    return { baseline, observations };
+  };
+
+  it('13. PR #45 — sync scan route rejects a cross-tenant baselineId (403 baseline-not-in-project) + listObservations is NEVER called for the foreign baseline', async () => {
+    const { baseline: baselineB, observations: observationsB } =
+      buildBaselineB('baseline-b-cross-tenant');
+    // Seed Project B's baseline into the shared recording repo (simulates
+    // "Project B has a baseline with this id"). The route's
+    // assertBaselineInProject calls findById(baselineB.id) → returns baselineB
+    // (projectId=projectB.id) → the gate fails (projectB.id !== projectA.id).
+    recordingBaselineRepo.seed(baselineB, observationsB);
+    const before = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    const res = await server.inject({
+      method: 'POST',
+      url: `/projects/${projectA.id}/maintenance/scan`,
+      headers: { authorization: 'Bearer raw-key-maint-a' },
+      payload: {
+        architectureVersionId: versionA.id,
+        baselineId: baselineB.id,
+      },
+    });
+    // PROOF 1: the route returned 403 (the foreign baselineId was rejected
+    // before detectAndEvaluate — the detectors were NEVER invoked).
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body) as { error: string; reason: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.reason).toBe('baseline-not-in-project');
+    // PROOF 2: no Work Items were created in Project A's version (the
+    // cross-tenant baseline evidence never reached the planner).
+    const after = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    expect(after.length).toBe(before.length);
+    // PROOF 3: listObservations was NEVER called for the foreign baseline
+    // (the route gate rejected before detectAndEvaluate; the detector was
+    // never invoked; listObservations is the read that would leak Project B's
+    // package_managers observation).
+    expect(recordingBaselineRepo.listObservationsCalls).not.toContain(baselineB.id);
+    // PROOF 4: findById WAS called for the foreign baseline (the route's
+    // assertBaselineInProject gate did the ownership check — this is the
+    // intended read; a UUID is never a credential).
+    expect(recordingBaselineRepo.findByIdCalls).toContain(baselineB.id);
+  });
+
+  it('14. PR #45 — async scan-async route rejects a cross-tenant baselineId (403 baseline-not-in-project) BEFORE enqueue (the maintenance.run job is NEVER enqueued)', async () => {
+    const { baseline: baselineB, observations: observationsB } =
+      buildBaselineB('baseline-b-cross-tenant-async');
+    // Use a DISTINCT id so this test's findById/listObservations assertions
+    // are independent of #13 (the shared recording repo accumulates calls).
+    recordingBaselineRepo.seed(baselineB, observationsB);
+    const before = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    const res = await server.inject({
+      method: 'POST',
+      url: `/projects/${projectA.id}/maintenance/scan-async`,
+      headers: { authorization: 'Bearer raw-key-maint-a' },
+      payload: {
+        architectureVersionId: versionA.id,
+        baselineId: baselineB.id,
+      },
+    });
+    // PROOF 1: the route returned 403 (the foreign baselineId was rejected
+    // BEFORE enqueue — the maintenance.run job was NEVER enqueued).
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body) as { error: string; reason: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.reason).toBe('baseline-not-in-project');
+    // PROOF 2: no Work Items were created (no job ran).
+    const after = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    expect(after.length).toBe(before.length);
+    // PROOF 3: listObservations was NEVER called for the foreign baseline
+    // (the async path also never reached the detector).
+    expect(recordingBaselineRepo.listObservationsCalls).not.toContain(baselineB.id);
+    // PROOF 4: findById WAS called (the route gate did the ownership check).
+    expect(recordingBaselineRepo.findByIdCalls).toContain(baselineB.id);
+  });
+
+  it('15. PR #45 — detector-level defense in depth: a programmatic detectAndEvaluate call with a cross-tenant baselineId produces NO signals + listObservations is NEVER called for the foreign baseline (the AdvisoryDetector guard fires even when bypassing the route)', async () => {
+    // This test bypasses the route entirely (calls detectAndEvaluate
+    // directly) to prove the DETECTOR's own ownership guard fires —
+    // protecting programmatic calls + the async job handler. Build a
+    // SEPARATE maintenance service with an AdvisorySource (the shared
+    // maintenanceService has no advisorySource → the detector returns early
+    // without the ownership check; this test forces the detector past the
+    // advisorySource check to the ownership guard).
+    const { baseline: baselineB, observations: observationsB } =
+      buildBaselineB('baseline-b-cross-tenant-detector');
+    // A SEPARATE recording repo (isolated from the shared one) so the
+    // assertions are precise.
+    const isolatedRecordingRepo = new SeededRecordingProjectBaselineRepository(
+      stack.projectBaselineRepository,
+    );
+    isolatedRecordingRepo.seed(baselineB, observationsB);
+    // Seed the lodash advisory (IF the detector ever read observationsB, it
+    // would match + produce a dependency-observation signal — proving the
+    // guard PREVENTED the read; the signal is NEVER produced).
+    const lodashAdvisory: AdvisoryRecord = {
+      advisoryId: 'GHSA-PR45-CROSS-TENANT',
+      ecosystem: 'npm',
+      packageName: 'lodash',
+      vulnerableRange: '<4.17.21',
+      fixedVersion: '4.17.21',
+      severity: 'high',
+      summary: 'Cross-tenant probe advisory',
+    };
+    const advisorySource = new InMemoryAdvisorySource([lodashAdvisory]);
+    const logger = createLogger({ level: 'info', destination: capture });
+    const detectorGuardedService = new DefaultMaintenanceService({
+      detectors: [new AdvisoryDetector()],
+      plannerService: planner,
+      workItemRepository: stack.workItemRepository,
+      workItemDependencyRepository: stack.workItemDependencyRepository,
+      architectureVersionRepository: stack.architectureVersionRepository,
+      architectureRepository: stack.architectureRepository,
+      requirementRepository: stack.requirementRepository,
+      acceptanceCriterionRepository: stack.acceptanceCriterionRepository,
+      ciEvidenceRepository: stack.ciEvidenceRepository,
+      projectBaselineRepository: isolatedRecordingRepo,
+      advisorySource,
+      logger,
+    });
+    const before = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    // Programmatic call with the FOREIGN baselineId (bypassing the route).
+    const result = await detectorGuardedService.detectAndEvaluate({
+      projectId: projectA.id,
+      organizationId: orgA.id,
+      architectureVersionId: versionA.id,
+      baselineId: baselineB.id,
+    });
+    // PROOF 1: the detector produced NO signals (the ownership guard threw
+    // maintenance-baseline-not-in-project; detectAndEvaluate caught + logged
+    // + continued with 0 signals — the run is NOT aborted, but the foreign
+    // baseline's observations were NEVER read).
+    expect(result.detectedSignalCount).toBe(0);
+    expect(result.createdCount).toBe(0);
+    // PROOF 2: no Work Items were created (the cross-tenant advisory never
+    // reached the planner).
+    const after = await stack.workItemRepository.findByArchitectureVersion(versionA.id);
+    expect(after.length).toBe(before.length);
+    // PROOF 3: listObservations was NEVER called for the foreign baseline
+    // (the detector's ownership guard threw BEFORE listObservations).
+    expect(isolatedRecordingRepo.listObservationsCalls).not.toContain(baselineB.id);
+    // PROOF 4: findById WAS called for the foreign baseline (the detector's
+    // ownership guard did the check — the intended read).
+    expect(isolatedRecordingRepo.findByIdCalls).toContain(baselineB.id);
   });
 });
