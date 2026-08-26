@@ -880,4 +880,497 @@ describe.skipIf(!isRealPg)('PR #42 round-6 + round-7 — the database-level + sc
     // The org policy V7 is still there (the fallback, untouched).
     expect(await currentOrgPolicyVersion(), 'the org policy V7 still exists (the fallback, untouched)').toBe(7);
   });
+
+  // =========================================================================
+  // PR #42 ROUND-8 — the ATOMIC MUTATION FENCE: the mutation-side lock
+  // is held THROUGH the mutation COMMIT, NOT released before the mutation.
+  //
+  // The architect's round-8 review of commit `776cbc2` established that
+  // the round-7 mutation-side `FOR UPDATE` was issued as a STANDALONE
+  // pool query (auto-commit → released immediately), then the actual
+  // INSERT / UPDATE / DELETE ran in a SEPARATE auto-commit transaction.
+  // So the lock was RELEASED BEFORE the mutation landed — the round-7
+  // mutation-side `FOR UPDATE` was structurally a no-op for serialization
+  // (the round-7 fence still serialized correctly only because the
+  // fence-side step-3/4 row locks fenced the mutation indirectly; the
+  // mutation-side anchor lock did NOT fence anything).
+  //
+  // THE ROUND-8 FIX (proven by these three tests): each of the four
+  // mutation paths wraps the anchor lock + the actual write in a SINGLE
+  // `db.transaction(async (tx) => { ... })` callback so the lock is held
+  // from SELECT FOR UPDATE THROUGH the INSERT/UPDATE/DELETE COMMIT:
+  //
+  //   BEGIN
+  //     SELECT id FROM wfos_projects / wfos_organizations WHERE id = $1 FOR UPDATE
+  //     INSERT / UPDATE / DELETE wfos_agent_policies ...
+  //   COMMIT
+  //
+  // H + I prove the round-8 atomic mutation blocks against the persistence
+  // fence for the two ORG-SCOPE mutation paths (setOrganizationPolicy +
+  // clearOrganizationPolicy) — the org-scope analogs of the round-7
+  // project-scope scenarios E + F. Together E + F + H + I cover ALL FOUR
+  // mutation paths the round-8 fix wraps.
+  //
+  // J proves the SYMMETRIC serialization that DISTINGUISHES the round-8
+  // atomic wrapper from the round-7 broken code: T2's mutation holds the
+  // project anchor lock THROUGH its own COMMIT (the round-8 atomic
+  // wrapper). T1's fence, started AFTER T2's lock acquisition but BEFORE
+  // T2's COMMIT, BLOCKS on T2's lock until T2 commits. T1 then acquires
+  // → re-resolves → sees T2's mutation → mismatch → ROLLBACK →
+  // `fence-stale`. With the round-7 broken code, the standalone FOR
+  // UPDATE would have auto-committed + released the lock BEFORE T2's
+  // INSERT landed, so T1's fence would have SQUEEZED IN between T2's
+  // lock release and T2's INSERT commit → T1 would have seen V7 (T2's
+  // INSERT not committed) → committed V7 stale evidence under the new
+  // V8 effective policy → THE HOLE. The round-8 atomic wrapper closes
+  // this hole by holding the lock through the mutation COMMIT.
+  //
+  // THE ARCHITECT'S INVARIANT: "the mutation stays blocked until the
+  // persistence transaction commits" — proven by H + I (the mutation
+  // blocks while T1's fence holds the lock; T2 applies AFTER T1 commits)
+  // AND by J (the symmetric inverse — T1's fence blocks while T2's
+  // mutation holds the lock; T1 rejects as stale after T2 commits).
+  // =========================================================================
+
+  // The V8 organization-scope document (a mutated org default that bumps
+  // the version — used in scenario H).
+  const V8_ORG_DOCUMENT: AgentPolicyDocument = {
+    description: 'V8 org policy (mutated)',
+    rules: [],
+    defaultEffect: 'allow',
+  };
+
+  // =========================================================================
+  // H. SERIALIZATION (org-scope, the round-8 atomic wrapper): org policy
+  //    V7 active, NO project policy → T1 fence locks the scope anchors
+  //    (project + org) + the org policy row → T2's setOrganizationPolicy
+  //    (V8) — an INSERT ... ON CONFLICT DO UPDATE on the SAME org policy
+  //    row the fence locks — BLOCKS on T1's org anchor lock (acquired by
+  //    setOrganizationPolicy's atomic transaction BEFORE the INSERT) →
+  //    T1 verifies + writes + commits under the org V7 → T2 unblocks +
+  //    applies V8 (the org default mutation happens AFTER the persistence
+  //    in the serialization order).
+  //
+  //    CRITICAL ASSERTION (the architect's invariant): T1's persisted
+  //    evidence carries per-read policyVersion=7 (the org V7 — the
+  //    persistence happened-before the org default was mutated to V8),
+  //    NOT V8. This proves the round-8 atomic mutation-side fence
+  //    serializes setOrganizationPolicy against the persistence fence
+  //    (the round-7 standalone FOR UPDATE was a no-op for this).
+  // =========================================================================
+  it('H. (round-8 org-scope) org policy V7, no project policy → T2 setOrganizationPolicy BLOCKS on T1\'s org anchor lock → T1 commits under org V7 → org default mutated to V8 AFTER', async () => {
+    // Setup: org policy V7 active, NO project policy (the architect's
+    // "no project policy" setup). The beforeEach seeded a project policy
+    // V7; remove it + seed the org-scope V7 default.
+    await seedOrgOnlyV7();
+    expect(await currentProjectPolicyVersion(), 'setup: no project policy exists').toBeNull();
+    expect(await currentOrgPolicyVersion(), 'setup: org policy V7 active').toBe(7);
+
+    const t2Repo = new PgAgentPolicyRepository({ db: second!.client });
+    let t2WasBlocked = false;
+    let t2Promise: Promise<void> | undefined;
+
+    // T2's mutation: setOrganizationPolicy(V8_ORG_DOCUMENT) — an
+    // INSERT ... ON CONFLICT DO UPDATE on the SAME org policy row the
+    // fence locks. T2's atomic transaction (round-8) acquires the org
+    // anchor lock (FOR UPDATE on wfos_organizations) BEFORE the INSERT
+    // — the SAME lock T1's fence holds. So T2 BLOCKS on T1's lock
+    // until T1 commits.
+    //
+    // CRITICAL: T2 is started INSIDE the willMutate hook — i.e. AFTER T1
+    // has acquired the scope anchor locks + the relevant policy rows +
+    // re-resolved the effective policy (so T2 cannot sneak in before T1
+    // locks the anchors + commit V8 first). Starting T2 before T1 begins
+    // would let T2 commit V8 before T1's lock acquisition, making T1 see
+    // V8 → fence-stale (that would be the inverse scenario, not this
+    // one — see scenario J for the symmetric case).
+    const willMutate = async () => {
+      // T1 now holds the project + org anchor locks + the org policy row
+      // lock. Start T2 — its setOrganizationPolicy acquires the org
+      // anchor lock (FOR UPDATE on wfos_organizations) inside its atomic
+      // transaction → BLOCKS on T1's lock.
+      t2Promise = (async () => {
+        await t2Repo.setOrganizationPolicy({
+          organizationId: orgId,
+          document: V8_ORG_DOCUMENT,
+          userId,
+        });
+      })();
+      // Give T2 time to reach the blocked state.
+      await delay(300);
+      // PROBE: is T2 still pending (blocked) or did it resolve?
+      const probe = await Promise.race([
+        t2Promise.then(() => 'resolved' as const),
+        delay(50).then(() => 'pending' as const),
+      ]);
+      t2WasBlocked = probe === 'pending';
+    };
+
+    const evidence = [makeEvidence('package.json', 7)];
+    const observations = [
+      makeObservation('repository_identity', { name: 'round8-org-scope-repo' }, 'package.json'),
+    ];
+
+    const t1Result = await projectBaselineRepository.persistBaselineWithPolicyFence({
+      baselineId,
+      evidence,
+      observations,
+      contentDigest: sha256('round8-content-H'),
+      expectedVersion: baselineVersion,
+      // The snapshot reflects the org-scope effective policy at capture
+      // time (BEFORE T2's mutation).
+      snapshot: v7OrgSnapshot,
+      organizationId: orgId,
+      projectId,
+      willMutate,
+    });
+
+    // T1 committed (persisted) — the fence held the project + org anchor
+    // locks + the org policy row lock through the writes + commit. T1's
+    // evidence was committed under the organization V7 policy (the
+    // persistence happened-before the org default was mutated to V8).
+    expect(t1Result.kind, 'T1 persisted under org V7 (the fence held the anchor locks)').toBe('persisted');
+
+    // T2 was BLOCKED while T1 held the org anchor lock (the real
+    // serialization point for the org-scope setOrganizationPolicy
+    // mutation).
+    expect(t2WasBlocked, 'T2 was blocked on T1\'s org anchor lock (real DB serialization — the round-8 atomic mutation-side fence serializes setOrganizationPolicy)').toBe(true);
+
+    // T1 committed → the lock released → T2 unblocks + mutates the org
+    // default to V8. Await T2 (so afterEach does not terminate its
+    // in-flight transaction).
+    await t2Promise;
+    expect(await currentOrgPolicyVersion(), 'T2 mutated the org default to V8 AFTER T1 committed').toBe(8);
+    // The project policy is still absent (T2 did not touch it).
+    expect(await currentProjectPolicyVersion(), 'the project policy is still absent (T2 did not touch it)').toBeNull();
+
+    // THE ARCHITECT'S INVARIANT: T1's persisted evidence carries per-read
+    // policyVersion=7 (the org V7 — the persistence happened-before the
+    // org default was mutated to V8). NOT V8 (the mutation did not exist
+    // when T1's persistence ran — T2 was blocked).
+    const persistedEvidence = await projectBaselineRepository.listEvidence(baselineId);
+    expect(persistedEvidence.length, 'T1\'s V7 evidence is committed').toBeGreaterThan(0);
+    expect(
+      persistedEvidence[0]!.repositoryReadEnforcement?.policyVersion,
+      'the committed evidence carries V7 (the persistence happened-before the org default was mutated to V8) — the round-8 atomic mutation-side fence serializes setOrganizationPolicy',
+    ).toBe(7);
+
+    // The baseline is complete (T1's markComplete committed under the
+    // anchor locks).
+    const baseline = await projectBaselineRepository.findById(baselineId);
+    expect(baseline?.state, 'T1 completed the baseline under the anchor locks').toBe('complete');
+  });
+
+  // =========================================================================
+  // I. SERIALIZATION (org-scope DELETE, the round-8 atomic wrapper): org
+  //    policy V7 active, NO project policy → T1 fence locks the scope
+  //    anchors (project + org) + the org policy row → T2's
+  //    clearOrganizationPolicy — a DELETE on the org policy row — BLOCKS
+  //    on T1's org anchor lock (acquired by clearOrganizationPolicy's
+  //    atomic transaction BEFORE the DELETE) → T1 verifies + writes +
+  //    commits under the org V7 → T2 unblocks + DELETEs the org policy
+  //    (the fallback to platform-default happens AFTER the persistence
+  //    in the serialization order).
+  //
+  //    CRITICAL ASSERTION (the architect's invariant): T1's persisted
+  //    evidence carries per-read policyVersion=7 (the org V7 — the
+  //    persistence happened-before the org default was cleared), NOT the
+  //    platform-default fallback. The round-7 standalone FOR UPDATE was
+  //    a no-op for the DELETE path (PostgreSQL's FK machinery does NOT
+  //    auto-lock the parent on DELETE); the round-8 atomic wrapper is
+  //    the ONLY thing that fences clearOrganizationPolicy against the
+  //    persistence fence.
+  // =========================================================================
+  it('I. (round-8 org-scope DELETE) org policy V7, no project policy → T2 clearOrganizationPolicy BLOCKS on T1\'s org anchor lock → T1 commits under org V7 → org default cleared AFTER', async () => {
+    // Setup: org policy V7 active, NO project policy.
+    await seedOrgOnlyV7();
+    expect(await currentProjectPolicyVersion(), 'setup: no project policy exists').toBeNull();
+    expect(await currentOrgPolicyVersion(), 'setup: org policy V7 active').toBe(7);
+
+    const t2Repo = new PgAgentPolicyRepository({ db: second!.client });
+    let t2WasBlocked = false;
+    let t2Promise: Promise<void> | undefined;
+
+    // T2's mutation: clearOrganizationPolicy — a DELETE on the org-scope
+    // row. T2's atomic transaction (round-8) acquires the org anchor
+    // lock (FOR UPDATE on wfos_organizations) BEFORE the DELETE — the
+    // SAME lock T1's fence holds. The DELETE itself does NOT auto-lock
+    // the parent (PostgreSQL's FK machinery locks the parent only on
+    // INSERT/UPDATE of the FK column); the explicit FOR UPDATE inside
+    // T2's atomic transaction is the ONLY thing that fences the DELETE.
+    // So T2 BLOCKS on T1's lock until T1 commits.
+    const willMutate = async () => {
+      // T1 now holds the project + org anchor locks + the org policy row
+      // lock. Start T2 — its clearOrganizationPolicy acquires the org
+      // anchor lock (FOR UPDATE on wfos_organizations) inside its atomic
+      // transaction → BLOCKS on T1's lock.
+      t2Promise = (async () => {
+        await t2Repo.clearOrganizationPolicy(orgId);
+      })();
+      // Give T2 time to reach the blocked state.
+      await delay(300);
+      // PROBE: is T2 still pending (blocked) or did it resolve?
+      const probe = await Promise.race([
+        t2Promise.then(() => 'resolved' as const),
+        delay(50).then(() => 'pending' as const),
+      ]);
+      t2WasBlocked = probe === 'pending';
+    };
+
+    const evidence = [makeEvidence('package.json', 7)];
+    const observations = [
+      makeObservation('repository_identity', { name: 'round8-org-delete-repo' }, 'package.json'),
+    ];
+
+    const t1Result = await projectBaselineRepository.persistBaselineWithPolicyFence({
+      baselineId,
+      evidence,
+      observations,
+      contentDigest: sha256('round8-content-I'),
+      expectedVersion: baselineVersion,
+      snapshot: v7OrgSnapshot,
+      organizationId: orgId,
+      projectId,
+      willMutate,
+    });
+
+    // T1 committed (persisted) — the fence held the project + org anchor
+    // locks + the org policy row lock through the writes + commit.
+    expect(t1Result.kind, 'T1 persisted under org V7 (the fence held the anchor locks)').toBe('persisted');
+
+    // T2 was BLOCKED while T1 held the org anchor lock (the real
+    // serialization point for the org-scope clearOrganizationPolicy
+    // mutation — the round-8 atomic wrapper is the ONLY thing that
+    // fences the DELETE, because PostgreSQL's FK machinery does NOT
+    // auto-lock the parent on DELETE).
+    expect(t2WasBlocked, 'T2 was blocked on T1\'s org anchor lock (real DB serialization — the round-8 atomic mutation-side fence serializes clearOrganizationPolicy; the DELETE has NO FK-induced parent lock)').toBe(true);
+
+    // T1 committed → the lock released → T2 unblocks + DELETEs the org
+    // policy. Await T2.
+    await t2Promise;
+    expect(await currentOrgPolicyVersion(), 'T2 cleared the org policy AFTER T1 committed (the platform-default fallback happened after the persistence)').toBeNull();
+    // The project policy is still absent (T2 did not touch it).
+    expect(await currentProjectPolicyVersion(), 'the project policy is still absent (T2 did not touch it)').toBeNull();
+
+    // THE ARCHITECT'S INVARIANT: T1's persisted evidence carries per-read
+    // policyVersion=7 (the org V7 — the persistence happened-before the
+    // org default was cleared). NOT the platform-default fallback (the
+    // clear did not happen when T1's persistence ran — T2 was blocked).
+    const persistedEvidence = await projectBaselineRepository.listEvidence(baselineId);
+    expect(persistedEvidence.length, 'T1\'s V7 evidence is committed').toBeGreaterThan(0);
+    expect(
+      persistedEvidence[0]!.repositoryReadEnforcement?.policyVersion,
+      'the committed evidence carries V7 (the persistence happened-before the org default was cleared) — the round-8 atomic mutation-side fence serializes clearOrganizationPolicy',
+    ).toBe(7);
+
+    // The baseline is complete (T1's markComplete committed under the
+    // anchor locks).
+    const baseline = await projectBaselineRepository.findById(baselineId);
+    expect(baseline?.state, 'T1 completed the baseline under the anchor locks').toBe('complete');
+  });
+
+  // =========================================================================
+  // J. SYMMETRIC SERIALIZATION (the round-8 atomic wrapper, the
+  //    distinguishing test): T2's setProjectPolicy HOLDS the project
+  //    anchor lock THROUGH its own COMMIT (the round-8 atomic wrapper).
+  //    T1's fence, started AFTER T2's lock acquisition but BEFORE T2's
+  //    COMMIT, BLOCKS on T2's lock until T2 commits. T1 then acquires →
+  //    re-resolves → sees T2's V8 mutation → mismatch → ROLLBACK →
+  //    `fence-stale`.
+  //
+  //    WHY THIS DISTINGUISHES THE ROUND-8 FIX FROM THE ROUND-7 BROKEN
+  //    CODE: with the round-7 broken code, T2's setProjectPolicy issued
+  //    `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE` as a
+  //    STANDALONE pool query (auto-commit → released immediately), then
+  //    ran the INSERT in a SEPARATE auto-commit transaction. So when T0
+  //    (the external lock holder) released, T2's standalone FOR UPDATE
+  //    acquired + auto-committed + released — and T1's fence (queued
+  //    behind T2 on T0's lock) would acquire the project anchor lock
+  //    (T2 already released) → re-resolve → see V7 (T2's INSERT not
+  //    committed yet) → COMMIT V7 stale evidence → T2's INSERT then
+  //    commits V8 → STALE EVIDENCE UNDER THE NEW V8 EFFECTIVE POLICY →
+  //    THE HOLE.
+  //
+  //    With the round-8 atomic wrapper, T2's setProjectPolicy is
+  //    `BEGIN; SELECT FOR UPDATE; INSERT; COMMIT` — the lock is held
+  //    THROUGH the INSERT COMMIT. T1's fence, queued behind T2 on T0's
+  //    lock, REMAINS BLOCKED on T2's lock when T0 releases (T2 acquires
+  //    first via FIFO, holds through its own COMMIT). T2 commits V8 →
+  //    releases → T1 acquires → re-resolves → sees V8 → mismatch →
+  //    ROLLBACK → `fence-stale` → ZERO stale evidence committed. ✓
+  //
+  //    THE ARCHITECT'S EXACT INVARIANT: "the mutation stays blocked
+  //    until the persistence transaction commits" — the symmetric
+  //    inverse. In scenarios E/F/H/I, T1 (persistence) holds the lock
+  //    and T2 (mutation) blocks until T1 commits. In scenario J, T2
+  //    (mutation) holds the lock and T1 (persistence) blocks until T2
+  //    commits — and T1 then REJECTS as stale (because T2's mutation
+  //    committed before T1's re-resolution).
+  //
+  //    NOTE ON THE FIFO RACE: when T0 releases, PostgreSQL's FOR UPDATE
+  //    lock scheduler grants the lock to the request that's been
+  //    waiting longest (T2 — it was queued first). In practice this is
+  //    reliable. If the scheduler ever grants T1 first (the opposite
+  //    ordering), the test outcome would be `persisted` (T1 sees V7,
+  //    commits V7 evidence, T2 applies V8 after — that is scenario A's
+  //    outcome, also correct serialization, just the reverse order). To
+  //    minimize this race, T2 is started BEFORE T1 (queued first).
+  // =========================================================================
+  it('J. (round-8 symmetric) T2\'s setProjectPolicy holds the project anchor lock THROUGH its own COMMIT → T1 fence (started after T2 acquires, before T2 commits) BLOCKS on T2\'s lock → T2 commits V8 → T1 re-resolves → sees V8 → ROLLBACK → fence-stale → ZERO stale evidence committed', async () => {
+    // Setup: project policy V7 active (the beforeEach seed — the
+    // snapshot source is 'project'). No org policy seeded.
+    expect(await currentProjectPolicyVersion(), 'setup: project policy V7 active').toBe(7);
+
+    // T0 — a THIRD independent pg.Client that holds the project anchor
+    // lock externally. T2's mutation will block on T0's lock at the
+    // SELECT FOR UPDATE step inside T2's atomic transaction; T1's fence
+    // will also block on T0's lock at step 1. The external lock lets us
+    // control the timing so T2 acquires T0's released lock BEFORE T1,
+    // then T2 holds the lock through its own COMMIT (proving the round-8
+    // atomic wrapper).
+    if (!stack.db.createSecondClient) {
+      // pglite path — should be skipped by describe.skipIf(!isRealPg).
+      throw new Error('createSecondClient unavailable on the real-pg path');
+    }
+    const t0 = await stack.db.createSecondClient();
+
+    try {
+      // T0 acquires the project anchor lock + holds the transaction
+      // open until `releaseT0` is called (then transaction() commits +
+      // releases the lock).
+      let releaseT0!: () => void;
+      const t0Held = new Promise<void>((resolve) => {
+        releaseT0 = resolve;
+      });
+      const t0Promise = t0.client.transaction(async (tx) => {
+        await tx.query(
+          `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+          [projectId],
+        );
+        // Hold the transaction open until releaseT0 is called.
+        await t0Held;
+      });
+
+      // T2's mutation: setProjectPolicy(V8_DOCUMENT) — an INSERT ... ON
+      // CONFLICT DO UPDATE on the SAME project policy row. T2's atomic
+      // transaction (round-8) is `BEGIN; SELECT FOR UPDATE (blocks on
+      // T0's lock); INSERT; COMMIT`. T2 is started FIRST so it is
+      // queued on T0's lock BEFORE T1.
+      const t2Repo = new PgAgentPolicyRepository({ db: second!.client });
+      const t2Promise = (async () => {
+        await t2Repo.setProjectPolicy({
+          organizationId: orgId,
+          projectId,
+          document: V8_DOCUMENT,
+          userId,
+        });
+      })();
+
+      // Give T2 time to reach the blocked state (queued on T0's lock).
+      await delay(300);
+
+      // T1's fence: started AFTER T2 is queued on T0's lock (so T1 is
+      // queued BEHIND T2). T1's snapshot is V7 (taken BEFORE T2's
+      // mutation commits). With the round-8 atomic wrapper, when T0
+      // releases, T2 acquires first (FIFO) + holds the lock through its
+      // own COMMIT → T1 stays blocked on T2's lock until T2 commits →
+      // T1 acquires → re-resolves → sees V8 → mismatch → ROLLBACK →
+      // `fence-stale`.
+      const evidence = [makeEvidence('package.json', 7)];
+      const observations = [
+        makeObservation('repository_identity', { name: 'round8-symmetric-repo' }, 'package.json'),
+      ];
+
+      const t1Promise = projectBaselineRepository.persistBaselineWithPolicyFence({
+        baselineId,
+        evidence,
+        observations,
+        contentDigest: sha256('round8-content-J'),
+        expectedVersion: baselineVersion,
+        snapshot: v7Snapshot, // stale — T2 will commit V8 before T1 re-resolves
+        organizationId: orgId,
+        projectId,
+        // no willMutate — T1 should block on T0/T2's lock without it
+      });
+
+      // Give T1 time to reach the blocked state (queued on T0's lock,
+      // behind T2).
+      await delay(300);
+
+      // PROBE 1: T1 should still be pending (blocked on T0's lock,
+      // behind T2). T2 should also still be pending (blocked on T0's
+      // lock).
+      const probe1T1 = await Promise.race([
+        t1Promise.then(() => 'resolved' as const),
+        delay(50).then(() => 'pending' as const),
+      ]);
+      const probe1T2 = await Promise.race([
+        t2Promise.then(() => 'resolved' as const),
+        delay(50).then(() => 'pending' as const),
+      ]);
+      expect(probe1T1, 'T1 was blocked on T0\'s external project anchor lock (queued behind T2)').toBe('pending');
+      expect(probe1T2, 'T2 was blocked on T0\'s external project anchor lock').toBe('pending');
+
+      // Release T0 — its transaction commits + releases the project
+      // anchor lock. PostgreSQL grants the lock to T2 first (FIFO — T2
+      // was queued before T1).
+      releaseT0();
+      await t0Promise;
+
+      // Give T2 time to acquire T0's released lock + apply the
+      // mutation + commit. With the round-8 atomic wrapper, T2's lock
+      // is held THROUGH the COMMIT — T1 stays blocked on T2's lock
+      // until T2 commits.
+      await delay(300);
+
+      // PROBE 2: T2 should have committed V8 (the mutation applied +
+      // committed inside T2's atomic transaction).
+      expect(await currentPolicyVersion(), 'T2 committed V8 (the mutation applied inside T2\'s atomic transaction)').toBe(8);
+
+      // PROBE 3: T1 should still be pending (blocked on T2's lock — T2
+      // held the lock through its own COMMIT, which is the round-8
+      // atomic wrapper invariant). With the round-7 broken code, T2's
+      // standalone FOR UPDATE would have auto-committed + released the
+      // lock BEFORE the INSERT, so T1 would have acquired the lock +
+      // committed V7 stale evidence by now → THE HOLE. With the
+      // round-8 atomic wrapper, T1 stays blocked until T2 commits.
+      const probe3T1 = await Promise.race([
+        t1Promise.then(() => 'resolved' as const),
+        delay(50).then(() => 'pending' as const),
+      ]);
+      // NOTE: with the round-8 atomic wrapper, T1 stays blocked until
+      // T2 commits. T2 has committed (probe 2). T1 should now unblock.
+      // If T1 is still pending here, it's because T1's re-resolution
+      // + ROLLBACK is still in-flight (very fast — should resolve
+      // immediately). The probe may show 'pending' for the ROLLBACK
+      // path; the OUTCOME assertion (fence-stale) is the real test.
+      void probe3T1; // best-effort probe — the outcome assertion below is authoritative
+
+      // T1's fence should now resolve (T2 committed → T1 acquires →
+      // re-resolves → sees V8 → mismatch → ROLLBACK → `fence-stale`).
+      const t1Result = await t1Promise;
+      expect(t1Result.kind, 'T1 REJECTED (T2\'s mutation committed V8 before T1 re-resolved — the symmetric serialization; the round-8 atomic wrapper held the lock through T2\'s COMMIT so T1 could NOT squeeze in between T2\'s lock release and T2\'s INSERT commit)').toBe('fence-stale');
+
+      // CRITICAL: ZERO stale evidence/observations are committed (T1's
+      // transaction was rolled back). The architect's invariant — NO
+      // stale evidence under the new V8 effective policy.
+      const persistedEvidence = await projectBaselineRepository.listEvidence(baselineId);
+      expect(persistedEvidence.length, 'ZERO stale evidence committed (T1\'s transaction rolled back — the round-8 atomic wrapper closed the hole where the round-7 broken code would have let T1 commit V7 evidence under the new V8 effective policy)').toBe(0);
+      const persistedObservations = await projectBaselineRepository.listObservations(baselineId);
+      expect(persistedObservations.length, 'ZERO stale observations committed (T1\'s transaction rolled back)').toBe(0);
+
+      // The baseline is still 'analyzing' (T1's markComplete rolled back).
+      const baseline = await projectBaselineRepository.findById(baselineId);
+      expect(baseline?.state, 'the baseline stays analyzing (T1\'s markComplete rolled back)').toBe('analyzing');
+
+      // The policy is V8 (T2's mutation stands — T1 did not touch it).
+      expect(await currentPolicyVersion(), 'the policy is V8 (T2\'s mutation stands — T1 did not touch it)').toBe(8);
+
+      // Await T2 (cleanup — T2 already resolved, but ensure no
+      // in-flight transaction is left open).
+      await t2Promise;
+    } finally {
+      await t0.close();
+    }
+  });
 });
