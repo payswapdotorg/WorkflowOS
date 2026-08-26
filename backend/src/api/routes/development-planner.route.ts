@@ -126,56 +126,83 @@ async function resolveProjectForWorkItem(
   return arch?.projectId ?? null;
 }
 
-/** Parse + validate a signal from the request body. */
-function parseSignal(raw: unknown): PlanningSignal | null {
+/**
+ * The FORBIDDEN signal-authority fields — a public caller MUST NOT supply
+ * these. The server constructs them from the authenticated principal + the
+ * frozen planner vocabulary (kind=developer-request, provenance=proposed,
+ * originator=user.id). If ANY forbidden field is present, the request is
+ * REJECTED with 400 (the boundary is explicit — the public route does NOT
+ * silently ignore caller-supplied authority; it REJECTS it, so a public
+ * caller can NEVER manufacture `observed` repository evidence, fake
+ * evidenceRefs, an unverified baselineCommitSha, or a caller-controlled
+ * blocksCount).
+ *
+ * This is the PR #44 round 4 authority/provenance boundary: the frozen
+ * provenance rule is source-fact → baseline/context-evidence → planner
+ * recommendation → authoritative Work Item. The planner MUST NOT turn
+ * UNVERIFIED CLIENT ASSERTIONS into `observed` repository evidence. Only
+ * trusted INTERNAL signal producers (WORK-038/039, /architecture,
+ * /requirements, /github, /work-items subsystems) may create the full
+ * signal vocabulary — and they call DevelopmentPlannerService.evaluate
+ * DIRECTLY (programmatically), NOT through this public route.
+ */
+const FORBIDDEN_SIGNAL_FIELDS = [
+  'kind', // server forces 'developer-request'
+  'provenance', // server forces 'proposed'
+  'evidenceRefs', // no caller-supplied evidence authority
+  'blocksCount', // no caller-controlled priority input
+  'relatedWorkItemIds', // no caller-supplied dependency references
+  'originator', // server resolves from the authenticated user
+  'baselineCommitSha', // no caller-supplied revision (not verified context)
+] as const;
+
+/**
+ * The public user-request shape — the ONLY per-item shape the public route
+ * accepts. A user request is { canonicalGoal, scope? }. The server constructs
+ * the authoritative PlanningSignal from this + the authenticated principal:
+ *   kind               = 'developer-request'
+ *   provenance         = 'proposed'
+ *   originator         = user.id (from the authenticated principal)
+ *   evidenceRefs       = (none — the public route supplies no evidence authority)
+ *   blocksCount        = (none — the prioritizer derives from validated refs)
+ *   relatedWorkItemIds = (none — the public route supplies no dependency refs)
+ *   baselineCommitSha  = (none — the public route does not verify a revision)
+ *
+ * Trusted INTERNAL signal producers call DevelopmentPlannerService.evaluate
+ * DIRECTLY (programmatically) with the full PlanningSignal vocabulary — they
+ * do NOT go through this public route. The programmatic path is unrestricted
+ * (it is the trusted-producer entry point); ONLY the public HTTP route is
+ * constrained to the user-request shape.
+ */
+interface PublicPlanningUserRequest {
+  readonly canonicalGoal: string;
+  readonly scope?: string;
+}
+
+/**
+ * Parse + validate a public user request. Returns the constrained shape OR
+ * null if the input is malformed OR contains a forbidden signal-authority
+ * field. The caller-supplied provenance/kind/evidenceRefs/blocksCount/
+ * relatedWorkItemIds/originator/baselineCommitSha are NEVER accepted — the
+ * server constructs those from the authenticated principal + the frozen
+ * planner vocabulary (kind=developer-request, provenance=proposed,
+ * originator=user.id).
+ */
+function parsePublicUserRequest(raw: unknown): PublicPlanningUserRequest | null {
   if (!raw || typeof raw !== 'object') return null;
   const s = raw as Record<string, unknown>;
+  // canonicalGoal is the ONE required field (the user's intent).
   if (typeof s.canonicalGoal !== 'string' || s.canonicalGoal.trim() === '') {
     return null;
   }
-  if (typeof s.kind !== 'string') return null;
-  if (
-    typeof s.provenance !== 'string' ||
-    !['observed', 'inferred', 'proposed'].includes(s.provenance)
-  ) {
-    return null;
+  // scope is the ONE optional field (user-supplied context).
+  const scope = typeof s.scope === 'string' ? s.scope : undefined;
+  // REJECT any forbidden signal-authority field. The public route does NOT
+  // turn unverified client assertions into observed repository evidence.
+  for (const field of FORBIDDEN_SIGNAL_FIELDS) {
+    if (field in s) return null;
   }
-  const evidenceRefs = Array.isArray(s.evidenceRefs)
-    ? s.evidenceRefs
-        .map((e) => {
-          if (!e || typeof e !== 'object') return null;
-          const er = e as Record<string, unknown>;
-          if (typeof er.kind !== 'string' || typeof er.ref !== 'string') return null;
-          return {
-            kind: er.kind as PlanningSignal['evidenceRefs'] extends
-              | readonly (infer E)[]
-              | undefined
-              ? E extends { kind: infer K }
-                ? K
-                : never
-              : never,
-            ref: er.ref,
-            detail: typeof er.detail === 'string' ? er.detail : undefined,
-          };
-        })
-        .filter((e): e is NonNullable<typeof e> => e !== null)
-    : undefined;
-  const relatedWorkItemIds = Array.isArray(s.relatedWorkItemIds)
-    ? s.relatedWorkItemIds.filter((x): x is string => typeof x === 'string')
-    : undefined;
-  return {
-    kind: s.kind as PlanningSignal['kind'],
-    canonicalGoal: s.canonicalGoal,
-    scope: typeof s.scope === 'string' ? s.scope : undefined,
-    provenance: s.provenance as PlanningSignal['provenance'],
-    evidenceRefs,
-    relatedWorkItemIds,
-    originator: typeof s.originator === 'string' ? s.originator : undefined,
-    baselineCommitSha:
-      typeof s.baselineCommitSha === 'string' ? s.baselineCommitSha : undefined,
-    blocksCount:
-      typeof s.blocksCount === 'number' ? s.blocksCount : undefined,
-  };
+  return { canonicalGoal: s.canonicalGoal, scope };
 }
 
 export async function developmentPlannerRoutes(
@@ -183,36 +210,70 @@ export async function developmentPlannerRoutes(
   deps: DevelopmentPlannerRouteDeps,
 ): Promise<void> {
   // POST /projects/:projectId/planning/evaluate — the canonical MUTATION.
+  // AUTHORITY/PROVENANCE BOUNDARY (PR #44 round 4): the public route accepts
+  // ONLY the user-request shape { canonicalGoal, scope? }. The server
+  // constructs the authoritative PlanningSignal from this + the
+  // authenticated principal: kind=developer-request, provenance=proposed,
+  // originator=user.id. NO caller-supplied provenance/kind/evidenceRefs/
+  // blocksCount/relatedWorkItemIds/baselineCommitSha/originator — the public
+  // route does NOT turn unverified client assertions into observed repository
+  // evidence. Trusted internal producers call DevelopmentPlannerService.evaluate
+  // DIRECTLY (programmatically) with the full vocabulary.
   app.post('/projects/:projectId/planning/evaluate', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
-      await requireProjectAuthorization(req, reply, deps, {
+      // Resolve the authenticated user (the originator).
+      // requireProjectAuthorization returns the User; its id is the canonical
+      // originator. A UUID is NEVER a credential — the route resolves the
+      // principal server-side.
+      const user = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write',
         projectId,
       });
       const body = req.body as {
         architectureVersionId?: string;
-        signals?: unknown[];
-        baselineCommitSha?: string;
+        requests?: unknown[];
         idempotencyKey?: string;
       } | undefined;
+      // REJECT the old full-vocabulary body shape (top-level `signals` or
+      // `baselineCommitSha`). The public route accepts ONLY the user-request
+      // shape. Trusted internal producers call DevelopmentPlannerService.evaluate
+      // DIRECTLY — they do NOT go through this public route.
+      if (body && ('signals' in body || 'baselineCommitSha' in body)) {
+        return reply.code(400).send({
+          error: 'forbidden-field',
+          reason: 'public-route-accepts-only-user-requests',
+        });
+      }
       if (!body?.architectureVersionId) {
         return reply
           .code(400)
           .send({ error: 'architectureVersionId required' });
       }
-      if (!Array.isArray(body.signals)) {
-        return reply.code(400).send({ error: 'signals array required' });
+      if (!Array.isArray(body.requests)) {
+        return reply.code(400).send({ error: 'requests array required' });
       }
+      // Construct the authoritative PlanningSignals from the constrained
+      // user requests + the authenticated principal. The public route FORCES
+      // kind=developer-request + provenance=proposed + originator=user.id. NO
+      // caller-supplied evidenceRefs/blocksCount/relatedWorkItemIds/
+      // baselineCommitSha (the parsePublicUserRequest parser REJECTS any of
+      // these if a caller supplies them).
       const signals: PlanningSignal[] = [];
-      for (const raw of body.signals) {
-        const parsed = parseSignal(raw);
+      for (const raw of body.requests) {
+        const parsed = parsePublicUserRequest(raw);
         if (!parsed) {
           return reply
             .code(400)
-            .send({ error: 'invalid-signal', signal: raw });
+            .send({ error: 'invalid-user-request', request: raw });
         }
-        signals.push(parsed);
+        signals.push({
+          kind: 'developer-request',
+          provenance: 'proposed',
+          canonicalGoal: parsed.canonicalGoal,
+          scope: parsed.scope,
+          originator: user.id,
+        });
       }
       try {
         const ctx = await resolvePlanningContext(deps, projectId);
@@ -220,8 +281,12 @@ export async function developmentPlannerRoutes(
           projectId,
           architectureVersionId: body.architectureVersionId,
           signals,
-          baselineCommitSha: body.baselineCommitSha,
           idempotencyKey: body.idempotencyKey,
+          // NO baselineCommitSha — the public route does NOT accept a caller-
+          // supplied revision (it is not verified context). The planner
+          // records null. Trusted internal producers that have resolved a
+          // real revision call DevelopmentPlannerService.evaluate DIRECTLY
+          // with baselineCommitSha.
         };
         const result = await deps.plannerService.evaluate(input, ctx);
         return reply
@@ -251,10 +316,19 @@ export async function developmentPlannerRoutes(
 
   // POST /projects/:projectId/planning/evaluate-async — enqueue a durable job
   // on the EXISTING platform Queue (reuses WorkerHost; NO new scheduler).
+  // Same AUTHORITY/PROVENANCE BOUNDARY as the sync route (PR #44 round 4): the
+  // public async route accepts ONLY the user-request shape; the server
+  // constructs kind=developer-request, provenance=proposed, originator=user.id;
+  // NO caller-supplied provenance/kind/evidenceRefs/blocksCount/
+  // relatedWorkItemIds/baselineCommitSha/originator. The job carries the
+  // CONSTRAINED signals (the public async path cannot manufacture observed
+  // evidence). Trusted internal producers that want async enqueues call
+  // queue.enqueue(PLANNING_EVALUATE_JOB_TYPE, ...) DIRECTLY with full-vocabulary
+  // signals — a server-internal mechanism, NOT this public route.
   app.post('/projects/:projectId/planning/evaluate-async', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
-      await requireProjectAuthorization(req, reply, deps, {
+      const user = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write',
         projectId,
       });
@@ -265,27 +339,41 @@ export async function developmentPlannerRoutes(
       }
       const body = req.body as {
         architectureVersionId?: string;
-        signals?: unknown[];
-        baselineCommitSha?: string;
+        requests?: unknown[];
         idempotencyKey?: string;
       } | undefined;
+      // REJECT the old full-vocabulary body shape (top-level `signals` or
+      // `baselineCommitSha`).
+      if (body && ('signals' in body || 'baselineCommitSha' in body)) {
+        return reply.code(400).send({
+          error: 'forbidden-field',
+          reason: 'public-route-accepts-only-user-requests',
+        });
+      }
       if (!body?.architectureVersionId) {
         return reply
           .code(400)
           .send({ error: 'architectureVersionId required' });
       }
-      if (!Array.isArray(body.signals)) {
-        return reply.code(400).send({ error: 'signals array required' });
+      if (!Array.isArray(body.requests)) {
+        return reply.code(400).send({ error: 'requests array required' });
       }
+      // Construct the constrained signals (same as the sync route).
       const signals: PlanningSignal[] = [];
-      for (const raw of body.signals) {
-        const parsed = parseSignal(raw);
+      for (const raw of body.requests) {
+        const parsed = parsePublicUserRequest(raw);
         if (!parsed) {
           return reply
             .code(400)
-            .send({ error: 'invalid-signal', signal: raw });
+            .send({ error: 'invalid-user-request', request: raw });
         }
-        signals.push(parsed);
+        signals.push({
+          kind: 'developer-request',
+          provenance: 'proposed',
+          canonicalGoal: parsed.canonicalGoal,
+          scope: parsed.scope,
+          originator: user.id,
+        });
       }
       // Resolve the project for the organizationId (the job handler re-verifies
       // it on processing — a UUID is NEVER a credential).
@@ -300,7 +388,8 @@ export async function developmentPlannerRoutes(
           organizationId: project.organizationId,
           architectureVersionId: body.architectureVersionId,
           signals,
-          baselineCommitSha: body.baselineCommitSha,
+          // NO baselineCommitSha — the public async route does NOT accept a
+          // caller-supplied revision. The planner records null.
           idempotencyKey: body.idempotencyKey,
         },
         { correlationId: req.id },

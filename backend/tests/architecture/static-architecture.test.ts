@@ -11607,4 +11607,80 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
       'the count check CATCHES the unscoped traversal — guard < traversal in the mutated file (the invariant fails on the mutation, proving it prevents unscoped calls)',
     ).toBeLessThan(mutatedTraversalSites);
   });
+
+  it('PUBLIC ROUTE AUTHORITY/PROVENANCE BOUNDARY (PR #44 round 4) — the public route accepts ONLY the user-request shape; the server constructs kind=developer-request, provenance=proposed, originator from auth; NO caller-supplied provenance/kind/evidenceRefs/blocksCount/relatedWorkItemIds/baselineCommitSha/originator', () => {
+    // Blocker (PR #44 round 4): the public POST .../planning/evaluate trusted
+    // caller-asserted evidence + provenance. A project.write caller could
+    // submit { provenance: "observed", evidenceRefs: [fabricated],
+    // baselineCommitSha: "arbitrary-sha", blocksCount: 100 } and the planner
+    // would persist those claims into the authoritative Work Item's
+    // metadata.planner — turning UNVERIFIED CLIENT ASSERTIONS into `observed`
+    // repository evidence, violating the frozen provenance rule (source-fact
+    // → baseline/context-evidence → planner recommendation → authoritative
+    // Work Item). The planner MUST NOT turn unverified client assertions
+    // into `observed` repository evidence.
+    //
+    // Fix: SEPARATE trusted signal production from user-requested planning.
+    // The PUBLIC route accepts ONLY the user-request shape { canonicalGoal,
+    // scope? } + rejects every forbidden signal-authority field. The server
+    // constructs kind=developer-request, provenance=proposed, originator=
+    // user.id (from the authenticated principal). Trusted INTERNAL producers
+    // call DevelopmentPlannerService.evaluate DIRECTLY (programmatically)
+    // with the full vocabulary — they do NOT go through the public route.
+    const route = readFileSync(DP_ROUTE, 'utf8');
+    // 1. The old full-vocabulary caller-controlled parser is GONE.
+    expect(route, 'the old caller-controlled parseSignal is removed').not.toMatch(/\bparseSignal\(/);
+    // 2. The constrained public-user-request parser is present.
+    expect(route, 'the public route uses parsePublicUserRequest (the constrained parser)').toMatch(/parsePublicUserRequest\(/);
+    // 3. The FORBIDDEN-field list names EVERY authority field a public
+    //    caller must NOT supply. Each is a string literal in the list — a
+    //    public caller supplying ANY of these is REJECTED with 400.
+    expect(route, 'the forbidden-field list rejects kind (server forces developer-request)').toMatch(/['"]kind['"]/);
+    expect(route, 'the forbidden-field list rejects provenance (server forces proposed)').toMatch(/['"]provenance['"]/);
+    expect(route, 'the forbidden-field list rejects evidenceRefs (no caller-supplied evidence authority)').toMatch(/['"]evidenceRefs['"]/);
+    expect(route, 'the forbidden-field list rejects blocksCount (no caller-controlled priority input)').toMatch(/['"]blocksCount['"]/);
+    expect(route, 'the forbidden-field list rejects relatedWorkItemIds (no caller-supplied dependency refs)').toMatch(/['"]relatedWorkItemIds['"]/);
+    expect(route, 'the forbidden-field list rejects originator (server resolves from auth)').toMatch(/['"]originator['"]/);
+    expect(route, 'the forbidden-field list rejects baselineCommitSha (no caller-supplied revision)').toMatch(/['"]baselineCommitSha['"]/);
+    // 4. The server constructs kind='developer-request' (literal — the public
+    //    route FORCES this kind; a caller cannot assert architecture-observation
+    //    / requirement-gap / benchmark-evidence / completed-work / observed /
+    //    inferred via the public route).
+    expect(route, 'the server forces kind=developer-request').toMatch(/kind:\s*['"]developer-request['"]/);
+    // 5. The server constructs provenance='proposed' (literal — the public
+    //    route FORCES proposed; a caller cannot assert observed/inferred
+    //    repository facts via the public route).
+    expect(route, 'the server forces provenance=proposed').toMatch(/provenance:\s*['"]proposed['"]/);
+    // 6. The server resolves originator from the authenticated user (user.id),
+    //    NOT from the caller-supplied body.
+    expect(route, 'the server resolves originator from the authenticated user (user.id)').toMatch(/originator:\s*user\.id/);
+    // 7. The body shape is constrained — `requests` (the user-request array),
+    //    NOT `signals` (the full-vocabulary internal shape).
+    expect(route, 'the body shape uses requests (the user-request array, not signals)').toMatch(/requests\?:/);
+    // 8. The route REJECTS the old full-vocabulary top-level body fields
+    //    (`signals` + `baselineCommitSha`) — the boundary is EXPLICIT (400,
+    //    not silent ignore).
+    expect(route, 'the route rejects the old top-level signals body field').toMatch(/['"]signals['"]\s+in\s+body/);
+    expect(route, 'the route rejects the old top-level baselineCommitSha body field').toMatch(/['"]baselineCommitSha['"]\s+in\s+body/);
+    // 9. The route captures the authenticated user from requireProjectAuthorization
+    //    (the originator is the auth principal, not a body field).
+    expect(route, 'the route captures the authenticated user (originator source)').toMatch(/const user = await requireProjectAuthorization/);
+    // 10. The programmatic path RETAINS the full vocabulary — the service's
+    //     evaluate method takes PlanningEvaluateInput (which carries
+    //     signals: readonly PlanningSignal[]). The trusted-producer entry
+    //     point is the PROGRAMMATIC service, NOT the public HTTP route — the
+    //     constraint is on the route, not the service.
+    const service = readFileSync(join(DP_DIR, 'internal', 'default-development-planner-service.ts'), 'utf8');
+    expect(service, 'the programmatic service evaluate method takes PlanningEvaluateInput (the full-vocabulary entry point)').toMatch(/evaluate\(\s*input:\s*PlanningEvaluateInput/);
+    expect(service, 'the programmatic service delegates to the prioritizer with the signal (full vocabulary passed through)').toMatch(/prioritizer\.prioritize\(signal/);
+    // 11. The programmatic input type retains baselineCommitSha (trusted
+    //     internal producers that have resolved a real revision supply it
+    //     DIRECTLY — the constraint is on the PUBLIC ROUTE, not the
+    //     programmatic API).
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'PlanningEvaluateInput retains baselineCommitSha for trusted internal producers').toMatch(/readonly baselineCommitSha\?:\s*string/);
+    expect(types, 'PlanningSignal retains provenance (full vocabulary for trusted internal producers)').toMatch(/readonly provenance:\s*PlanningProvenance/);
+    expect(types, 'PlanningSignal retains evidenceRefs (full vocabulary for trusted internal producers)').toMatch(/readonly evidenceRefs\?:\s*readonly PlanningEvidenceRef\[\]/);
+    expect(types, 'PlanningSignal retains blocksCount (full vocabulary for trusted internal producers)').toMatch(/readonly blocksCount\?:\s*number/);
+  });
 });

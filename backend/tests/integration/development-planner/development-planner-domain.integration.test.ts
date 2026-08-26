@@ -705,6 +705,159 @@ describe('WORK-040 — Continuous Development Planner (16 frozen regressions)', 
       expect(matches.length).toBe(1);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 17. PUBLIC ROUTE AUTHORITY/PROVENANCE BOUNDARY (PR #44 round 4)
+  //     The public POST .../planning/evaluate accepts ONLY the user-request
+  //     shape { canonicalGoal, scope? }. The server constructs kind=
+  //     developer-request, provenance=proposed, originator=user.id. A public
+  //     caller CANNOT manufacture observed repository evidence, fake
+  //     evidenceRefs, an unverified baselineCommitSha, or a caller-controlled
+  //     blocksCount. Trusted internal producers call DevelopmentPlannerService
+  //     .evaluate DIRECTLY (programmatically) with the full vocabulary.
+  // -------------------------------------------------------------------------
+  describe('17. PUBLIC ROUTE AUTHORITY/PROVENANCE BOUNDARY (PR #44 round 4) — the public route cannot manufacture observed evidence or a fake revision', () => {
+    const postEvaluate = (body: unknown) =>
+      server.inject({
+        method: 'POST',
+        url: `/projects/${projectA.id}/planning/evaluate`,
+        headers: { authorization: 'Bearer raw-key-dp-a' },
+        payload: body as Record<string, unknown>,
+      });
+
+    it('17a. rejects caller-supplied provenance: "observed" — the public route must NOT turn unverified client assertions into observed repository evidence', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', provenance: 'observed' }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17b. rejects caller-supplied evidenceRefs — the public route must NOT accept fabricated evidence authority', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', evidenceRefs: [{ kind: 'architecture-observation', ref: 'fabricated-id' }] }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17c. rejects a caller-supplied top-level baselineCommitSha — the public route must NOT accept an unverified revision', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x' }],
+        baselineCommitSha: 'arbitrary-sha',
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17d. rejects caller-supplied blocksCount — the public route must NOT accept caller-controlled priority input', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', blocksCount: 100 }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17e. rejects caller-supplied kind: "architecture-observation" — the server forces developer-request', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', kind: 'architecture-observation' }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17f. rejects caller-supplied originator — the server resolves it from the authenticated principal', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', originator: 'attacker-user-id' }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17g. rejects caller-supplied relatedWorkItemIds — the public route supplies no dependency references', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: 'x', relatedWorkItemIds: ['some-id'] }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17h. rejects the old full-vocabulary `signals` body shape — the public route accepts ONLY `requests`', async () => {
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        signals: [{ kind: 'developer-request', canonicalGoal: 'x', provenance: 'proposed' }],
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('17i. the constrained user-request shape produces a developer-request/proposed Work Item with originator = the authenticated user + NO baselineCommitSha + NO manufactured evidence', async () => {
+      const goal = 'Public-route authority boundary — constrained user request';
+      const res = await postEvaluate({
+        architectureVersionId: versionA.id,
+        requests: [{ canonicalGoal: goal, scope: 'the public route boundary' }],
+      });
+      expect(res.statusCode).toBe(201);
+      const body = JSON.parse(res.body) as {
+        createdCount: number;
+        recommendations: Array<{
+          candidate: { signal: { originator?: string; kind: string; provenance: string; evidenceRefs?: unknown[]; blocksCount?: number; relatedWorkItemIds?: string[] } };
+          workItemId: string;
+        }>;
+      };
+      expect(body.createdCount).toBe(1);
+      const rec = body.recommendations[0]!;
+      // The persisted Work Item carries the FORCED planning evidence.
+      const wi = await stack.workItemRepository.findById(rec.workItemId);
+      const planner = (wi!.metadata as { planner?: { source: string; provenance: string; baselineCommitSha: string | null } }).planner;
+      expect(planner!.source).toBe('developer-request');
+      expect(planner!.provenance).toBe('proposed');
+      expect(planner!.baselineCommitSha).toBeNull();
+      // The candidate's signal carries the FORCED vocabulary: originator =
+      // the authenticated user (userA.id), kind=developer-request,
+      // provenance=proposed. NO evidenceRefs / blocksCount /
+      // relatedWorkItemIds were manufactured.
+      expect(rec.candidate.signal.originator).toBe(userA.id);
+      expect(rec.candidate.signal.kind).toBe('developer-request');
+      expect(rec.candidate.signal.provenance).toBe('proposed');
+      expect(rec.candidate.signal.evidenceRefs ?? []).toEqual([]);
+      expect(rec.candidate.signal.blocksCount ?? 0).toBe(0);
+      expect(rec.candidate.signal.relatedWorkItemIds ?? []).toEqual([]);
+    });
+
+    it('17j. trusted internal programmatic path RETAINS the full vocabulary — DevelopmentPlannerService.evaluate accepts architecture-observation/observed/evidenceRefs/baselineCommitSha DIRECTLY', async () => {
+      // A trusted internal producer (e.g. the WORK-039 context engine)
+      // constructs a full-vocabulary signal from authoritative sources +
+      // calls DevelopmentPlannerService.evaluate DIRECTLY (programmatically),
+      // NOT through the public HTTP route. This is the trusted-producer entry
+      // point — it is NOT constrained (the constraint is on the PUBLIC ROUTE).
+      const goal = 'Trusted internal producer full-vocabulary signal';
+      const signal: PlanningSignal = {
+        kind: 'architecture-observation',
+        canonicalGoal: goal,
+        provenance: 'observed',
+        evidenceRefs: [{ kind: 'architecture-observation', ref: 'real-adr-id' }],
+        baselineCommitSha: 'real-resolved-sha-from-github',
+        blocksCount: 3,
+      };
+      const result = await planner.evaluate(
+        { projectId: projectA.id, architectureVersionId: versionA.id, signals: [signal], baselineCommitSha: 'real-resolved-sha-from-github' },
+        ctxA,
+      );
+      expect(result.createdCount).toBe(1);
+      const rec = result.recommendations[0]!;
+      const wi = await stack.workItemRepository.findById(rec.workItemId!);
+      const plannerMeta = (wi!.metadata as { planner?: { source: string; provenance: string; baselineCommitSha: string | null } }).planner;
+      // The full vocabulary is PRESERVED on the programmatic path.
+      expect(plannerMeta!.source).toBe('architecture-observation');
+      expect(plannerMeta!.provenance).toBe('observed');
+      expect(plannerMeta!.baselineCommitSha).toBe('real-resolved-sha-from-github');
+      // The candidate's signal carries the full vocabulary.
+      expect(rec.candidate.signal.kind).toBe('architecture-observation');
+      expect(rec.candidate.signal.provenance).toBe('observed');
+      expect(rec.candidate.signal.evidenceRefs).toHaveLength(1);
+      expect(rec.candidate.signal.blocksCount).toBe(3);
+    });
+  });
 });
 
 /** Poll a predicate until it returns true or the timeout elapses. */
