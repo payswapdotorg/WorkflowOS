@@ -87,6 +87,11 @@ function buildPlannerMetadata(
     baselineCommitSha,
     evaluatedAt: evaluatedAt.toISOString(),
     plannerVersion,
+    // WORK-041: pass the maintenance metadata through VERBATIM (like
+    // baselineCommitSha). The planner NEVER fabricates maintenance metadata —
+    // it is supplied ONLY by trusted internal maintenance detectors. Absent
+    // for non-maintenance signals (the field is optional).
+    maintenance: candidate.signal.maintenance,
   };
 }
 

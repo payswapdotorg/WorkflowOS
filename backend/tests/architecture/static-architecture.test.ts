@@ -11684,3 +11684,153 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     expect(types, 'PlanningSignal retains blocksCount (full vocabulary for trusted internal producers)').toMatch(/readonly blocksCount\?:\s*number/);
   });
 });
+
+// =============================================================================
+// WORK-041 invariants — Maintenance baseline cross-tenant guard (PR #45
+// architect review). The scan / scan-async routes accept a caller-controlled
+// baselineId; the AdvisoryDetector reads listObservations(baselineId). A
+// Project A caller MUST NOT cause the detector to inspect Project B's baseline
+// evidence. The fix is layered:
+//   * ROUTE-LAYER GATE — assertBaselineInProject(deps, projectId, baselineId)
+//     is called by scan (before detectAndEvaluate) + scan-async (before
+//     enqueue) + returns a clean 403 for a foreign / non-existent baselineId.
+//   * DETECTOR-LAYER GUARD (defense in depth) — the AdvisoryDetector verifies
+//     baseline.projectId === input.projectId via findById BEFORE
+//     listObservations; throws maintenance-baseline-not-in-project on mismatch
+//     (protects programmatic calls + the async job handler).
+// The invariants below are the static proof; the dynamic proof is the
+// sync/async two-project regression coverage in
+// maintenance-domain.integration.test.ts (#13 + #14 + #15).
+// =============================================================================
+describe('WORK-041 invariants — Maintenance baseline cross-tenant guard (PR #45 architect review)', () => {
+  const MAINT_DIR = join(SRC_ROOT, 'maintenance');
+  const ADVISORY_DETECTOR = join(MAINT_DIR, 'internal', 'detectors', 'advisory-detector.ts');
+  const MAINT_ROUTE = join(SRC_ROOT, 'api', 'routes', 'maintenance.route.ts');
+
+  it('TENANT-OWNERSHIP GUARD BEFORE BASELINE OBSERVATION READ (PR #45) — listObservations in the AdvisoryDetector is ALWAYS preceded by a project-ownership check (no cross-tenant baseline evidence leak)', () => {
+    // Blocker (PR #45 architect review): scan / scan-async accept a caller-
+    // controlled baselineId. The AdvisoryDetector read
+    // listObservations(baselineId) without verifying the baseline belongs to
+    // the authorized project. A Project A caller could supply Project B's
+    // baselineId + cause the detector to inspect Project B's package_managers
+    // observation (cross-tenant information leak). The fix: when input.baselineId
+    // is supplied, the detector calls findById(baselineId) + compares
+    // baseline.projectId to input.projectId BEFORE listObservations. A foreign
+    // or non-existent baselineId throws maintenance-baseline-not-in-project;
+    // listObservations is NEVER called for a baseline that does not belong to
+    // the authorized project.
+    const detector = readFileSync(ADVISORY_DETECTOR, 'utf8');
+    // 1. The ownership guard exists — the detector calls findById to resolve
+    //    the baseline's projectId.
+    expect(detector, 'the AdvisoryDetector calls findById to resolve the baseline owner').toMatch(/projectBaselineRepository\.findById\(/);
+    // 2. The gate — the resolved baseline.projectId is compared to input.projectId.
+    expect(detector, 'the AdvisoryDetector gates on baseline.projectId === input.projectId').toMatch(/baseline\.projectId !== input\.projectId/);
+    // 3. The honest rejection — a foreign / non-existent baseline throws.
+    expect(detector, 'the AdvisoryDetector throws maintenance-baseline-not-in-project on a foreign baseline').toMatch(/maintenance-baseline-not-in-project/);
+    // 4. The traversal is present (gated by the guard). The dotted form
+    //    (.listObservations( matches only the actual method CALL, not JSDoc
+    //    mentions — the ordering check below is therefore precise).
+    expect(detector, 'the AdvisoryDetector calls listObservations (gated by the ownership guard)').toMatch(/\.listObservations\(/);
+    // 5. ORDERING: the gate MUST appear BEFORE the listObservations CALL in
+    //    the file (the guard is evaluated before the traversal). This is the
+    //    static proof the guard precedes the traversal; the count check (#6)
+    //    proves EVERY traversal is gated; the dynamic proof is the detector-
+    //    level regression #15.
+    const guardIdx = detector.indexOf('baseline.projectId !== input.projectId');
+    const traversalIdx = detector.indexOf('.listObservations(');
+    expect(guardIdx, 'the ownership gate must be present').toBeGreaterThan(-1);
+    expect(traversalIdx, 'the listObservations call must be present').toBeGreaterThan(-1);
+    expect(guardIdx, 'the ownership gate must precede the listObservations call in the file').toBeLessThan(traversalIdx);
+    // 6. EVERY traversal site is gated — count-based proof. The number of
+    //    gate sites (baseline.projectId !== input.projectId) must be >= the
+    //    number of listObservations CALL sites (.listObservations( dotted
+    //    calls). This PREVENTS a future developer from adding a SECOND,
+    //    unguarded listObservations call in a different code path — every
+    //    traversal site must have a corresponding gate. (The first-occurrence
+    //    ordering check #5 proves the gate precedes the first traversal; this
+    //    count check proves NO traversal site lacks a guard — the architect's
+    //    "preventing an unscoped listObservations(baselineId) call" requirement.)
+    const gateSiteCount = (detector.match(/baseline\.projectId !== input\.projectId/g) ?? []).length;
+    const traversalCallSiteCount = (detector.match(/\.listObservations\(/g) ?? []).length;
+    expect(gateSiteCount, 'the AdvisoryDetector has at least one ownership gate site').toBeGreaterThanOrEqual(1);
+    expect(traversalCallSiteCount, 'the AdvisoryDetector has at least one listObservations call site (the guarded one)').toBeGreaterThanOrEqual(1);
+    expect(
+      gateSiteCount,
+      'EVERY listObservations call site must have a corresponding baseline.projectId ownership gate (no unscoped traversal — a second unguarded call would make gate < traversal)',
+    ).toBeGreaterThanOrEqual(traversalCallSiteCount);
+    // 7. MUTATION PROOF — the count check actually CATCHES an unscoped
+    //    traversal. Synthesize a mutated detector with a second, unguarded
+    //    listObservations call (the exact regression the invariant must
+    //    prevent) + assert the count check detects the violation (gate sites
+    //    < traversal call sites). This proves "preventing," not merely
+    //    "checking."
+    const mutatedDetector = detector + [
+      '',
+      '// MUTATION (for the static-arch test only — NOT in the real file):',
+      'async function futureUnguardedPath(ctx) {',
+      '  // A second traversal site WITHOUT a preceding baseline.projectId gate',
+      '  // — this is the unscoped call the invariant must catch.',
+      '  return ctx.projectBaselineRepository.listObservations(\'rogue-baseline-id\');',
+      '}',
+      '',
+    ].join('\n');
+    const mutatedGateSites = (mutatedDetector.match(/baseline\.projectId !== input\.projectId/g) ?? []).length;
+    const mutatedTraversalSites = (mutatedDetector.match(/\.listObservations\(/g) ?? []).length;
+    expect(mutatedTraversalSites, 'the mutated file has 2 traversal sites (the original guarded one + the unguarded mutation)').toBe(traversalCallSiteCount + 1);
+    expect(mutatedGateSites, 'the mutated file still has the same gate site count (the mutation added no gate)').toBe(gateSiteCount);
+    expect(
+      mutatedGateSites,
+      'the count check CATCHES the unscoped listObservations — gate < traversal in the mutated file (the invariant fails on the mutation, proving it prevents unscoped calls)',
+    ).toBeLessThan(mutatedTraversalSites);
+  });
+
+  it('ROUTE-LEVEL BASELINE OWNERSHIP GATE (PR #45) — scan + scan-async call assertBaselineInProject before detectAndEvaluate / enqueue; a foreign baselineId returns 403 baseline-not-in-project', () => {
+    // The route-layer gate is the PRIMARY defense (clean 403 semantics for
+    // both sync + async); the detector guard is defense in depth. The route
+    // must call assertBaselineInProject BEFORE detectAndEvaluate (scan) /
+    // BEFORE enqueue (scan-async) so a foreign baselineId is rejected
+    // immediately + the detectors are NEVER invoked (sync) / the job is NEVER
+    // enqueued (async).
+    const route = readFileSync(MAINT_ROUTE, 'utf8');
+    // 1. The assertBaselineInProject helper exists (defined once).
+    expect(route, 'the route defines assertBaselineInProject (the ownership gate helper)').toMatch(/async function assertBaselineInProject\(/);
+    // 2. The gate uses findById + projectId comparison.
+    expect(route, 'assertBaselineInProject calls findById to resolve the baseline').toMatch(/projectBaselineRepository\.findById\(baselineId\)/);
+    expect(route, 'assertBaselineInProject compares baseline.projectId to the authorized projectId').toMatch(/baseline\.projectId === projectId/);
+    // 3. The 403 reason is present for both scan + scan-async.
+    expect(route, 'the route returns 403 baseline-not-in-project for a foreign baselineId').toMatch(/baseline-not-in-project/);
+    // 4. ORDERING — the scan route calls assertBaselineInProject BEFORE
+    //    detectAndEvaluate. The indexOf of the guard call (inside `if
+    //    (body.baselineId)`) must be < the indexOf of detectAndEvaluate.
+    const scanGuardIdx = route.indexOf('assertBaselineInProject(deps, projectId, body.baselineId)');
+    const scanDetectIdx = route.indexOf('deps.maintenanceService.detectAndEvaluate(');
+    expect(scanGuardIdx, 'the scan route calls assertBaselineInProject').toBeGreaterThan(-1);
+    expect(scanDetectIdx, 'the scan route calls detectAndEvaluate').toBeGreaterThan(-1);
+    // The scan route has TWO assertBaselineInProject calls (scan + scan-async);
+    // the first one (scan) must precede the detectAndEvaluate call.
+    expect(scanGuardIdx, 'the scan route gates before detectAndEvaluate').toBeLessThan(scanDetectIdx);
+    // 5. The scan-async route calls assertBaselineInProject BEFORE enqueue.
+    //    The LAST assertBaselineInProject call (scan-async's) must precede
+    //    the scan-async enqueue. NOTE: we locate the enqueue via the LAST
+    //    `deps.queue.enqueue(` call (the scan-async enqueue) — there are two
+    //    such calls in the route (evaluate-async enqueues PLANNING_EVALUATE_
+    //    JOB_TYPE first; scan-async enqueues MAINTENANCE_RUN_JOB_TYPE second);
+    //    the second is the scan-async enqueue. (Searching for the literal
+    //    MAINTENANCE_RUN_JOB_TYPE symbol would also match its top-of-file
+    //    import, which precedes everything — wrong for an ordering check.)
+    const lastGuardIdx = route.lastIndexOf('assertBaselineInProject(deps, projectId, body.baselineId)');
+    const scanAsyncEnqueueIdx = route.lastIndexOf('deps.queue.enqueue(');
+    expect(lastGuardIdx, 'the scan-async route calls assertBaselineInProject').toBeGreaterThan(scanGuardIdx);
+    expect(scanAsyncEnqueueIdx, 'the scan-async route calls deps.queue.enqueue').toBeGreaterThan(-1);
+    expect(lastGuardIdx, 'the scan-async route gates before enqueue').toBeLessThan(scanAsyncEnqueueIdx);
+    // 6. COUNT PROOF — the route calls assertBaselineInProject exactly twice
+    //    (scan + scan-async). A future developer adding a third scan route
+    //    without the gate would NOT be caught by count alone (the gate count
+    //    would stay 2); but the ordering checks (#4, #5) catch a missing gate
+    //    on a SPECIFIC detect/enqueue call. The count check here asserts the
+    //    two known routes both have the gate (a regression where one is removed
+    //    drops the count to 1).
+    const guardCallSites = (route.match(/assertBaselineInProject\(deps, projectId, body\.baselineId\)/g) ?? []).length;
+    expect(guardCallSites, 'both scan + scan-async call assertBaselineInProject (the gate is wired into both routes)').toBe(2);
+  });
+});
