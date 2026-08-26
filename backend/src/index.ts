@@ -388,6 +388,43 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-040: Continuous Development Planner routes (evaluate +
+      // evaluate-async + read-only recommendations list/inspect). Backend-
+      // authorized (project.read / project.write). The orchestrator composes
+      // /work-items (authoritative Work Item creation through the existing
+      // WorkItemRepository.create with the deterministic proposedWorkItemId
+      // as the dedup key) + /architecture + /requirements + /projects to
+      // decide "what should be done next?" + convergently create governed
+      // Work Items. The planner NEVER mutates the dependency graph, NEVER
+      // mutates workflow / verification / review state, NEVER starts
+      // execution, NEVER selects a provider. The queue (optional) enables
+      // evaluate-async (reuses the EXISTING platform Queue + WorkerHost — NO
+      // new scheduler).
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.requirementRepository &&
+      app.deps.acceptanceCriterionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.workItemDependencyRepository &&
+      app.deps.developmentPlannerService
+        ? {
+            developmentPlanner: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              architectureRepository: app.deps.architectureRepository,
+              requirementRepository: app.deps.requirementRepository,
+              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              workItemDependencyRepository: app.deps.workItemDependencyRepository,
+              plannerService: app.deps.developmentPlannerService,
+              logger: app.deps.logger,
+              queue: app.deps.queue,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

@@ -11076,3 +11076,611 @@ describe('WORK-039 invariants — Repository and Context Intelligence (context i
     }
   });
 });
+
+// ===========================================================================
+// WORK-040 invariants — Continuous Development Planner (turns signals into
+// governed Work Items THROUGH the existing /work-items authority).
+// ===========================================================================
+//
+// The central correctness requirement: the planner is NOT a second Work Item
+// authority. It CREATES Work Items through the existing WorkItemRepository.create
+// (the single creation path) with a deterministic proposedWorkItemId as the
+// dedup key; the existing UNIQUE(architecture_version_id, work_item_id) DB
+// constraint is the persistence-level dedup fence — concurrent/retried planner
+// runs CONVERGE to a single Work Item (no duplicates). The planner NEVER mutates
+// the dependency graph (no add/remove), NEVER mutates workflow / verification /
+// review state, NEVER starts execution, NEVER selects a provider. Provenance
+// (the WORK-038 vocabulary observed/inferred/confirmed/proposed) is preserved
+// verbatim — a recommendation is `proposed` (or observed/inferred per the
+// signal); it NEVER becomes `confirmed` without an authorized confirmation path.
+//
+// Authority boundaries preserved:
+//   /work-items — the AUTHORITATIVE Work Item authority. The planner CREATES
+//                  through the existing WorkItemRepository.create (legitimate).
+//                  It does NOT mutate the dependency graph (no add/remove), does
+//                  NOT set `completed` (internal-only), does NOT create Work
+//                  Orders. The dedup key is the existing
+//                  UNIQUE(architecture_version_id, work_item_id).
+//   /architecture, /requirements — read-only authority references (the planner
+//                  resolves the target ArchitectureVersion + cites ADRs /
+//                  requirements as evidence; it NEVER auto-freezes / never
+//                  creates versions / requirements / criteria).
+//   /projects  — the planner resolves the project + organizationId for tenant
+//                  scoping; it NEVER creates projects.
+//   /github    — NEVER imported by the planner domain (the revision-bound
+//                  baselineCommitSha is carried in the signal; the planner does
+//                  NOT re-resolve the repo — that is the WORK-039 caller's job).
+//   /workflows, /verification, /reviews, /agents — NEVER mutated/invoked.
+//
+// The capability lives in src/development-planner/ — an APPLICATION-LAYER
+// orchestrator (like src/onboarding/ + src/repository-intelligence/ +
+// src/execution-policy/ + src/benchmark/), NOT a frozen module and NOT an
+// authority. It owns NO tables — the planning evidence is embedded in the
+// authoritative Work Item's existing `metadata` JSONB (field `metadata.planner`).
+describe('WORK-040 invariants — Continuous Development Planner (planner capability + governed Work Item creation)', () => {
+  const DP_DIR = join(SRC_ROOT, 'development-planner');
+  const DP_ROUTE = join(SRC_ROOT, 'api', 'routes', 'development-planner.route.ts');
+
+  /** Recursively list every .ts file under a directory. */
+  function listTsFiles(dir: string): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        out.push(...listTsFiles(full));
+      } else if (entry.endsWith('.ts')) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('WORK-040 is NOT a frozen module — development-planner is an application capability, not a new authority', () => {
+    // The static check at PLAT-AC-01 enforces exactly 17 frozen modules. The
+    // development-planner capability must NOT add an 18th module under
+    // src/modules/. It lives under src/development-planner/ (an
+    // application-layer directory, like src/onboarding/ +
+    // src/repository-intelligence/).
+    expect(existsSync(join(MODULES_DIR, 'development-planner'))).toBe(false);
+    expect(existsSync(DP_DIR)).toBe(true);
+  });
+
+  it('NO NEW TABLE — the planner owns no tables; planning evidence lives in the Work Item existing metadata.planner JSONB', () => {
+    // The frozen spec: "Avoid a giant AI planner state table. Use existing
+    // /work-items models wherever authoritative state is needed. Persistent
+    // planning evidence may belong in an application-layer table only if the
+    // frozen specification requires durable planning history." The frozen
+    // WORK-040 spec does NOT require durable planning history (it requires
+    // governed Work Item creation). The planner therefore owns NO migration +
+    // NO table — the evidence is embedded in the authoritative Work Item's
+    // existing metadata JSONB (field metadata.planner). There is NO migration
+    // 0042+ introduced by WORK-040.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    const migrations = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    // The highest migration is 0041 (WORK-039) — WORK-040 adds none.
+    const last = migrations[migrations.length - 1];
+    expect(last, 'WORK-040 adds no migration (no new table)').toMatch(/^0041_/);
+    // The planner domain must NOT define any CREATE TABLE.
+    const files = listTsFiles(DP_DIR);
+    expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not define a CREATE TABLE`).not.toMatch(/CREATE\s+TABLE/i);
+    }
+  });
+
+  it('no second project authority — the planner resolves the project for tenant scoping; it NEVER creates/updates projects', () => {
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not create/update projects`).not.toMatch(/projectRepository\.(create|transitionState|update)\s*\(/);
+    }
+  });
+
+  it('no second architecture authority — the planner NEVER auto-freezes / never creates ArchitectureVersion rows', () => {
+    // Architecture references in planning evidence are REFERENCES to
+    // ArchitectureVersion ids, never an auto-created ArchitectureVersion. The
+    // capability never calls ArchitectureService mutation methods.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /architecture internal/`).not.toMatch(/from\s+['"][^'"]*modules\/architecture\/internal/);
+      expect(src, `${rel} must not freeze architecture versions`).not.toMatch(/freezeVersion\s*\(/);
+      expect(src, `${rel} must not create architecture versions`).not.toMatch(/architectureVersionRepository\.create\s*\(/);
+      expect(src, `${rel} must not approve architecture change requests`).not.toMatch(/approveChangeAndCreateReplacement\s*\(/);
+    }
+  });
+
+  it('no second requirements authority — the planner does NOT create Requirement/AcceptanceCriterion rows', () => {
+    // Requirement references in planning evidence are REFERENCES to
+    // authoritative Requirement rows, never duplicate requirements.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /requirements internal/`).not.toMatch(/from\s+['"][^'"]*modules\/requirements\/internal/);
+      expect(src, `${rel} must not create requirements`).not.toMatch(/requirementRepository\.create\s*\(/);
+      expect(src, `${rel} must not create acceptance criteria`).not.toMatch(/acceptanceCriterionRepository\.create\s*\(/);
+    }
+  });
+
+  it('NO DEPENDENCY GRAPH MUTATION — the planner creates Work Item ROWS (legitimate, via existing create) but NEVER mutates the dependency graph / completion / Work Orders', () => {
+    // The planner's legitimate creation: workItemRepository.create (the single
+    // creation path). The planner MUST NOT: mutate the dependency graph
+    // (workItemDependencyRepository.add/remove), set completion
+    // (markCompleted — internal-only), create Work Orders (workOrderRepository).
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      // The dependency graph is mutated ONLY through the existing
+      // /work-items/dependencies route — the planner NEVER calls add/remove.
+      expect(src, `${rel} must not add work item dependencies (no graph mutation)`).not.toMatch(/workItemDependencyRepository\.(add|remove)\s*\(/);
+      // `completed` is internal-only (the public WorkItemRepository interface
+      // does not expose markCompleted); the planner NEVER sets it.
+      expect(src, `${rel} must not set work item completion`).not.toMatch(/markCompleted\s*\(/);
+      // Work Orders are a separate /work-items mutation surface; the planner
+      // does NOT create them (the Work Order lifecycle is downstream).
+      expect(src, `${rel} must not create work orders`).not.toMatch(/workOrderRepository\.create\s*\(/);
+      // The planner does NOT import /work-items internal/ (uses the barrel).
+      expect(src, `${rel} must not import /work-items internal/`).not.toMatch(/from\s+['"][^'"]*modules\/work-items\/internal/);
+    }
+  });
+
+  it('NO WORKFLOW / VERIFICATION / REVIEW MUTATION — the planner never mutates those authorities', () => {
+    // The created Work Item enters the EXISTING Work Item → Work Order →
+    // Execution → Verification → Review lifecycle; the planner does NOT advance
+    // it. It never imports /workflows / /verification / /reviews internal/ +
+    // never calls their mutation methods.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /workflows internal/`).not.toMatch(/from\s+['"][^'"]*modules\/workflows\/internal/);
+      expect(src, `${rel} must not transition workflow state`).not.toMatch(/workflowRepository\.(transitionState|create|update)\s*\(/);
+      expect(src, `${rel} must not import /verification internal/`).not.toMatch(/from\s+['"][^'"]*modules\/verification\/internal/);
+      expect(src, `${rel} must not import /reviews internal/`).not.toMatch(/from\s+['"][^'"]*modules\/reviews\/internal/);
+    }
+  });
+
+  it('NO DIRECT EXECUTION / NO PROVIDER ROUTING — the planner never starts execution + never selects a provider', () => {
+    // WORK-043/044 (execution eligibility + adaptive routing) are OUT OF SCOPE.
+    // The planner produces governed Work Items; when later executed, the
+    // existing execution policy decides how. The planner notes the ADVISORY
+    // frozen-spec value 'native-or-external-per-eligibility' but does NOT
+    // select a provider + does NOT start execution.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /agents internal/ (no execution)`).not.toMatch(/from\s+['"][^'"]*modules\/agents\/internal/);
+      expect(src, `${rel} must not start execution`).not.toMatch(/executionService\.start\s*\(/);
+      expect(src, `${rel} must not import a provider SDK`).not.toMatch(/from\s+['"][^'"]*(openai|anthropic|@anthropic-ai|@xenova|transformers)/);
+    }
+    // The executionModeAdvisory is the ADVISORY frozen-spec value (NOT a
+    // provider selection) — declared in the types + set by the prioritizer.
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'the types declare the advisory execution-mode value').toMatch(/native-or-external-per-eligibility/);
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    expect(prioritizer, 'the prioritizer sets the advisory execution-mode value (NOT a provider selection)').toMatch(/executionModeAdvisory:\s*['"]native-or-external-per-eligibility['"]/);
+  });
+
+  it('NO CREDENTIALS — the planner never imports a concrete secret store + never assigns token/password values', () => {
+    // The planner domain never handles credentials. Secret-shaped content
+    // from WORK-038 context (cited as evidence) is already redacted; the
+    // planner never reverses redaction.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import EnvSecretStore`).not.toMatch(/from\s+['"][^'"]*platform\/secrets/);
+      expect(src, `${rel} must not import /auth internal/`).not.toMatch(/from\s+['"][^'"]*modules\/auth\/internal/);
+    }
+  });
+
+  it('NO GITHUB SDK / NO /github internal/ — the planner never re-resolves the repo (the revision is carried in the signal)', () => {
+    // WORK-039 owns the repository/context engine. The planner CONSUMES at the
+    // signal-production layer (the explicit trigger caller may derive signals
+    // from retrieveExisting); the planner itself does NOT call retrieveExisting
+    // + does NOT import the GitHub SDK / /github internal/.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import @octokit (GitHub SDK)`).not.toMatch(/from\s+['"]@octokit/);
+      expect(src, `${rel} must not import /github internal/`).not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+    }
+  });
+
+  it('NO PROVIDER SDK LEAKAGE — the planner domain imports no pg / ioredis / pglite', () => {
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import pg`).not.toMatch(/from\s+['"]pg['"]/);
+      expect(src, `${rel} must not import @electric-sql/pglite`).not.toMatch(/from\s+['"]@electric-sql\/pglite['"]/);
+      expect(src, `${rel} must not import ioredis`).not.toMatch(/from\s+['"]ioredis['"]/);
+      expect(src, `${rel} must not import concrete provider implementation files`).not.toMatch(/from\s+['"][^'"]*platform\/(postgres|redis|storage|secrets)\/internal/);
+    }
+  });
+
+  it('NO MAINTENANCE ENGINE / NO CONTINUOUS SCHEDULER — the planner is trigger-driven (explicit POST + a durable job), not a polling engine', () => {
+    // WORK-041 (Maintenance + Project Health Engine) is STRICTLY OUT OF SCOPE.
+    // The planner does NOT poll, does NOT setInterval, does NOT cron, does NOT
+    // auto-scan vulnerabilities / CI / dependencies. It is triggered
+    // EXPLICITLY (POST .../planning/evaluate) + via a durable job registered
+    // with the EXISTING WorkerHost (NO new scheduler).
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not define a setInterval scheduler`).not.toMatch(/setInterval\s*\(/);
+      expect(src, `${rel} must not define a cron scheduler`).not.toMatch(/\bcron\s*\(/);
+      expect(src, `${rel} must not define a maintenance/health engine`).not.toMatch(/MaintenanceEngine|HealthEngine|VulnerabilityScanner|DependencyAdvisoryIngestion/);
+    }
+  });
+
+  it('NO VECTOR DATABASE / NO EMBEDDING / NO TSVECTOR — the prioritizer is deterministic + discrete', () => {
+    // The prioritizer's signals are discrete + explainable (blocks-n-downstream,
+    // requested-by-developer, architecture-risk, dependency-chain, etc.). NO
+    // opaque AI score; NO vector/embedding/tsvector infrastructure.
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not use pgvector/vector/embedding/tsvector`).not.toMatch(/pgvector|vector\(\d+|embedding\(\d+|to_tsvector|tsquery|tsvector/i);
+      expect(src, `${rel} must not import an embedding library`).not.toMatch(/from\s+['"][^'"]*(openai|cohere|@xenova|transformers)/);
+    }
+  });
+
+  it('PROVENANCE PRESERVATION — the prioritizer + the orchestrator NEVER assign the literal confirmed to a provenance field', () => {
+    // The planner re-uses the WORK-038 vocabulary (observed/inferred/confirmed/
+    // proposed). A recommendation is `proposed` (or observed/inferred per the
+    // signal); it NEVER becomes `confirmed` without an authorized confirmation
+    // path on a baseline observation. The regex forbids both direct
+    // `provenance: 'confirmed'` AND conditional promotion
+    // `provenance: x ? 'confirmed' : 'observed'`.
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    expect(prioritizer, 'the prioritizer must not promote provenance to confirmed').not.toMatch(/provenance:\s*[^,}]*['"]confirmed['"]/);
+    const orchestrator = readFileSync(join(DP_DIR, 'internal', 'default-development-planner-service.ts'), 'utf8');
+    expect(orchestrator, 'the orchestrator must not promote provenance to confirmed').not.toMatch(/provenance:\s*[^,}]*['"]confirmed['"]/);
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    // The PlanningProvenance type is the WORK-038 vocabulary MINUS 'confirmed'
+    // (a planner signal is never confirmed — confirmation is a separate path).
+    expect(types, 'PlanningProvenance excludes confirmed').toMatch(/'observed'\s*\|\s*'inferred'\s*\|\s*'proposed'/);
+    expect(types, 'PlanningProvenance must not include confirmed').not.toMatch(/PlanningProvenance\s*=\s*[^;]*['"]confirmed['"]/);
+  });
+
+  it('the development-planner barrel exports ONLY known pure-data constants — no concrete implementations (classes/functions with behavior) are exported', () => {
+    // Mirrors the frozen-module barrel rule + the WORK-039 barrel convention.
+    // DefaultDevelopmentPlannerService + DeterministicPlanningPrioritizer +
+    // PlanningEvaluateJobHandler stay in internal/ (the composition root in
+    // app.ts wires them by importing from internal/, the sanctioned wiring
+    // boundary). The barrel MAY export pure-data constants (the job-type name,
+    // the redelivery policy, the planner version) — these are NOT concrete
+    // implementations; they are the frozen string/numeric values the route +
+    // the handler need to reference the job type + the policy.
+    const barrel = readFileSync(join(DP_DIR, 'index.ts'), 'utf8');
+    const valueExportRegex = /export\s+(?!type\b)\{([^}]+)\}\s+from/g;
+    const matches = [...barrel.matchAll(valueExportRegex)];
+    // The sanctioned pure-data constants (NOT concrete implementations).
+    const PURE_DATA_CONSTANTS = new Set<string>([
+      'PLANNING_EVALUATE_JOB_TYPE',
+      'PLANNING_EVALUATE_REDELIVERY_POLICY',
+      'PLANNER_VERSION',
+    ]);
+    const violations: string[] = [];
+    for (const m of matches) {
+      const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+      for (const n of names) {
+        if (!PURE_DATA_CONSTANTS.has(n)) violations.push(n);
+      }
+    }
+    expect(
+      violations,
+      `src/development-planner/index.ts exports non-constant value: ${violations.join(', ')} (only pure-data constants are permitted; concrete implementations stay in internal/)`,
+    ).toEqual([]);
+    // The barrel must NOT export a class or function (concrete implementation).
+    expect(barrel, 'the barrel must not export a concrete class').not.toMatch(/export\s+class\s+/);
+    expect(barrel, 'the barrel must not export a concrete function').not.toMatch(/export\s+function\s+/);
+  });
+
+  it('READ/MUTATION SEPARATION — the GET route calls only read methods; the POST evaluate is the only mutation (project.write); GET uses project.read', () => {
+    // The frozen spec: "A read endpoint must never silently trigger Work Item
+    // creation or planner state mutation." The GET recommendations routes call
+    // only listRecommendations (read-only service method) + findById (read).
+    // The POST evaluate route is the mutation (project.write) that creates
+    // Work Items through the orchestrator. The route layer NEVER directly
+    // calls workItemRepository.create (the creation is delegated to the
+    // orchestrator, invoked only from the POST evaluate handler).
+    const route = readFileSync(DP_ROUTE, 'utf8');
+    // The route does NOT directly call workItemRepository.create (the
+    // orchestrator does, invoked only from the POST /evaluate handler).
+    expect(route, 'the route must not directly call workItemRepository.create (the orchestrator does)').not.toMatch(/workItemRepository\.create\s*\(/);
+    // The GET routes call listRecommendations (read-only) + findById (read).
+    expect(route, 'the GET recommendations route calls listRecommendations').toMatch(/plannerService\.listRecommendations\(/);
+    // The POST evaluate route is the mutation — it calls plannerService.evaluate.
+    expect(route, 'the POST evaluate route calls plannerService.evaluate (the mutation)').toMatch(/plannerService\.evaluate\(/);
+    // project.read is used (for the GET routes).
+    expect(route, 'the route uses project.read').toMatch(/permission:\s*['"]project\.read['"]/);
+    // project.write is used (for the POST routes — the mutation).
+    expect(route, 'the route uses project.write').toMatch(/permission:\s*['"]project\.write['"]/);
+  });
+
+  it('DETERMINISTIC DEDUP KEY — the prioritizer computes a deterministic proposedWorkItemId (PLAN- + sha256 slice) for the existing UNIQUE constraint to fence', () => {
+    // The dedup natural key is the existing UNIQUE(architecture_version_id,
+    // work_item_id). The planner's proposedWorkItemId = "PLAN-" +
+    // sha256(canonical(goal)+"|"+canonical(scope)).slice(0,10). Two signals
+    // with the same canonical goal + scope produce the same id → the DB
+    // constraint fences concurrent runs → convergence.
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    expect(prioritizer, 'uses node:crypto createHash (deterministic)').toMatch(/from\s+['"]node:crypto['"]/);
+    expect(prioritizer, 'computes sha256').toMatch(/createHash\(['"]sha256['"]\)/);
+    expect(prioritizer, 'the proposedWorkItemId is PLAN- prefixed').toMatch(/`PLAN-\$\{computeCanonicalGoalHash/);
+    expect(prioritizer, 'the hash is truncated to 10 hex chars').toMatch(/\.slice\(0,\s*10\)/);
+    expect(prioritizer, 'canonicalizes the goal (lowercase + collapse whitespace)').toMatch(/\.toLowerCase\(\)\.replace\(\/\\s\+\/g/);
+  });
+
+  it('REVISION-BOUND CONTEXT CITED — the metadata.planner payload records the baselineCommitSha the signal was bound to', () => {
+    // The frozen spec: "All context remains revision-bound." The planner
+    // records the baselineCommitSha in metadata.planner.baselineCommitSha so
+    // the recommendation's evidence is traceable to a concrete revision.
+    const orchestrator = readFileSync(join(DP_DIR, 'internal', 'default-development-planner-service.ts'), 'utf8');
+    expect(orchestrator, 'the orchestrator embeds metadata.planner').toMatch(/metadata:\s*\{\s*planner:\s*metadataPayload/);
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'PlanningMetadataPayload carries baselineCommitSha').toMatch(/readonly baselineCommitSha:\s*string \| null/);
+  });
+
+  it('EXPLAINABLE PRIORITY — every candidate carries priorityFactors + rationale + whyNow (no opaque AI score)', () => {
+    // The frozen spec: "Do NOT reduce everything to an opaque AI score. Prefer
+    // structured reasons." The prioritizer produces discrete, traceable factors.
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'PlanningCandidate carries priorityFactors').toMatch(/readonly priorityFactors:\s*readonly PlanningPriorityFactor\[\]/);
+    expect(types, 'PlanningCandidate carries rationale').toMatch(/readonly rationale:\s*string/);
+    expect(types, 'PlanningCandidate carries whyNow').toMatch(/readonly whyNow:\s*string/);
+    expect(types, 'PlanningCandidate carries expectedImpact').toMatch(/readonly expectedImpact:\s*string/);
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    expect(prioritizer, 'the prioritizer sums weights to a discrete band').toMatch(/bandFor\(totalWeight\)/);
+  });
+
+  it('DURABLE JOB IS IDEMPOTENT + HAS A REDELIVERY POLICY (crash/retry safe) — reuses the existing WorkerHost, NO new scheduler', () => {
+    // The planner is convergent (the DB constraint fences concurrent/redelivered
+    // runs). The durable planning.evaluate job handler therefore declares a
+    // redeliveryPolicy (maxAttempts: 3) — a transient failure produces another
+    // DURABLE attempt without a process restart. The handler is registered
+    // with the EXISTING WorkerHost registry (NO new scheduler).
+    const handler = readFileSync(join(DP_DIR, 'internal', 'planning-evaluate-job-handler.ts'), 'utf8');
+    expect(handler, 'the handler implements JobHandler').toMatch(/class\s+PlanningEvaluateJobHandler\s+implements\s+JobHandler/);
+    expect(handler, 'the handler declares a redeliveryPolicy').toMatch(/redeliveryPolicy\s*=\s*PLANNING_EVALUATE_REDELIVERY_POLICY/);
+    expect(handler, 'the handler re-resolves the project (not serializable handles)').toMatch(/projectRepository\.findById\(/);
+    // The handler does NOT define a scheduler (reuses WorkerHost).
+    expect(handler, 'the handler must not define setInterval').not.toMatch(/setInterval\s*\(/);
+    expect(handler, 'the handler must not define cron').not.toMatch(/\bcron\s*\(/);
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'PLANNING_EVALUATE_REDELIVERY_POLICY maxAttempts: 3').toMatch(/maxAttempts:\s*3/);
+  });
+
+  it('TENANT ISOLATION — every route resolves the project + authorizes; the orchestrator re-asserts version.projectId === ctx.projectId', () => {
+    // Every route uses requireProjectAuthorization. The orchestrator
+    // re-asserts the architecture version belongs to ctx.projectId (defense
+    // in depth — a UUID is NEVER a credential). The GET inspect route walks
+    // WorkItem→Version→Architecture→Project + checks it matches.
+    const route = readFileSync(DP_ROUTE, 'utf8');
+    expect(route, 'the route uses requireProjectAuthorization').toMatch(/requireProjectAuthorization/);
+    expect(route, 'the GET inspect route checks cross-tenant').toMatch(/cross-tenant-work-item/);
+    const orchestrator = readFileSync(join(DP_DIR, 'internal', 'default-development-planner-service.ts'), 'utf8');
+    expect(orchestrator, 'the orchestrator re-asserts version in project').toMatch(/planning-architecture-version-not-in-project/);
+  });
+
+  it('app.ts wires the developmentPlannerService + the planningEvaluateJobHandler (production planning is available)', () => {
+    // The composition root must construct the DeterministicPlanningPrioritizer
+    // + the DefaultDevelopmentPlannerService + the PlanningEvaluateJobHandler,
+    // and expose the service for the route + push the handler to the existing
+    // WorkerHost registry.
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts constructs DeterministicPlanningPrioritizer').toMatch(/new DeterministicPlanningPrioritizer\(/);
+    expect(appSrc, 'app.ts constructs DefaultDevelopmentPlannerService').toMatch(/new DefaultDevelopmentPlannerService\(/);
+    expect(appSrc, 'app.ts constructs PlanningEvaluateJobHandler').toMatch(/new PlanningEvaluateJobHandler\(/);
+    expect(appSrc, 'app.ts exposes developmentPlannerService for the route').toMatch(/developmentPlannerService:\s*developmentPlannerServiceRef/);
+    expect(appSrc, 'app.ts pushes the planning handler to the existing WorkerHost registry').toMatch(/handlerList\.push\(planningEvaluateJobHandlerRef\)/);
+  });
+
+  it('server.ts registers the developmentPlanner route + ServerDeps declares it; index.ts assembles the route deps', () => {
+    const serverSrc = readFileSync(join(SRC_ROOT, 'api', 'server.ts'), 'utf8');
+    expect(serverSrc, 'server.ts imports developmentPlannerRoutes').toMatch(/import\s+\{\s*developmentPlannerRoutes/);
+    expect(serverSrc, 'server.ts declares developmentPlanner in ServerDeps').toMatch(/developmentPlanner\?:\s*DevelopmentPlannerRouteDeps/);
+    expect(serverSrc, 'server.ts registers the developmentPlanner route').toMatch(/developmentPlannerRoutes\(app,\s*deps\.developmentPlanner\)/);
+    const indexSrc = readFileSync(join(SRC_ROOT, 'index.ts'), 'utf8');
+    expect(indexSrc, 'index.ts assembles the developmentPlanner route deps').toMatch(/developmentPlanner:\s*\{/);
+  });
+
+  it('the development-planner capability consumes the authority barrels (NOT internal/)', () => {
+    // The capability imports from @modules/work-items, @modules/architecture,
+    // @modules/requirements, @development-planner, @platform — never from any
+    // internal/ of a frozen module (PLAT-AC-02).
+    const files = listTsFiles(DP_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /work-items internal/`).not.toMatch(/from\s+['"][^'"]*modules\/work-items\/internal/);
+      expect(src, `${rel} must not import /architecture internal/`).not.toMatch(/from\s+['"][^'"]*modules\/architecture\/internal/);
+      expect(src, `${rel} must not import /requirements internal/`).not.toMatch(/from\s+['"][^'"]*modules\/requirements\/internal/);
+      expect(src, `${rel} must not import /projects internal/`).not.toMatch(/from\s+['"][^'"]*modules\/projects\/internal/);
+    }
+  });
+
+  it('NO FABRICATED TOOL EVIDENCE — the orchestrator + prioritizer never invent evidence refs; the prioritizer records honest read failures', () => {
+    // The prioritizer reads the dependency graph for explanation; if a related
+    // id is not found (or its deps can't be read), it records the failure
+    // honestly (logger.warn) — it does NOT fabricate a chain.
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    expect(prioritizer, 'the prioritizer logs honest dependency-chain read failures').toMatch(/dependency-chain-read-failed/);
+  });
+
+  it('TENANT-OWNERSHIP GUARD BEFORE DEPENDENCY TRAVERSAL (PR #44 round 2) — listTransitiveDependencies is ALWAYS preceded by a project-ownership check (no cross-tenant dependency leak)', () => {
+    // Blocker: the route accepts caller-controlled PlanningSignal.relatedWorkItemIds.
+    // The prioritizer must NOT call listTransitiveDependencies(relatedId) without
+    // first resolving WorkItem → ArchitectureVersion → Architecture → Project +
+    // requiring === ctx.projectId. A Project A user submitting a Project B work
+    // item id must NOT cause traversal of Project B's dependency graph (cross-
+    // tenant information leak). The fix: a resolveWorkItemProject guard gates
+    // every traversal; cross-project ids are ignored WITHOUT traversal.
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    // 1. The ownership-guard helper exists + is called.
+    expect(prioritizer, 'the prioritizer defines + calls resolveWorkItemProject (the ownership guard)').toMatch(/resolveWorkItemProject\(/);
+    // 2. The gate: the resolved projectId is compared to ctx.projectId.
+    expect(prioritizer, 'the prioritizer gates on ownerProjectId === ctx.projectId').toMatch(/ownerProjectId\s*!==\s*ctx\.projectId/);
+    // 3. The honest rejection log for cross-tenant / not-found ids.
+    expect(prioritizer, 'the prioritizer logs cross-tenant related-work-item rejection').toMatch(/related-work-item-not-in-project/);
+    // 4. The traversal is present (gated by the guard). The dotted form
+    //    (.listTransitiveDependencies() matches only the actual method CALL,
+    //    not JSDoc mentions of the symbol — the ordering check below is
+    //    therefore precise).
+    expect(prioritizer, 'the prioritizer calls listTransitiveDependencies (gated by the guard)').toMatch(/\.listTransitiveDependencies\(/);
+    // 5. ORDERING: the guard symbol MUST appear BEFORE the traversal CALL in
+    //    the file (the guard is defined + called before the traversal). This
+    //    is the static proof that the guard precedes the FIRST traversal; the
+    //    count check (#6 below) proves EVERY traversal is gated; the dynamic
+    //    proof is the cross-tenant regression test (#8b).
+    const guardIdx = prioritizer.indexOf('resolveWorkItemProject(');
+    const traversalIdx = prioritizer.indexOf('.listTransitiveDependencies(');
+    expect(guardIdx, 'the ownership guard must be present').toBeGreaterThan(-1);
+    expect(traversalIdx, 'the traversal call must be present').toBeGreaterThan(-1);
+    expect(guardIdx, 'the ownership guard must precede the traversal call in the file').toBeLessThan(traversalIdx);
+    // 6. The WorkItem → ArchitectureVersion → Architecture → Project walk is
+    //    present in the guard (the canonical traceability chain).
+    expect(prioritizer, 'the guard resolves the work item').toMatch(/workItemRepository\.findById\(/);
+    expect(prioritizer, 'the guard resolves the architecture version').toMatch(/architectureVersionRepository\.findById\(/);
+    expect(prioritizer, 'the guard resolves the architecture (→ project)').toMatch(/architectureRepository\.findById\(/);
+    expect(prioritizer, 'the guard returns the project id').toMatch(/return arch\.projectId/);
+    // 7. EVERY traversal site is gated — count-based proof. The number of
+    //    guard CALL sites (resolveWorkItemProject( occurrences MINUS the one
+    //    function definition) must be >= the number of traversal CALL sites
+    //    (.listTransitiveDependencies( dotted calls). This PREVENTS a future
+    //    developer from adding a SECOND, unguarded listTransitiveDependencies
+    //    call in a different code path — every traversal site must have a
+    //    corresponding guard call site. (The first-occurrence ordering check
+    //    #5 proves the guard precedes the first traversal; this count check
+    //    proves NO traversal site lacks a guard — the architect's "preventing
+    //    an unscoped listTransitiveDependencies(relatedId) call" requirement.)
+    const guardAllMatches = prioritizer.match(/resolveWorkItemProject\(/g) ?? [];
+    // Subtract 1 for the `async function resolveWorkItemProject(` definition.
+    const guardCallSiteCount = Math.max(0, guardAllMatches.length - 1);
+    const traversalCallSiteCount = (prioritizer.match(/\.listTransitiveDependencies\(/g) ?? []).length;
+    expect(guardCallSiteCount, 'the prioritizer has at least one guard CALL site (not just the definition)').toBeGreaterThanOrEqual(1);
+    expect(traversalCallSiteCount, 'the prioritizer has at least one traversal call site (the guarded one)').toBeGreaterThanOrEqual(1);
+    expect(
+      guardCallSiteCount,
+      'EVERY listTransitiveDependencies call site must have a corresponding resolveWorkItemProject guard call site (no unscoped traversal — a second unguarded traversal would make guard < traversal)',
+    ).toBeGreaterThanOrEqual(traversalCallSiteCount);
+    // 8. MUTATION PROOF — the count check actually CATCHES an unscoped
+    //    traversal. Synthesize a mutated prioritizer with a second, unguarded
+    //    listTransitiveDependencies call (the exact regression the invariant
+    //    must prevent) + assert the count check detects the violation (guard
+    //    call sites < traversal call sites). This proves "preventing," not
+    //    merely "checking."
+    const mutatedPrioritizer = prioritizer + [
+      '',
+      '// MUTATION (for the static-arch test only — NOT in the real file):',
+      'async function futureUnguardedPath(ctx) {',
+      '  // A second traversal site WITHOUT a preceding resolveWorkItemProject',
+      '  // guard — this is the unscoped call the invariant must catch.',
+      '  return ctx.workItemDependencyRepository.listTransitiveDependencies(\'rogue-id\');',
+      '}',
+      '',
+    ].join('\n');
+    const mutatedGuardSites = Math.max(
+      0,
+      (mutatedPrioritizer.match(/resolveWorkItemProject\(/g) ?? []).length - 1,
+    );
+    const mutatedTraversalSites = (mutatedPrioritizer.match(/\.listTransitiveDependencies\(/g) ?? []).length;
+    expect(mutatedTraversalSites, 'the mutated file has 2 traversal sites (the original guarded one + the unguarded mutation)').toBe(traversalCallSiteCount + 1);
+    expect(mutatedGuardSites, 'the mutated file still has the same guard call site count (the mutation added no guard)').toBe(guardCallSiteCount);
+    expect(
+      mutatedGuardSites,
+      'the count check CATCHES the unscoped traversal — guard < traversal in the mutated file (the invariant fails on the mutation, proving it prevents unscoped calls)',
+    ).toBeLessThan(mutatedTraversalSites);
+  });
+
+  it('PUBLIC ROUTE AUTHORITY/PROVENANCE BOUNDARY (PR #44 round 4) — the public route accepts ONLY the user-request shape; the server constructs kind=developer-request, provenance=proposed, originator from auth; NO caller-supplied provenance/kind/evidenceRefs/blocksCount/relatedWorkItemIds/baselineCommitSha/originator', () => {
+    // Blocker (PR #44 round 4): the public POST .../planning/evaluate trusted
+    // caller-asserted evidence + provenance. A project.write caller could
+    // submit { provenance: "observed", evidenceRefs: [fabricated],
+    // baselineCommitSha: "arbitrary-sha", blocksCount: 100 } and the planner
+    // would persist those claims into the authoritative Work Item's
+    // metadata.planner — turning UNVERIFIED CLIENT ASSERTIONS into `observed`
+    // repository evidence, violating the frozen provenance rule (source-fact
+    // → baseline/context-evidence → planner recommendation → authoritative
+    // Work Item). The planner MUST NOT turn unverified client assertions
+    // into `observed` repository evidence.
+    //
+    // Fix: SEPARATE trusted signal production from user-requested planning.
+    // The PUBLIC route accepts ONLY the user-request shape { canonicalGoal,
+    // scope? } + rejects every forbidden signal-authority field. The server
+    // constructs kind=developer-request, provenance=proposed, originator=
+    // user.id (from the authenticated principal). Trusted INTERNAL producers
+    // call DevelopmentPlannerService.evaluate DIRECTLY (programmatically)
+    // with the full vocabulary — they do NOT go through the public route.
+    const route = readFileSync(DP_ROUTE, 'utf8');
+    // 1. The old full-vocabulary caller-controlled parser is GONE.
+    expect(route, 'the old caller-controlled parseSignal is removed').not.toMatch(/\bparseSignal\(/);
+    // 2. The constrained public-user-request parser is present.
+    expect(route, 'the public route uses parsePublicUserRequest (the constrained parser)').toMatch(/parsePublicUserRequest\(/);
+    // 3. The FORBIDDEN-field list names EVERY authority field a public
+    //    caller must NOT supply. Each is a string literal in the list — a
+    //    public caller supplying ANY of these is REJECTED with 400.
+    expect(route, 'the forbidden-field list rejects kind (server forces developer-request)').toMatch(/['"]kind['"]/);
+    expect(route, 'the forbidden-field list rejects provenance (server forces proposed)').toMatch(/['"]provenance['"]/);
+    expect(route, 'the forbidden-field list rejects evidenceRefs (no caller-supplied evidence authority)').toMatch(/['"]evidenceRefs['"]/);
+    expect(route, 'the forbidden-field list rejects blocksCount (no caller-controlled priority input)').toMatch(/['"]blocksCount['"]/);
+    expect(route, 'the forbidden-field list rejects relatedWorkItemIds (no caller-supplied dependency refs)').toMatch(/['"]relatedWorkItemIds['"]/);
+    expect(route, 'the forbidden-field list rejects originator (server resolves from auth)').toMatch(/['"]originator['"]/);
+    expect(route, 'the forbidden-field list rejects baselineCommitSha (no caller-supplied revision)').toMatch(/['"]baselineCommitSha['"]/);
+    // 4. The server constructs kind='developer-request' (literal — the public
+    //    route FORCES this kind; a caller cannot assert architecture-observation
+    //    / requirement-gap / benchmark-evidence / completed-work / observed /
+    //    inferred via the public route).
+    expect(route, 'the server forces kind=developer-request').toMatch(/kind:\s*['"]developer-request['"]/);
+    // 5. The server constructs provenance='proposed' (literal — the public
+    //    route FORCES proposed; a caller cannot assert observed/inferred
+    //    repository facts via the public route).
+    expect(route, 'the server forces provenance=proposed').toMatch(/provenance:\s*['"]proposed['"]/);
+    // 6. The server resolves originator from the authenticated user (user.id),
+    //    NOT from the caller-supplied body.
+    expect(route, 'the server resolves originator from the authenticated user (user.id)').toMatch(/originator:\s*user\.id/);
+    // 7. The body shape is constrained — `requests` (the user-request array),
+    //    NOT `signals` (the full-vocabulary internal shape).
+    expect(route, 'the body shape uses requests (the user-request array, not signals)').toMatch(/requests\?:/);
+    // 8. The route REJECTS the old full-vocabulary top-level body fields
+    //    (`signals` + `baselineCommitSha`) — the boundary is EXPLICIT (400,
+    //    not silent ignore).
+    expect(route, 'the route rejects the old top-level signals body field').toMatch(/['"]signals['"]\s+in\s+body/);
+    expect(route, 'the route rejects the old top-level baselineCommitSha body field').toMatch(/['"]baselineCommitSha['"]\s+in\s+body/);
+    // 9. The route captures the authenticated user from requireProjectAuthorization
+    //    (the originator is the auth principal, not a body field).
+    expect(route, 'the route captures the authenticated user (originator source)').toMatch(/const user = await requireProjectAuthorization/);
+    // 10. The programmatic path RETAINS the full vocabulary — the service's
+    //     evaluate method takes PlanningEvaluateInput (which carries
+    //     signals: readonly PlanningSignal[]). The trusted-producer entry
+    //     point is the PROGRAMMATIC service, NOT the public HTTP route — the
+    //     constraint is on the route, not the service.
+    const service = readFileSync(join(DP_DIR, 'internal', 'default-development-planner-service.ts'), 'utf8');
+    expect(service, 'the programmatic service evaluate method takes PlanningEvaluateInput (the full-vocabulary entry point)').toMatch(/evaluate\(\s*input:\s*PlanningEvaluateInput/);
+    expect(service, 'the programmatic service delegates to the prioritizer with the signal (full vocabulary passed through)').toMatch(/prioritizer\.prioritize\(signal/);
+    // 11. The programmatic input type retains baselineCommitSha (trusted
+    //     internal producers that have resolved a real revision supply it
+    //     DIRECTLY — the constraint is on the PUBLIC ROUTE, not the
+    //     programmatic API).
+    const types = readFileSync(join(DP_DIR, 'development-planner.types.ts'), 'utf8');
+    expect(types, 'PlanningEvaluateInput retains baselineCommitSha for trusted internal producers').toMatch(/readonly baselineCommitSha\?:\s*string/);
+    expect(types, 'PlanningSignal retains provenance (full vocabulary for trusted internal producers)').toMatch(/readonly provenance:\s*PlanningProvenance/);
+    expect(types, 'PlanningSignal retains evidenceRefs (full vocabulary for trusted internal producers)').toMatch(/readonly evidenceRefs\?:\s*readonly PlanningEvidenceRef\[\]/);
+    expect(types, 'PlanningSignal retains blocksCount (full vocabulary for trusted internal producers)').toMatch(/readonly blocksCount\?:\s*number/);
+  });
+});

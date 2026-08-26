@@ -29,6 +29,7 @@
       "@modules/*": ["src/modules/*"],
       "@onboarding/*": ["src/onboarding/*"],
       "@repository-intelligence/*": ["src/repository-intelligence/*"],
+      "@development-planner/*": ["src/development-planner/*"],
       "@root/*": ["src/*"],
       "@/*": ["../frontend/src/*"]
     },
