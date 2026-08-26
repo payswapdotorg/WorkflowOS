@@ -128,6 +128,20 @@ function kindBaseWeight(signal: PlanningSignal): {
       return { weight: 3, detail: 'requirement gap identified' };
     case 'benchmark-evidence':
       return { weight: 2, detail: 'benchmark evidence' };
+    // WORK-041 maintenance kinds — produced by trusted internal maintenance
+    // detectors. The base weight reflects the maintenance category's default
+    // urgency (CI regressions block merges; runtime changes warrant attention;
+    // operational risks are moderate; maintenance-request mirrors developer-request).
+    // The maintenance-severity + maintenance-affected-count factors (emitted
+    // below when signal.maintenance is present) modulate the final priority.
+    case 'maintenance-ci-regression':
+      return { weight: 4, detail: 'CI regression detected' };
+    case 'maintenance-runtime-change':
+      return { weight: 3, detail: 'runtime change detected' };
+    case 'maintenance-operational-risk':
+      return { weight: 2, detail: 'operational risk identified' };
+    case 'maintenance-request':
+      return { weight: 4, detail: 'explicit maintenance request' };
     default:
       return { weight: 1, detail: 'unspecified signal' };
   }
@@ -158,6 +172,17 @@ function kindFactorKind(
       return 'requirement-gap';
     case 'benchmark-evidence':
       return 'benchmark-evidence';
+    // WORK-041 maintenance kinds → maintenance factor kinds (or, for
+    // maintenance-request, the requested-by-developer factor mirroring
+    // developer-request).
+    case 'maintenance-ci-regression':
+      return 'maintenance-severity';
+    case 'maintenance-runtime-change':
+      return 'maintenance-severity';
+    case 'maintenance-operational-risk':
+      return 'maintenance-severity';
+    case 'maintenance-request':
+      return 'requested-by-developer';
     default:
       return 'confidence-evidence-quality';
   }
@@ -168,6 +193,26 @@ function bandFor(totalWeight: number): PlanningPriority {
   if (totalWeight >= 10) return 'high';
   if (totalWeight >= 5) return 'medium';
   return 'low';
+}
+
+/**
+ * WORK-041: map a maintenance severity band to a discrete weight. The
+ * maintenance-severity factor is emitted ONLY when signal.maintenance.severity
+ * is present. critical=5, high=4, medium=2, low=1.
+ */
+function maintenanceSeverityWeight(
+  severity: 'critical' | 'high' | 'medium' | 'low',
+): number {
+  switch (severity) {
+    case 'critical':
+      return 5;
+    case 'high':
+      return 4;
+    case 'medium':
+      return 2;
+    case 'low':
+      return 1;
+  }
 }
 
 /**
@@ -340,6 +385,35 @@ export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
       });
     }
 
+    // 9. WORK-041 maintenance factors — emitted ONLY when the signal carries
+    //    a `maintenance` metadata payload (trusted internal maintenance
+    //    detector produced this signal). The maintenance-severity factor
+    //    derives from signal.maintenance.severity (discrete weight: critical=5,
+    //    high=4, medium=2, low=1); the maintenance-affected-count factor
+    //    derives from signal.maintenance.affectedCount (capped at 5). These
+    //    are DISCRETE + EXPLAINABLE factors — same rule as the 11 original
+    //    factors. NO opaque AI score. Absent for non-maintenance signals.
+    if (signal.maintenance) {
+      if (signal.maintenance.severity) {
+        const sevWeight = maintenanceSeverityWeight(signal.maintenance.severity);
+        factors.push({
+          kind: 'maintenance-severity',
+          weight: sevWeight,
+          detail: `maintenance severity ${signal.maintenance.severity} (category: ${signal.maintenance.category}${signal.maintenance.advisoryId ? `; advisory: ${signal.maintenance.advisoryId}` : ''})`,
+        });
+      }
+      if (signal.maintenance.affectedCount !== undefined) {
+        const affWeight = Math.min(signal.maintenance.affectedCount, 5);
+        if (affWeight > 0) {
+          factors.push({
+            kind: 'maintenance-affected-count',
+            weight: affWeight,
+            detail: `affects ${signal.maintenance.affectedCount} item(s) (detector: ${signal.maintenance.detectorSource ?? 'unknown'})`,
+          });
+        }
+      }
+    }
+
     // Sum + band.
     const totalWeight = factors.reduce((sum, f) => sum + f.weight, 0);
     const priority = bandFor(totalWeight);
@@ -349,13 +423,23 @@ export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
     const whyNow =
       signal.kind === 'developer-request'
         ? 'explicit developer request — direct user intent'
-        : signal.kind === 'completed-work'
-          ? 'completed-work signal — follow-up now unblocked'
-          : signal.kind === 'architecture-observation'
-            ? 'architecture observation — drift/risk warrants near-term attention'
-            : signal.kind === 'requirement-gap'
-              ? 'requirement gap — coverage missing now'
-              : 'planner-recommended candidate — eligible for the existing Work Item lifecycle';
+        : signal.kind === 'maintenance-request'
+          ? 'explicit maintenance request — direct user intent'
+          : signal.kind === 'maintenance-ci-regression'
+            ? 'CI regression detected — blocks merges; warrants near-term attention'
+            : signal.kind === 'maintenance-runtime-change'
+              ? 'runtime change detected — warrants near-term verification'
+              : signal.kind === 'maintenance-operational-risk'
+                ? 'operational risk identified — warrants near-term mitigation'
+                : signal.kind === 'completed-work'
+                  ? 'completed-work signal — follow-up now unblocked'
+                  : signal.kind === 'architecture-observation'
+                    ? 'architecture observation — drift/risk warrants near-term attention'
+                    : signal.kind === 'requirement-gap'
+                      ? 'requirement gap — coverage missing now'
+                      : signal.maintenance
+                        ? `maintenance signal (category: ${signal.maintenance.category}) — detected by ${signal.maintenance.detectorSource ?? 'a trusted internal detector'}`
+                        : 'planner-recommended candidate — eligible for the existing Work Item lifecycle';
     const expectedImpact = `Creates a governed Work Item (proposedWorkItemId ${computeProposedWorkItemId(signal.canonicalGoal, signal.scope)}) entering the existing Work Item → Work Order → Execution → Verification → Review lifecycle. Execution mode: native or external per eligibility/policy (advisory — the planner does NOT select a provider).`;
 
     // PROVENANCE — passed through verbatim. NEVER promoted. The candidate's

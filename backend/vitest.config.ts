@@ -33,6 +33,7 @@ export default defineConfig({
       '@onboarding': fileURLToPath(new URL('./src/onboarding', import.meta.url)),
       '@repository-intelligence': fileURLToPath(new URL('./src/repository-intelligence', import.meta.url)),
       '@development-planner': fileURLToPath(new URL('./src/development-planner', import.meta.url)),
+      '@maintenance': fileURLToPath(new URL('./src/maintenance', import.meta.url)),
       '@root': fileURLToPath(new URL('./src', import.meta.url)),
       '@': fileURLToPath(new URL('../frontend/src', import.meta.url)),
     },

@@ -30,6 +30,8 @@ import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth
 import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore, InMemoryObjectStore } from '@platform/index.js';
 import { buildTestDatabase, type TestDatabase } from './test-database.js';
+import { PgCiEvidenceIngestionRepository } from '../../src/modules/github/internal/pg-ci-evidence-repository.js';
+import { PgProjectBaselineRepository } from '../../src/modules/projects/internal/pg-project-baseline-repository.js';
 
 /**
  * Test harness wiring the WORK-002 + WORK-004 identity/authorization/project/
@@ -64,6 +66,10 @@ export interface TestAuthStack {
   workOrderRepository: PgWorkOrderRepository;
   /** INTERNAL completion service — not in the /work-items public barrel. */
   workItemCompletionService: DefaultWorkItemCompletionService;
+  /** WORK-015/WORK-041: the CI evidence ingestion repository (real PG). */
+  ciEvidenceRepository: PgCiEvidenceIngestionRepository;
+  /** WORK-038/WORK-041: the project baseline repository (real PG). */
+  projectBaselineRepository: PgProjectBaselineRepository;
   authProvider: ApiKeyAuthProvider;
   authorizationService: DefaultAuthorizationService;
   apiKeyProvisioner: ApiKeyCredentialProvisioner;
@@ -111,6 +117,8 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const pullRequestAssociationRepository = new PgPullRequestAssociationRepository(db.client);
   const workOrderRepository = new PgWorkOrderRepository(db.client);
   const workItemCompletionService = new DefaultWorkItemCompletionService(workItemRepository);
+  const ciEvidenceRepository = new PgCiEvidenceIngestionRepository(db.client);
+  const projectBaselineRepository = new PgProjectBaselineRepository(db.client);
   const authProvider = new ApiKeyAuthProvider(db.client, secretStore);
   const authorizationService = new DefaultAuthorizationService(
     membershipRepository,
@@ -154,6 +162,8 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     pullRequestAssociationRepository,
     workOrderRepository,
     workItemCompletionService,
+    ciEvidenceRepository,
+    projectBaselineRepository,
     authProvider,
     authorizationService,
     apiKeyProvisioner,

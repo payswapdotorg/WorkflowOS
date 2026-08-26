@@ -30,6 +30,7 @@
       "@onboarding/*": ["src/onboarding/*"],
       "@repository-intelligence/*": ["src/repository-intelligence/*"],
       "@development-planner/*": ["src/development-planner/*"],
+      "@maintenance/*": ["src/maintenance/*"],
       "@root/*": ["src/*"],
       "@/*": ["../frontend/src/*"]
     },

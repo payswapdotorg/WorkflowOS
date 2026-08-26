@@ -59,6 +59,11 @@ export type {
   DevelopmentPlannerService,
   DevelopmentPlannerServiceDeps,
   PlanningEvaluateJobPayload,
+  // WORK-041: maintenance metadata types re-exported so the maintenance
+  // capability's barrel can re-export them (single surface for capability
+  // consumers).
+  MaintenanceCategory,
+  MaintenanceSignalMetadata,
 } from './development-planner.types.js';
 
 // Re-export the authority types so capability consumers import from this

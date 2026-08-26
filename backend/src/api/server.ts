@@ -33,6 +33,10 @@ import {
   developmentPlannerRoutes,
   type DevelopmentPlannerRouteDeps,
 } from './routes/development-planner.route.js';
+import {
+  maintenanceRoutes,
+  type MaintenanceRouteDeps,
+} from './routes/maintenance.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -114,6 +118,15 @@ export interface ServerDeps extends JobsRouteDeps {
    *  verification / review state, NEVER starts execution, NEVER selects a
    *  provider. */
   developmentPlanner?: DevelopmentPlannerRouteDeps;
+  /** WORK-041: Maintenance + Project Health Engine route deps (the maintenance
+   *  capability: POST evaluate/evaluate-async [user requests → planner] +
+   *  POST scan/scan-async [detector trigger → detectors → planner] + GET
+   *  signals/health). Backend-authorized (project.read / project.write). The
+   *  maintenance capability NEVER calls WorkItemRepository.create directly (it
+   *  goes THROUGH the planner), NEVER mutates the dependency graph, NEVER
+   *  mutates workflow / verification / review state, NEVER starts execution,
+   *  NEVER selects a provider. */
+  maintenance?: MaintenanceRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -218,6 +231,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.developmentPlanner) {
     await developmentPlannerRoutes(app, deps.developmentPlanner);
+  }
+  if (deps.auth && deps.maintenance) {
+    await maintenanceRoutes(app, deps.maintenance);
   }
   return app;
 }

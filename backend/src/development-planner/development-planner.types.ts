@@ -113,7 +113,17 @@ export type PlanningEvidenceKind =
   | 'dependency-graph'
   | 'existing-work-item'
   | 'benchmark-evidence'
-  | 'explicit-user-input';
+  | 'explicit-user-input'
+  // WORK-041 maintenance evidence kinds — referenced by trusted internal
+  // maintenance detectors (CiRegressionDetector, ArchitectureDriftDetector,
+  // AdvisoryDetector) when they produce PlanningSignals. The ref is an
+  // opaque authority id / locator (e.g. a wfos_github_ci_evidence row id, a
+  // GHSA/CVE advisory id, a wfos_deployments row id). The planner NEVER
+  // dereferences these — it records them as evidence so the maintenance
+  // recommendation is traceable.
+  | 'ci-evidence'
+  | 'advisory-evidence'
+  | 'deployment-evidence';
 
 /**
  * A typed pointer to where a piece of planning evidence came from. The ref is
@@ -142,7 +152,69 @@ export type PlanningSignalKind =
   | 'completed-work'
   | 'architecture-observation'
   | 'requirement-gap'
-  | 'benchmark-evidence';
+  | 'benchmark-evidence'
+  // WORK-041 maintenance signal kinds — produced by trusted internal
+  // maintenance detectors (the maintenance capability's detectors call
+  // DevelopmentPlannerService.evaluate DIRECTLY with these kinds). The 4 kinds
+  // below cover the maintenance categories that do NOT map cleanly onto an
+  // existing kind. The remaining maintenance categories (dependency
+  // vulnerabilities, security advisories, compatibility issues, performance
+  // regressions, architecture drift, technical debt) reuse the existing kinds
+  // above + carry a `maintenance` metadata payload for maintenance-specific
+  // framing. The public maintenance route forces kind='maintenance-request'
+  // (mirroring the WORK-040 round-4 boundary: the public route accepts ONLY the
+  // user-request shape; the server constructs kind+provenance+originator).
+  | 'maintenance-ci-regression'
+  | 'maintenance-runtime-change'
+  | 'maintenance-operational-risk'
+  | 'maintenance-request';
+
+// ---------------------------------------------------------------------------
+// Maintenance signal metadata (WORK-041 — optional passthrough).
+// ---------------------------------------------------------------------------
+
+/**
+ * The 9 maintenance detection categories from the WORK-041 frozen contract
+ * (`spec/work-items.md` WORK-041). A maintenance detector produces a
+ * PlanningSignal whose `kind` may be a maintenance-specific kind (e.g.
+ * `maintenance-ci-regression`) OR an existing kind reused for maintenance
+ * (e.g. `dependency-observation` for a vulnerability). The `maintenance`
+ * metadata payload carries the maintenance-specific framing (category, severity,
+ * advisory id, affected count, detector source) so the prioritizer can emit
+ * maintenance-specific factors + the created Work Item's metadata.planner
+ * records the maintenance provenance.
+ *
+ * This is a PASSTHROUGH field — the planner records it verbatim in
+ * `metadata.planner.maintenance` (like `baselineCommitSha`). The planner
+ * NEVER fabricates maintenance metadata; it is supplied ONLY by trusted
+ * internal maintenance detectors (the maintenance capability) calling
+ * DevelopmentPlannerService.evaluate DIRECTLY (programmatically). The public
+ * maintenance route does NOT accept a caller-supplied `maintenance` field —
+ * it is in the FORBIDDEN_SIGNAL_FIELDS list (mirror of the WORK-040 round-4
+ * authority/provenance boundary).
+ */
+export type MaintenanceCategory =
+  | 'vulnerability'
+  | 'ci-regression'
+  | 'runtime-change'
+  | 'security-advisory'
+  | 'compatibility'
+  | 'performance-regression'
+  | 'architecture-drift'
+  | 'technical-debt'
+  | 'operational-risk';
+
+export interface MaintenanceSignalMetadata {
+  readonly category: MaintenanceCategory;
+  /** Severity band — the detector's assessment (e.g. CVSS-derived for vulnerabilities, failure-rate for CI). */
+  readonly severity?: 'critical' | 'high' | 'medium' | 'low';
+  /** Advisory id (GHSA-XXXX-XXXX-XXXX, CVE-YYYY-NNNNN, OSV-YYYY-YYYY) — present for vulnerability/security-advisory signals. */
+  readonly advisoryId?: string;
+  /** How many dependencies/items are affected (the detector's assessment — feeds the maintenance-affected-count factor). */
+  readonly affectedCount?: number;
+  /** Which detector produced this signal (e.g. 'ci-regression-detector', 'architecture-drift-detector', 'advisory-detector'). */
+  readonly detectorSource?: string;
+}
 
 /**
  * A planning signal. The canonicalGoal is the deterministic, canonicalized
@@ -166,6 +238,13 @@ export interface PlanningSignal {
   readonly baselineCommitSha?: string;
   /** Optional explicit "blocks N items" declaration (the signal's own assessment). */
   readonly blocksCount?: number;
+  /**
+   * WORK-041 maintenance metadata (optional passthrough). Present ONLY on
+   * signals produced by trusted internal maintenance detectors. The planner
+   * passes this through verbatim to metadata.planner.maintenance (like
+   * baselineCommitSha). The public route does NOT accept this field.
+   */
+  readonly maintenance?: MaintenanceSignalMetadata;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +264,14 @@ export type PlanningPriorityFactorKind =
   | 'completed-work-unblocks'
   | 'requirement-gap'
   | 'benchmark-evidence'
-  | 'confidence-evidence-quality';
+  | 'confidence-evidence-quality'
+  // WORK-041 maintenance factor kinds — emitted by the prioritizer when a
+  // signal carries a `maintenance` metadata payload. maintenance-severity
+  // derives from signal.maintenance.severity; maintenance-affected-count
+  // derives from signal.maintenance.affectedCount. Discrete + explainable
+  // (same rule as the 11 original factors — NO opaque AI score).
+  | 'maintenance-severity'
+  | 'maintenance-affected-count';
 
 /**
  * A discrete, explainable priority factor. Each contributes a weight + a
@@ -303,6 +389,13 @@ export interface PlanningMetadataPayload {
   readonly baselineCommitSha: string | null;
   readonly evaluatedAt: string;
   readonly plannerVersion: string;
+  /**
+   * WORK-041 maintenance metadata (optional passthrough). Present ONLY when the
+   * signal carried a `maintenance` payload (a trusted internal maintenance
+   * detector produced this signal). The planner records it verbatim — it
+   * NEVER fabricates maintenance metadata. Absent for non-maintenance signals.
+   */
+  readonly maintenance?: MaintenanceSignalMetadata;
 }
 
 // ---------------------------------------------------------------------------
