@@ -220,48 +220,17 @@ function mapEvidence(r: EvidenceRow): BaselineEvidence {
 }
 
 /**
- * PR #42 round-5: determine whether the persistence-boundary snapshot is
- * STALE relative to a revalidation. Mirrors the round-4 `isSnapshotStale`
- * logic in the governed-read boundary: compare version (primary) + ruleId
- * (defense-in-depth) + decision (defense-in-depth — last resort). When the
- * gate surfaces no version on either side, the fence falls back to
- * ruleId + decision comparison.
+ * PR #42 round-6: the application-level staleness check
+ * (`isPersistenceSnapshotStale`) used by the round-5 fence (Check A + Check
+ * C revalidation) is REMOVED — the round-6 fence replaces it with a
+ * database-level `SELECT ... FOR UPDATE` on the authoritative
+ * `wfos_agent_policies` row (the lock held from the version check through
+ * COMMIT IS the fence; there is no separate revalidation read to compare
+ * against). The per-read snapshot verification (Check B) inside the
+ * transaction is retained + compares the snapshot's policyVersion to each
+ * evidence row's per-read `repository_read_enforcement.policyVersion`
+ * directly (no helper function needed).
  */
-function isPersistenceSnapshotStale(
-  snapshot: PersistencePolicySnapshot,
-  revalidation: PersistencePolicySnapshot,
-): boolean {
-  // Primary signal: the policy version changed (the WORK-037 store bumps
-  // policy_version on every document mutation — a version change is the
-  // definitive signal that the policy document the snapshot was captured
-  // against is no longer current).
-  if (
-    snapshot.policyVersion !== null &&
-    revalidation.policyVersion !== null &&
-    snapshot.policyVersion !== revalidation.policyVersion
-  ) {
-    return true;
-  }
-  // Defense-in-depth: the matched rule id changed (a rule replacement
-  // without a version bump would be an engine bug, but the fence catches it).
-  if (
-    (snapshot.ruleId !== null || revalidation.ruleId !== null) &&
-    snapshot.ruleId !== revalidation.ruleId
-  ) {
-    return true;
-  }
-  // Defense-in-depth: the decision itself changed (an allow→deny flip
-  // without a version/rule change would be an engine bug, but the fence
-  // catches it). This is the last-resort signal when the gate surfaces no
-  // version AND no ruleId.
-  if (
-    (snapshot.decision !== null || revalidation.decision !== null) &&
-    snapshot.decision !== revalidation.decision
-  ) {
-    return true;
-  }
-  return false;
-}
 
 /**
  * PR #42 round-5: the internal sentinel thrown inside the
@@ -599,152 +568,213 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   }
 
   // =========================================================================
-  // PR #42 round-5 (the persistence-boundary fence): persist evidence +
-  // observations + complete the baseline in ONE DB transaction, under the
-  // captured persistence-boundary policy snapshot.
+  // PR #42 round-6 (the DATABASE-LEVEL fence): persist evidence + observations
+  // + complete the baseline in ONE PostgreSQL transaction whose commit is
+  // conditioned on the authoritative `wfos_agent_policies` policy row remaining
+  // at the snapshot's version — via a `SELECT ... FOR UPDATE` held from the
+  // version check THROUGH commit.
   //
-  // THE ROUND-5 BLOCKER (the architect's review of commit `2a597ed`): the
-  // round-4 fence protects the READ window (capture V7 → read → revalidate V7
-  // → discard if stale) but does NOT protect the SUBSEQUENT PERSISTENCE
-  // window:
+  // THE ROUND-6 BLOCKER (the architect's review of commit `f229641`): the
+  // round-5 fence wrapped the writes in ONE DB transaction + performed a CAS
+  // on the policy version INSIDE the transaction at TWO revalidation
+  // checkpoints (Check A pre-writes + Check C post-writes). But the
+  // `revalidate()` callback was an independent policy-engine call (it
+  // re-invoked `capturePersistenceSnapshot` → `decideForProjectScope` → a
+  // PLAIN `SELECT` on `wfos_agent_policies`) — NOT a query performed through
+  // the same PostgreSQL transaction holding the baseline persistence
+  // transaction open. So the database transaction did NOT lock or condition
+  // its commit on the policy row remaining V7:
   //
-  //   capture V7
-  //     ↓
-  //   read
-  //     ↓
-  //   revalidate V7                ← round-4 fence passes here
-  //     ↓
-  //   policy mutates V7 → V8       ← the round-4 fence does NOT cover this gap
-  //     ↓
-  //   appendEvidence(V7)           ← STALE V7 evidence committed
-  //     ↓
-  //   upsertObservations(V7)       ← STALE V7 observations committed
-  //     ↓
-  //   markComplete                 ← baseline marked complete under V8 with V7 evidence
+  //   Check C: policy = V7                     (plain SELECT — no lock held)
+  //       ↓
+  //   another worker UPDATEs wfos_agent_policies V7 → V8   (no lock blocks it)
+  //       ↓
+  //   COMMIT                                   (stale V7 evidence committed under V8)
   //
-  // The architect's required fix: a "persistence-boundary CAS/transactional
-  // policy snapshot guard." A regression must explicitly mutate the policy
-  // AFTER revalidation (the per-read fence's revalidation) BUT BEFORE
-  // persistence and prove zero stale evidence/observations are committed.
+  // THE ROUND-6 FIX (implemented here): the persistence transaction ACQUIRES
+  // the row lock on the authoritative `wfos_agent_policies` row INSIDE the
+  // same transaction — the lock is held from the version check THROUGH commit.
+  // The application-level `revalidate()` callback is REMOVED.
   //
-  // THE ROUND-5 FIX (implemented here): the persistence-boundary fence wraps
-  // the appendEvidence + upsertObservations + markComplete in ONE DB
-  // transaction + performs a CAS check on the policy version INSIDE the
-  // transaction (before commit). If the snapshot is stale at any fence check,
-  // the transaction is ROLLED BACK — zero evidence/observations are
-  // committed. The architect's invariant: "a repository-read result is
-  // persisted only if the policy snapshot that authorized it is still current
-  // when the result is committed."
-  //
-  // THE FENCE PROTOCOL (the double-CAS pattern — defense-in-depth):
+  // THE FENCE PROTOCOL (the database-level serialization point):
   //
   //   1. BEGIN TRANSACTION.
-  //   2. PRE-WRITES REVALIDATION (Check A) — call `revalidate()` to fetch the
-  //      CURRENT policy snapshot; compare to `input.snapshot`:
-  //      * If they differ, the policy mutated BETWEEN the orchestrator's
-  //        capture and the transaction start → ROLLBACK → return `fence-stale`.
-  //   3. PER-READ SNAPSHOT VERIFICATION (Check B) — verify `input.snapshot`
-  //      matches each evidence row's per-read `repository_read_enforcement
-  //      .policyVersion` (captured by the analyzer's per-read fence). If ANY
-  //      differ, the policy mutated BETWEEN the per-read fence and the
-  //      persistence capture → the evidence is stale → ROLLBACK → return
-  //      `fence-stale`. This is the architect's exact regression scenario
-  //      (the test hook mutates V7 → V8 AFTER the per-read fence passes, BEFORE
-  //      the persistence transaction begins).
-  //   4. WRITES — appendEvidence (idempotent on (baseline_id, source,
+  //   2. LOCK + VERIFY the authoritative `wfos_agent_policies` row:
+  //      a. SELECT policy_version FROM wfos_agent_policies
+  //           WHERE scope = 'project' AND organization_id = $org
+  //             AND project_id = $proj
+  //           FOR UPDATE          ← row lock held for the WHOLE transaction
+  //         (the symmetric org-scope query when `snapshot.source ===
+  //         'organization'`; SKIPPED when `snapshot.source ===
+  //         'platform-default'` — no authoritative DB row exists; the platform
+  //         default is a constant, not a row, so there is nothing to mutate
+  //         mid-flight + nothing to lock).
+  //      b. If the row is MISSING (the policy was DELETED mid-flight) →
+  //         ROLLBACK → `fence-stale`.
+  //      c. If the row's policy_version ≠ snapshot.policyVersion (a concurrent
+  //         mutation committed BEFORE this transaction acquired the lock) →
+  //         ROLLBACK → `fence-stale`. READ COMMITTED locked-read semantics
+  //         return the NEWEST committed row, so a mutation that committed
+  //         first is observed here → the predicate rejects.
+  //   3. PER-READ SNAPSHOT VERIFICATION (Check B — retained from round-5):
+  //      verify `snapshot.policyVersion` matches each evidence row's per-read
+  //      `repository_read_enforcement.policyVersion`. If ANY differ →
+  //      ROLLBACK → `fence-stale`.
+  //   4. (test seam) If `input.willMutate` is set, invoke it NOW — the row
+  //      lock is held, so a concurrent policy mutation (T2) driven from the
+  //      hook BLOCKS on the FOR UPDATE lock until this transaction commits.
+  //      No-op in production.
+  //   5. WRITES — appendEvidence (idempotent on (baseline_id, source,
   //      locator)) + upsertObservations (idempotent on (baseline_id, kind,
   //      claim_digest)) + markComplete (CAS on baseline.version). Lost CAS
-  //      → ROLLBACK → return `cas-lost`.
-  //   5. POST-WRITES REVALIDATION (Check C — defense-in-depth) — call
-  //      `revalidate()` AGAIN; compare to `input.snapshot`. If they differ,
-  //      the policy mutated DURING the writes → ROLLBACK → return `fence-stale`.
-  //   6. COMMIT (the transaction commits only if every fence check passed).
+  //      → ROLLBACK → `cas-lost`. NO post-writes revalidation — the row lock
+  //      held since step 2 serializes against ANY concurrent mutation for the
+  //      duration of the writes + commit (a mutation must wait; it cannot
+  //      sneak in between a final revalidation read and COMMIT because there
+  //      IS no separate revalidation read — the lock IS the fence).
+  //   6. COMMIT — releases the row lock. A blocked concurrent mutator (T2)
+  //      now proceeds + applies its mutation (the persistence happened-before
+  //      the mutation in the serialization order).
   //   7. Return `persisted` with the completed baseline + the evidence rows.
   //
-  // The double-CAS pattern (Check A + Check C) keeps the TOCTOU window
-  // between step 5 and COMMIT itself as small as possible. A mutation in that
-  // final gap is the same unavoidable window the architect's earlier rounds
-  // acknowledged (the DB cannot participate in the policy store's
-  // transaction). The fence DETECTS + REJECTS stale snapshots at every other
-  // point in the persistence flow — same fencing protocol as round-4,
-  // extended to cover the persistence window the round-4 fence left open.
-  //
-  // FAIL-CLOSED: a revalidation call FAILURE (the gate throws on the
-  // revalidation) is treated as STALE — the transaction is ROLLED BACK, the
-  // result is `fence-revalidation-failed`. A revalidation failure must NOT
-  // become an implicit persist (the result cannot be committed without a
-  // successful revalidation).
+  // SERIALIZATION GUARANTEE: a concurrent policy mutation (via
+  // `setProjectPolicy` / `setOrganizationPolicy` / `clearProjectPolicy` /
+  // `clearOrganizationPolicy` — all of which INSERT/UPDATE/DELETE the SAME
+  // `wfos_agent_policies` row the fence locks) must either WAIT for this
+  // transaction to commit (T1 holds the lock → T2 blocks → T1 commits → T2
+  // applies) OR commit first (the fence's locked read sees the NEWEST
+  // committed version → the predicate rejects → ROLLBACK → zero stale
+  // evidence/observations are committed). There is no TOCTOU window between
+  // a revalidation read and COMMIT because the fence IS the row lock — the
+  // serialization point is the database, not an application-level callback.
   //
   // CAS-LOST: the markComplete CAS losing (another worker completed the
   // baseline first) is treated as `cas-lost` — the transaction is ROLLED BACK
-  // (the caller re-reads the winner's row — convergence). The winner's
-  // evidence is already in (idempotent upserts); the rolled-back writes from
-  // this call are no-ops (the ON CONFLICT DO NOTHING semantic).
+  // (the caller re-reads the winner's row — convergence).
   //
   // WHY THE THROW-TO-ROLLBACK PATTERN: the `db.transaction()` callback rolls
   // back on any thrown error. The fence throws a `FenceStaleSignal` (a
   // private internal sentinel — NOT a ProjectBaselineError) to abort the
   // transaction; the outer catch translates it to the `fence-stale` /
-  // `fence-revalidation-failed` result. This keeps the public method's
+  // `cas-lost` result. The `fence-revalidation-failed` variant is retained in
+  // the signal's union + the result type + the catch branch for contract
+  // completeness + the round-5 fail-closed architecture invariant; the round-6
+  // fence does NOT throw it (the locked SELECT replaces the application-level
+  // revalidation; a locked-SELECT failure is a genuine infrastructure error
+  // that re-throws, not a typed fence result). This keeps the public method's
   // contract clean (it never throws for fence-stale — it returns a typed
   // result; only the genuine infrastructure errors throw).
   // =========================================================================
 
   async persistBaselineWithPolicyFence(
     input: PersistBaselineInput,
-    revalidate: () => Promise<PersistencePolicySnapshot>,
   ): Promise<PersistBaselineResult> {
     try {
       const result = await this.db.transaction(async (tx) => {
         const q: Queryable = tx as unknown as Queryable;
 
-        // ---- Check A: PRE-WRITES REVALIDATION (the first CAS).
-        // Fetch the current policy snapshot INSIDE the transaction. If the
-        // snapshot mutated between the orchestrator's capture and the
-        // transaction start, this CAS catches it.
-        let revalidationA: PersistencePolicySnapshot;
-        try {
-          revalidationA = await revalidate();
-        } catch (err) {
-          throw new FenceStaleSignal(
-            'fence-revalidation-failed',
-            input.snapshot,
-            null,
-            `the persistence-boundary pre-writes revalidation failed (${(err as Error).message}) — the transaction is rolled back (a revalidation failure must NOT become an implicit persist)`,
+        // ---- THE DATABASE-LEVEL FENCE (round-6): LOCK + VERIFY the
+        // authoritative wfos_agent_policies row INSIDE this transaction.
+        // The FOR UPDATE row lock is held for the WHOLE transaction
+        // (through COMMIT), so a concurrent policy mutation
+        // (setProjectPolicy / setOrganizationPolicy / clearProjectPolicy /
+        // clearOrganizationPolicy — all touch the SAME row) must either
+        // WAIT for this transaction to commit OR commit first (then this
+        // locked read returns the NEWEST committed version → the version
+        // predicate rejects → ROLLBACK). This is the serialization point
+        // the architect's round-6 review demanded — NOT an application-
+        // level revalidation callback (which left a TOCTOU window between
+        // the final revalidation read and COMMIT).
+        const source = input.snapshot.source;
+        // The locked row's policy_version (what the fence saw as the
+        // CURRENT authoritative version at lock-acquisition time). null
+        // when no row exists (source='platform-default' OR the row was
+        // deleted mid-flight).
+        let lockedVersion: number | null = null;
+        let lockedScope: 'project' | 'organization' | null = null;
+        if (source === 'project') {
+          const r = await q.query<{ policy_version: number }>(
+            `SELECT policy_version FROM wfos_agent_policies
+              WHERE scope = 'project' AND organization_id = $1 AND project_id = $2
+              FOR UPDATE`,
+            [input.organizationId, input.projectId],
           );
+          if (r.rows[0]) {
+            lockedVersion = r.rows[0]!.policy_version;
+            lockedScope = 'project';
+          }
+        } else if (source === 'organization') {
+          const r = await q.query<{ policy_version: number }>(
+            `SELECT policy_version FROM wfos_agent_policies
+              WHERE scope = 'organization' AND organization_id = $1 AND project_id IS NULL
+              FOR UPDATE`,
+            [input.organizationId],
+          );
+          if (r.rows[0]) {
+            lockedVersion = r.rows[0]!.policy_version;
+            lockedScope = 'organization';
+          }
         }
-        if (isPersistenceSnapshotStale(input.snapshot, revalidationA)) {
-          throw new FenceStaleSignal(
-            'fence-stale',
-            input.snapshot,
-            revalidationA,
-            `the persistence-boundary fence REJECTED the persist at the PRE-WRITES revalidation (Check A): the snapshot (version=${input.snapshot.policyVersion ?? 'not-surfaced'}, rule=${input.snapshot.ruleId ?? 'default'}, decision=${input.snapshot.decision ?? 'none'}) that authorized the persistence is no longer current (revalidation saw version=${revalidationA.policyVersion ?? 'not-surfaced'}, rule=${revalidationA.ruleId ?? 'default'}, decision=${revalidationA.decision ?? 'none'}) — the policy mutated between the orchestrator's capture and the transaction start; the transaction is rolled back (zero evidence/observations are committed)`,
-          );
+        // source === 'platform-default' OR null: no authoritative DB row.
+        // The platform default is a constant, not a row — there is nothing
+        // to mutate mid-flight + nothing to lock. Skip the lock + the
+        // version check; the per-read fence already authorized the reads
+        // under the platform default (the fence's only remaining guard is
+        // the per-read snapshot verification — Check B below).
+
+        // The forensic "revalidated" snapshot: what the fence saw as the
+        // current authoritative state at lock-acquisition time (the locked
+        // row's policy_version; ruleId + decision are NOT read from the
+        // row — the fence uses ONLY policy_version for the DB-level CAS,
+        // mirroring the round-5 fence's version-first drift detection).
+        const lockedRow: PersistencePolicySnapshot = {
+          source,
+          policyVersion: lockedVersion,
+          ruleId: input.snapshot.ruleId,
+          decision: input.snapshot.decision,
+          reason: null,
+        };
+
+        // Verify the locked row's version matches the snapshot (when the
+        // snapshot surfaced a version + the source expects a row).
+        if (source === 'project' || source === 'organization') {
+          if (lockedVersion === null) {
+            // The authoritative row is MISSING — the policy was DELETED
+            // mid-flight (clearProjectPolicy / clearOrganizationPolicy
+            // committed between the capture and the lock). ROLLBACK.
+            throw new FenceStaleSignal(
+              'fence-stale',
+              input.snapshot,
+              lockedRow,
+              `the persistence-boundary DATABASE-LEVEL fence REJECTED the persist at the LOCK + VERIFY step: the authoritative wfos_agent_policies row (source=${source}, organization_id=${input.organizationId}${source === 'project' ? `, project_id=${input.projectId}` : ''}) is MISSING — the policy row was deleted mid-flight (clearProjectPolicy/clearOrganizationPolicy committed between the capture and the lock); the transaction is rolled back (zero evidence/observations are committed)`,
+            );
+          }
+          if (
+            input.snapshot.policyVersion !== null &&
+            lockedVersion !== input.snapshot.policyVersion
+          ) {
+            // The authoritative row's version DIFFERS from the snapshot —
+            // a concurrent mutation committed BEFORE this transaction
+            // acquired the FOR UPDATE lock. ROLLBACK.
+            throw new FenceStaleSignal(
+              'fence-stale',
+              input.snapshot,
+              lockedRow,
+              `the persistence-boundary DATABASE-LEVEL fence REJECTED the persist at the LOCK + VERIFY step: the authoritative wfos_agent_policies row (scope=${lockedScope}, organization_id=${input.organizationId}${lockedScope === 'project' ? `, project_id=${input.projectId}` : ''}) carries policy_version=${lockedVersion} which does NOT match the snapshot's policyVersion=${input.snapshot.policyVersion} — a concurrent policy mutation committed BEFORE this transaction acquired the FOR UPDATE row lock; the transaction is rolled back (zero evidence/observations are committed)`,
+            );
+          }
         }
 
-        // ---- Check B: PER-READ SNAPSHOT VERIFICATION.
+        // ---- Check B: PER-READ SNAPSHOT VERIFICATION (retained from round-5).
         // Verify `input.snapshot` matches each evidence row's per-read
         // `repository_read_enforcement.policyVersion` (the snapshot the
-        // analyzer's per-read fence captured for THAT individual read). If ANY
-        // differ, the policy mutated BETWEEN the per-read fence and the
-        // persistence capture — the evidence is stale → ROLLBACK. This is
-        // the architect's exact regression scenario: the test hook mutates
-        // V7 → V8 AFTER the per-read fence's revalidation passes, BEFORE the
-        // persistence transaction begins. The orchestrator's V_p capture
-        // (post-mutation) would be V8; the evidence's per-read snapshot
-        // (pre-mutation) is V7 → mismatch → ROLLBACK.
+        // analyzer's per-read fence captured for THAT individual read). If
+        // ANY differ, the policy mutated BETWEEN the per-read fence and
+        // the persistence capture — the evidence is stale → ROLLBACK.
         for (const ev of input.evidence) {
-          // Evidence rows that did NOT come from a governed repository read
-          // carry no per-read snapshot — skip them (no fence reference to
-          // compare against). Currently every evidence row comes from a
-          // governed read, but the check is forward-compatible.
           if (ev.repositoryReadEnforcement === null) continue;
           const perReadVersion = ev.repositoryReadEnforcement.policyVersion;
           const perReadRuleId = ev.repositoryReadEnforcement.ruleId;
-          // If the per-read snapshot surfaced a version, the persistence
-          // snapshot must match it. If the persistence snapshot surfaced a
-          // version, the per-read snapshot must match it. Either direction
-          // of mismatch is stale.
           if (
             perReadVersion !== null &&
             input.snapshot.policyVersion !== null &&
@@ -753,13 +783,10 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
             throw new FenceStaleSignal(
               'fence-stale',
               input.snapshot,
-              revalidationA,
+              lockedRow,
               `the persistence-boundary fence REJECTED the persist at the PER-READ snapshot verification (Check B): the evidence row for locator '${ev.locator}' carries a per-read snapshot (version=${perReadVersion}, rule=${perReadRuleId ?? 'default'}) that does NOT match the persistence-boundary snapshot (version=${input.snapshot.policyVersion}, rule=${input.snapshot.ruleId ?? 'default'}) — the policy mutated between the per-read fence and the persistence capture; the evidence is stale; the transaction is rolled back (zero evidence/observations are committed)`,
             );
           }
-          // Defense-in-depth: the per-read ruleId must match too (a rule
-          // replacement without a version bump would be a bug, but the fence
-          // catches it).
           if (
             (perReadRuleId !== null || input.snapshot.ruleId !== null) &&
             perReadRuleId !== input.snapshot.ruleId
@@ -767,10 +794,20 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
             throw new FenceStaleSignal(
               'fence-stale',
               input.snapshot,
-              revalidationA,
+              lockedRow,
               `the persistence-boundary fence REJECTED the persist at the PER-READ snapshot verification (Check B — ruleId defense-in-depth): the evidence row for locator '${ev.locator}' carries a per-read ruleId '${perReadRuleId ?? 'default'}' that does NOT match the persistence-boundary snapshot's ruleId '${input.snapshot.ruleId ?? 'default'}' — the matched rule changed between the per-read fence and the persistence capture; the transaction is rolled back (zero evidence/observations are committed)`,
             );
           }
+        }
+
+        // ---- (test seam) the willMutate hook — invoked AFTER the row
+        // lock is acquired + verified, BEFORE the writes. The real-
+        // PostgreSQL concurrency regression drives a concurrent policy
+        // mutation (T2) from here; T2's UPDATE blocks on this
+        // transaction's FOR UPDATE lock until COMMIT. No-op in
+        // production (input.willMutate is undefined).
+        if (input.willMutate) {
+          await input.willMutate();
         }
 
         // ---- WRITES (the actual persist).
@@ -810,39 +847,27 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
         );
         if (completed === null) {
           // CAS lost — another worker completed the baseline first. The
-          // transaction is ROLLED BACK (the caller re-reads the winner's row —
-          // convergence). The winner's evidence is already in (idempotent
-          // upserts); the rolled-back writes from this call are no-ops.
+          // transaction is ROLLED BACK (the caller re-reads the winner's
+          // row — convergence). The winner's evidence is already in
+          // (idempotent upserts); the rolled-back writes from this call
+          // are no-ops.
           throw new FenceStaleSignal(
             'cas-lost',
             input.snapshot,
-            revalidationA,
+            lockedRow,
             'the markComplete CAS lost (another worker completed the baseline first) — the transaction is rolled back; the caller re-reads the winner\'s row (convergence)',
           );
         }
 
-        // ---- Check C: POST-WRITES REVALIDATION (defense-in-depth — the
-        // second CAS, just before COMMIT). If the policy mutated DURING the
-        // writes, this CAS catches it.
-        let revalidationB: PersistencePolicySnapshot;
-        try {
-          revalidationB = await revalidate();
-        } catch (err) {
-          throw new FenceStaleSignal(
-            'fence-revalidation-failed',
-            input.snapshot,
-            null,
-            `the persistence-boundary post-writes revalidation failed (${(err as Error).message}) — the transaction is rolled back (a revalidation failure must NOT become an implicit persist)`,
-          );
-        }
-        if (isPersistenceSnapshotStale(input.snapshot, revalidationB)) {
-          throw new FenceStaleSignal(
-            'fence-stale',
-            input.snapshot,
-            revalidationB,
-            `the persistence-boundary fence REJECTED the persist at the POST-WRITES revalidation (Check C — defense-in-depth): the snapshot (version=${input.snapshot.policyVersion ?? 'not-surfaced'}, rule=${input.snapshot.ruleId ?? 'default'}, decision=${input.snapshot.decision ?? 'none'}) that authorized the persistence is no longer current after the writes (revalidation saw version=${revalidationB.policyVersion ?? 'not-surfaced'}, rule=${revalidationB.ruleId ?? 'default'}, decision=${revalidationB.decision ?? 'none'}) — the policy mutated DURING the writes; the transaction is rolled back (zero evidence/observations are committed)`,
-          );
-        }
+        // ---- NO post-writes revalidation (round-6): the FOR UPDATE row
+        // lock held since the LOCK + VERIFY step serializes against ANY
+        // concurrent mutation for the duration of the writes + commit. A
+        // mutation cannot sneak in between a final revalidation read and
+        // COMMIT because there IS no separate revalidation read — the lock
+        // IS the fence. The transaction will COMMIT, releasing the lock;
+        // a blocked concurrent mutator (T2) now proceeds + applies its
+        // mutation (the persistence happened-before the mutation in the
+        // serialization order).
 
         // ---- Every fence check passed — the transaction will COMMIT.
         return {
@@ -860,6 +885,9 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
           return { kind: 'cas-lost' };
         }
         if (err.kind === 'fence-revalidation-failed') {
+          // Retained for contract completeness + the round-5 fail-closed
+          // architecture invariant; the round-6 fence does NOT throw this
+          // (the locked SELECT replaces the application-level revalidation).
           return {
             kind: 'fence-revalidation-failed',
             snapshot: err.snapshot,
@@ -870,6 +898,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
           kind: 'fence-stale',
           snapshot: err.snapshot,
           revalidated: err.revalidated ?? {
+            source: null,
             policyVersion: null,
             ruleId: null,
             decision: null,

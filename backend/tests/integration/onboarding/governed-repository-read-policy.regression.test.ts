@@ -801,6 +801,9 @@ describe('WORK-038 PR #42 round-3 + round-4 — GovernedRepositoryReadPolicy (th
     expect(snapshot.ruleId, 'the snapshot carries the matched ruleId').toBe('fake-rule');
     expect(snapshot.decision, 'the snapshot carries the decision (informational — NOT enforced at the persistence boundary)').toBe('allow');
     expect(snapshot.reason).toBeNull(); // FakePolicyGate surfaces no reason for allow
+    // PR #42 round-6: the snapshot carries `source` (which authoritative
+    // wfos_agent_policies row backs the snapshot — the fence locks that row).
+    expect(snapshot.source, 'the snapshot carries the gate-surfaced source').toBe('project');
     // The boundary called the gate ONCE for the capture (the persistence
     // fence's revalidation will call it AGAIN — verified in the integration
     // suite).
@@ -845,6 +848,7 @@ describe('WORK-038 PR #42 round-3 + round-4 — GovernedRepositoryReadPolicy (th
     expect(snapshot.policyVersion, 'the snapshot is null (fail-closed)').toBeNull();
     expect(snapshot.ruleId, 'the ruleId is null').toBeNull();
     expect(snapshot.decision, 'the decision is null').toBeNull();
+    expect(snapshot.source, 'the source is null (fail-closed — no scope resolved)').toBeNull();
     expect(snapshot.reason, 'the reason explains the fail-closed').toContain('persistence-snapshot-capture-failed');
     // The forensic log was emitted.
     const logOutput = capture.raw();
@@ -865,5 +869,8 @@ describe('WORK-038 PR #42 round-3 + round-4 — GovernedRepositoryReadPolicy (th
     expect(snapshot.policyVersion).toBeNull();
     expect(snapshot.ruleId).toBeNull();
     expect(snapshot.decision).toBe('allow');
+    // PR #42 round-6: the minimal gate surfaced no scopeSource → the
+    // snapshot's source is null (the fence treats null as 'platform-default').
+    expect(snapshot.source).toBeNull();
   });
 });

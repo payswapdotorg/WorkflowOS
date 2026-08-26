@@ -178,59 +178,69 @@ export class DefaultOnboardingService implements OnboardingService {
     try {
       const result = await this.deps.analyzer.analyze(analysisContext);
 
-      // 8. PR #42 round-5 (the persistence-boundary fence): capture the
-      //    CURRENT policy snapshot AFTER analyze() returns (every evidence
-      //    row has its per-read snapshot from the round-4 fence) AND BEFORE
-      //    the persistence transaction begins. The snapshot is the
-      //    persistence-boundary fence's reference value — the
-      //    persistBaselineWithPolicyFence method revalidates it INSIDE the
-      //    DB transaction (pre-writes + post-writes + per-read verification)
-      //    + rolls back if it is stale.
+      // 8. PR #42 round-6 (the database-level fence): capture the CURRENT
+      //    policy snapshot AFTER analyze() returns (every evidence row has
+      //    its per-read snapshot from the round-4 fence) AND BEFORE the
+      //    persistence transaction begins. The snapshot (including `source`
+      //    — which authoritative wfos_agent_policies row backs it) is the
+      //    fence's reference value.
       //
-      //    THE ARCHITECT'S ROUND-5 BLOCKER: the round-4 fence protects the
-      //    READ window but NOT the SUBSEQUENT PERSISTENCE window:
+      //    THE ARCHITECT'S ROUND-6 BLOCKER (review of commit `f229641`):
+      //    the round-5 fence wrapped the writes in ONE DB transaction +
+      //    revalidated the snapshot INSIDE the transaction at two application-
+      //    level checkpoints (Check A + Check C). But the `revalidate()`
+      //    callback was an independent policy-engine call (a PLAIN SELECT on
+      //    wfos_agent_policies), NOT a query performed through the same
+      //    PostgreSQL transaction holding the persistence transaction open —
+      //    so a concurrent policy mutation could commit between the final
+      //    revalidation read and COMMIT.
       //
-      //      capture V7 -> read -> revalidate V7 (round-4 fence passes) ->
-      //      policy mutates V7 -> V8 -> appendEvidence(V7) -> markComplete
-      //
-      //    The persistence-boundary fence catches the mutation at THREE
-      //    checkpoints inside the transaction (pre-writes revalidation, per-
-      //    read snapshot verification, post-writes revalidation). If the
-      //    policy mutated BETWEEN the per-read fence and this capture (the
-      //    architect's exact regression scenario), the snapshot (V8) differs
-      //    from the evidence's per-read policyVersion (V7) — the per-read
-      //    verification catches the mismatch + rolls back. ZERO stale
-      //    evidence/observations are committed.
+      //    THE ROUND-6 FIX: the repository's persistBaselineWithPolicyFence
+      //    method ACQUIRES the row lock on the authoritative wfos_agent_policies
+      //    row INSIDE the same PostgreSQL transaction (SELECT ... FOR UPDATE),
+      //    so the lock is held from the version check THROUGH commit. A
+      //    concurrent policy mutation must WAIT (then applies after commit) OR
+      //    commit first (the fence's locked read returns the NEWEST committed
+      //    version → the predicate rejects → ROLLBACK → zero stale evidence/
+      //    observations are committed). The per-read snapshot verification
+      //    (Check B) is retained; the application-level revalidate() callback is
+      //    REMOVED.
       const persistenceSnapshot =
         await this.deps.governedReadPolicy.capturePersistenceSnapshot(analysisContext);
 
-      // 9. Persist evidence + observations + complete the baseline in ONE DB
-      //    transaction, under the captured persistence-boundary snapshot.
-      //    PR #42 round-2 (Blocker A): observations reference evidence by
-      //    LOCATOR (the path), not by a manufactured toolInvocationId. The
-      //    repository's persistBaselineWithPolicyFence resolves locator→evidence
-      //    id by the composite (source, locator) key inside the transaction.
-      //    PR #42 round-5: the fence revalidates the snapshot INSIDE the
-      //    transaction + rolls back if it is stale (zero stale evidence/
-      //    observations are committed).
+      // 9. Persist evidence + observations + complete the baseline in ONE
+      //    PostgreSQL transaction, under the captured persistence-boundary
+      //    snapshot + the database-level row lock. PR #42 round-2 (Blocker A):
+      //    observations reference evidence by LOCATOR (the path), not by a
+      //    manufactured toolInvocationId. The repository's
+      //    persistBaselineWithPolicyFence resolves locator→evidence id by the
+      //    composite (source, locator) key inside the transaction. PR #42
+      //    round-6: the fence locks + verifies the authoritative policy row
+      //    INSIDE the transaction (FOR UPDATE) + rolls back if it is stale
+      //    (zero stale evidence/observations are committed).
       const persistResult =
-        await this.deps.projectBaselineRepository.persistBaselineWithPolicyFence(
-          {
-            baselineId: baseline.id,
-            evidence: result.evidence,
-            observations: result.observations,
-            contentDigest: result.contentDigest,
-            expectedVersion: baseline.version,
-            snapshot: persistenceSnapshot,
-          },
-          // The revalidate closure: re-fetch the current policy snapshot
-          // INSIDE the transaction. The repository's fence calls this closure
-          // TWICE (pre-writes + post-writes) + compares each revalidation to
-          // the captured snapshot. If either differs, the transaction is
-          // ROLLED BACK.
-          async () =>
-            this.deps.governedReadPolicy.capturePersistenceSnapshot(analysisContext),
-        );
+        await this.deps.projectBaselineRepository.persistBaselineWithPolicyFence({
+          baselineId: baseline.id,
+          evidence: result.evidence,
+          observations: result.observations,
+          contentDigest: result.contentDigest,
+          expectedVersion: baseline.version,
+          snapshot: persistenceSnapshot,
+          // PR #42 round-6 (the database-level fence): the fence locks the
+          // authoritative wfos_agent_policies row for this (organization,
+          // project) via SELECT ... FOR UPDATE INSIDE the same PostgreSQL
+          // transaction that holds the baseline persistence writes. The lock
+          // is held from the version check THROUGH commit, so a concurrent
+          // policy mutation (setProjectPolicy / setOrganizationPolicy /
+          // clearProjectPolicy / clearOrganizationPolicy — all touch the SAME
+          // row) must either WAIT for this transaction to commit OR commit
+          // first (then the fence's locked read returns the NEWEST committed
+          // version → the version predicate rejects → ROLLBACK → zero stale
+          // evidence/observations are committed). The round-5 application-
+          // level revalidate() callback is REMOVED — the lock IS the fence.
+          organizationId: analysisContext.organizationId,
+          projectId: analysisContext.projectId,
+        });
 
       // 10. Handle the persist result. Three success paths + two fence-
       //     rejection paths.

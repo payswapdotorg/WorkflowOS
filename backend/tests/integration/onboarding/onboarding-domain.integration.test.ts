@@ -160,7 +160,13 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
     // so the governed boundary can record them on the evidence row (drift
     // detection + forensic provenance). The real AgentPolicyEngine surfaces
     // these from evaluateCore; the fake simulates them deterministically.
-    const base = { policyVersion: this.nextPolicyVersion, ruleId: 'fake-rule', scopeSource: 'project' as const };
+    // PR #42 round-6: the fake surfaces scopeSource='platform-default' —
+    // the fake gate does NOT back its claim with a real wfos_agent_policies
+    // row, so the honest source is 'platform-default' (no authoritative DB
+    // row). The round-6 database-level fence then skips the row lock (there
+    // is nothing to lock); the real-PG concurrency regression exercises the
+    // lock against a seeded real row.
+    const base = { policyVersion: this.nextPolicyVersion, ruleId: 'fake-rule', scopeSource: 'platform-default' as const };
     if (this.denied.has(path)) {
       return { ...base, decision: 'deny' as const, reason: 'denied by test policy' };
     }
@@ -202,11 +208,13 @@ class MutatingPolicyGate implements ProjectScopedPolicyGate {
     _projectId: string,
     _organizationId: string,
   ) {
+    // PR #42 round-6: scopeSource='platform-default' (the fake gate does not
+    // back its claim with a real wfos_agent_policies row — see FakePolicyGate).
     return {
       decision: this.decision,
       policyVersion: this.policyVersion,
       ruleId: this.ruleId,
-      scopeSource: 'project' as const,
+      scopeSource: 'platform-default' as const,
       reason: this.mutated ? 'allowed by V8 (mutated)' : 'allowed by V7',
     };
   }
@@ -265,75 +273,20 @@ class HookedContentPort implements RepositoryContentPort {
 }
 
 /**
- * PR #42 round-5: a policy gate that MUTATES after a SPECIFIC call count.
- * The architect's round-5 regression spec requires: "explicitly mutate the
- * policy AFTER revalidation but BEFORE persistence." The orchestrator calls
- * decideForProjectScope() twice per governedRead() (capture + revalidation),
- * then once for capturePersistenceSnapshot(), then twice inside the
- * persistence transaction (Check A + Check C revalidations).
- *
- * For a 6-candidate analyzer run, that's:
- *   calls 1-12: analyzer's per-read fence (capture + revalidation per read)
- *   call 13: capturePersistenceSnapshot (the orchestrator's V_p capture)
- *   call 14: Check A pre-writes revalidation (inside the transaction)
- *   call 15: Check C post-writes revalidation (inside the transaction)
- *
- * A `CountingMutatingPolicyGate(mutateAfter=12)` returns V7 for calls 1-12
- * (the analyzer's per-read fence passes — V7 captured + revalidated for
- * every read), then V8 starting from call 13 (the orchestrator's V_p capture
- * sees V8). The persistence fence's per-read verification (Check B) catches
- * the mismatch: V_p (V8) != evidence's per-read policyVersion (V7) →
- * ROLLBACK. ZERO stale evidence/observations are committed. This is the
- * architect's exact regression scenario.
- *
- * A `CountingMutatingPolicyGate(mutateAfter=13)` returns V7 for calls 1-13
- * (the capture sees V7), then V8 starting from call 14 (the Check A
- * revalidation sees V8). The persistence fence's pre-writes revalidation
- * (Check A) catches the mutation: V_p (V7) != V_current (V8) → ROLLBACK.
- * ZERO stale evidence/observations are committed.
- *
- * A `CountingMutatingPolicyGate(mutateAfter=14)` returns V7 for calls 1-14
- * (the Check A revalidation passes), then V8 starting from call 15 (the
- * Check C post-writes revalidation sees V8). The persistence fence's post-
- * writes revalidation (Check C) catches the mutation DURING the writes:
- * V_p (V7) != V_current (V8) → ROLLBACK. ZERO stale evidence/observations
- * are committed.
+ * PR #42 round-5 → round-6: the `CountingMutatingPolicyGate` (an in-memory
+ * fake that mutated after a specific call count to exercise the round-5
+ * application-level Check A / Check C revalidation checkpoints) is REMOVED.
+ * The architect's round-6 review established that an application-level
+ * revalidation callback is NOT a real fence (it leaves a TOCTOU window
+ * between the final revalidation read and COMMIT), and that a fake mutating
+ * gate is insufficient to prove database transaction serialization. The
+ * round-6 regression lives in
+ * `tests/integration/onboarding/persistence-fence-concurrency.regression.test.ts`
+ * — it exercises REAL PostgreSQL concurrency (T1 fence holds the FOR UPDATE
+ * row lock → T2 policy mutation blocks → T1 commits → T2 applies; AND the
+ * inverse: T2 mutates first → T1 fence reads the NEWEST committed version →
+ * T1 rejects → zero stale evidence/observations committed).
  */
-class CountingMutatingPolicyGate implements ProjectScopedPolicyGate {
-  private policyVersion = 7;
-  private ruleId = 'fake-rule-v7';
-  private callCount = 0;
-  private mutated = false;
-  constructor(private readonly mutateAfterCalls: number) {}
-  wasMutated(): boolean {
-    return this.mutated;
-  }
-  getCallCount(): number {
-    return this.callCount;
-  }
-  getPolicyVersion(): number {
-    return this.policyVersion;
-  }
-  async decideForProjectScope(
-    _request: ToolPolicyRequest,
-    _projectId: string,
-    _organizationId: string,
-  ) {
-    this.callCount++;
-    if (this.callCount > this.mutateAfterCalls && !this.mutated) {
-      this.policyVersion = 8;
-      this.ruleId = 'fake-rule-v8';
-      this.mutated = true;
-    }
-    return {
-      decision: 'allow' as const,
-      policyVersion: this.policyVersion,
-      ruleId: this.ruleId,
-      scopeSource: 'project' as const,
-      reason: this.mutated ? 'allowed by V8 (mutated after call ' + this.mutateAfterCalls + ')' : 'allowed by V7',
-    };
-  }
-}
 
 describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboarding capability)', () => {
   let stack: TestAuthStack;
@@ -1499,232 +1452,20 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
   });
 
   // =========================================================================
-  // PR #42 round-5 (the persistence-boundary fence): the architect's exact
-  // regression scenario — mutate the policy AFTER the per-read fence's
-  // revalidation passes BUT BEFORE the persistence transaction commits, and
-  // prove ZERO stale evidence/observations are committed.
-  //
-  // The round-4 fence protects the READ window (capture V7 -> read ->
-  // revalidate V7 -> discard if stale). The round-5 fence protects the
-  // SUBSEQUENT PERSISTENCE window (capture V7 -> ... -> appendEvidence(V7) ->
-  // upsertObservations(V7) -> markComplete) by wrapping the writes in ONE
-  // DB transaction + performing a CAS on the policy version INSIDE the
-  // transaction (pre-writes revalidation + per-read snapshot verification +
-  // post-writes revalidation). If ANY check fails, the transaction is
-  // ROLLED BACK — zero evidence/observations are committed.
+  // PR #42 round-6: the round-5 in-memory-fake-gate tests 34-37 (which
+  // exercised the application-level Check A / Check C revalidation
+  // checkpoints) are REMOVED. The architect's round-6 review established
+  // that an application-level revalidation callback is NOT a real fence
+  // (it leaves a TOCTOU window between the final revalidation read and
+  // COMMIT) and that a fake mutating gate is insufficient to prove database
+  // transaction serialization. The round-5 fence's Check A + Check C
+  // revalidation checkpoints are REMOVED (replaced by the database-level
+  // SELECT ... FOR UPDATE row lock); the per-read snapshot verification
+  // (Check B) is RETAINED. The round-6 regression — REAL PostgreSQL
+  // concurrency (T1 fence holds the FOR UPDATE row lock → T2 policy
+  // mutation blocks → T1 commits → T2 applies; AND the inverse: T2 mutates
+  // first → T1 fence reads the NEWEST committed version → T1 rejects →
+  // zero stale evidence/observations committed) — lives in
+  // `tests/integration/onboarding/persistence-fence-concurrency.regression.test.ts`.
   // =========================================================================
-
-  it('34. PR #42 r5: mutation AFTER the per-read fence passes BUT BEFORE the persistence capture (the architect\'s exact regression scenario) -> the per-read verification (Check B) catches the mismatch (V_p=V8 vs evidence=V7) -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
-    // The architect's round-5 regression spec:
-    //   initial version = 7 (allow)
-    //     ↓
-    //   analyzer runs: per-read fence captures V7 + revalidates V7 for EVERY
-    //   read (the round-4 fence passes — no mutation DURING the reads)
-    //     ↓
-    //   TEST HOOK fires: mutate V7 -> V8 AFTER analyze() returns BUT BEFORE
-    //   the persistence transaction begins
-    //     ↓
-    //   the orchestrator's V_p capture (call 13) sees V8 (post-mutation)
-    //     ↓
-    //   the persistence fence's per-read verification (Check B, inside the
-    //   transaction) catches the mismatch: V_p (V8) != evidence's per-read
-    //   policyVersion (V7) → ROLLBACK
-    //     ↓
-    //   ZERO stale V7 evidence/observations are committed
-    //     ↓
-    //   the baseline is FAILED with failure_stage=
-    //   'policy-snapshot-stale-at-persistence' (forensic provenance)
-    const ref = 'persistence-fence-branch';
-    // The CountingMutatingPolicyGate mutates AFTER the 12th call (the
-    // analyzer's 6 reads × 2 calls per read = 12 calls during analyze()).
-    // Starting from the 13th call (the orchestrator's V_p capture), the
-    // gate returns V8.
-    const gate = new CountingMutatingPolicyGate(12);
-    const port = new InMemoryContentPort()
-      .setFile('package.json', JSON.stringify({ name: 'stale-persistence-repo', version: '1.0.0' }))
-      .setFile('README.md', '# Stale Persistence Repo')
-      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
-      .setFile('Dockerfile', 'FROM node:20');
-    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
-    const service = new DefaultOnboardingService({
-      projectRepository: stack.projectRepository,
-      projectBaselineRepository,
-      projectGitHubRepositoryRepository,
-      githubAdapter,
-      analyzer,
-      governedReadPolicy,
-      logger,
-    });
-    const result = await service.onboard({ projectId, ref });
-    // The gate WAS mutated (after the 12th call).
-    expect(gate.wasMutated(), 'the gate was mutated after the analyzer finished').toBe(true);
-    expect(gate.getPolicyVersion(), 'the current policy version is V8').toBe(8);
-    // The gate was called 14 times: 12 (analyzer: 6 reads × 2 calls) + 1
-    // (V_p capture) + 1 (Check A pre-writes revalidation). The transaction
-    // ROLLED BACK at Check B (per-read verification) — Check C (post-writes
-    // revalidation) was never reached.
-    expect(gate.getCallCount(), '12 (analyzer) + 1 (capture) + 1 (Check A) = 14 calls (Check B rolled back before Check C)').toBe(14);
-
-    // CRITICAL: the baseline is FAILED (NOT complete) — the persistence
-    // fence REJECTED the persist. ZERO stale V7 evidence/observations are
-    // committed. The architect's invariant: "zero stale evidence/
-    // observations are committed when the policy mutates after the per-read
-    // revalidation but before persistence."
-    expect(result.baseline.state, 'the baseline is FAILED (the persistence fence rejected the persist)').toBe('failed');
-    expect(result.baseline.failureStage, 'the failure_stage records the fence rejection (forensic provenance)').toBe('policy-snapshot-stale-at-persistence');
-
-    // ZERO evidence rows committed (the transaction was rolled back).
-    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
-    expect(evidence.length, 'ZERO evidence rows committed (the transaction was rolled back)').toBe(0);
-
-    // ZERO observations committed (the transaction was rolled back).
-    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
-    expect(observations.length, 'ZERO observations committed (the transaction was rolled back)').toBe(0);
-
-    // The fence-rejection log was emitted (forensic audit).
-    const logOutput = capture.raw();
-    expect(logOutput, 'the persistence-fence-rejected log was emitted').toContain('persistence-fence-rejected');
-    expect(logOutput, 'the log records the failure stage').toContain('policy-snapshot-stale-at-persistence');
-    // The log records the snapshot (V8 — what the capture saw) + the
-    // revalidated (V8 — what Check A saw; both V8 because the mutation
-    // happened BEFORE the capture). The PER-READ verification (Check B) is
-    // what caught the mismatch — the log reason explains it.
-    expect(logOutput, 'the log carries the snapshot policyVersion V8').toContain('"policyVersion":8');
-    expect(logOutput, 'the log explains the per-read verification rejection').toContain('PER-READ snapshot verification');
-  });
-
-  it('35. PR #42 r5: mutation BETWEEN the V_p capture and the transaction start (the persistence-boundary pre-writes revalidation — Check A — catches the mutation: V_p=V7 != V_current=V8 -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
-    // A second defense-in-depth scenario: the policy mutates AFTER the V_p
-    // capture (V_p = V7) BUT BEFORE the persistence transaction's Check A
-    // revalidation (V_current = V8). The pre-writes revalidation catches
-    // the mutation: V_p (V7) != V_current (V8) → ROLLBACK.
-    const ref = 'persistence-fence-check-a-branch';
-    // The CountingMutatingPolicyGate mutates AFTER the 13th call (the V_p
-    // capture sees V7; the Check A revalidation — call 14 — sees V8).
-    const gate = new CountingMutatingPolicyGate(13);
-    const port = new InMemoryContentPort()
-      .setFile('package.json', JSON.stringify({ name: 'check-a-repo', version: '1.0.0' }))
-      .setFile('README.md', '# Check A Repo')
-      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
-      .setFile('Dockerfile', 'FROM node:20');
-    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
-    const service = new DefaultOnboardingService({
-      projectRepository: stack.projectRepository,
-      projectBaselineRepository,
-      projectGitHubRepositoryRepository,
-      githubAdapter,
-      analyzer,
-      governedReadPolicy,
-      logger,
-    });
-    const result = await service.onboard({ projectId, ref });
-    expect(gate.wasMutated(), 'the gate was mutated after the V_p capture').toBe(true);
-    // The gate was called 14 times: 12 (analyzer) + 1 (V_p capture = V7) +
-    // 1 (Check A revalidation = V8). The transaction ROLLED BACK at Check A.
-    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p capture) + 1 (Check A) = 14 calls (Check A rolled back)').toBe(14);
-    // The baseline is FAILED.
-    expect(result.baseline.state).toBe('failed');
-    expect(result.baseline.failureStage).toBe('policy-snapshot-stale-at-persistence');
-    // ZERO evidence/observations committed.
-    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
-    expect(evidence.length, 'ZERO evidence rows committed').toBe(0);
-    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
-    expect(observations.length, 'ZERO observations committed').toBe(0);
-    // The log explains the Check A rejection.
-    const logOutput = capture.raw();
-    expect(logOutput, 'the log explains the pre-writes revalidation rejection').toContain('PRE-WRITES revalidation');
-  });
-
-  it('36. PR #42 r5: mutation DURING the writes (the post-writes revalidation — Check C — catches the mutation: V_p=V7 != V_current=V8 -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
-    // A third defense-in-depth scenario: the policy mutates DURING the
-    // writes (after Check A passes, before Check C). The post-writes
-    // revalidation catches the mutation: V_p (V7) != V_current (V8) →
-    // ROLLBACK. The writes were rolled back (the evidence + observations
-    // from this transaction are NOT committed).
-    const ref = 'persistence-fence-check-c-branch';
-    // The CountingMutatingPolicyGate mutates AFTER the 14th call (the V_p
-    // capture = V7, the Check A revalidation = V7; the Check C post-writes
-    // revalidation — call 15 — sees V8).
-    const gate = new CountingMutatingPolicyGate(14);
-    const port = new InMemoryContentPort()
-      .setFile('package.json', JSON.stringify({ name: 'check-c-repo', version: '1.0.0' }))
-      .setFile('README.md', '# Check C Repo')
-      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
-      .setFile('Dockerfile', 'FROM node:20');
-    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
-    const service = new DefaultOnboardingService({
-      projectRepository: stack.projectRepository,
-      projectBaselineRepository,
-      projectGitHubRepositoryRepository,
-      githubAdapter,
-      analyzer,
-      governedReadPolicy,
-      logger,
-    });
-    const result = await service.onboard({ projectId, ref });
-    expect(gate.wasMutated(), 'the gate was mutated during the writes').toBe(true);
-    // The gate was called 15 times: 12 (analyzer) + 1 (V_p capture = V7) +
-    // 1 (Check A = V7) + 1 (Check C = V8). The transaction ROLLED BACK at
-    // Check C.
-    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p) + 1 (Check A) + 1 (Check C) = 15 calls (Check C rolled back)').toBe(15);
-    // The baseline is FAILED.
-    expect(result.baseline.state).toBe('failed');
-    expect(result.baseline.failureStage).toBe('policy-snapshot-stale-at-persistence');
-    // ZERO evidence/observations committed (the writes were rolled back).
-    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
-    expect(evidence.length, 'ZERO evidence rows committed (the writes were rolled back)').toBe(0);
-    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
-    expect(observations.length, 'ZERO observations committed (the writes were rolled back)').toBe(0);
-    // The log explains the Check C rejection.
-    const logOutput = capture.raw();
-    expect(logOutput, 'the log explains the post-writes revalidation rejection').toContain('POST-WRITES revalidation');
-  });
-
-  it('37. PR #42 r5: the NORMAL case (no mutation) -> the persistence fence passes (Check A + Check B + Check C all pass) -> the baseline COMPLETES with evidence + observations persisted (the round-5 fence is transparent when there is no drift)', async () => {
-    // The normal case: no policy mutation. The analyzer's per-read fence
-    // passes (V7 for every read), the V_p capture sees V7, the Check A
-    // revalidation sees V7, the per-read verification (Check B) passes
-    // (V_p == evidence's per-read = V7), the writes happen, the Check C
-    // post-writes revalidation sees V7 — the transaction COMMITS. The
-    // baseline COMPLETES with evidence + observations persisted. The round-
-    // 5 fence is transparent when there is no drift.
-    const ref = 'persistence-fence-normal-branch';
-    const gate = new FakePolicyGate(); // policyVersion=1, always allow, no mutation
-    const port = new InMemoryContentPort()
-      .setFile('package.json', JSON.stringify({ name: 'normal-persistence-repo', version: '1.0.0' }))
-      .setFile('README.md', '# Normal Persistence Repo')
-      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
-      .setFile('Dockerfile', 'FROM node:20');
-    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
-    const service = new DefaultOnboardingService({
-      projectRepository: stack.projectRepository,
-      projectBaselineRepository,
-      projectGitHubRepositoryRepository,
-      githubAdapter,
-      analyzer,
-      governedReadPolicy,
-      logger,
-    });
-    const result = await service.onboard({ projectId, ref });
-    // The baseline COMPLETES (the fence passed — no drift).
-    expect(result.baseline.state, 'the baseline completes (the fence passed — no drift)').toBe('complete');
-    expect(result.baseline.failureStage, 'no failure stage (the fence did not reject)').toBeNull();
-    // The FakePolicyGate was called 15 times: 12 (analyzer) + 1 (V_p
-    // capture) + 1 (Check A) + 1 (Check C). ALL return V1 (no mutation).
-    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p) + 1 (Check A) + 1 (Check C) = 15 calls').toBe(15);
-    // The evidence rows ARE persisted (the transaction committed).
-    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
-    expect(evidence.length, 'evidence rows ARE persisted (the transaction committed)').toBeGreaterThan(0);
-    expect(evidence.find((e) => e.locator === 'package.json'), 'package.json evidence IS persisted').toBeDefined();
-    expect(evidence.find((e) => e.locator === 'README.md'), 'README.md evidence IS persisted').toBeDefined();
-    expect(evidence.find((e) => e.locator === 'Dockerfile'), 'Dockerfile evidence IS persisted').toBeDefined();
-    // The observations ARE persisted (the transaction committed).
-    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
-    expect(observations.find((o) => o.kind === 'package_managers'), 'package_managers observation IS persisted').toBeDefined();
-    expect(observations.find((o) => o.kind === 'repository_identity'), 'repository_identity observation IS persisted').toBeDefined();
-    expect(observations.find((o) => o.kind === 'ci'), 'ci observation IS persisted').toBeDefined();
-    // The fence-rejection log was NOT emitted (the fence passed).
-    const logOutput = capture.raw();
-    expect(logOutput, 'no fence-rejection log (the fence passed)').not.toContain('persistence-fence-rejected');
-  });
 });

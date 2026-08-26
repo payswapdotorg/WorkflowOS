@@ -49,6 +49,7 @@ export type {
   NewBaselineEvidence,
   RepositoryReadEnforcement,
   PersistencePolicySnapshot,
+  PersistencePolicySource,
   PersistBaselineInput,
   PersistBaselineResult,
   EnsureBaselineInput,

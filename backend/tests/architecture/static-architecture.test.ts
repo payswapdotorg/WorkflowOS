@@ -807,6 +807,7 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // (lives in /projects — the persistence authority; the onboarding
       // orchestrator composes them through the barrel).
       'PersistencePolicySnapshot',
+      'PersistencePolicySource',
       'PersistBaselineInput',
       'PersistBaselineResult',
       'EnsureBaselineInput',
@@ -10434,12 +10435,25 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     // callback rolls back on the throw).
     expect(repo, 'the fence uses db.transaction').toMatch(/this\.db\.transaction\(/);
     expect(repo, 'the fence has the FenceStaleSignal sentinel').toMatch(/class FenceStaleSignal extends Error/);
-    expect(repo, 'the fence has the staleness check function').toMatch(/function isPersistenceSnapshotStale/);
-    // The three fence checks: pre-writes revalidation (Check A) + per-read
-    // snapshot verification (Check B) + post-writes revalidation (Check C).
-    expect(repo, 'Check A — pre-writes revalidation').toMatch(/PRE-WRITES REVALIDATION/);
+    // PR #42 round-6: the application-level staleness check
+    // (isPersistenceSnapshotStale, used by the round-5 Check A + Check C
+    // revalidation) is REMOVED — the round-6 fence replaces it with a
+    // database-level SELECT ... FOR UPDATE on the authoritative
+    // wfos_agent_policies row (the lock held from the version check
+    // through COMMIT IS the fence; no separate revalidation read to
+    // TOCTOU).
+    expect(repo, 'round-6: the fence locks the authoritative policy row FOR UPDATE').toMatch(/SELECT policy_version FROM wfos_agent_policies[\s\S]*FOR UPDATE/);
+    expect(repo, 'round-6: the fence locks the project-scope row').toMatch(/scope = 'project' AND organization_id = \$1 AND project_id = \$2/);
+    expect(repo, 'round-6: the fence locks the organization-scope row').toMatch(/scope = 'organization' AND organization_id = \$1 AND project_id IS NULL/);
+    // The fence protocol: LOCK + VERIFY (round-6 DB-level fence) + per-read
+    // snapshot verification (Check B — retained from round-5). NO post-
+    // writes revalidation — the FOR UPDATE row lock held for the whole
+    // transaction IS the fence (no separate revalidation read to TOCTOU).
+    expect(repo, 'round-6: the LOCK + VERIFY step').toMatch(/LOCK \+ VERIFY/);
     expect(repo, 'Check B — per-read snapshot verification').toMatch(/PER-READ SNAPSHOT VERIFICATION/);
-    expect(repo, 'Check C — post-writes revalidation').toMatch(/POST-WRITES REVALIDATION/);
+    expect(repo, 'round-6: NO post-writes revalidation (the lock IS the fence)').toMatch(/NO post-writes revalidation/);
+    // The willMutate test seam (for the real-PG concurrency regression).
+    expect(repo, 'round-6: the willMutate test seam').toMatch(/input\.willMutate/);
     // The fence rejects (ROLLBACK) when ANY check fails. The reject
     // messages reference the per-read verification (the architect's exact
     // regression scenario).
@@ -10471,10 +10485,19 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(types, 'PersistBaselineResult has the cas-lost kind').toMatch(/kind: 'cas-lost'/);
     expect(types, 'PersistBaselineResult has the fence-stale kind').toMatch(/kind: 'fence-stale'/);
     expect(types, 'PersistBaselineResult has the fence-revalidation-failed kind').toMatch(/kind: 'fence-revalidation-failed'/);
+    // PR #42 round-6 type-level invariants: the snapshot carries `source`
+    // (which authoritative row backs it) + the input carries organizationId /
+    // projectId (the lock target) + the optional willMutate test seam.
+    expect(types, 'round-6: PersistencePolicySource type is defined').toMatch(/export type PersistencePolicySource/);
+    expect(types, 'round-6: PersistencePolicySnapshot carries source').toMatch(/readonly source: PersistencePolicySource \| null/);
+    expect(types, 'round-6: PersistBaselineInput carries organizationId').toMatch(/readonly organizationId: string/);
+    expect(types, 'round-6: PersistBaselineInput carries projectId').toMatch(/readonly projectId: string/);
+    expect(types, 'round-6: PersistBaselineInput carries the willMutate test seam').toMatch(/readonly willMutate\?: \(\) => Promise<void>/);
     // The /projects barrel re-exports the new types so the onboarding
     // orchestrator can compose them.
     const barrel = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
     expect(barrel, 'the /projects barrel re-exports PersistencePolicySnapshot').toMatch(/PersistencePolicySnapshot/);
+    expect(barrel, 'round-6: the /projects barrel re-exports PersistencePolicySource').toMatch(/PersistencePolicySource/);
     expect(barrel, 'the /projects barrel re-exports PersistBaselineInput').toMatch(/PersistBaselineInput/);
     expect(barrel, 'the /projects barrel re-exports PersistBaselineResult').toMatch(/PersistBaselineResult/);
   });
@@ -10496,7 +10519,12 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(orchestrator, 'the orchestrator captures the persistence snapshot').toMatch(/capturePersistenceSnapshot\(/);
     expect(orchestrator, 'the orchestrator delegates to persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
     expect(orchestrator, 'the orchestrator passes the snapshot through the input').toMatch(/snapshot:\s*persistenceSnapshot/);
-    expect(orchestrator, 'the orchestrator passes a revalidate closure').toMatch(/async \(\)\s*=>\s*this\.deps\.governedReadPolicy\.capturePersistenceSnapshot/);
+    // PR #42 round-6: the orchestrator passes organizationId + projectId
+    // (the fence locks the authoritative wfos_agent_policies row for this
+    // org/project). The round-5 revalidate() closure is REMOVED — the
+    // database-level FOR UPDATE lock replaces it.
+    expect(orchestrator, 'round-6: the orchestrator passes organizationId').toMatch(/organizationId:\s*analysisContext\.organizationId/);
+    expect(orchestrator, 'round-6: the orchestrator passes projectId').toMatch(/projectId:\s*analysisContext\.projectId/);
     // The fence-rejection paths: markFailed with the 'policy-snapshot-stale-
     // at-persistence' / 'policy-snapshot-revalidation-failed' failure stage.
     expect(orchestrator, 'the fence-stale path markFailed').toMatch(/policy-snapshot-stale-at-persistence/);

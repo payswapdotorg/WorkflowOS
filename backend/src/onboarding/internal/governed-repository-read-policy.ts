@@ -630,6 +630,7 @@ export class DefaultGovernedRepositoryReadPolicy implements GovernedRepositoryRe
         ctx.organizationId,
       );
       return {
+        source: decision.scopeSource ?? null,
         policyVersion: decision.policyVersion ?? null,
         ruleId: decision.ruleId ?? null,
         decision: decision.decision,
@@ -652,6 +653,7 @@ export class DefaultGovernedRepositoryReadPolicy implements GovernedRepositoryRe
         error: (err as Error).message,
       });
       return {
+        source: null,
         policyVersion: null,
         ruleId: null,
         decision: null,
