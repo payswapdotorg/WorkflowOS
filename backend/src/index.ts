@@ -344,6 +344,50 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-039: Repository and Context Intelligence routes (build + retrieve
+      // + inspect + stale-advisory for a revision-bound context index).
+      // Backend-authorized (project.read / project.write). The orchestrator
+      // composes /projects + /github + /architecture + /requirements +
+      // /work-items; the context index is stored THROUGH /projects (the single
+      // project authority). A baseline or index UUID is NOT an authorization
+      // credential — every route resolves the resource + verifies
+      // authorization server-side. Provenance re-uses the WORK-038 vocabulary;
+      // the ranker NEVER promotes provenance. Repository revision is
+      // fundamental — an index is pinned to a concrete baseline_commit_sha,
+      // never silently swapped.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.projectBaselineRepository &&
+      app.deps.projectContextIndexRepository &&
+      app.deps.repositoryIntelligenceService &&
+      app.deps.projectGitHubRepositoryRepository &&
+      app.deps.githubAdapter &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.requirementRepository &&
+      app.deps.acceptanceCriterionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.workItemRequirementRepository &&
+      app.deps.workItemCriterionRepository
+        ? {
+            repositoryIntelligence: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              projectBaselineRepository: app.deps.projectBaselineRepository,
+              projectContextIndexRepository: app.deps.projectContextIndexRepository,
+              repositoryIntelligenceService: app.deps.repositoryIntelligenceService,
+              projectGitHubRepositoryRepository: app.deps.projectGitHubRepositoryRepository,
+              githubAdapter: app.deps.githubAdapter,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              architectureRepository: app.deps.architectureRepository,
+              requirementRepository: app.deps.requirementRepository,
+              acceptanceCriterionRepository: app.deps.acceptanceCriterionRepository,
+              workItemRepository: app.deps.workItemRepository,
+              workItemRequirementRepository: app.deps.workItemRequirementRepository,
+              workItemCriterionRepository: app.deps.workItemCriterionRepository,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&

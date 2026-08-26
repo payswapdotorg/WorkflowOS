@@ -817,6 +817,33 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // discriminated-error-class exception — see PURE_DATA_CATALOG_EXPORTS).
       'ProjectBaselineError',
       'PROJECT_BASELINE_ERROR_CODES',
+      // WORK-039: Repository and Context Intelligence — the revision-bound
+      // context index + the explainable, provenance-preserving context-item
+      // layer (a PROJECT artifact stored THROUGH the existing /projects
+      // authority, like ProjectBaseline). The orchestrator lives in the
+      // application-layer src/repository-intelligence/ capability (not a
+      // module, not an authority). Provenance re-uses the WORK-038
+      // vocabulary; the ranker NEVER promotes provenance.
+      'ContextIndexState',
+      'ContextIndexQueryKind',
+      'ContextItemKind',
+      'ContextItemSource',
+      'ContextItemProvenance',
+      'ProjectContextIndex',
+      'ContextItem',
+      'NewContextItem',
+      'EnsureContextIndexInput',
+      'EnsureContextIndexResult',
+      'MarkContextIndexCompleteInput',
+      'MarkContextIndexCompleteResult',
+      'MarkContextIndexFailedInput',
+      'MarkContextIndexStaleInput',
+      'ProjectContextIndexRepository',
+      'RepositoryIntelligenceErrorCode',
+      // WORK-039: the context-index typed error (the sanctioned
+      // discriminated-error-class exception — see PURE_DATA_CATALOG_EXPORTS).
+      'RepositoryIntelligenceError',
+      'REPOSITORY_INTELLIGENCE_ERROR_CODES',
       // Module contract marker (every frozen module exports one).
       'projectsModule',
     ]);
@@ -888,6 +915,13 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // exception + reasoning) + the frozen pure-data error-code list.
       'ProjectBaselineError',              // @modules/projects — the typed domain error
       'PROJECT_BASELINE_ERROR_CODES',       // @modules/projects — the stable code list
+      // WORK-039: the repository-intelligence typed error (the same sanctioned
+      // exception + reasoning) + the frozen pure-data error-code list. The
+      // context index is a PROJECT artifact stored THROUGH /projects (the
+      // same precedent as ProjectBaseline); its typed error class follows
+      // the same sanctioned-exception rule.
+      'RepositoryIntelligenceError',            // @modules/projects — the typed domain error
+      'REPOSITORY_INTELLIGENCE_ERROR_CODES',    // @modules/projects — the stable code list
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -10607,3 +10641,438 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
   });
 });
 
+
+// ===========================================================================
+// WORK-039 invariants — Repository and Context Intelligence (the revision-
+// bound context index + the repository-intelligence application capability).
+// ===========================================================================
+//
+// The central correctness requirement: WorkflowOS must NEVER silently present
+// context from commit A as context from commit B. Every context index is
+// pinned to a concrete baseline_commit_sha; the detectStale advisory surfaces
+// staleness — it never swaps the baseline under the caller. Provenance (the
+// WORK-038 vocabulary observed/inferred/confirmed/proposed) is preserved
+// verbatim through indexing + retrieval; the ranker's relevance_score is
+// ADVISORY ONLY — ranking NEVER promotes provenance.
+//
+// Authority boundaries preserved:
+//   /projects    — the context-index STORAGE authority (the index is a
+//                  PROJECT artifact, like ProjectBaseline; /projects remains
+//                  the single project authority; the capability owns NO
+//                  tables)
+//   /github      — the repository + commit authority (NO GitHub SDK in the
+//                  capability domain; the adapter is the only SDK caller)
+//   /architecture, /requirements, /work-items — read-only authority
+//                  REFERENCES (the context items POINT at architecture
+//                  versions / requirements / work items, they never become
+//                  them; the capability NEVER calls freezeVersion /
+//                  requirementRepository.create / workItemRepository.create)
+//   /workflows, /verification, /reviews — never mutated by the capability
+//
+// The capability lives in src/repository-intelligence/ — an APPLICATION-LAYER
+// orchestrator (like src/onboarding/ + src/execution-policy/ + src/benchmark/),
+// NOT a frozen module and NOT an authority.
+describe('WORK-039 invariants — Repository and Context Intelligence (context index + repository-intelligence capability)', () => {
+  const RI_DIR = join(SRC_ROOT, 'repository-intelligence');
+  const PROJECTS_CONTEXT_INDEX_TYPES = join(MODULES_DIR, 'projects', 'internal', 'project-context-index.types.ts');
+  const PROJECTS_CONTEXT_INDEX_REPO = join(MODULES_DIR, 'projects', 'internal', 'pg-project-context-index-repository.ts');
+  const MIGRATION_0041 = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0041_repository_context_intelligence.sql');
+  const RI_ROUTE = join(SRC_ROOT, 'api', 'routes', 'repository-intelligence.route.ts');
+
+  /** Recursively list every .ts file under a directory. */
+  function listTsFiles(dir: string): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        out.push(...listTsFiles(full));
+      } else if (entry.endsWith('.ts')) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('WORK-039 is NOT a frozen module — repository-intelligence is an application capability, not a new authority', () => {
+    // The static check at PLAT-AC-01 enforces exactly 17 frozen modules. The
+    // repository-intelligence capability must NOT add an 18th module under
+    // src/modules/. It lives under src/repository-intelligence/ (an
+    // application-layer directory, like src/onboarding/ + src/execution-policy/).
+    expect(existsSync(join(MODULES_DIR, 'repository-intelligence'))).toBe(false);
+    expect(existsSync(RI_DIR)).toBe(true);
+  });
+
+  it('no second project authority — repository-intelligence does NOT create projects (it stores context indices under existing /projects authority rows)', () => {
+    // The orchestrator + source + ranker must not create Project rows. It
+    // reads the project (to resolve orgId via the baseline) + stores context
+    // indices THROUGH /projects (the single project authority).
+    const files = [...listTsFiles(RI_DIR), PROJECTS_CONTEXT_INDEX_REPO];
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      expect(
+        src,
+        `${relative(BACKEND_ROOT, f)} must not create/transition projects`,
+      ).not.toMatch(/projectRepository\.(create|transitionState|update)\s*\(/);
+    }
+  });
+
+  it('no second repository / GitHub authority — repository-intelligence imports NO GitHub SDK + no /github internal/', () => {
+    // The capability domain holds no GitHub credentials and no GitHub SDK.
+    // It consumes the /github barrel (GitHubAdapter.getBranch + listDir +
+    // ProjectGitHubRepositoryRepository) — the adapter is the only SDK caller.
+    const files = listTsFiles(RI_DIR);
+    expect(files.length, 'src/repository-intelligence/ must contain implementation files').toBeGreaterThan(0);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import @octokit (GitHub SDK)`).not.toMatch(/from\s+['"]@octokit/);
+      expect(src, `${rel} must not import /github internal/`).not.toMatch(/from\s+['"][^'"]*modules\/github\/internal/);
+    }
+  });
+
+  it('no second architecture authority — repository-intelligence NEVER auto-freezes / never creates ArchitectureVersion rows', () => {
+    // Architecture observations in the context index are REFERENCES to
+    // ArchitectureVersion ids, never an auto-created ArchitectureVersion. The
+    // capability never calls ArchitectureService mutation methods.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /architecture internal/`).not.toMatch(/from\s+['"][^'"]*modules\/architecture\/internal/);
+      expect(src, `${rel} must not freeze architecture versions`).not.toMatch(/freezeVersion\s*\(/);
+      expect(src, `${rel} must not create architecture versions`).not.toMatch(/architectureVersionRepository\.create\s*\(/);
+      expect(src, `${rel} must not approve architecture change requests`).not.toMatch(/approveChangeAndCreateReplacement\s*\(/);
+    }
+  });
+
+  it('no second requirements authority — repository-intelligence does NOT create Requirement/AcceptanceCriterion rows', () => {
+    // Requirement items in the context index are REFERENCES to authoritative
+    // Requirement rows, never duplicate requirements. The /requirements
+    // authority is untouched.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /requirements internal/`).not.toMatch(/from\s+['"][^'"]*modules\/requirements\/internal/);
+      expect(src, `${rel} must not create requirements`).not.toMatch(/requirementRepository\.create\s*\(/);
+      expect(src, `${rel} must not create acceptance criteria`).not.toMatch(/acceptanceCriterionRepository\.create\s*\(/);
+    }
+  });
+
+  it('no second work-items / workflow authority — repository-intelligence does NOT create work items / does NOT mutate workflow state', () => {
+    // Work-item references in the context index are REFERENCES to
+    // authoritative WorkItem rows, never duplicate work items. The capability
+    // never mutates workflow / work-item state.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /work-items internal/`).not.toMatch(/from\s+['"][^'"]*modules\/work-items\/internal/);
+      expect(src, `${rel} must not create work items`).not.toMatch(/workItemRepository\.create\s*\(/);
+      expect(src, `${rel} must not import /workflows internal/`).not.toMatch(/from\s+['"][^'"]*modules\/workflows\/internal/);
+      expect(src, `${rel} must not transition workflow state`).not.toMatch(/workflowRepository\.(transitionState|create|update)\s*\(/);
+    }
+  });
+
+  it('no workflow / verification / review mutation — repository-intelligence never mutates those authorities', () => {
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /verification internal/`).not.toMatch(/from\s+['"][^'"]*modules\/verification\/internal/);
+      expect(src, `${rel} must not import /reviews internal/`).not.toMatch(/from\s+['"][^'"]*modules\/reviews\/internal/);
+      expect(src, `${rel} must not import /workflows internal/`).not.toMatch(/from\s+['"][^'"]*modules\/workflows\/internal/);
+    }
+  });
+
+  it('no credentials — repository-intelligence never imports a concrete secret store + never assigns token/password values', () => {
+    // The capability domain never handles credentials. Secret-shaped content
+    // is already redacted by WORK-038; the redacted flag is preserved, never
+    // reversed.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import EnvSecretStore`).not.toMatch(/from\s+['"][^'"]*platform\/secrets/);
+      expect(src, `${rel} must not import /auth internal/`).not.toMatch(/from\s+['"][^'"]*modules\/auth\/internal/);
+      // The capability must NOT assign token/password/secret VALUES (it passes
+      // the redacted flag through verbatim; never reverses redaction).
+      expect(src, `${rel} must not assign secret-shaped values`).not.toMatch(/redacted\s*=\s*false\s*;\s*\/\/\s*un-redact/);
+    }
+  });
+
+  it('no provider SDK leakage — repository-intelligence domain imports no pg / ioredis / pglite', () => {
+    // The capability domain holds no DB driver. It delegates to the /projects
+    // storage authority (PgProjectContextIndexRepository) which uses
+    // DatabaseClient. The capability imports no provider packages.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import pg`).not.toMatch(/from\s+['"]pg['"]/);
+      expect(src, `${rel} must not import @electric-sql/pglite`).not.toMatch(/from\s+['"]@electric-sql\/pglite['"]/);
+      expect(src, `${rel} must not import ioredis`).not.toMatch(/from\s+['"]ioredis['"]/);
+      expect(src, `${rel} must not import concrete provider implementation files`).not.toMatch(/from\s+['"][^'"]*platform\/(postgres|redis|storage|secrets)\/internal/);
+    }
+  });
+
+  it('no maintenance engine / no continuous scheduler — repository-intelligence is one-shot context assembly, not continuous maintenance', () => {
+    // A continuous maintenance engine is STRICTLY OUT OF SCOPE (WORK-041).
+    // The capability produces a context index on demand; it does not poll,
+    // does not schedule, does not auto-create maintenance work items.
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not define a setInterval scheduler`).not.toMatch(/setInterval\s*\(/);
+      expect(src, `${rel} must not define a cron scheduler`).not.toMatch(/\bcron\s*\(/);
+      expect(src, `${rel} must not define a maintenance engine`).not.toMatch(/MaintenanceEngine|HealthEngine/);
+    }
+  });
+
+  it('no vector database / no pgvector / no embedding / no tsvector — the deterministic ranker is the retrieval layer', () => {
+    // The WORK-039 prompt: "A deterministic baseline-aware retrieval layer
+    // should be established before optional semantic ranking. Do not
+    // introduce a vector database solely because semantic search is
+    // fashionable." The capability uses NO vector/embedding/tsvector
+    // infrastructure. The DeterministicContextRanker's signals are discrete
+    // + explainable (term_overlap, architecture_ref, requirement_ref, etc.).
+    const files = [...listTsFiles(RI_DIR), PROJECTS_CONTEXT_INDEX_REPO, PROJECTS_CONTEXT_INDEX_TYPES];
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not use pgvector`).not.toMatch(/pgvector|vector\(\d+|embedding\(\d+/i);
+      expect(src, `${rel} must not use tsvector full-text`).not.toMatch(/to_tsvector|tsquery|tsvector/i);
+      expect(src, `${rel} must not import an embedding library`).not.toMatch(/from\s+['"][^'"]*(openai|cohere|@xenova|transformers)/);
+    }
+    // The migration must not declare a vector / embedding / tsvector column.
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 must not declare a vector column').not.toMatch(/vector\(\d+|embedding|tsvector/i);
+  });
+
+  it('the repository-intelligence barrel is types-only — no concrete implementations exported', () => {
+    // Mirrors the frozen-module barrel rule + the WORK-038 onboarding barrel
+    // convention. DefaultRepositoryIntelligenceService +
+    // DeterministicContextRanker + BaselineContextSource + NoOpHostInspector
+    // stay in internal/ (the composition root in app.ts wires them by
+    // importing from internal/, the sanctioned wiring boundary).
+    const barrel = readFileSync(join(RI_DIR, 'index.ts'), 'utf8');
+    // Match value re-exports: `export { Foo } from '...'` (NOT `export type``.
+    const valueExportRegex = /export\s+(?!type\b)\{([^}]+)\}\s+from/g;
+    const matches = [...barrel.matchAll(valueExportRegex)];
+    const violations: string[] = [];
+    for (const m of matches) {
+      const names = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+      for (const n of names) violations.push(n);
+    }
+    expect(
+      violations,
+      `src/repository-intelligence/index.ts value-exports: ${violations.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('REPOSITORY REVISION IS FUNDAMENTAL — the context index is pinned to a concrete baseline_commit_sha + the storage repository never swaps it', () => {
+    // The ProjectContextIndex interface carries baseline_commit_sha; the
+    // ensureIndex input carries it; the migration's transition guard enforces
+    // baseline_commit_sha immutability.
+    const types = readFileSync(PROJECTS_CONTEXT_INDEX_TYPES, 'utf8');
+    expect(types, 'ProjectContextIndex carries baselineCommitSha').toMatch(/readonly baselineCommitSha:\s*string/);
+    expect(types, 'EnsureContextIndexInput carries baselineCommitSha').toMatch(/readonly baselineCommitSha:\s*string/);
+    const repo = readFileSync(PROJECTS_CONTEXT_INDEX_REPO, 'utf8');
+    expect(repo, 'ensureIndex writes baseline_commit_sha').toMatch(/baseline_commit_sha/);
+    // The migration's transition guard enforces baseline_commit_sha immutability.
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 enforces baseline_commit_sha immutability').toMatch(/baseline_commit_sha IS DISTINCT FROM OLD\.baseline_commit_sha/);
+  });
+
+  it('PROVENANCE PRESERVATION — the ranker + the source NEVER mutate provenance; the storage layer forbids in-place item rewrites', () => {
+    // The ranker passes provenance through verbatim — it NEVER assigns to it.
+    // The storage layer's item guard forbids UPDATE (append-only-idempotent).
+    const ranker = readFileSync(join(RI_DIR, 'internal', 'deterministic-context-ranker.ts'), 'utf8');
+    const types = readFileSync(join(RI_DIR, 'repository-intelligence.types.ts'), 'utf8');
+    // The ranker must NOT assign to `provenance` (it reads it from the input +
+    // passes it to the output). A mutation would look like `provenance =`.
+    expect(ranker, 'the ranker must not mutate provenance (no assignment)').not.toMatch(/\.provenance\s*=/);
+    expect(ranker, 'the ranker must not hard-code a provenance promotion').not.toMatch(/provenance:\s*['"]confirmed['"]/);
+    // The RankedContextItem interface (in the types file) carries provenance through.
+    expect(types, 'RankedContextItem carries provenance').toMatch(/readonly provenance:\s*ContextItemProvenance/);
+    expect(ranker, 'the ranker returns provenance from the input item').toMatch(/provenance:\s*s\.item\.provenance/);
+    // The migration's item guard forbids UPDATE.
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 forbids in-place item UPDATE').toMatch(/items are append-only — UPDATE is forbidden/);
+    expect(migration, 'migration 0041 forbids direct item DELETE').toMatch(/direct DELETE on items is forbidden/);
+
+    // PR #43 round 2 — the source MUST NOT promote provenance to 'confirmed'
+    // based on architecture authority state. The version's `state` ('draft' |
+    // 'frozen' | 'superseded') is the /architecture AUTHORITY's lifecycle —
+    // it is NOT the WORK-038 provenance of the context item that REFERENCES
+    // it. A frozen architecture version is still an OBSERVED reference; the
+    // only path to 'confirmed' is the authorized confirmation route on a
+    // baseline observation. The source must NEVER assign the literal
+    // 'confirmed' to a provenance field (the regex catches both direct
+    // assignment `provenance: 'confirmed'` AND conditional promotion
+    // `provenance: <something> ? 'confirmed' : 'observed'` — both forms
+    // promote authority state into provenance, which is forbidden).
+    const source = readFileSync(join(RI_DIR, 'internal', 'baseline-context-source.ts'), 'utf8');
+    expect(
+      source,
+      'the source must not promote provenance to confirmed (no literal \'confirmed\' assigned to a provenance field — frozen architecture authority state ≠ confirmed provenance)',
+    ).not.toMatch(/provenance:\s*[^,}]*['"]confirmed['"]/);
+  });
+
+  it('READ/MUTATION SEPARATION (PR #43 round 2) — the GET context-index route NEVER invokes the build-if-missing retrieve() under project.read', () => {
+    // Blocker 1: the GET /context-index route used project.read but called
+    // retrieve() — which builds + persists a missing index (ensureIndex +
+    // markComplete are STATE MUTATIONS). Read authorization must NOT hide a
+    // mutation. The fix: the GET route calls retrieveExisting (read-only;
+    // returns null when missing → 404). The build-if-missing retrieve() is
+    // reserved for write-authorized programmatic callers; the route layer
+    // NEVER invokes it (the regex matches `.retrieve(` exactly — NOT
+    // `.retrieveExisting(`, which has `Existing` between `retrieve` + `(`).
+    const route = readFileSync(RI_ROUTE, 'utf8');
+    expect(
+      route,
+      'the route layer must not invoke the build-if-missing retrieve() (read authorization must not hide a state mutation — the GET route uses retrieveExisting)',
+    ).not.toMatch(/repositoryIntelligenceService\.retrieve\(/);
+    // The GET collection route MUST call retrieveExisting (read-only).
+    expect(route, 'the GET collection route calls retrieveExisting').toMatch(/repositoryIntelligenceService\.retrieveExisting\(/);
+    // The GET collection route carries project.read (the read permission).
+    expect(route, 'the GET collection route uses project.read').toMatch(/permission:\s*['"]project\.read['"]/);
+    // The POST build route carries project.write (the write permission).
+    expect(route, 'the POST build route uses project.write').toMatch(/permission:\s*['"]project\.write['"]/);
+    // The route MUST pass repositoryDefaultBranch (the /github authority's
+    // default branch) into the context — detectStale consults it instead of
+    // hardcoding 'main'.
+    expect(route, 'resolveContext carries repositoryDefaultBranch').toMatch(/repositoryDefaultBranch:\s*repoLink\.defaultBranch/);
+    // The stale route MUST call detectStale(indexId, ...) — pinned to the
+    // requested index (NOT detectStale(query, ...), which re-queries by
+    // query tuple + could inspect a different index).
+    expect(route, 'the stale route calls detectStale(indexId, ctx) — pinned to the requested index').toMatch(/detectStale\(indexId,\s*ctx\)/);
+  });
+
+  it('CRASH RECOVERY WIRED (PR #43 round 2) — buildIndex invokes reclaimStaleIndexing (a crashed indexing run is never permanently stuck)', () => {
+    // Blocker 2: reclaimStaleIndexing existed in the /projects storage
+    // authority but buildIndex never invoked it — a crash after ensureIndex
+    // left the index permanently 'indexing' (every subsequent buildIndex
+    // returned cas-lost forever). The fix: buildIndex's 'existing' + 'indexing'
+    // branch calls reclaimStaleIndexing (gated by the staleness TTL — a live
+    // run is NOT prematurely reclaimed) + re-drives markComplete.
+    const orchestrator = readFileSync(join(RI_DIR, 'internal', 'default-repository-intelligence-service.ts'), 'utf8');
+    expect(orchestrator, 'buildIndex calls reclaimStaleIndexing on a stuck indexing row').toMatch(/reclaimStaleIndexing\(/);
+    // The TTL guard — a live run (updated_at within the TTL) is NOT reclaimed.
+    expect(orchestrator, 'buildIndex gates reclaim on the staleness TTL (isStaleIndexing)').toMatch(/isStaleIndexing/);
+    expect(orchestrator, 'the indexing-staleness TTL is configurable (indexingStaleAfterMs)').toMatch(/indexingStaleAfterMs/);
+    // The app.ts composition root MUST wire the TTL (env-configurable, with
+    // a sane default) — the orchestrator must not silently fall back to 0
+    // (which would reclaim legitimately in-flight runs).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts wires indexingStaleAfterMs (env WORKFLOWOS_CONTEXT_INDEX_STALE_AFTER_MS)').toMatch(/WORKFLOWOS_CONTEXT_INDEX_STALE_AFTER_MS/);
+    expect(appSrc, 'app.ts defaults the TTL to 5 minutes').toMatch(/5\s*\*\s*60\s*\*\s*1000/);
+  });
+
+  it('NO FABRICATED TOOL EVIDENCE — the orchestrator passes hostInspector.toolInvocationIds through verbatim; the NoOp default returns []', () => {
+    // The orchestrator NEVER invents toolInvocationIds. It passes the
+    // hostInspector's output through to ensureIndex verbatim. The NoOpHostInspector
+    // returns '[]' (no host inspection; the no-fabrication invariant).
+    const orchestrator = readFileSync(join(RI_DIR, 'internal', 'default-repository-intelligence-service.ts'), 'utf8');
+    expect(orchestrator, 'the orchestrator passes hostResult.toolInvocationIds through').toMatch(/toolInvocationIds:\s*hostResult\.toolInvocationIds/);
+    // The orchestrator must NOT fabricate an ID (no randomUUID assigned to
+    // toolInvocationIds; the randomUUID is only for indexingRunId).
+    expect(orchestrator, 'the orchestrator must not fabricate toolInvocationIds').not.toMatch(/toolInvocationIds:\s*\[.*randomUUID/);
+    const noop = readFileSync(join(RI_DIR, 'internal', 'noop-host-inspector.ts'), 'utf8');
+    expect(noop, 'NoOpHostInspector returns empty toolInvocationIds').toMatch(/toolInvocationIds:\s*\[\]/);
+    expect(noop, 'NoOpHostInspector returns empty observations').toMatch(/observations:\s*\[\]/);
+    // The migration's tool_invocation_ids column defaults to '[]'.
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 defaults tool_invocation_ids to []').toMatch(/tool_invocation_ids JSONB NOT NULL DEFAULT '\[\]'/);
+  });
+
+  it('EXPLAINABLE RELEVANCE — every context item carries a non-empty relevance_reason', () => {
+    // The migration enforces non-empty relevance_reason via CHECK. The ranker
+    // produces a reason for every included item (baseline observations get
+    // the baseline_observation reason; non-baseline items with no hit are
+    // filtered out by the inclusion policy).
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 enforces non-empty relevance_reason').toMatch(/relevance_reason TEXT NOT NULL CHECK \(length\(relevance_reason\) > 0\)/);
+    const ranker = readFileSync(join(RI_DIR, 'internal', 'deterministic-context-ranker.ts'), 'utf8');
+    expect(ranker, 'the ranker produces a reason for every included item').toMatch(/baseline_observation\(\$\{s\.item\.provenance\}/);
+  });
+
+  it('TENANT ISOLATION — every context index + item is project_id + organization_id scoped', () => {
+    // The migration carries project_id + organization_id on both tables.
+    // The route's resolveContext verifies baseline.projectId === projectId
+    // (server-side ownership check — no UUID-as-credential).
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'wfos_project_context_indices has project_id').toMatch(/project_id UUID NOT NULL REFERENCES wfos_projects/);
+    expect(migration, 'wfos_project_context_indices has organization_id').toMatch(/organization_id UUID NOT NULL/);
+    expect(migration, 'wfos_project_context_items has project_id').toMatch(/project_id UUID NOT NULL,/);
+    expect(migration, 'wfos_project_context_items has organization_id').toMatch(/organization_id UUID NOT NULL,/);
+    const route = readFileSync(RI_ROUTE, 'utf8');
+    expect(route, 'the route checks baseline.projectId === projectId').toMatch(/baseline\.projectId !== projectId/);
+    expect(route, 'the route checks index.projectId === projectId').toMatch(/index\.projectId !== projectId/);
+    expect(route, 'the route uses requireProjectAuthorization').toMatch(/requireProjectAuthorization/);
+  });
+
+  it('IDEMPOTENCY + CONCURRENCY — the unique constraints + the CAS + the SELECT FOR UPDATE fence concurrent indexing', () => {
+    // The migration's UNIQUE(baseline_id, query_kind, query_ref) on indices +
+    // UNIQUE(context_index_id, locator, source, kind) on items make
+    // concurrent/retried indexing converge to a single row (no duplicates).
+    // The storage repository's markComplete wraps SELECT FOR UPDATE + item
+    // upserts + CAS complete in a single transaction.
+    const migration = readFileSync(MIGRATION_0041, 'utf8');
+    expect(migration, 'migration 0041 enforces index idempotency').toMatch(/UNIQUE \(baseline_id, query_kind, query_ref\)/);
+    expect(migration, 'migration 0041 enforces item idempotency').toMatch(/UNIQUE \(context_index_id, locator, source, kind\)/);
+    const repo = readFileSync(PROJECTS_CONTEXT_INDEX_REPO, 'utf8');
+    expect(repo, 'markComplete opens a transaction').toMatch(/this\.db\.transaction\(async \(tx\) =>/);
+    expect(repo, 'markComplete acquires SELECT FOR UPDATE on the index row').toMatch(/SELECT \$\{INDEX_COLUMNS\} FROM wfos_project_context_indices\s+WHERE id = \$1 FOR UPDATE/);
+    expect(repo, 'markComplete CAS-completes with version predicate').toMatch(/WHERE id = \$3 AND version = \$2 AND state = 'indexing'/);
+    expect(repo, 'ensureIndex uses ON CONFLICT DO NOTHING').toMatch(/ON CONFLICT \(baseline_id, query_kind, query_ref\) DO NOTHING/);
+    expect(repo, 'insertItemIn uses ON CONFLICT DO NOTHING').toMatch(/ON CONFLICT \(context_index_id, locator, source, kind\) DO NOTHING/);
+  });
+
+  it('app.ts wires the repositoryIntelligenceService + projectContextIndexRepository (production context intelligence is available)', () => {
+    // The composition root must construct the PgProjectContextIndexRepository
+    // + the BaselineContextSource + the DeterministicContextRanker + the
+    // DefaultRepositoryIntelligenceService, and expose them for the route.
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts constructs PgProjectContextIndexRepository').toMatch(/new PgProjectContextIndexRepository\(/);
+    expect(appSrc, 'app.ts constructs BaselineContextSource').toMatch(/new BaselineContextSource\(/);
+    expect(appSrc, 'app.ts constructs DeterministicContextRanker').toMatch(/new DeterministicContextRanker\(/);
+    expect(appSrc, 'app.ts constructs DefaultRepositoryIntelligenceService').toMatch(/new DefaultRepositoryIntelligenceService\(/);
+    expect(appSrc, 'app.ts exposes projectContextIndexRepository for the route').toMatch(/projectContextIndexRepository:\s*projectContextIndexRepositoryRef/);
+    expect(appSrc, 'app.ts exposes repositoryIntelligenceService for the route').toMatch(/repositoryIntelligenceService:\s*repositoryIntelligenceServiceRef/);
+  });
+
+  it('server.ts registers the repositoryIntelligence route + ServerDeps declares it', () => {
+    // The route must be registered in buildServer + the ServerDeps interface
+    // must declare the repositoryIntelligence field.
+    const serverSrc = readFileSync(join(SRC_ROOT, 'api', 'server.ts'), 'utf8');
+    expect(serverSrc, 'server.ts imports repositoryIntelligenceRoutes').toMatch(/import\s+\{\s*repositoryIntelligenceRoutes/);
+    expect(serverSrc, 'server.ts declares repositoryIntelligence in ServerDeps').toMatch(/repositoryIntelligence\?:\s*RepositoryIntelligenceRouteDeps/);
+    expect(serverSrc, 'server.ts registers the repositoryIntelligence route').toMatch(/repositoryIntelligenceRoutes\(app, deps\.repositoryIntelligence\)/);
+    // The index.ts production bootstrap assembles the route deps.
+    const indexSrc = readFileSync(join(SRC_ROOT, 'index.ts'), 'utf8');
+    expect(indexSrc, 'index.ts assembles the repositoryIntelligence route deps').toMatch(/repositoryIntelligence:\s*\{/);
+  });
+
+  it('the context index types are re-exported through the /projects barrel (the single project authority)', () => {
+    // The context index is a PROJECT artifact (like ProjectBaseline); its
+    // types live in /projects/internal/ + are re-exported through the
+    // /projects barrel so the capability consumes them through the barrel
+    // (NOT through internal/ — the cross-module internal/ import is forbidden
+    // by PLAT-AC-02).
+    const barrel = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
+    expect(barrel, 'the /projects barrel re-exports ProjectContextIndex').toMatch(/ProjectContextIndex/);
+    expect(barrel, 'the /projects barrel re-exports ContextItem').toMatch(/\bContextItem\b/);
+    expect(barrel, 'the /projects barrel re-exports ProjectContextIndexRepository').toMatch(/ProjectContextIndexRepository/);
+    expect(barrel, 'the /projects barrel re-exports RepositoryIntelligenceError').toMatch(/RepositoryIntelligenceError/);
+    // The capability consumes the /projects barrel (NOT internal/).
+    const files = listTsFiles(RI_DIR);
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      const rel = relative(BACKEND_ROOT, f);
+      expect(src, `${rel} must not import /projects internal/ (use the barrel)`).not.toMatch(/from\s+['"][^'"]*modules\/projects\/internal/);
+    }
+  });
+});

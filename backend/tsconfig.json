@@ -28,6 +28,7 @@
       "@api/*": ["src/api/*"],
       "@modules/*": ["src/modules/*"],
       "@onboarding/*": ["src/onboarding/*"],
+      "@repository-intelligence/*": ["src/repository-intelligence/*"],
       "@root/*": ["src/*"],
       "@/*": ["../frontend/src/*"]
     },
