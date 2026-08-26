@@ -11545,8 +11545,9 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     expect(prioritizer, 'the prioritizer calls listTransitiveDependencies (gated by the guard)').toMatch(/\.listTransitiveDependencies\(/);
     // 5. ORDERING: the guard symbol MUST appear BEFORE the traversal CALL in
     //    the file (the guard is defined + called before the traversal). This
-    //    is the static proof that the guard precedes the traversal; the
-    //    dynamic proof is the cross-tenant regression test (#8b).
+    //    is the static proof that the guard precedes the FIRST traversal; the
+    //    count check (#6 below) proves EVERY traversal is gated; the dynamic
+    //    proof is the cross-tenant regression test (#8b).
     const guardIdx = prioritizer.indexOf('resolveWorkItemProject(');
     const traversalIdx = prioritizer.indexOf('.listTransitiveDependencies(');
     expect(guardIdx, 'the ownership guard must be present').toBeGreaterThan(-1);
@@ -11558,5 +11559,52 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     expect(prioritizer, 'the guard resolves the architecture version').toMatch(/architectureVersionRepository\.findById\(/);
     expect(prioritizer, 'the guard resolves the architecture (→ project)').toMatch(/architectureRepository\.findById\(/);
     expect(prioritizer, 'the guard returns the project id').toMatch(/return arch\.projectId/);
+    // 7. EVERY traversal site is gated — count-based proof. The number of
+    //    guard CALL sites (resolveWorkItemProject( occurrences MINUS the one
+    //    function definition) must be >= the number of traversal CALL sites
+    //    (.listTransitiveDependencies( dotted calls). This PREVENTS a future
+    //    developer from adding a SECOND, unguarded listTransitiveDependencies
+    //    call in a different code path — every traversal site must have a
+    //    corresponding guard call site. (The first-occurrence ordering check
+    //    #5 proves the guard precedes the first traversal; this count check
+    //    proves NO traversal site lacks a guard — the architect's "preventing
+    //    an unscoped listTransitiveDependencies(relatedId) call" requirement.)
+    const guardAllMatches = prioritizer.match(/resolveWorkItemProject\(/g) ?? [];
+    // Subtract 1 for the `async function resolveWorkItemProject(` definition.
+    const guardCallSiteCount = Math.max(0, guardAllMatches.length - 1);
+    const traversalCallSiteCount = (prioritizer.match(/\.listTransitiveDependencies\(/g) ?? []).length;
+    expect(guardCallSiteCount, 'the prioritizer has at least one guard CALL site (not just the definition)').toBeGreaterThanOrEqual(1);
+    expect(traversalCallSiteCount, 'the prioritizer has at least one traversal call site (the guarded one)').toBeGreaterThanOrEqual(1);
+    expect(
+      guardCallSiteCount,
+      'EVERY listTransitiveDependencies call site must have a corresponding resolveWorkItemProject guard call site (no unscoped traversal — a second unguarded traversal would make guard < traversal)',
+    ).toBeGreaterThanOrEqual(traversalCallSiteCount);
+    // 8. MUTATION PROOF — the count check actually CATCHES an unscoped
+    //    traversal. Synthesize a mutated prioritizer with a second, unguarded
+    //    listTransitiveDependencies call (the exact regression the invariant
+    //    must prevent) + assert the count check detects the violation (guard
+    //    call sites < traversal call sites). This proves "preventing," not
+    //    merely "checking."
+    const mutatedPrioritizer = prioritizer + [
+      '',
+      '// MUTATION (for the static-arch test only — NOT in the real file):',
+      'async function futureUnguardedPath(ctx) {',
+      '  // A second traversal site WITHOUT a preceding resolveWorkItemProject',
+      '  // guard — this is the unscoped call the invariant must catch.',
+      '  return ctx.workItemDependencyRepository.listTransitiveDependencies(\'rogue-id\');',
+      '}',
+      '',
+    ].join('\n');
+    const mutatedGuardSites = Math.max(
+      0,
+      (mutatedPrioritizer.match(/resolveWorkItemProject\(/g) ?? []).length - 1,
+    );
+    const mutatedTraversalSites = (mutatedPrioritizer.match(/\.listTransitiveDependencies\(/g) ?? []).length;
+    expect(mutatedTraversalSites, 'the mutated file has 2 traversal sites (the original guarded one + the unguarded mutation)').toBe(traversalCallSiteCount + 1);
+    expect(mutatedGuardSites, 'the mutated file still has the same guard call site count (the mutation added no guard)').toBe(guardCallSiteCount);
+    expect(
+      mutatedGuardSites,
+      'the count check CATCHES the unscoped traversal — guard < traversal in the mutated file (the invariant fails on the mutation, proving it prevents unscoped calls)',
+    ).toBeLessThan(mutatedTraversalSites);
   });
 });
