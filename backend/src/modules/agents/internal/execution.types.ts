@@ -250,12 +250,46 @@ export interface UpdateExecutionStatusInput {
   readonly expiresAt?: Date | null;
 }
 
+/**
+ * WORK-042: input for a cross-mode mode transition
+ * ({@link ExecutionRecordRepository.transitionMode}). Unlike
+ * {@link UpdateExecutionStatusInput}, this ALSO updates the `mode` (and may
+ * update `provider`/`model`). Used ONLY by the cross-mode handoff service to
+ * transition an existing ExecutionRecord from native <-> external while
+ * preserving its identity (the same row). Unspecified fields keep their
+ * current value (COALESCE) so a native->external transition can set the
+ * package + expires_at without clearing agent_run_id, and an external->native
+ * transition can set agent_run_id without clearing package_json.
+ *
+ * This method does NOT touch workflow/verification/review state, and the
+ * handoff log table's UNIQUE(execution_record_id) is the concurrency fence (no
+ * CAS on version is needed here — the handoff row is the reserve step).
+ */
+export interface TransitionModeInput {
+  readonly mode: ExecutionMode;
+  readonly status: ExecutionState;
+  readonly provider?: string;
+  readonly model?: string | null;
+  readonly packageValue?: ExternalExecutionPackage | null;
+  readonly agentRunId?: string | null;
+  readonly externalSessionRef?: string | null;
+  readonly expiresAt?: Date | null;
+  readonly benchmarkMetadata?: Record<string, unknown>;
+}
+
 export interface ExecutionRecordRepository {
   create(input: CreateExecutionRecordInput): Promise<ExecutionRecord>;
   findById(id: string): Promise<ExecutionRecord | null>;
   findByExecutionId(executionId: string): Promise<ExecutionRecord | null>;
   listForWorkItem(workItemId: string): Promise<ExecutionRecord[]>;
   updateStatus(id: string, input: UpdateExecutionStatusInput): Promise<ExecutionRecord | null>;
+  /**
+   * WORK-042: transition an existing execution record's mode + status (+ the
+   * mode-specific authoritative fields). The cross-mode handoff log table's
+   * UNIQUE(execution_record_id) is the concurrency fence. Returns null when
+   * the record does not exist.
+   */
+  transitionMode(id: string, input: TransitionModeInput): Promise<ExecutionRecord | null>;
 }
 
 /** One ingested external execution event (audit trail for the boundary). */

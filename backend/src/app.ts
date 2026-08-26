@@ -233,6 +233,8 @@ import {
   createWorkspaceReleaseRelayJobHandler,
 } from './modules/agents/internal/workspace-release-relay.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
+import { DefaultCrossModeHandoffService } from './modules/agents/internal/default-cross-mode-handoff-service.js';
+import { PgCrossModeHandoffRepository } from './modules/agents/internal/pg-cross-mode-handoff-repository.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
 // WORK-032: Native vs External Execution Benchmark — application-layer
@@ -277,6 +279,7 @@ import type {
   ExecutionHandoffService,
   ExecutionCallbackService,
   ExecutionEventIngestionService,
+  CrossModeHandoffService,
   ToolRuntime,
 } from '@modules/agents/index.js';
 import type { ExecutionTaskService } from '@modules/work-items/index.js';
@@ -432,6 +435,16 @@ export interface AppDeps {
   executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
+  /**
+   * WORK-042: cross-mode handoff boundary (native <-> external for the SAME
+   * logical execution — ONE ExecutionRecord preserved). Present when DB +
+   * execution + agent-policy + execution-policy + agent-provider-registry are
+   * configured. NOT an ExecutionService — it transitions the existing record
+   * + writes an append-only history log; it NEVER creates a second
+   * ExecutionRecord, NEVER touches workflow/verification/review state, and
+   * NEVER persists secrets.
+   */
+  crossModeHandoffService?: CrossModeHandoffService;
   /** WORK-036: the governed Tool Runtime. Present when DB + agents are
    *  configured. Capabilities, never authorities — tool outcomes are
    *  observations (session events + audit) and never mutate workflow,
@@ -690,6 +703,10 @@ export async function buildApp(
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
+  // WORK-042: the cross-mode handoff service (native <-> external for the
+  // SAME logical execution — ONE ExecutionRecord preserved). Declared at
+  // function scope; constructed inside the agents/execution-policy block.
+  let crossModeHandoffService: CrossModeHandoffService | undefined;
   // WORK-038: the onboarding orchestrator + the /projects baseline storage
   // repository (declared at function scope; constructed inside the agents
   // block — exposed for the onboarding route surface).
@@ -1515,6 +1532,34 @@ export async function buildApp(
       benchmarkEvidenceProvider: executionEvidenceProvider,
     });
 
+    // --- WORK-042: Cross-Mode Execution Handoff. ---
+    // Constructed AFTER the execution-policy service (the native target gate
+    // consumes getProjectPolicy().nativeExecutionAllowed) + the agent-provider-
+    // registry service (native provider availability — getPlatformDefaultProvider
+    // / getPlatformDefaultModel / isProviderConfigured). Composes the EXISTING
+    // NativeExecutionProvider + ExternalExecutionProvider + ExecutionTaskService
+    // + AgentPolicyEngine (evaluateExternalHandoff for the external target) +
+    // AgentRunRepository (the crash-retry guard for external->native — skips a
+    // second AgentRun on wfos_agent_runs.execution_id UNIQUE). NOT an
+    // ExecutionService — it transitions the SAME ExecutionRecord + writes an
+    // append-only history log row (migration 0042). NEVER creates a second
+    // ExecutionRecord, NEVER touches workflow/verification/review state, NEVER
+    // persists secrets.
+    const crossModeHandoffRepository = new PgCrossModeHandoffRepository(database);
+    crossModeHandoffService = new DefaultCrossModeHandoffService({
+      executionRecordRepository,
+      crossModeHandoffRepository,
+      executionTaskService: executionTaskService!,
+      nativeExecutionProvider,
+      externalExecutionProvider,
+      agentRunRepository: agentRunRepository!,
+      agentPolicyEvaluator: agentPolicyEngine,
+      executionPolicyService,
+      agentProviderRegistryService,
+      auditService,
+      logger,
+    });
+
     // --- /runtime module: DefaultRuntimeStatusService (SUB-B). ---
     // Aggregates GitHub + Vercel + Architect + Agent status for a project.
     // The resolvers are closures over existing services; each catches its own
@@ -1710,6 +1755,9 @@ export async function buildApp(
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,
+      // WORK-042: cross-mode handoff service (native <-> external for the SAME
+      // logical execution — ONE ExecutionRecord preserved).
+      crossModeHandoffService,
       // WORK-036: the governed tool runtime (present when DB + agents
       // configured). Capabilities, never authorities — observations only.
       toolRuntime: toolRuntimeRef,

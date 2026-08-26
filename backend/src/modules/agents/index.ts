@@ -51,6 +51,10 @@ export type {
   ExecutionRecord,
   CreateExecutionRecordInput,
   UpdateExecutionStatusInput,
+  // WORK-042: the cross-mode transition input (mode + status + the
+  // mode-specific authoritative fields). Used ONLY by the cross-mode handoff
+  // service to transition an existing ExecutionRecord native <-> external.
+  TransitionModeInput,
   ExecutionRecordRepository,
   ExecutionEventRecord,
   AppendExecutionEventInput,
@@ -73,6 +77,31 @@ export type {
   ExecutionSubmitResult,
   ExecutionService,
 } from './internal/execution.types.js';
+
+// WORK-042: Cross-Mode Execution Handoff — the cross-mode transition boundary
+// for the SAME logical ExecutionRecord (native <-> external). ONE ExecutionRecord
+// is preserved; the handoff is a subordinate state transition + an append-only
+// history log row. The service composes the EXISTING NativeExecutionProvider +
+// ExternalExecutionProvider + ExecutionTaskService + AgentPolicyEngine +
+// ExecutionPolicyService + AgentProviderRegistryService — it is NOT an
+// ExecutionService, it NEVER creates a second ExecutionRecord, and it NEVER
+// touches workflow/verification/review state. Concrete implementations stay
+// in internal/ (wired by app.ts).
+export type {
+  CrossModeHandoffRecord,
+  CrossModeHandoffInput,
+  CrossModeHandoffResult,
+  CrossModeHandoffRepository,
+  CrossModeHandoffService,
+  CrossModeHandoffDirection,
+  CreateCrossModeHandoffInput,
+  CrossModeHandoffErrorCode,
+} from './internal/cross-mode-handoff.types.js';
+export {
+  CrossModeHandoffError,
+  CROSS_MODE_HANDOFF_ERROR_CODES,
+  CROSS_MODE_HANDOFF_RELAY_JOB_TYPE,
+} from './internal/cross-mode-handoff.types.js';
 
 // WORK-034 (first slice): Persistent Session Core — the provider-independent
 // session contracts. An ExecutionSession is the CONTINUATION CONTEXT for

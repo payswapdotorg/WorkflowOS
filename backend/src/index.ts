@@ -263,6 +263,13 @@ async function main(): Promise<void> {
               executionHandoffService: app.deps.executionHandoffService,
               executionCallbackService: app.deps.executionCallbackService,
               executionEventIngestionService: app.deps.executionEventIngestionService,
+              // WORK-042: cross-mode handoff service (native <-> external for
+              // the SAME logical execution — ONE ExecutionRecord preserved).
+              // OPTIONAL — the route returns 503 when it is absent (the
+              // existing execution routes are unaffected). Wired when DB +
+              // agent-policy + execution-policy + agent-provider-registry are
+              // all configured.
+              crossModeHandoffService: app.deps.crossModeHandoffService,
             },
           }
         : {}),

@@ -922,6 +922,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // the same sanctioned-exception rule.
       'RepositoryIntelligenceError',            // @modules/projects — the typed domain error
       'REPOSITORY_INTELLIGENCE_ERROR_CODES',    // @modules/projects — the stable code list
+      // WORK-042: the cross-mode-handoff typed error (the same sanctioned
+      // exception + reasoning — a discriminated error CLASS consumers
+      // instanceof-check; it wires nothing, constructs nothing, holds only
+      // (code, message)) + the frozen pure-data error-code list + the frozen
+      // pure-data relay job-type constant (a string literal — no wiring, no
+      // credentials).
+      'CrossModeHandoffError',                  // @modules/agents — the typed domain error
+      'CROSS_MODE_HANDOFF_ERROR_CODES',         // @modules/agents — the stable code list
+      'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE',      // @modules/agents — the frozen pure-data relay job-type
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -11160,9 +11169,12 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0041 (WORK-039) — WORK-040 adds none.
+    // The highest migration is 0042 (WORK-042 cross-mode handoff log) —
+    // WORK-040 added none (0042 belongs to WORK-042, not WORK-040). The
+    // planner evidence lives in the existing Work Item metadata.planner
+    // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (no new table)').toMatch(/^0041_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-042 cross-mode handoff log, NOT a planner-owned table)').toMatch(/^0042_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -11832,5 +11844,394 @@ describe('WORK-041 invariants — Maintenance baseline cross-tenant guard (PR #4
     //    drops the count to 1).
     const guardCallSites = (route.match(/assertBaselineInProject\(deps, projectId, body\.baselineId\)/g) ?? []).length;
     expect(guardCallSites, 'both scan + scan-async call assertBaselineInProject (the gate is wired into both routes)').toBe(2);
+  });
+});
+
+// =============================================================================
+// WORK-042 invariants — Cross-Mode Execution Handoff (the append-only mode-
+// transition log for the SAME logical ExecutionRecord). ONE ExecutionRecord
+// preserved; the handoff is a SUBORDINATE state transition + an append-only
+// history log row. The service composes the EXISTING NativeExecutionProvider +
+// ExternalExecutionProvider + ExecutionTaskService + AgentPolicyEngine +
+// ExecutionPolicyService + AgentProviderRegistryService — it is NOT an
+// ExecutionService, it NEVER creates a second ExecutionRecord, NEVER touches
+// workflow/verification/review state, NEVER persists secrets. The route
+// accepts NO authoritative fields (executionId from path; projectId resolved
+// server-side; policy decision server-side; audit identity server-side). The
+// cross-project guard (record.projectId validation) runs BEFORE any mutation.
+// =============================================================================
+describe('WORK-042 — Cross-Mode Execution Handoff', () => {
+  const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
+  const CROSS_MODE_TYPES = join(AGENTS_INTERNAL, 'cross-mode-handoff.types.ts');
+  const CROSS_MODE_REPO = join(AGENTS_INTERNAL, 'pg-cross-mode-handoff-repository.ts');
+  const CROSS_MODE_SERVICE = join(AGENTS_INTERNAL, 'default-cross-mode-handoff-service.ts');
+  const MIGRATION_0042 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0042_cross_mode_execution_handoff.sql',
+  );
+  const AGENTS_BARREL = join(MODULES_DIR, 'agents', 'index.ts');
+  const PG_EXECUTION_REPO = join(AGENTS_INTERNAL, 'pg-execution-repository.ts');
+  const EXECUTION_ROUTE = join(SRC_ROOT, 'api', 'routes', 'execution.route.ts');
+
+  /** Strip line + block comments (TypeScript + SQL) so doc-only mentions of
+   *  sensitive tokens do not trip the secret-persistence invariant. */
+  function strip(src: string): string {
+    return src
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*--.*$/gm, '');
+  }
+
+  // -------------------------------------------------------------------------
+  // A1: Migration 0042 exists + the correct schema.
+  // -------------------------------------------------------------------------
+  it('A1. migration 0042 exists with the cross-mode handoff log schema (UNIQUE execution + mode-change CHECK + idempotency UNIQUE + append-only trigger + prior-phase snapshot)', () => {
+    expect(existsSync(MIGRATION_0042), '0042_cross_mode_execution_handoff.sql must exist').toBe(true);
+    const src = readFileSync(MIGRATION_0042, 'utf8');
+    // The append-only mode-transition log table.
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_mode_handoffs/);
+    // ONE handoff per execution (the hard fence against a second handoff).
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_execution_unique UNIQUE \(execution_record_id\)/);
+    // A handoff MUST change the mode.
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_mode_change CHECK \(from_mode <> to_mode\)/);
+    // Idempotency key (convergent retry).
+    expect(src).toMatch(/idempotency_key TEXT NOT NULL/);
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_idempotency_unique UNIQUE \(idempotency_key\)/);
+    // The prior-phase authoritative evidence snapshot (preserves the correction chain).
+    expect(src).toMatch(/previous_agent_run_id UUID/);
+    expect(src).toMatch(/previous_external_session_ref TEXT/);
+    expect(src).toMatch(/previous_package_json JSONB/);
+    // Append-only immutability trigger (no UPDATE/DELETE — the history is permanent).
+    expect(src).toMatch(/wfos_execution_mode_handoff_immutable/);
+    expect(src).toMatch(/BEFORE UPDATE OR DELETE ON wfos_execution_mode_handoffs/);
+  });
+
+  it('A1b. the migration stores NO credentials (stripped of comments, the schema mentions no secret/token/cookie/api_key/password)', () => {
+    const src = readFileSync(MIGRATION_0042, 'utf8');
+    const stripped = strip(src);
+    expect(stripped, 'the handoff log table stores no secrets').not.toMatch(/secret|token|cookie|api_key|password/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // A2: NO second ExecutionService / NO second AgentGateway / NO second
+  // session/workspace engine (the CrossModeHandoffService is a SEPARATE
+  // boundary that composes the existing ones; it never constructs a parallel
+  // engine).
+  // -------------------------------------------------------------------------
+  it('A2. the cross-mode handoff boundary creates NO second ExecutionService / AgentGateway / SessionService / WorkspaceService', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      // No second ExecutionService (the CrossModeHandoffService is a SEPARATE
+      // interface — it transitions the SAME ExecutionRecord; it never
+      // constructs, implements, or declares an ExecutionService).
+      expect(src, `${name}: no second ExecutionService`).not.toMatch(/new\s+\w*ExecutionService\b|implements\s+ExecutionService\b|class\s+\w*ExecutionService\b/);
+      // No second AgentGateway (the service calls the EXISTING
+      // NativeExecutionProvider which delegates to the existing gateway).
+      expect(src, `${name}: no second DefaultAgentGateway`).not.toMatch(/new\s+DefaultAgentGateway/);
+      // No second session engine (the existing DefaultExecutionSessionService
+      // is the ONE; the cross-mode service must NOT create another).
+      expect(src, `${name}: no second SessionService`).not.toMatch(/class\s+\w*SessionService\b|implements\s+ExecutionSessionService\b/);
+      // No second workspace engine (the existing DefaultAgentWorkspaceService
+      // is the ONE; the cross-mode service must NOT create another).
+      expect(src, `${name}: no second WorkspaceService`).not.toMatch(/class\s+\w*WorkspaceService\b|implements\s+AgentWorkspaceService\b/);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // A3: NO workflow / verification / review mutation (the cross-mode handoff
+  // is a subordinate state transition — it never touches the workflow /
+  // verification / review authority).
+  // -------------------------------------------------------------------------
+  it('A3. the cross-mode handoff NEVER mutates workflow / verification / review state (SQL-level + state-machine-level)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no workflow mutation`).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+      expect(src, `${name}: no verification mutation`).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+      expect(src, `${name}: no review mutation`).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+      // No workflow state-machine transition (the toState: 'approved'/
+      // 'merged'/'verified' shape would be a workflow authority claim).
+      expect(src, `${name}: no workflow state-machine mutation`).not.toMatch(/toState:\s*'(approved|merged|verified)'/);
+    }
+    // The service does NOT import the workflow / verification / review
+    // modules (the one-way dependency — agents → execution-policy → tool
+    // runtime, never agents → workflow authority).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the cross-mode service does not import @modules/workflows').not.toContain("from '@modules/workflows");
+    expect(serviceSrc, 'the cross-mode service does not import @modules/verification').not.toContain("from '@modules/verification");
+    expect(serviceSrc, 'the cross-mode service does not import @modules/reviews').not.toContain("from '@modules/reviews");
+  });
+
+  // -------------------------------------------------------------------------
+  // A4: The cross-mode handoff reuses the EXISTING providers + task service +
+  // policy engine (NO parallel model).
+  // -------------------------------------------------------------------------
+  it('A4. the cross-mode handoff reuses the EXISTING NativeExecutionProvider + ExternalExecutionProvider + ExecutionTaskService + agent-policy evaluateExternalHandoff (no parallel model)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The service depends on the existing native + external providers (typed
+    // as the provider-independent ExecutionProvider interface — not new ones).
+    expect(serviceSrc, 'the service depends on nativeExecutionProvider').toMatch(/nativeExecutionProvider\s*[:.]/);
+    expect(serviceSrc, 'the service depends on externalExecutionProvider').toMatch(/externalExecutionProvider\s*[:.]/);
+    // The service reuses the EXISTING ExecutionTaskService.build (the same
+    // path the ExecutionService uses to build a task).
+    expect(serviceSrc, 'the service depends on executionTaskService').toMatch(/executionTaskService\s*[:.]/);
+    // For targetMode='external', the service calls the EXISTING
+    // agent-policy evaluateExternalHandoff hook (no second policy engine).
+    expect(serviceSrc, 'the service calls evaluateExternalHandoff').toMatch(/evaluateExternalHandoff\s*\(/);
+    // The service does NOT construct a DefaultAgentGateway (it dispatches
+    // through NativeExecutionProvider, which delegates to the existing
+    // gateway — never a parallel gateway).
+    expect(serviceSrc, 'the service never constructs a second DefaultAgentGateway').not.toMatch(/new\s+DefaultAgentGateway/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A5: POST-only mutation (NO GET mutation on the cross-mode-handoff route).
+  // -------------------------------------------------------------------------
+  it('A5. the cross-mode-handoff route is POST-only (NO GET mutation)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    expect(routeSrc, 'the route registers a POST handler').toMatch(/app\.post\('\/execution\/:executionId\/cross-mode-handoff'/);
+    // No GET handler on the cross-mode-handoff path (no read-as-mutation).
+    expect(routeSrc, 'no GET mutation on the cross-mode-handoff path').not.toMatch(/app\.get\('\/execution\/:executionId\/cross-mode-handoff'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A6: Server-side authority (no caller-supplied authoritative fields).
+  // The route body destructuring reads ONLY caller-controlled INTENT
+  // (targetMode/reason/userInstruction/idempotencyKey/provider/model). The
+  // projectId / executionRecordId / policyDecision / audit identity are
+  // resolved server-side.
+  // -------------------------------------------------------------------------
+  it('A6. the cross-mode-handoff route accepts NO authoritative fields (executionId from path; projectId/policyDecision/audit identity resolved server-side)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    // Extract the cross-mode-handoff route handler (from app.post to the end
+    // of the file — it is the LAST route).
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    expect(sectionStart, 'the cross-mode-handoff route section must be present').toBeGreaterThan(-1);
+    const section = routeSrc.slice(sectionStart);
+    // The body destructuring must NOT read authoritative fields.
+    expect(section, 'no body.projectId').not.toMatch(/body\??\.(projectId|executionRecordId|policyDecision|auditId|workspaceId|evidenceId)/i);
+    // The route resolves record.projectId server-side + calls
+    // requireProjectAuthorization (the projectId is NEVER from the body).
+    expect(section, 'the route resolves record.projectId server-side').toMatch(/record\.projectId/);
+    expect(section, 'the route calls requireProjectAuthorization').toMatch(/requireProjectAuthorization\(/);
+  });
+
+  it('A6b. ORDERING — the route calls requireProjectAuthorization BEFORE crossModeHandoffService.handoff (authorize BEFORE mutate)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    const section = routeSrc.slice(sectionStart);
+    const authIdx = section.indexOf('requireProjectAuthorization(req, reply');
+    const mutateIdx = section.indexOf('crossModeHandoffService.handoff(');
+    expect(authIdx, 'the route calls requireProjectAuthorization').toBeGreaterThan(-1);
+    expect(mutateIdx, 'the route calls crossModeHandoffService.handoff').toBeGreaterThan(-1);
+    expect(authIdx, 'the route authorizes BEFORE mutating').toBeLessThan(mutateIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A9: Tenant-ownership guard BEFORE mutation (the WORK-041 mutation-proof
+  // pattern). The route's requireProjectAuthorization (which validates the
+  // caller's project membership) runs BEFORE crossModeHandoffService.handoff.
+  // PLUS the service re-resolves the record (record.projectId) BEFORE any
+  // createHandoff call (defense-in-depth).
+  //
+  // Count + MUTATION-PROOF: count the requireProjectAuthorization CALL sites
+  // (await requireProjectAuthorization() dotted call) in the cross-mode-
+  // handoff route section (>= 1) + synthesize a mutated route section WITHOUT
+  // the authorize call → the count check catches the violation.
+  // -------------------------------------------------------------------------
+  it('A9. tenant-ownership guard BEFORE mutation — requireProjectAuthorization runs BEFORE crossModeHandoffService.handoff; a synthesized unguarded mutation is caught by the count check', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    const section = routeSrc.slice(sectionStart);
+    // Count actual CALL sites (the await + parenthesised call — NOT JSDoc
+    // mentions of the helper name).
+    const gateCallSitePattern = /await\s+requireProjectAuthorization\(/g;
+    const gateCallSiteCount = (section.match(gateCallSitePattern) ?? []).length;
+    expect(gateCallSiteCount, 'the cross-mode-handoff route calls requireProjectAuthorization (the project-ownership gate)').toBeGreaterThanOrEqual(1);
+
+    // MUTATION PROOF — synthesize a mutated route section WITHOUT the
+    // authorize call (the exact regression the invariant must prevent) +
+    // assert the count check detects the violation (gate call sites == 0).
+    const mutatedSection = section.replace(/await\s+requireProjectAuthorization\([^)]*\)/g, '/* MUTATION: authorize call removed */');
+    const mutatedGateCallSites = (mutatedSection.match(gateCallSitePattern) ?? []).length;
+    expect(mutatedGateCallSites, 'the mutated section has 0 authorize call sites (the mutation stripped the gate)').toBe(0);
+    expect(
+      mutatedGateCallSites,
+      'the count check CATCHES the unguarded mutation — gate < 1 in the mutated section',
+    ).toBeLessThan(1);
+
+    // SERVICE-LEVEL defense-in-depth: the service re-resolves the record
+    // (record.projectId is known) BEFORE the createHandoff INSERT. The FIRST
+    // occurrence of record.projectId must precede the FIRST createHandoff
+    // call site (the reserve step).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const recordProjectIdIdx = serviceSrc.indexOf('record.projectId');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoff(');
+    expect(recordProjectIdIdx, 'the service resolves record.projectId').toBeGreaterThan(-1);
+    expect(createHandoffIdx, 'the service calls createHandoff').toBeGreaterThan(-1);
+    expect(recordProjectIdIdx, 'the service resolves record.projectId BEFORE the createHandoff INSERT (defense-in-depth)').toBeLessThan(createHandoffIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A10: ONE handoff per execution (the UNIQUE fence). The migration has
+  // UNIQUE(execution_record_id) (A1 covers); the service has EXACTLY ONE
+  // createHandoff call site. A mutated service with a second createHandoff
+  // site → the count check catches it.
+  // -------------------------------------------------------------------------
+  it('A10. ONE handoff per execution — the service has EXACTLY ONE createHandoff call site (the UNIQUE(execution_record_id) fence)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const createHandoffCallSites = (serviceSrc.match(/\.createHandoff\(/g) ?? []).length;
+    expect(createHandoffCallSites, 'the service has exactly ONE createHandoff call site (the reserve step)').toBe(1);
+    // MUTATION PROOF — synthesize a mutated service with a second
+    // createHandoff site → the count check catches it.
+    const mutatedService = serviceSrc + [
+      '',
+      '// MUTATION (for the static-arch test only — NOT in the real file):',
+      'async function futureUnguardedCreate(ctx) {',
+      '  // A second createHandoff site — this is the regression the',
+      '  // invariant must catch (would bypass the UNIQUE fence on a',
+      '  // different idempotency_key).',
+      '  return ctx.deps.crossModeHandoffRepository.createHandoff({} as never);',
+      '}',
+      '',
+    ].join('\n');
+    const mutatedCallSites = (mutatedService.match(/\.createHandoff\(/g) ?? []).length;
+    expect(mutatedCallSites, 'the mutated service has 2 createHandoff call sites').toBe(createHandoffCallSites + 1);
+    expect(
+      mutatedCallSites,
+      'the count check CATCHES the second createHandoff site — count > 1 in the mutated service',
+    ).toBeGreaterThan(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // A11: Idempotent convergence (findByIdempotencyKey BEFORE createHandoff —
+  // a retry with the same key converges to the existing result).
+  // -------------------------------------------------------------------------
+  it('A11. idempotent convergence — the service calls findByIdempotencyKey (the convergence lookup) BEFORE createHandoff', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service calls findByIdempotencyKey (convergence check)').toMatch(/findByIdempotencyKey/);
+    // ORDERING — the findByIdempotencyKey lookup precedes the createHandoff
+    // INSERT (the convergence check is evaluated BEFORE the reserve).
+    const idempotencyLookupIdx = serviceSrc.indexOf('findByIdempotencyKey');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoff(');
+    expect(idempotencyLookupIdx, 'findByIdempotencyKey must be present').toBeGreaterThan(-1);
+    expect(createHandoffIdx, 'createHandoff must be present').toBeGreaterThan(-1);
+    expect(idempotencyLookupIdx, 'findByIdempotencyKey precedes createHandoff (converge before reserve)').toBeLessThan(createHandoffIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A12: Durable relay constant (IMPL-1 added CROSS_MODE_HANDOFF_RELAY_JOB_TYPE
+  // + the idempotent reconcileCrossModeHandoffForExecution entry point).
+  // -------------------------------------------------------------------------
+  it('A12. the durable relay constant is exported (the optional cross-mode-handoff reconciliation relay job type)', () => {
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE is defined in the types').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    expect(barrelSrc, 'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE is exported from the barrel').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
+    // The service defines the idempotent reconciliation entry point (the
+    // relay calls this on retry; a complete handoff is a no-op).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service implements reconcileCrossModeHandoffForExecution').toMatch(/reconcileCrossModeHandoffForExecution/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A13: Barrel exports (the public contract; concrete impls stay internal).
+  // -------------------------------------------------------------------------
+  it('A13. the /agents barrel exports the cross-mode handoff public contract (no concrete impls)', () => {
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    // The public contract names.
+    expect(barrelSrc).toMatch(/CrossModeHandoffService/);
+    expect(barrelSrc).toMatch(/CrossModeHandoffRecord/);
+    expect(barrelSrc).toMatch(/CrossModeHandoffError/);
+    expect(barrelSrc).toMatch(/CROSS_MODE_HANDOFF_ERROR_CODES/);
+    expect(barrelSrc).toMatch(/TransitionModeInput/);
+    // The concrete implementations stay internal (wired only by app.ts).
+    expect(barrelSrc, 'PgCrossModeHandoffRepository stays internal').not.toMatch(/PgCrossModeHandoffRepository/);
+    expect(barrelSrc, 'DefaultCrossModeHandoffService stays internal').not.toMatch(/DefaultCrossModeHandoffService/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A14: transitionMode repo method exists + does NOT touch
+  // workflow/verification/review (it ONLY touches wfos_executions — the
+  // SAME ExecutionRecord's mode/status/provider columns).
+  // -------------------------------------------------------------------------
+  it('A14. PgExecutionRecordRepository.transitionMode exists + uses an UPDATE on wfos_executions (NOT a new table) + does NOT touch workflow/verification/review', () => {
+    const repoSrc = readFileSync(PG_EXECUTION_REPO, 'utf8');
+    expect(repoSrc, 'transitionMode method exists').toMatch(/transitionMode\s*\(/);
+    expect(repoSrc, 'transitionMode uses UPDATE wfos_executions SET (the SAME record — no new table)').toMatch(/UPDATE wfos_executions SET/);
+    // Extract the transitionMode method body + assert it touches ONLY
+    // wfos_executions (no workflow/verification/review SQL).
+    const methodStart = repoSrc.indexOf('async transitionMode(');
+    expect(methodStart, 'transitionMode method body must be present').toBeGreaterThan(-1);
+    // Find the method's closing brace (the next '\n  }' at column 2).
+    const methodEnd = repoSrc.indexOf('\n  }', methodStart);
+    const methodBody = repoSrc.slice(methodStart, methodEnd);
+    expect(methodBody, 'transitionMode does NOT insert/update workflow state').not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow/);
+    expect(methodBody, 'transitionMode does NOT insert/update verification state').not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification/);
+    expect(methodBody, 'transitionMode does NOT insert/update review state').not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A7 + A8 (combined for clarity): NO token/credential persistence + NO
+  // direct provider SDK coupling.
+  // -------------------------------------------------------------------------
+  it('A7. the cross-mode handoff log + service persist NO secrets (no raw_token / api_key / secret / password / cookie); the service does NOT issue tokens (token issuance is the EXISTING ExecutionHandoffService job via POST /execution/:id/handoff)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no raw_token / api_key / secret / password / cookie`).not.toMatch(/raw_token|rawToken|api_key|apiKey|secret|password|cookie/i);
+    }
+    // The service does NOT call createHash or generate tokens (token
+    // issuance for native->external is the EXISTING ExecutionHandoffService's
+    // job — the cross-mode handoff generates the package + sets
+    // status=handoff_ready; the user then calls POST /execution/:id/handoff
+    // to issue the token, which goes through the existing policy-gated
+    // decorator).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service does NOT call createHash').not.toMatch(/createHash\(/);
+    expect(serviceSrc, 'the service does NOT issue handoff tokens (the existing ExecutionHandoffService owns that)').not.toMatch(/executionHandoffService\s*\./);
+  });
+
+  it('A8. the cross-mode handoff has NO direct provider SDK coupling (no @octokit / openai / anthropic / zai-sdk imports)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = readFileSync(path, 'utf8');
+      expect(src, `${name}: no @octokit/openai/anthropic/zai-sdk imports`).not.toMatch(/from ['"]@octokit|from ['"]openai|from ['"]anthropic|zai-sdk/);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // The cross-mode-handoff regression test file must exist (the 20 frozen
+  // regressions + the two-project tenant-ownership regression). This is the
+  // dynamic proof that mirrors these static invariants.
+  // -------------------------------------------------------------------------
+  it('the cross-mode-handoff regression test file exists with the frozen identity + concurrency + crash + tenant-ownership scenarios', () => {
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff.regression.test.ts');
+    expect(existsSync(testPath), 'cross-mode-handoff.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    // The six describe blocks (the frozen test matrix shape).
+    expect(src).toMatch(/describe\('identity preservation'/);
+    expect(src).toMatch(/describe\('evidence \+ audit'/);
+    expect(src).toMatch(/describe\('concurrency \+ idempotency'/);
+    expect(src).toMatch(/describe\('crash recovery'/);
+    expect(src).toMatch(/describe\('tenant isolation \(two-project\)'/);
+    expect(src).toMatch(/describe\('policy integration'/);
+    // The two-project tenant-ownership regression is present (the route
+    // 403 + the service-level defense-in-depth rejection).
+    expect(src).toMatch(/403/);
+    expect(src).toMatch(/tenant/);
   });
 });
