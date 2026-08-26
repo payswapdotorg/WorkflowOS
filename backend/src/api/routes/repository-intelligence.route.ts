@@ -33,16 +33,27 @@ import {
  *
  *   POST   /projects/:projectId/baselines/:baselineId/context-index
  *     — build (or re-use) the context index for a baseline+query. Idempotent
- *       per (baseline, query_kind, query_ref). Requires project.write.
+ *       per (baseline, query_kind, query_ref). Requires project.write
+ *       (it is a STATE MUTATION — ensureIndex + markComplete). Crash recovery
+ *       is wired: a crashed indexing run is reclaimed + completed on the next
+ *       POST for the same (baseline, query).
  *   GET    /projects/:projectId/baselines/:baselineId/context-index
  *          ?queryKind=work_item&queryRef=<wiId>
- *     — retrieve the context selection. Builds if missing. Requires
- *       project.read.
+ *     — READ-ONLY retrieval of the existing context selection for the caller's
+ *       baseline+query. Requires project.read. NEVER builds (the build is a
+ *       write — a read-authorized caller must NOT trigger a state mutation).
+ *       Returns 404 `{ error: 'index-not-found' }` if no non-terminal index
+ *       exists for the caller's baseline (the caller POSTs to build). The
+ *       orchestrator method is retrieveExisting (read-only); the build-if-missing
+ *       retrieve() is reserved for write-authorized programmatic callers.
  *   GET    /projects/:projectId/baselines/:baselineId/context-index/:indexId
  *     — read a specific index + its items. Requires project.read.
  *   GET    /projects/:projectId/baselines/:baselineId/context-index/:indexId/stale
  *     — the stale advisory (compares the index's baseline_commit_sha against
- *       the current repo HEAD). Requires project.read.
+ *       the current HEAD of the repository authority's DEFAULT branch — never
+ *       a hardcoded 'main'). PINNED TO THE REQUESTED indexId — never re-queries
+ *       by query tuple (which could inspect a different index). Requires
+ *       project.read.
  *
  * Every route is backend-authorized via the reusable AuthorizationService
  * (AUTHZ-AC-01..03). A repository, baseline, or index UUID is NOT an
@@ -96,6 +107,11 @@ async function resolveContext(
     repositoryOwner: repoLink.owner,
     repositoryName: repoLink.repository,
     installationId: String(repoLink.installationId),
+    // The /github authority's default branch — detectStale compares the
+    // index's pinned baseline_commit_sha against the current HEAD of THIS
+    // branch (NEVER a hardcoded 'main'; a repo whose default branch is
+    // 'develop' compares against 'develop's HEAD).
+    repositoryDefaultBranch: repoLink.defaultBranch,
     projectBaselineRepository: deps.projectBaselineRepository,
     projectContextIndexRepository: deps.projectContextIndexRepository,
     projectGitHubRepositoryRepository: deps.projectGitHubRepositoryRepository,
@@ -181,7 +197,14 @@ export async function repositoryIntelligenceRoutes(
 
   // GET /projects/:projectId/baselines/:baselineId/context-index
   //   ?queryKind=work_item&queryRef=<wiId>
-  // Returns the context selection (index + items + reason). Builds if missing.
+  // READ-ONLY retrieval of the existing context selection for the caller's
+  // baseline+query. project.read. NEVER builds (the build is a write — a
+  // read-authorized caller must NOT trigger a state mutation). Returns 404
+  // { error: 'index-not-found' } if no non-terminal index exists for the
+  // caller's baseline (the caller POSTs to build). The orchestrator method is
+  // retrieveExisting (read-only); the build-if-missing retrieve() is reserved
+  // for write-authorized programmatic callers + is NEVER invoked from this
+  // route (it would hide a state mutation behind project.read).
   app.get('/projects/:projectId/baselines/:baselineId/context-index', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId, baselineId } = req.params as { projectId: string; baselineId: string };
@@ -219,7 +242,15 @@ export async function repositoryIntelligenceRoutes(
       };
       try {
         const ctx = await resolveContext(deps, projectId, baselineId);
-        const selection = await deps.repositoryIntelligenceService.retrieve(query, ctx);
+        const selection = await deps.repositoryIntelligenceService.retrieveExisting(query, ctx);
+        if (selection === null) {
+          // No non-terminal index exists for this caller's baseline+query. The
+          // build is a WRITE — direct the caller to POST (project.write).
+          return reply.code(404).send({
+            error: 'index-not-found',
+            message: `no complete context index for baseline ${baselineId} + query ${q.queryKind}/${q.queryRef ?? ''}; POST /projects/${projectId}/baselines/${baselineId}/context-index to build (requires project.write)`,
+          });
+        }
         return reply.code(200).send(selection);
       } catch (err) {
         const msg = (err as Error).message ?? '';
@@ -264,7 +295,11 @@ export async function repositoryIntelligenceRoutes(
 
   // GET /projects/:projectId/baselines/:baselineId/context-index/:indexId/stale
   // — the stale advisory (compares the index's baseline_commit_sha against
-  // the current repo HEAD). The index is NEVER swapped; this is advisory.
+  // the current HEAD of the repository authority's DEFAULT branch — never a
+  // hardcoded 'main'). PINNED TO THE REQUESTED indexId — the route resolves +
+  // verifies ownership by indexId, then passes indexId to the orchestrator
+  // (which loads by id — NEVER re-queries by query tuple, which could
+  // inspect a different index). The index is NEVER swapped; this is advisory.
   app.get(
     '/projects/:projectId/baselines/:baselineId/context-index/:indexId/stale',
     async (req, reply) => {
@@ -278,21 +313,19 @@ export async function repositoryIntelligenceRoutes(
           permission: 'project.read',
           projectId,
         });
+        // Server-side ownership: the index must belong to the authorized
+        // project + the path's baseline (a UUID is NEVER a credential).
         const index = await deps.projectContextIndexRepository.findById(indexId);
         if (!index || index.projectId !== projectId || index.baselineId !== baselineId) {
           return reply.code(404).send({ error: 'not-found' });
         }
-        // Reuse the query from the index header (the stored queryTermsJson).
-        const query: ContextIndexQuery = {
-          projectId,
-          baselineId,
-          kind: index.queryKind,
-          queryRef: index.queryRef,
-          queryTerms: index.queryTermsJson as unknown as ContextQueryTerms,
-        };
         try {
           const ctx = await resolveContext(deps, projectId, baselineId);
-          const report = await deps.repositoryIntelligenceService.detectStale(query, ctx);
+          // PINNED to indexId — the orchestrator loads by id + compares its
+          // immutable baseline_commit_sha against the current HEAD of
+          // ctx.repositoryDefaultBranch (the /github authority's default
+          // branch). Never re-queries by query tuple.
+          const report = await deps.repositoryIntelligenceService.detectStale(indexId, ctx);
           return report;
         } catch (err) {
           const msg = (err as Error).message ?? '';
@@ -301,6 +334,9 @@ export async function repositoryIntelligenceRoutes(
           }
           if (msg.includes('no-repository-link')) {
             return reply.code(409).send({ error: 'no-repository-link' });
+          }
+          if (msg.includes('context-index-not-found')) {
+            return reply.code(404).send({ error: 'index-not-found', indexId });
           }
           return reply.code(500).send({ error: 'stale-detection-failed', message: msg.slice(0, 500) });
         }

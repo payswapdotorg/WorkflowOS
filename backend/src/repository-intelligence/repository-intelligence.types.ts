@@ -261,6 +261,15 @@ export interface ContextResolutionContext {
   readonly repositoryOwner: string;
   readonly repositoryName: string;
   readonly installationId: string;
+  /**
+   * The repository authority's default branch (resolved through /github from
+   * the persisted wfos_project_github_repositories row). detectStale compares
+   * the index's pinned baseline_commit_sha against the current HEAD of THIS
+   * branch (NOT a hardcoded 'main' — a repo whose default branch is 'develop'
+   * or 'trunk' must compare against THAT branch's HEAD). The capability NEVER
+   * hardcodes a branch name; it consults the /github authority.
+   */
+  readonly repositoryDefaultBranch: string;
   readonly projectBaselineRepository: ProjectBaselineRepository;
   readonly projectContextIndexRepository: ProjectContextIndexRepository;
   readonly projectGitHubRepositoryRepository: ProjectGitHubRepositoryRepository;
@@ -313,24 +322,61 @@ export interface RepositoryIntelligenceService {
    * returns the SAME row (no duplicate). If the index is already 'complete',
    * returns it (no rebuild). If 'indexing' (a concurrent job is running), the
    * caller observes the existing row (convergence — the loser reconciles).
+   *
+   * CRASH RECOVERY. If ensureIndex returns an 'existing' row whose state is
+   * 'indexing' AND whose updated_at is older than the indexing staleness TTL
+   * (the run is no longer live — a crash after ensureIndex left the row
+   * permanently 'indexing'), this method RECLAIMS the row via
+   * reclaimStaleIndexing (CAS: state='indexing' + version=expected → bump
+   * indexing_run_id + version+1) and re-drives the ranker + markComplete.
+   * The crash/retry guarantee: a crashed indexing run can NEVER permanently
+   * block the same (baseline, query) — a subsequent buildIndex reclaims +
+   * completes. Two concurrent reclaims converge (reclaimStaleIndexing is a
+   * CAS — only one wins; the loser sees cas-lost).
    */
   buildIndex(query: ContextIndexQuery, ctx: ContextResolutionContext): Promise<BuildIndexResult>;
 
   /**
-   * Retrieve the context selection for a baseline+query. If a 'complete'
-   * index exists, returns it. If none exists, builds one. If an 'indexing'
-   * row exists, the caller observes convergence (returns the existing row;
-   * a subsequent retrieve re-reads once the indexing completes). NEVER
-   * silently swaps the baseline under the caller (the index is pinned to
-   * the caller's baselineId + its baseline_commit_sha).
+   * MUTATION — requires WRITE authority. Retrieve the context selection for a
+   * baseline+query, BUILDING ONE IF NONE EXISTS. This is the build-if-missing
+   * convenience for write-authorized programmatic callers (e.g. a future
+   * execution layer that has already proven write authority). The HTTP GET
+   * route MUST NOT call this (it would hide a state mutation behind
+   * `project.read`); the route calls {@link retrieveExisting} instead. A caller
+   * choosing to invoke `retrieve()` directly knows it may build + MUST hold
+   * write authority.
+   *
+   * If a 'complete' index exists for the caller's baseline, returns it. If none
+   * exists, builds one. If an 'indexing' row exists, the caller observes
+   * convergence (returns the existing row; a subsequent retrieve re-reads
+   * once the indexing completes). NEVER silently swaps the baseline under the
+   * caller (the index is pinned to the caller's baselineId + its
+   * baseline_commit_sha).
    */
   retrieve(query: ContextIndexQuery, ctx: ContextResolutionContext): Promise<ContextSelection>;
 
   /**
-   * Detect whether the index's baseline_commit_sha is still the current
-   * repo HEAD. Returns a StaleReport (advisory; the index is NEVER swapped).
+   * READ-ONLY retrieval — never builds, never mutates. Returns the existing
+   * context selection for the caller's baseline+query, or `null` if no
+   * non-terminal index exists for THAT baseline (the caller must POST to build
+   * — the build is a write). The HTTP GET route uses this so a read-authorized
+   * caller can NEVER trigger a state mutation. If an 'indexing' row exists,
+   * returns the convergence selection (empty items; re-read later); this is
+   * NOT a mutation (the row was created by a prior write-authorized caller).
+   * NEVER silently swaps the baseline (the caller's baselineId is the pivot).
    */
-  detectStale(query: ContextIndexQuery, ctx: ContextResolutionContext): Promise<StaleReport>;
+  retrieveExisting(query: ContextIndexQuery, ctx: ContextResolutionContext): Promise<ContextSelection | null>;
+
+  /**
+   * Detect whether the index's baseline_commit_sha is still the current HEAD
+   * of the repository authority's DEFAULT branch (resolved through /github —
+   * NOT a hardcoded 'main'). PINNED TO THE REQUESTED indexId — loads the
+   * index by id (throws context-index-not-found if missing) + compares its
+   * immutable baseline_commit_sha against the current HEAD. Never re-queries
+   * by (project, queryKind, queryRef) — that could inspect a DIFFERENT index
+   * than the one the caller asked about. Advisory; the index is NEVER swapped.
+   */
+  detectStale(indexId: string, ctx: ContextResolutionContext): Promise<StaleReport>;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,4 +389,26 @@ export interface RepositoryIntelligenceServiceDeps {
   /** OPTIONAL — defaults to NoOpHostInspector (no host inspection; '[]' toolInvocationIds; no fabrication). */
   readonly hostInspector?: GovernedHostInspector;
   readonly logger: Logger;
+  /**
+   * OPTIONAL — the indexing-staleness TTL (milliseconds). An 'indexing' index
+   * row whose updated_at is older than this TTL is assumed to belong to a run
+   * that CRASHED (a live run would have completed or touched the row within
+   * the TTL) + is reclaimable by a subsequent buildIndex. Default 5 minutes
+   * (a legitimate concurrent indexing job completes well within that window;
+   * only genuinely-stuck rows are reclaimed). Setting this to 0 reclaims ANY
+   * 'indexing' row not owned by the current caller — useful for crash-recovery
+   * tests; NOT safe for production (would reclaim legitimately in-flight runs).
+   */
+  readonly indexingStaleAfterMs?: number;
+  /**
+   * OPTIONAL — the wall-clock source used by the indexing-staleness TTL
+   * check. Defaults to `() => Date.now()`. Injected by tests so crash-recovery
+   * can be exercised deterministically (inject a clock 10 minutes in the
+   * future → an 'indexing' row whose updated_at is NOW() is past the 5-min TTL
+   * → reclaimed) WITHOUT waiting in real time AND without SQL aging (the
+   * touch trigger on wfos_project_context_indices resets updated_at = NOW()
+   * on every UPDATE, defeating SQL aging). Production wires the default
+   * (Date.now).
+   */
+  readonly clock?: () => number;
 }

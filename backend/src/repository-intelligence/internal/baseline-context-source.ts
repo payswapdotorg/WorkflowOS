@@ -28,9 +28,20 @@
  * PROVENANCE PRESERVATION. Every candidate carries the SAME provenance as
  * its underlying source: a baseline observation with provenance=`inferred`
  * produces a candidate with provenance=`inferred` (NEVER promoted). An
- * architecture version reference is `observed` (it's an authoritative fact).
- * A requirement reference is `observed`. A work-item reference is `observed`.
- * A repository file is `observed`.
+ * architecture version reference is `observed` (it's an authoritative fact the
+ * baseline OBSERVED — the existence of ArchitectureVersion X is a verifiable
+ * source fact). A requirement reference is `observed`. A work-item reference is
+ * `observed`. A repository file is `observed`.
+ *
+ * PROVENANCE ≠ AUTHORITY STATE. The architecture version's `state` ('draft' |
+ * 'frozen' | 'superseded') is a SEPARATE dimension — it describes the
+ * /architecture AUTHORITY's lifecycle for that version, NOT the WORK-038
+ * provenance of the context item that REFERENCES it. A frozen architecture
+ * version is still an OBSERVED reference from the context layer's perspective
+ * (freezing does NOT retroactively `confirm` the context item's provenance;
+ * `confirmed` is reachable ONLY through the authorized confirmation route on a
+ * baseline observation, never through architecture authority state). The
+ * capability NEVER conflates these two dimensions.
  *
  * REDACTION PRESERVATION. The candidate's `redacted` flag is carried through
  * from the underlying baseline evidence (NEVER reversed; the capability never
@@ -114,6 +125,19 @@ export class BaselineContextSource implements ContextSource {
     // 2. Architecture versions for the project (REFERENCES — the item's
     //    authorityRef.architectureVersionId POINTS at the version; the
     //    capability NEVER calls freezeVersion / create).
+    //
+    //    PROVENANCE ≠ AUTHORITY STATE. The version's `state` ('draft' |
+    //    'frozen' | 'superseded') is the /architecture AUTHORITY's lifecycle
+    //    for the version — it is NOT the WORK-038 provenance of the context
+    //    item that REFERENCES it. A frozen architecture version is still an
+    //    OBSERVED reference from the context layer's perspective (freezing
+    //    does NOT retroactively `confirm` the context item; `confirmed` is
+    //    reachable ONLY through the authorized confirmation route on a
+    //    baseline observation, never through architecture authority state).
+    //    The capability records the version's `state` in authorityRef (so the
+    //    consumer can SEE the authority state) + assigns `observed` provenance
+    //    (the existence of the version is a verifiable source fact). The two
+    //    dimensions NEVER collapse.
     try {
       const architectures = await ctx.architectureRepository.findByProject(query.projectId);
       const architecture = architectures[0];
@@ -124,7 +148,7 @@ export class BaselineContextSource implements ContextSource {
             kind: 'architecture_observation',
             locator: v.id,
             source: 'architecture',
-            provenance: v.state === 'frozen' ? 'confirmed' : 'observed',
+            provenance: 'observed', // NEVER promoted — frozen authority state ≠ confirmed provenance
             contentDigest: v.digestSha256 ?? null,
             redacted: false,
             evidenceRef: [],

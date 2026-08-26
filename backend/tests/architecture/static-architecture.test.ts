@@ -10886,7 +10886,7 @@ describe('WORK-039 invariants — Repository and Context Intelligence (context i
     expect(migration, 'migration 0041 enforces baseline_commit_sha immutability').toMatch(/baseline_commit_sha IS DISTINCT FROM OLD\.baseline_commit_sha/);
   });
 
-  it('PROVENANCE PRESERVATION — the ranker NEVER mutates provenance; the storage layer forbids in-place item rewrites', () => {
+  it('PROVENANCE PRESERVATION — the ranker + the source NEVER mutate provenance; the storage layer forbids in-place item rewrites', () => {
     // The ranker passes provenance through verbatim — it NEVER assigns to it.
     // The storage layer's item guard forbids UPDATE (append-only-idempotent).
     const ranker = readFileSync(join(RI_DIR, 'internal', 'deterministic-context-ranker.ts'), 'utf8');
@@ -10902,6 +10902,73 @@ describe('WORK-039 invariants — Repository and Context Intelligence (context i
     const migration = readFileSync(MIGRATION_0041, 'utf8');
     expect(migration, 'migration 0041 forbids in-place item UPDATE').toMatch(/items are append-only — UPDATE is forbidden/);
     expect(migration, 'migration 0041 forbids direct item DELETE').toMatch(/direct DELETE on items is forbidden/);
+
+    // PR #43 round 2 — the source MUST NOT promote provenance to 'confirmed'
+    // based on architecture authority state. The version's `state` ('draft' |
+    // 'frozen' | 'superseded') is the /architecture AUTHORITY's lifecycle —
+    // it is NOT the WORK-038 provenance of the context item that REFERENCES
+    // it. A frozen architecture version is still an OBSERVED reference; the
+    // only path to 'confirmed' is the authorized confirmation route on a
+    // baseline observation. The source must NEVER assign the literal
+    // 'confirmed' to a provenance field (the regex catches both direct
+    // assignment `provenance: 'confirmed'` AND conditional promotion
+    // `provenance: <something> ? 'confirmed' : 'observed'` — both forms
+    // promote authority state into provenance, which is forbidden).
+    const source = readFileSync(join(RI_DIR, 'internal', 'baseline-context-source.ts'), 'utf8');
+    expect(
+      source,
+      'the source must not promote provenance to confirmed (no literal \'confirmed\' assigned to a provenance field — frozen architecture authority state ≠ confirmed provenance)',
+    ).not.toMatch(/provenance:\s*[^,}]*['"]confirmed['"]/);
+  });
+
+  it('READ/MUTATION SEPARATION (PR #43 round 2) — the GET context-index route NEVER invokes the build-if-missing retrieve() under project.read', () => {
+    // Blocker 1: the GET /context-index route used project.read but called
+    // retrieve() — which builds + persists a missing index (ensureIndex +
+    // markComplete are STATE MUTATIONS). Read authorization must NOT hide a
+    // mutation. The fix: the GET route calls retrieveExisting (read-only;
+    // returns null when missing → 404). The build-if-missing retrieve() is
+    // reserved for write-authorized programmatic callers; the route layer
+    // NEVER invokes it (the regex matches `.retrieve(` exactly — NOT
+    // `.retrieveExisting(`, which has `Existing` between `retrieve` + `(`).
+    const route = readFileSync(RI_ROUTE, 'utf8');
+    expect(
+      route,
+      'the route layer must not invoke the build-if-missing retrieve() (read authorization must not hide a state mutation — the GET route uses retrieveExisting)',
+    ).not.toMatch(/repositoryIntelligenceService\.retrieve\(/);
+    // The GET collection route MUST call retrieveExisting (read-only).
+    expect(route, 'the GET collection route calls retrieveExisting').toMatch(/repositoryIntelligenceService\.retrieveExisting\(/);
+    // The GET collection route carries project.read (the read permission).
+    expect(route, 'the GET collection route uses project.read').toMatch(/permission:\s*['"]project\.read['"]/);
+    // The POST build route carries project.write (the write permission).
+    expect(route, 'the POST build route uses project.write').toMatch(/permission:\s*['"]project\.write['"]/);
+    // The route MUST pass repositoryDefaultBranch (the /github authority's
+    // default branch) into the context — detectStale consults it instead of
+    // hardcoding 'main'.
+    expect(route, 'resolveContext carries repositoryDefaultBranch').toMatch(/repositoryDefaultBranch:\s*repoLink\.defaultBranch/);
+    // The stale route MUST call detectStale(indexId, ...) — pinned to the
+    // requested index (NOT detectStale(query, ...), which re-queries by
+    // query tuple + could inspect a different index).
+    expect(route, 'the stale route calls detectStale(indexId, ctx) — pinned to the requested index').toMatch(/detectStale\(indexId,\s*ctx\)/);
+  });
+
+  it('CRASH RECOVERY WIRED (PR #43 round 2) — buildIndex invokes reclaimStaleIndexing (a crashed indexing run is never permanently stuck)', () => {
+    // Blocker 2: reclaimStaleIndexing existed in the /projects storage
+    // authority but buildIndex never invoked it — a crash after ensureIndex
+    // left the index permanently 'indexing' (every subsequent buildIndex
+    // returned cas-lost forever). The fix: buildIndex's 'existing' + 'indexing'
+    // branch calls reclaimStaleIndexing (gated by the staleness TTL — a live
+    // run is NOT prematurely reclaimed) + re-drives markComplete.
+    const orchestrator = readFileSync(join(RI_DIR, 'internal', 'default-repository-intelligence-service.ts'), 'utf8');
+    expect(orchestrator, 'buildIndex calls reclaimStaleIndexing on a stuck indexing row').toMatch(/reclaimStaleIndexing\(/);
+    // The TTL guard — a live run (updated_at within the TTL) is NOT reclaimed.
+    expect(orchestrator, 'buildIndex gates reclaim on the staleness TTL (isStaleIndexing)').toMatch(/isStaleIndexing/);
+    expect(orchestrator, 'the indexing-staleness TTL is configurable (indexingStaleAfterMs)').toMatch(/indexingStaleAfterMs/);
+    // The app.ts composition root MUST wire the TTL (env-configurable, with
+    // a sane default) — the orchestrator must not silently fall back to 0
+    // (which would reclaim legitimately in-flight runs).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts wires indexingStaleAfterMs (env WORKFLOWOS_CONTEXT_INDEX_STALE_AFTER_MS)').toMatch(/WORKFLOWOS_CONTEXT_INDEX_STALE_AFTER_MS/);
+    expect(appSrc, 'app.ts defaults the TTL to 5 minutes').toMatch(/5\s*\*\s*60\s*\*\s*1000/);
   });
 
   it('NO FABRICATED TOOL EVIDENCE — the orchestrator passes hostInspector.toolInvocationIds through verbatim; the NoOp default returns []', () => {

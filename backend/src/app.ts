@@ -1218,6 +1218,19 @@ export async function buildApp(
       // invariant). A real GovernedHostInspector (Workspace +
       // ToolRuntime.invoke) is a future slice.
       logger,
+      // CRASH RECOVERY (PR #43 round 2). The indexing-staleness TTL: an
+      // 'indexing' index row whose updated_at is older than this is assumed
+      // to belong to a run that CRASHED after ensureIndex (a live run
+      // completes well within this window) + is reclaimable by a subsequent
+      // buildIndex. Default 5 min; overridable via env for ops/tuning. A
+      // value of 0 reclaims ANY 'indexing' row not owned by the current
+      // caller (NOT safe for production — would reclaim legitimately
+      // in-flight runs; useful for tests).
+      indexingStaleAfterMs: (() => {
+        const raw = process.env.WORKFLOWOS_CONTEXT_INDEX_STALE_AFTER_MS;
+        const parsed = raw !== undefined ? Number.parseInt(raw, 10) : NaN;
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60 * 1000;
+      })(),
     });
     projectContextIndexRepositoryRef = projectContextIndexRepository;
     repositoryIntelligenceServiceRef = repositoryIntelligenceService;

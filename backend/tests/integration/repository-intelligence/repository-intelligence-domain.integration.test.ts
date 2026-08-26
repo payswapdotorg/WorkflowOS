@@ -172,6 +172,10 @@ describe('WORK-039 — Repository and Context Intelligence (context index + repo
       repositoryOwner: 'test-org',
       repositoryName: 'ri-repo',
       installationId: '12345',
+      // The repository authority's default branch — detectStale compares the
+      // index's pinned baseline_commit_sha against the current HEAD of THIS
+      // branch (NEVER a hardcoded 'main').
+      repositoryDefaultBranch: 'main',
       projectBaselineRepository,
       projectContextIndexRepository,
       projectGitHubRepositoryRepository,
@@ -315,17 +319,23 @@ describe('WORK-039 — Repository and Context Intelligence (context index + repo
     const query = buildQuery();
     const r = await riService.buildIndex(query, buildCtx());
     expect(r.kind).toBe('complete');
-    const report1 = await riService.detectStale(query, buildCtx());
+    // detectStale is now PINNED to the requested indexId (not re-queried by
+    // query tuple — that could inspect a different index).
+    const report1 = await riService.detectStale(r.index.id, buildCtx());
     expect(report1.stale).toBe(false);
     expect(report1.baselineCommitSha).toBe(baselineCommitSha);
     expect(report1.currentHeadSha).toBe(baselineCommitSha);
     (githubAdapter as unknown as { advanceSha: () => void }).advanceSha?.();
-    const report2 = await riService.detectStale(query, buildCtx());
+    const report2 = await riService.detectStale(r.index.id, buildCtx());
     expect(report2.stale).toBe(true);
     expect(report2.baselineCommitSha).toBe(baselineCommitSha);
     expect(report2.currentHeadSha).not.toBe(baselineCommitSha);
-    const sel = await riService.retrieve(query, buildCtx());
-    expect(sel.index.baselineCommitSha).toBe(baselineCommitSha);
+    // retrieveExisting never builds — it returns the existing complete index
+    // (which is pinned to the caller's baseline_commit_sha). The stale HEAD
+    // does NOT swap the baseline under the caller.
+    const sel = await riService.retrieveExisting(query, buildCtx());
+    expect(sel, 'retrieveExisting returns the existing complete index').not.toBeNull();
+    expect(sel!.index.baselineCommitSha).toBe(baselineCommitSha);
   });
 
   it('9. concurrent indexing converges safely (no duplicate items)', async () => {
@@ -364,6 +374,221 @@ describe('WORK-039 — Repository and Context Intelligence (context index + repo
     expect(items.length).toBeGreaterThan(0);
     const locators = items.map((i) => `${i.source}|${i.kind}|${i.locator}`);
     expect(new Set(locators).size).toBe(locators.length);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #43 round 2 — the four blocker fixes (read/mutation separation, crash
+  // recovery wired, stale detection pinned to indexId + uses the repository
+  // authority's default branch, provenance never promoted on frozen arch).
+  // -------------------------------------------------------------------------
+
+  it('10b. buildIndex reclaims a crashed indexing row (no permanent stuck state)', async () => {
+    // Simulate a crash: ensureIndex creates an 'indexing' row whose run is
+    // never driven to markComplete. The touch trigger on
+    // wfos_project_context_indices resets updated_at = NOW() on every UPDATE,
+    // defeating SQL aging — so we inject a CLOCK 10 minutes into the future
+    // to simulate elapsed time past the 5-min TTL (the production default).
+    // The row's updated_at is ~NOW(); the injected clock reads NOW()+10min;
+    // ageMs ≈ 10min > 5min TTL → stale → reclaimable.
+    const fastForwardClock = () => Date.now() + 10 * 60 * 1000;
+    const riServiceReclaim = new DefaultRepositoryIntelligenceService({
+      ranker: new DeterministicContextRanker(),
+      source: new BaselineContextSource(logger),
+      clock: fastForwardClock,
+      logger,
+    });
+    const stuck = await projectContextIndexRepository.ensureIndex({
+      projectId, organizationId: orgId, projectGithubRepositoryId: repoLinkRowId,
+      baselineId, baselineCommitSha, queryKind: 'work_item', queryRef: 'wi-crash-wired',
+      queryTermsJson: {}, indexingRunId: 'crashed-run-wired', toolInvocationIds: [],
+    });
+    expect(stuck.kind).toBe('created');
+    expect(stuck.index.state).toBe('indexing');
+    // buildIndex for the SAME (baseline, query) — the injected clock makes
+    // the row appear past the 5-min TTL → reclaimable. The orchestrator
+    // reclaims + completes (this caller takes ownership + drives markComplete).
+    const query: ContextIndexQuery = {
+      projectId, baselineId, kind: 'work_item', queryRef: 'wi-crash-wired',
+      queryTerms: { workItemTerms: ['package'] } as ContextQueryTerms,
+    };
+    const r = await riServiceReclaim.buildIndex(query, buildCtx());
+    expect(r.kind).toBe('complete');
+    // The SAME row was reclaimed (NOT a new row — the unique constraint on
+    // (baseline_id, query_kind, query_ref) means ensureIndex returned
+    // 'existing' + reclaim took ownership of that exact row).
+    expect(r.index.id).toBe(stuck.index.id);
+    expect(r.index.state).toBe('complete');
+    expect(r.index.indexingRunId).not.toBe('crashed-run-wired');
+    const items = await projectContextIndexRepository.listItems(r.index.id);
+    expect(items.length).toBeGreaterThan(0);
+    const locators = items.map((i) => `${i.source}|${i.kind}|${i.locator}`);
+    expect(new Set(locators).size).toBe(locators.length);
+    // A SECOND buildIndex for the same query re-reads the now-complete row
+    // (idempotent — no reclaim, no rebuild). The crash-recovery did not leave
+    // a second stuck row. (Uses the default riService — the row is 'complete'
+    // so no reclaim path is taken regardless of the clock.)
+    const r2 = await riService.buildIndex(query, buildCtx());
+    expect(r2.kind).toBe('complete');
+    expect(r2.index.id).toBe(stuck.index.id);
+  });
+
+  it('10c. a live concurrent indexing run is NOT prematurely reclaimed (TTL guards reclaim)', async () => {
+    // The TTL (5 min default) ensures a legitimately in-flight run is NOT
+    // reclaimed. ensureIndex creates an 'indexing' row whose updated_at is
+    // NOW() — a live run. A concurrent buildIndex for the same query sees
+    // the row as NOT stale → converges via cas-lost (the normal path), NOT
+    // via reclaim.
+    const stuck = await projectContextIndexRepository.ensureIndex({
+      projectId, organizationId: orgId, projectGithubRepositoryId: repoLinkRowId,
+      baselineId, baselineCommitSha, queryKind: 'work_item', queryRef: 'wi-live-run',
+      queryTermsJson: {}, indexingRunId: 'live-run', toolInvocationIds: [],
+    });
+    expect(stuck.kind).toBe('created');
+    expect(stuck.index.state).toBe('indexing');
+    // Do NOT age the row — updated_at is NOW(). A concurrent buildIndex must
+    // NOT reclaim (the row is fresh — a live run).
+    const query: ContextIndexQuery = {
+      projectId, baselineId, kind: 'work_item', queryRef: 'wi-live-run',
+      queryTerms: { workItemTerms: ['package'] } as ContextQueryTerms,
+    };
+    const r = await riService.buildIndex(query, buildCtx());
+    // The fresh 'indexing' row is NOT reclaimed → the orchestrator returns
+    // cas-lost (convergence — a concurrent live run is in progress; this
+    // caller re-reads later). The row is NOT completed by this caller (the
+    // 'live-run' owns it; this caller did not steal ownership).
+    expect(r.kind).toBe('cas-lost');
+    expect(r.index.id).toBe(stuck.index.id);
+    expect(r.index.state).toBe('indexing');
+    expect(r.index.indexingRunId).toBe('live-run');
+  });
+
+  it('10d. retrieveExisting is READ-ONLY — never builds when missing (the GET route must not mutate)', async () => {
+    // The blocker: the GET /context-index route used project.read but called
+    // retrieve() which builds. The fix: retrieveExisting is read-only; it
+    // returns null when no index exists (the caller POSTs to build — the
+    // build is a write). A read-authorized caller can NEVER trigger a state
+    // mutation through retrieveExisting.
+    const query: ContextIndexQuery = {
+      projectId, baselineId, kind: 'work_item', queryRef: 'wi-no-build',
+      queryTerms: { workItemTerms: ['package'] } as ContextQueryTerms,
+    };
+    const ctx = buildCtx();
+    // No index exists yet → retrieveExisting returns null (NO build).
+    const sel = await riService.retrieveExisting(query, ctx);
+    expect(sel).toBeNull();
+    // Prove NO row was created (the read-only contract):
+    const row = await projectContextIndexRepository.findByQuery(projectId, query.kind, query.queryRef);
+    expect(row).toBeNull();
+    // After a buildIndex (write), retrieveExisting returns the complete index.
+    const built = await riService.buildIndex(query, ctx);
+    expect(built.kind).toBe('complete');
+    const sel2 = await riService.retrieveExisting(query, ctx);
+    expect(sel2).not.toBeNull();
+    expect(sel2!.index.id).toBe(built.index.id);
+    expect(sel2!.freshlyBuilt).toBe(false);
+  });
+
+  it('10e. detectStale is pinned to the requested indexId (never inspects a different index)', async () => {
+    // The blocker: detectStale re-queried by (project, queryKind, queryRef)
+    // + could inspect a DIFFERENT index than the one the caller asked about
+    // (multiple indices can match the same query tuple — e.g. a terminal
+    // 'stale' one + a fresh 'complete' one). The fix: detectStale loads by
+    // indexId — it CANNOT inspect a different index.
+    const query = buildQuery();
+    const ctx = buildCtx();
+    // Build a first complete index, then advance the SHA + build a SECOND
+    // complete index for a DIFFERENT baseline (different revision). The two
+    // indices share (project, queryKind, queryRef) but differ on baselineId.
+    const r1 = await riService.buildIndex(query, ctx);
+    expect(r1.kind).toBe('complete');
+    contentPort.setFile('package.json', JSON.stringify({ name: 'ri-repo', version: '3.0.0' }));
+    (githubAdapter as unknown as { advanceSha: () => void }).advanceSha?.();
+    const r2 = await onboardingService.onboard({ projectId });
+    const query2 = { ...query, baselineId: r2.baseline.id };
+    const ctx2 = { ...ctx, baselineId: r2.baseline.id, baselineCommitSha: r2.baseline.baselineCommitSha };
+    const r1b = await riService.buildIndex(query2, ctx2);
+    expect(r1b.kind).toBe('complete');
+    // detectStale(r1.index.id) MUST report on index 1 (pinned to that id),
+    // even though findByQuery(projectId, kind, queryRef) would return index
+    // 1b (the most recent by created_at DESC). The baseline_commit_sha
+    // reported is index 1's, NOT index 1b's.
+    const report = await riService.detectStale(r1.index.id, ctx);
+    expect(report.index.id).toBe(r1.index.id);
+    expect(report.baselineCommitSha).toBe(r1.index.baselineCommitSha);
+    // detectStale on a non-existent indexId throws (NOT a silent fall-back
+    // to a different index found by query tuple).
+    await expect(
+      riService.detectStale('00000000-0000-0000-0000-000000000000', ctx),
+    ).rejects.toThrow(RepositoryIntelligenceError);
+  });
+
+  it('10f. detectStale uses the repository authority default branch (not a hardcoded "main")', async () => {
+    // The blocker: detectStale hardcoded 'main'. A repo whose default
+    // branch is 'develop' must compare against 'develop's HEAD. The fix:
+    // detectStale uses ctx.repositoryDefaultBranch (the /github authority's
+    // defaultBranch). This test sets the ctx's default branch to 'develop'
+    // + verifies the FakeGitHubAdapter's getBranch is called with
+    // 'develop' (the stale SHA is the 'develop' SHA, not the 'main' SHA).
+    const query = buildQuery();
+    const r = await riService.buildIndex(query, buildCtx());
+    expect(r.kind).toBe('complete');
+    // Use a ctx whose repositoryDefaultBranch is 'develop'. The fake
+    // adapter's getBranch returns a deterministic SHA per branch name:
+    //   main    → fakeshamain0000 (+ nonce)
+    //   develop → fakeshadevelop (+ nonce)
+    // The baseline was produced against 'main' (baselineCommitSha =
+    // fakeshamain0000, nonce 0). detectStale against 'develop' resolves
+    // currentHeadSha = fakeshadevelop0000 (nonce 0) ≠ baselineCommitSha →
+    // stale=true. (If detectStale hardcoded 'main', currentHeadSha would
+    // equal baselineCommitSha → stale=false — the regression this test
+    // guards against.)
+    const ctxDevelop = { ...buildCtx(), repositoryDefaultBranch: 'develop' };
+    const report = await riService.detectStale(r.index.id, ctxDevelop);
+    expect(report.stale).toBe(true);
+    expect(report.baselineCommitSha).toBe(baselineCommitSha);
+    expect(report.currentHeadSha).not.toBe(baselineCommitSha);
+    expect(report.currentHeadSha).toMatch(/^fakeshadevelop/);
+  });
+
+  it('10g. a frozen architecture version does NOT promote provenance to "confirmed" (provenance ≠ authority state)', async () => {
+    // The blocker: BaselineContextSource set architecture items to
+    // provenance='confirmed' when the architecture version's state='frozen'.
+    // Frozen architecture authority state is a SEPARATE dimension from
+    // WORK-038 provenance — freezing does NOT retroactively confirm the
+    // context item's provenance. 'confirmed' is reachable ONLY through the
+    // authorized confirmation route on a baseline observation. The fix:
+    // architecture items are ALWAYS 'observed' (the existence of the
+    // version is a verifiable source fact), regardless of the version's
+    // authority state.
+    const arch = await stack.db.client.query<{ id: string }>(
+      `INSERT INTO wfos_architectures (project_id, name, description)
+       VALUES ($1, 'Frozen Arch', 'a frozen architecture version') RETURNING id`,
+      [projectId],
+    );
+    const architectureId = arch.rows[0]!.id;
+    // Insert a FROZEN architecture version (state='frozen'). The trigger
+    // forbids mutating content columns on a frozen row, but a fresh INSERT
+    // with state='frozen' is allowed.
+    const version = await stack.db.client.query<{ id: string }>(
+      `INSERT INTO wfos_architecture_versions (architecture_id, version_number, state, content_inline, content_length, digest_sha256, frozen_at, frozen_by)
+       VALUES ($1, 1, 'frozen', 'frozen content', 15, 'frozen-digest', NOW(), $2) RETURNING id`,
+      [architectureId, userId],
+    );
+    const versionId = version.rows[0]!.id;
+    // Build an index that references the architecture (the source reads
+    // architecture versions for the project).
+    const query = buildQuery({ architectureRefs: [versionId] });
+    const r = await riService.buildIndex(query, buildCtx());
+    expect(r.kind).toBe('complete');
+    const items = await projectContextIndexRepository.listItems(r.index.id);
+    const archItems = items.filter((i) => i.source === 'architecture');
+    expect(archItems.length, 'the frozen architecture version produced a context item').toBeGreaterThan(0);
+    for (const a of archItems) {
+      // The frozen authority state is recorded in authorityRef.state (the
+      // consumer can SEE it) — but provenance is 'observed', NOT 'confirmed'.
+      expect(a.authorityRef.state).toBe('frozen');
+      expect(a.provenance, 'frozen authority state MUST NOT promote provenance to confirmed').toBe('observed');
+    }
   });
 
   it('11. architecture/requirements relationships remain references (not duplicated)', async () => {
