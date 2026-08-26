@@ -568,85 +568,115 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   }
 
   // =========================================================================
-  // PR #42 round-6 (the DATABASE-LEVEL fence): persist evidence + observations
+  // PR #42 round-7 (the SCOPE-RESOLUTION fence): persist evidence + observations
   // + complete the baseline in ONE PostgreSQL transaction whose commit is
-  // conditioned on the authoritative `wfos_agent_policies` policy row remaining
-  // at the snapshot's version — via a `SELECT ... FOR UPDATE` held from the
-  // version check THROUGH commit.
+  // conditioned on the EFFECTIVE policy resolution remaining at the snapshot's
+  // (source, policyVersion) — via `SELECT ... FOR UPDATE` on the scope ANCHOR
+  // rows (`wfos_projects` + `wfos_organizations`) AND the relevant policy rows,
+  // held from the re-resolution THROUGH commit.
   //
-  // THE ROUND-6 BLOCKER (the architect's review of commit `f229641`): the
-  // round-5 fence wrapped the writes in ONE DB transaction + performed a CAS
-  // on the policy version INSIDE the transaction at TWO revalidation
-  // checkpoints (Check A pre-writes + Check C post-writes). But the
-  // `revalidate()` callback was an independent policy-engine call (it
-  // re-invoked `capturePersistenceSnapshot` → `decideForProjectScope` → a
-  // PLAIN `SELECT` on `wfos_agent_policies`) — NOT a query performed through
-  // the same PostgreSQL transaction holding the baseline persistence
-  // transaction open. So the database transaction did NOT lock or condition
-  // its commit on the policy row remaining V7:
+  // THE ROUND-7 BLOCKER (the architect's review of commit `60dda58`): the
+  // round-6 fence locked ONLY the row represented by `snapshot.source`. That
+  // works when the current effective policy source is an existing project/org
+  // policy row. But consider:
   //
-  //   Check C: policy = V7                     (plain SELECT — no lock held)
+  //   Current effective policy:
+  //       organization policy V7
+  //       project policy does not exist
   //       ↓
-  //   another worker UPDATEs wfos_agent_policies V7 → V8   (no lock blocks it)
+  //   snapshot.source = organization
+  //   snapshot.version = 7
+  //
+  //   T1 starts persistence
   //       ↓
-  //   COMMIT                                   (stale V7 evidence committed under V8)
+  //   locks organization policy row FOR UPDATE
   //
-  // THE ROUND-6 FIX (implemented here): the persistence transaction ACQUIRES
-  // the row lock on the authoritative `wfos_agent_policies` row INSIDE the
-  // same transaction — the lock is held from the version check THROUGH commit.
-  // The application-level `revalidate()` callback is REMOVED.
+  //   T2 creates a NEW project policy row
+  //       ↓
+  //   project policy now overrides organization policy
+  //       ↓
+  //   effective policy has changed
   //
-  // THE FENCE PROTOCOL (the database-level serialization point):
+  //   T1 still holds the organization row
+  //       ↓
+  //   T1 sees organization version 7
+  //       ↓
+  //   T1 commits
+  //
+  // The effective policy changed, but the locked organization row did NOT.
+  // The same problem occurs in the reverse direction when a project policy
+  // is DELETED and resolution falls back to organization. So:
+  //
+  //   policy row immutability ≠ effective policy immutability
+  //
+  // THE ROUND-7 FIX (implemented here): the fence serializes the ENTIRE
+  // scope-resolution decision, not just the currently selected policy
+  // document. The fence locks:
+  //   * the project scope anchor (wfos_projects row) — FOR UPDATE
+  //   * the organization scope anchor (wfos_organizations row) — FOR UPDATE
+  //   * the project-scope policy row (if present) — FOR UPDATE
+  //   * the org-scope policy row (if present) — FOR UPDATE
+  // The anchor locks make a concurrent T2's INSERT/UPDATE/DELETE that can
+  // change the effective resolution BLOCK on the anchor (the project anchor
+  // blocks a NEW project policy INSERT via the FK-induced FOR KEY SHARE;
+  // the org anchor blocks a NEW org policy INSERT similarly). The mutation
+  // paths (setProjectPolicy / clearProjectPolicy / setOrganizationPolicy /
+  // clearOrganizationPolicy in pg-agent-policy-repository.ts) acquire the
+  // SAME anchor lock BEFORE the INSERT/UPDATE/DELETE — so the two
+  // transactions SERIALIZE against each other even when the effective
+  // policy changes because a row is CREATED or DELETED.
+  //
+  // THE FENCE PROTOCOL (the scope-resolution serialization point):
   //
   //   1. BEGIN TRANSACTION.
-  //   2. LOCK + VERIFY the authoritative `wfos_agent_policies` row:
+  //   2. LOCK the scope ANCHOR rows:
+  //      a. SELECT id FROM wfos_projects WHERE id = $proj FOR UPDATE
+  //      b. SELECT id FROM wfos_organizations WHERE id = $org FOR UPDATE
+  //   3. LOCK the relevant policy rows (present OR absent — the anchor
+  //      locks block creation mid-flight):
   //      a. SELECT policy_version FROM wfos_agent_policies
-  //           WHERE scope = 'project' AND organization_id = $org
-  //             AND project_id = $proj
-  //           FOR UPDATE          ← row lock held for the WHOLE transaction
-  //         (the symmetric org-scope query when `snapshot.source ===
-  //         'organization'`; SKIPPED when `snapshot.source ===
-  //         'platform-default'` — no authoritative DB row exists; the platform
-  //         default is a constant, not a row, so there is nothing to mutate
-  //         mid-flight + nothing to lock).
-  //      b. If the row is MISSING (the policy was DELETED mid-flight) →
-  //         ROLLBACK → `fence-stale`.
-  //      c. If the row's policy_version ≠ snapshot.policyVersion (a concurrent
-  //         mutation committed BEFORE this transaction acquired the lock) →
-  //         ROLLBACK → `fence-stale`. READ COMMITTED locked-read semantics
-  //         return the NEWEST committed row, so a mutation that committed
-  //         first is observed here → the predicate rejects.
-  //   3. PER-READ SNAPSHOT VERIFICATION (Check B — retained from round-5):
+  //           WHERE scope='project' AND organization_id=$org AND project_id=$proj
+  //           FOR UPDATE
+  //      b. SELECT policy_version FROM wfos_agent_policies
+  //           WHERE scope='organization' AND organization_id=$org AND project_id IS NULL
+  //           FOR UPDATE
+  //   4. RE-RESOLVE the effective policy from the LOCKED rows:
+  //      project-override → org-default → platform-default.
+  //   5. VERIFY (source, policyVersion) against the snapshot — NOT just
+  //      version. If the effective source DIFFERS from the snapshot's
+  //      source (a row was CREATED or DELETED mid-flight, changing the
+  //      effective resolution) OR the version DIFFERS (an in-place
+  //      mutation committed before the lock) → ROLLBACK → `fence-stale`.
+  //   6. PER-READ SNAPSHOT VERIFICATION (Check B — retained from round-5):
   //      verify `snapshot.policyVersion` matches each evidence row's per-read
   //      `repository_read_enforcement.policyVersion`. If ANY differ →
   //      ROLLBACK → `fence-stale`.
-  //   4. (test seam) If `input.willMutate` is set, invoke it NOW — the row
-  //      lock is held, so a concurrent policy mutation (T2) driven from the
-  //      hook BLOCKS on the FOR UPDATE lock until this transaction commits.
-  //      No-op in production.
-  //   5. WRITES — appendEvidence (idempotent on (baseline_id, source,
-  //      locator)) + upsertObservations (idempotent on (baseline_id, kind,
-  //      claim_digest)) + markComplete (CAS on baseline.version). Lost CAS
-  //      → ROLLBACK → `cas-lost`. NO post-writes revalidation — the row lock
-  //      held since step 2 serializes against ANY concurrent mutation for the
-  //      duration of the writes + commit (a mutation must wait; it cannot
-  //      sneak in between a final revalidation read and COMMIT because there
-  //      IS no separate revalidation read — the lock IS the fence).
-  //   6. COMMIT — releases the row lock. A blocked concurrent mutator (T2)
+  //   7. (test seam) If `input.willMutate` is set, invoke it NOW — the
+  //      scope-anchor locks + the policy-row locks are held, so a concurrent
+  //      policy mutation (T2) driven from the hook BLOCKS on the FOR UPDATE
+  //      locks until this transaction commits. No-op in production.
+  //   8. WRITES — appendEvidence + upsertObservations + markComplete (CAS on
+  //      baseline.version). Lost CAS → ROLLBACK → `cas-lost`. NO post-writes
+  //      revalidation — the locks held since steps 2 + 3 serialize against
+  //      ANY concurrent mutation for the duration of the writes + commit.
+  //   9. COMMIT — releases all the locks. A blocked concurrent mutator (T2)
   //      now proceeds + applies its mutation (the persistence happened-before
   //      the mutation in the serialization order).
-  //   7. Return `persisted` with the completed baseline + the evidence rows.
+  //  10. Return `persisted` with the completed baseline + the evidence rows.
   //
   // SERIALIZATION GUARANTEE: a concurrent policy mutation (via
   // `setProjectPolicy` / `setOrganizationPolicy` / `clearProjectPolicy` /
-  // `clearOrganizationPolicy` — all of which INSERT/UPDATE/DELETE the SAME
-  // `wfos_agent_policies` row the fence locks) must either WAIT for this
-  // transaction to commit (T1 holds the lock → T2 blocks → T1 commits → T2
-  // applies) OR commit first (the fence's locked read sees the NEWEST
-  // committed version → the predicate rejects → ROLLBACK → zero stale
-  // evidence/observations are committed). There is no TOCTOU window between
-  // a revalidation read and COMMIT because the fence IS the row lock — the
-  // serialization point is the database, not an application-level callback.
+  // `clearOrganizationPolicy` — all acquire the SAME anchor lock the fence
+  // holds) must either WAIT for this transaction to commit (T1 holds the
+  // anchor lock → T2 blocks → T1 commits → T2 applies) OR commit FIRST (then
+  // the fence's locked re-resolution sees the NEW effective policy → source/
+  // version mismatch → ROLLBACK → zero stale evidence/observations are
+  // committed). There is no TOCTOU hole for the missing-row cases because the
+  // fence no longer locks a single row — it locks the scope ANCHOR + every
+  // relevant row + re-resolves. The architect's invariant — "policy row
+  // immutability ≠ effective policy immutability" — is honored: the fence
+  // asserts against the EFFECTIVE policy version/source, NOT merely the old
+  // policy row's version.
   //
   // CAS-LOST: the markComplete CAS losing (another worker completed the
   // baseline first) is treated as `cas-lost` — the transaction is ROLLED BACK
@@ -658,12 +688,13 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   // transaction; the outer catch translates it to the `fence-stale` /
   // `cas-lost` result. The `fence-revalidation-failed` variant is retained in
   // the signal's union + the result type + the catch branch for contract
-  // completeness + the round-5 fail-closed architecture invariant; the round-6
-  // fence does NOT throw it (the locked SELECT replaces the application-level
-  // revalidation; a locked-SELECT failure is a genuine infrastructure error
-  // that re-throws, not a typed fence result). This keeps the public method's
-  // contract clean (it never throws for fence-stale — it returns a typed
-  // result; only the genuine infrastructure errors throw).
+  // completeness + the round-5 fail-closed architecture invariant; the
+  // round-7 fence does NOT throw it (the locked re-resolution replaces the
+  // application-level revalidation; a locked-SELECT failure is a genuine
+  // infrastructure error that re-throws, not a typed fence result). This
+  // keeps the public method's contract clean (it never throws for fence-stale
+  // — it returns a typed result; only the genuine infrastructure errors
+  // throw).
   // =========================================================================
 
   async persistBaselineWithPolicyFence(
@@ -673,96 +704,213 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
       const result = await this.db.transaction(async (tx) => {
         const q: Queryable = tx as unknown as Queryable;
 
-        // ---- THE DATABASE-LEVEL FENCE (round-6): LOCK + VERIFY the
-        // authoritative wfos_agent_policies row INSIDE this transaction.
-        // The FOR UPDATE row lock is held for the WHOLE transaction
-        // (through COMMIT), so a concurrent policy mutation
-        // (setProjectPolicy / setOrganizationPolicy / clearProjectPolicy /
-        // clearOrganizationPolicy — all touch the SAME row) must either
-        // WAIT for this transaction to commit OR commit first (then this
-        // locked read returns the NEWEST committed version → the version
-        // predicate rejects → ROLLBACK). This is the serialization point
-        // the architect's round-6 review demanded — NOT an application-
-        // level revalidation callback (which left a TOCTOU window between
-        // the final revalidation read and COMMIT).
-        const source = input.snapshot.source;
-        // The locked row's policy_version (what the fence saw as the
-        // CURRENT authoritative version at lock-acquisition time). null
-        // when no row exists (source='platform-default' OR the row was
-        // deleted mid-flight).
-        let lockedVersion: number | null = null;
-        let lockedScope: 'project' | 'organization' | null = null;
-        if (source === 'project') {
-          const r = await q.query<{ policy_version: number }>(
-            `SELECT policy_version FROM wfos_agent_policies
-              WHERE scope = 'project' AND organization_id = $1 AND project_id = $2
-              FOR UPDATE`,
-            [input.organizationId, input.projectId],
-          );
-          if (r.rows[0]) {
-            lockedVersion = r.rows[0]!.policy_version;
-            lockedScope = 'project';
-          }
-        } else if (source === 'organization') {
-          const r = await q.query<{ policy_version: number }>(
-            `SELECT policy_version FROM wfos_agent_policies
-              WHERE scope = 'organization' AND organization_id = $1 AND project_id IS NULL
-              FOR UPDATE`,
-            [input.organizationId],
-          );
-          if (r.rows[0]) {
-            lockedVersion = r.rows[0]!.policy_version;
-            lockedScope = 'organization';
-          }
-        }
-        // source === 'platform-default' OR null: no authoritative DB row.
-        // The platform default is a constant, not a row — there is nothing
-        // to mutate mid-flight + nothing to lock. Skip the lock + the
-        // version check; the per-read fence already authorized the reads
-        // under the platform default (the fence's only remaining guard is
-        // the per-read snapshot verification — Check B below).
+        // ---- THE SCOPE-RESOLUTION FENCE (round-7): LOCK the scope ANCHORS
+        // + the relevant policy rows + RE-RESOLVE the effective policy
+        // INSIDE this transaction. The round-6 fence locked ONLY the row
+        // represented by `snapshot.source`. The architect's round-7 review
+        // of commit `60dda58` established that locking a single policy row
+        // does NOT fence policy RESOLUTION: when the current effective
+        // source is `organization` (no project policy exists) and a
+        // concurrent T2 CREATES a NEW project policy row, the effective
+        // policy changes (project now overrides organization) but the
+        // locked organization row did NOT change → the round-6 fence let
+        // V7 (org) stale evidence commit under the new V1 (project)
+        // effective policy. The inverse hole existed when a project policy
+        // was DELETED (clearProjectPolicy) and resolution fell back to
+        // organization.
+        //
+        // THE ROUND-7 FIX: the fence locks the SCOPE ANCHOR rows (the
+        // `wfos_projects` + `wfos_organizations` rows — the authoritative
+        // scope boundary every policy row references via FK) PLUS the
+        // relevant policy rows (project-scope AND org-scope, present OR
+        // absent — the anchor lock blocks a NEW project policy row's
+        // FK-induced `FOR KEY SHARE` on the project parent). The fence
+        // then RE-RESOLVES the effective policy from the LOCKED rows
+        // (project-override → org-default → platform-default) and compares
+        // (source, policyVersion) against the snapshot — NOT just version.
+        // If source DIFFERS (the effective policy changed because a row was
+        // created or deleted) OR version differs → ROLLBACK → fence-stale.
+        //
+        // The mutation paths (setProjectPolicy / clearProjectPolicy /
+        // setOrganizationPolicy / clearOrganizationPolicy in
+        // pg-agent-policy-repository.ts) acquire the SAME anchor lock
+        // BEFORE the INSERT/UPDATE/DELETE — so the fence's anchor lock
+        // SERIALIZES against ANY concurrent mutation that can change the
+        // effective resolution, including the missing-row cases (T2 creates
+        // a NEW project policy → blocked on the fence's project anchor
+        // lock; T2 deletes the project policy → blocked on the same lock;
+        // T2 mutates the org default → blocked on the org anchor lock).
+        //
+        // SERIALIZATION GUARANTEE: a concurrent policy mutation must
+        // either WAIT for this transaction to commit (then the mutation
+        // applies AFTER the persistence — happened-before in the
+        // serialization order) OR commit FIRST (then the fence's locked
+        // re-resolution sees the NEW effective policy → source/version
+        // mismatch → ROLLBACK → zero stale evidence/observations are
+        // committed). There is no TOCTOU hole for the missing-row cases
+        // because the fence no longer locks a single row — it locks the
+        // scope ANCHOR + every relevant row + re-resolves.
 
-        // The forensic "revalidated" snapshot: what the fence saw as the
-        // current authoritative state at lock-acquisition time (the locked
-        // row's policy_version; ruleId + decision are NOT read from the
-        // row — the fence uses ONLY policy_version for the DB-level CAS,
-        // mirroring the round-5 fence's version-first drift detection).
+        // ---- 1. Lock the project-scope anchor: SELECT ... FOR UPDATE on
+        // the wfos_projects row. The project's existence is the scope
+        // anchor; every project-scope policy row references it via FK.
+        // The mutation paths (setProjectPolicy / clearProjectPolicy) hold
+        // the SAME lock — they SERIALIZE against this fence. The lock
+        // also blocks a concurrent T2's INSERT into wfos_agent_policies
+        // (FK-induced FOR KEY SHARE on the project parent conflicts with
+        // FOR UPDATE) — the missing-row case 1 (org policy active, T2
+        // creates project policy) is fenced.
+        await q.query(
+          `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+          [input.projectId],
+        );
+
+        // ---- 2. Lock the organization-scope anchor: SELECT ... FOR
+        // UPDATE on the wfos_organizations row. The org anchor covers
+        // every project-scope AND organization-scope mutation in the org.
+        // setOrganizationPolicy / clearOrganizationPolicy acquire this
+        // SAME lock. The lock ALSO blocks a concurrent T2's INSERT of an
+        // org-scope policy row (FK-induced FOR KEY SHARE on the org
+        // parent) — covering the platform-default → organization case.
+        await q.query(
+          `SELECT id FROM wfos_organizations WHERE id = $1 FOR UPDATE`,
+          [input.organizationId],
+        );
+
+        // ---- 3. Lock the project-scope policy row (if present). SELECT
+        // ... FOR UPDATE on the project-scope wfos_agent_policies row.
+        // If the row is absent, this is a no-op (the anchor lock from
+        // step 1 blocks any concurrent T2 from CREATING a new project
+        // policy row mid-flight via the FK-induced lock). If the row is
+        // present, the lock blocks T2's UPDATE/DELETE on this row (the
+        // mutation paths also acquire the anchor lock; the row lock here
+        // is defense-in-depth).
+        const projectPolicyRes = await q.query<{ policy_version: number }>(
+          `SELECT policy_version FROM wfos_agent_policies
+            WHERE scope = 'project' AND organization_id = $1 AND project_id = $2
+            FOR UPDATE`,
+          [input.organizationId, input.projectId],
+        );
+        const projectPolicyRow = projectPolicyRes.rows[0] ?? null;
+
+        // ---- 4. Lock the organization-scope policy row (if present).
+        // SELECT ... FOR UPDATE on the org-scope wfos_agent_policies row.
+        // Same rationale as step 3 for the org-scope row.
+        const orgPolicyRes = await q.query<{ policy_version: number }>(
+          `SELECT policy_version FROM wfos_agent_policies
+            WHERE scope = 'organization' AND organization_id = $1 AND project_id IS NULL
+            FOR UPDATE`,
+          [input.organizationId],
+        );
+        const orgPolicyRow = orgPolicyRes.rows[0] ?? null;
+
+        // ---- 5. RE-RESOLVE the effective policy from the LOCKED rows.
+        // The effective policy is: project-override → org-default →
+        // platform-default. The fence's resolution mirrors the policy
+        // engine's getEffectivePolicy (project → org → null), but reads
+        // from the LOCKED rows inside this transaction (so the resolution
+        // is consistent with the lock state — no concurrent mutation can
+        // change it between the read and COMMIT).
+        let effectiveSource: 'project' | 'organization' | 'platform-default';
+        let effectiveVersion: number | null;
+        if (projectPolicyRow) {
+          effectiveSource = 'project';
+          effectiveVersion = projectPolicyRow.policy_version;
+        } else if (orgPolicyRow) {
+          effectiveSource = 'organization';
+          effectiveVersion = orgPolicyRow.policy_version;
+        } else {
+          effectiveSource = 'platform-default';
+          effectiveVersion = null;
+        }
+
+        // ---- 6. VERIFY the snapshot's (source, policyVersion) against
+        // the LOCKED re-resolved effective policy. The architect's
+        // round-7 invariant: assert against the EFFECTIVE policy
+        // version/source, NOT merely the old policy row's version. The
+        // source comparison catches the missing-row cases (snapshot
+        // source='organization' but the effective is now 'project' →
+        // a project policy was created mid-flight; OR snapshot
+        // source='project' but the effective is now 'organization' →
+        // the project policy was deleted mid-flight). The version
+        // comparison catches in-place document mutations on the SAME
+        // source (the round-6 invariant, retained).
         const lockedRow: PersistencePolicySnapshot = {
-          source,
-          policyVersion: lockedVersion,
+          source: effectiveSource,
+          policyVersion: effectiveVersion,
           ruleId: input.snapshot.ruleId,
           decision: input.snapshot.decision,
           reason: null,
         };
 
-        // Verify the locked row's version matches the snapshot (when the
-        // snapshot surfaced a version + the source expects a row).
-        if (source === 'project' || source === 'organization') {
-          if (lockedVersion === null) {
-            // The authoritative row is MISSING — the policy was DELETED
-            // mid-flight (clearProjectPolicy / clearOrganizationPolicy
-            // committed between the capture and the lock). ROLLBACK.
-            throw new FenceStaleSignal(
-              'fence-stale',
-              input.snapshot,
-              lockedRow,
-              `the persistence-boundary DATABASE-LEVEL fence REJECTED the persist at the LOCK + VERIFY step: the authoritative wfos_agent_policies row (source=${source}, organization_id=${input.organizationId}${source === 'project' ? `, project_id=${input.projectId}` : ''}) is MISSING — the policy row was deleted mid-flight (clearProjectPolicy/clearOrganizationPolicy committed between the capture and the lock); the transaction is rolled back (zero evidence/observations are committed)`,
-            );
-          }
-          if (
-            input.snapshot.policyVersion !== null &&
-            lockedVersion !== input.snapshot.policyVersion
-          ) {
-            // The authoritative row's version DIFFERS from the snapshot —
-            // a concurrent mutation committed BEFORE this transaction
-            // acquired the FOR UPDATE lock. ROLLBACK.
-            throw new FenceStaleSignal(
-              'fence-stale',
-              input.snapshot,
-              lockedRow,
-              `the persistence-boundary DATABASE-LEVEL fence REJECTED the persist at the LOCK + VERIFY step: the authoritative wfos_agent_policies row (scope=${lockedScope}, organization_id=${input.organizationId}${lockedScope === 'project' ? `, project_id=${input.projectId}` : ''}) carries policy_version=${lockedVersion} which does NOT match the snapshot's policyVersion=${input.snapshot.policyVersion} — a concurrent policy mutation committed BEFORE this transaction acquired the FOR UPDATE row lock; the transaction is rolled back (zero evidence/observations are committed)`,
-            );
-          }
+        if (input.snapshot.source !== null && effectiveSource !== input.snapshot.source) {
+          // The effective source DIFFERS from the snapshot's source —
+          // the effective policy CHANGED because a row was CREATED
+          // (e.g., snapshot='organization' but effective='project' —
+          // T2 created a project policy that overrides the org default)
+          // OR DELETED (e.g., snapshot='project' but
+          // effective='organization' — T2 cleared the project policy
+          // and resolution fell back to the org default). ROLLBACK.
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            lockedRow,
+            `the persistence-boundary SCOPE-RESOLUTION fence REJECTED the persist at the EFFECTIVE-POLICY re-resolution step: the snapshot's source '${input.snapshot.source}' does NOT match the locked re-resolved effective source '${effectiveSource}' — the effective policy changed because a wfos_agent_policies row was CREATED (a project override was added or an org default was created) or DELETED (a project override was cleared or an org default was cleared) between the snapshot capture and the fence's lock acquisition; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
+        }
+        // If the snapshot surfaced no source (the capture failed-closed),
+        // skip the source comparison (best-effort — same fail-closed
+        // behavior as the round-4 fence).
+
+        // Source matches (or the snapshot failed-closed to null). Now
+        // verify the version (when both the snapshot + the effective
+        // resolution surfaced one). The version comparison catches in-
+        // place document mutations on the SAME source (the round-6
+        // invariant): setProjectPolicy / setOrganizationPolicy bump
+        // policy_version on UPDATE; the fence's locked read returns
+        // the NEWEST committed version → mismatch → ROLLBACK.
+        if (
+          input.snapshot.policyVersion !== null &&
+          effectiveVersion !== null &&
+          input.snapshot.policyVersion !== effectiveVersion
+        ) {
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            lockedRow,
+            `the persistence-boundary SCOPE-RESOLUTION fence REJECTED the persist at the EFFECTIVE-POLICY re-resolution step: the snapshot's policyVersion=${input.snapshot.policyVersion} does NOT match the locked re-resolved effective policyVersion=${effectiveVersion} (source=${effectiveSource}) — a concurrent policy mutation committed BEFORE this transaction acquired the FOR UPDATE row lock; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
+        }
+
+        // Special case: the snapshot source is 'project' OR
+        // 'organization' but the LOCKED row for that source is MISSING
+        // (the row was deleted mid-flight). This is caught by the source
+        // comparison above (effectiveSource will differ — e.g.,
+        // snapshot='project' but projectPolicyRow is null →
+        // effectiveSource='organization' or 'platform-default' → mismatch
+        // → ROLLBACK). The explicit missing-row check below is defense-
+        // in-depth (the source comparison is the primary guard).
+        if (
+          input.snapshot.source === 'project' &&
+          projectPolicyRow === null
+        ) {
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            lockedRow,
+            `the persistence-boundary SCOPE-RESOLUTION fence REJECTED the persist: the snapshot's source is 'project' but the locked project-scope wfos_agent_policies row is MISSING — the project override was deleted mid-flight (clearProjectPolicy committed between the snapshot capture and the fence's lock); the effective resolution has fallen back to '${effectiveSource}'; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
+        }
+        if (
+          input.snapshot.source === 'organization' &&
+          orgPolicyRow === null
+        ) {
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            lockedRow,
+            `the persistence-boundary SCOPE-RESOLUTION fence REJECTED the persist: the snapshot's source is 'organization' but the locked organization-scope wfos_agent_policies row is MISSING — the org default was deleted mid-flight (clearOrganizationPolicy committed between the snapshot capture and the fence's lock); the effective resolution has fallen back to '${effectiveSource}'; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
         }
 
         // ---- Check B: PER-READ SNAPSHOT VERIFICATION (retained from round-5).
@@ -859,13 +1007,19 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
           );
         }
 
-        // ---- NO post-writes revalidation (round-6): the FOR UPDATE row
-        // lock held since the LOCK + VERIFY step serializes against ANY
-        // concurrent mutation for the duration of the writes + commit. A
-        // mutation cannot sneak in between a final revalidation read and
-        // COMMIT because there IS no separate revalidation read — the lock
-        // IS the fence. The transaction will COMMIT, releasing the lock;
-        // a blocked concurrent mutator (T2) now proceeds + applies its
+        // ---- NO post-writes revalidation (round-7): the scope-anchor row
+        // locks (FOR UPDATE on wfos_projects + wfos_organizations, held
+        // since steps 1 + 2) PLUS the policy-row locks (steps 3 + 4)
+        // serialize against ANY concurrent mutation that can change the
+        // effective policy resolution for the duration of the writes +
+        // commit. A mutation cannot sneak in between the fence's
+        // re-resolution read and COMMIT because the locks held since the
+        // re-resolution block any concurrent mutation (whether in-place on
+        // an existing row, OR a NEW row creation that would change the
+        // effective source, OR a row DELETION that would change the
+        // effective source) — the source/version comparison is final.
+        // The transaction will COMMIT, releasing all the locks; a
+        // blocked concurrent mutator (T2) now proceeds + applies its
         // mutation (the persistence happened-before the mutation in the
         // serialization order).
 

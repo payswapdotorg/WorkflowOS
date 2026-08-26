@@ -10435,25 +10435,41 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     // callback rolls back on the throw).
     expect(repo, 'the fence uses db.transaction').toMatch(/this\.db\.transaction\(/);
     expect(repo, 'the fence has the FenceStaleSignal sentinel').toMatch(/class FenceStaleSignal extends Error/);
-    // PR #42 round-6: the application-level staleness check
-    // (isPersistenceSnapshotStale, used by the round-5 Check A + Check C
-    // revalidation) is REMOVED — the round-6 fence replaces it with a
-    // database-level SELECT ... FOR UPDATE on the authoritative
-    // wfos_agent_policies row (the lock held from the version check
-    // through COMMIT IS the fence; no separate revalidation read to
-    // TOCTOU).
-    expect(repo, 'round-6: the fence locks the authoritative policy row FOR UPDATE').toMatch(/SELECT policy_version FROM wfos_agent_policies[\s\S]*FOR UPDATE/);
-    expect(repo, 'round-6: the fence locks the project-scope row').toMatch(/scope = 'project' AND organization_id = \$1 AND project_id = \$2/);
-    expect(repo, 'round-6: the fence locks the organization-scope row').toMatch(/scope = 'organization' AND organization_id = \$1 AND project_id IS NULL/);
-    // The fence protocol: LOCK + VERIFY (round-6 DB-level fence) + per-read
-    // snapshot verification (Check B — retained from round-5). NO post-
-    // writes revalidation — the FOR UPDATE row lock held for the whole
-    // transaction IS the fence (no separate revalidation read to TOCTOU).
-    expect(repo, 'round-6: the LOCK + VERIFY step').toMatch(/LOCK \+ VERIFY/);
+    // PR #42 round-7: the fence is the SCOPE-RESOLUTION fence. It locks the
+    // scope ANCHOR rows (wfos_projects + wfos_organizations) + the
+    // relevant policy rows (project + org, present OR absent) + RE-
+    // RESOLVES the effective policy INSIDE the transaction. The round-6
+    // fence locked ONLY the row represented by `snapshot.source`; the
+    // architect's round-7 review established that locking a single row
+    // does NOT fence policy RESOLUTION (a NEW project policy row can
+    // override the org default mid-flight without changing the locked org
+    // row). The round-7 fence serializes the ENTIRE scope-resolution
+    // decision — assert against the EFFECTIVE policy version/source, NOT
+    // merely the old policy row's version.
+    expect(repo, 'round-7: the fence locks the project scope anchor (wfos_projects) FOR UPDATE').toMatch(/SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the organization scope anchor (wfos_organizations) FOR UPDATE').toMatch(/SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the project-scope policy row FOR UPDATE').toMatch(/scope = 'project' AND organization_id = \$1 AND project_id = \$2[\s\S]*FOR UPDATE/);
+    expect(repo, 'round-7: the fence locks the organization-scope policy row FOR UPDATE').toMatch(/scope = 'organization' AND organization_id = \$1 AND project_id IS NULL[\s\S]*FOR UPDATE/);
+    // The fence RE-RESOLVES the effective policy from the locked rows
+    // (project-override → org-default → platform-default).
+    expect(repo, 'round-7: the fence RE-RESOLVES the effective policy (project → org → platform-default)').toMatch(/effectiveSource/);
+    // The fence VERIFY step compares (source, policyVersion) against the
+    // snapshot — NOT just version. The source comparison catches the
+    // missing-row cases (a row was CREATED or DELETED mid-flight, changing
+    // the effective resolution).
+    expect(repo, 'round-7: the fence compares the effective source against the snapshot source').toMatch(/effectiveSource !== input\.snapshot\.source/);
+    expect(repo, 'round-7: the fence compares the effective version against the snapshot version').toMatch(/input\.snapshot\.policyVersion !== effectiveVersion/);
+    // The fence protocol: LOCK the scope anchors + the relevant policy
+    // rows + RE-RESOLVE + VERIFY (round-7 scope-resolution fence) + per-
+    // read snapshot verification (Check B — retained from round-5). NO
+    // post-writes revalidation — the locks held since the LOCK step
+    // serialize against ANY concurrent mutation for the duration of the
+    // writes + commit.
+    expect(repo, 'round-7: the SCOPE-RESOLUTION fence step').toMatch(/SCOPE-RESOLUTION fence/);
     expect(repo, 'Check B — per-read snapshot verification').toMatch(/PER-READ SNAPSHOT VERIFICATION/);
-    expect(repo, 'round-6: NO post-writes revalidation (the lock IS the fence)').toMatch(/NO post-writes revalidation/);
+    expect(repo, 'round-7: NO post-writes revalidation (the locks are the fence)').toMatch(/NO post-writes revalidation/);
     // The willMutate test seam (for the real-PG concurrency regression).
-    expect(repo, 'round-6: the willMutate test seam').toMatch(/input\.willMutate/);
+    expect(repo, 'round-7: the willMutate test seam').toMatch(/input\.willMutate/);
     // The fence rejects (ROLLBACK) when ANY check fails. The reject
     // messages reference the per-read verification (the architect's exact
     // regression scenario).
@@ -10485,21 +10501,49 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(types, 'PersistBaselineResult has the cas-lost kind').toMatch(/kind: 'cas-lost'/);
     expect(types, 'PersistBaselineResult has the fence-stale kind').toMatch(/kind: 'fence-stale'/);
     expect(types, 'PersistBaselineResult has the fence-revalidation-failed kind').toMatch(/kind: 'fence-revalidation-failed'/);
-    // PR #42 round-6 type-level invariants: the snapshot carries `source`
-    // (which authoritative row backs it) + the input carries organizationId /
-    // projectId (the lock target) + the optional willMutate test seam.
-    expect(types, 'round-6: PersistencePolicySource type is defined').toMatch(/export type PersistencePolicySource/);
-    expect(types, 'round-6: PersistencePolicySnapshot carries source').toMatch(/readonly source: PersistencePolicySource \| null/);
-    expect(types, 'round-6: PersistBaselineInput carries organizationId').toMatch(/readonly organizationId: string/);
-    expect(types, 'round-6: PersistBaselineInput carries projectId').toMatch(/readonly projectId: string/);
-    expect(types, 'round-6: PersistBaselineInput carries the willMutate test seam').toMatch(/readonly willMutate\?: \(\) => Promise<void>/);
+    // PR #42 round-7 type-level invariants: the snapshot carries `source`
+    // (which effective scope the gate surfaced) + the input carries
+    // organizationId / projectId (the scope anchor lock targets) + the
+    // optional willMutate test seam.
+    expect(types, 'round-7: PersistencePolicySource type is defined').toMatch(/export type PersistencePolicySource/);
+    expect(types, 'round-7: PersistencePolicySnapshot carries source').toMatch(/readonly source: PersistencePolicySource \| null/);
+    expect(types, 'round-7: PersistBaselineInput carries organizationId').toMatch(/readonly organizationId: string/);
+    expect(types, 'round-7: PersistBaselineInput carries projectId').toMatch(/readonly projectId: string/);
+    expect(types, 'round-7: PersistBaselineInput carries the willMutate test seam').toMatch(/readonly willMutate\?: \(\) => Promise<void>/);
     // The /projects barrel re-exports the new types so the onboarding
     // orchestrator can compose them.
     const barrel = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
     expect(barrel, 'the /projects barrel re-exports PersistencePolicySnapshot').toMatch(/PersistencePolicySnapshot/);
-    expect(barrel, 'round-6: the /projects barrel re-exports PersistencePolicySource').toMatch(/PersistencePolicySource/);
+    expect(barrel, 'round-7: the /projects barrel re-exports PersistencePolicySource').toMatch(/PersistencePolicySource/);
     expect(barrel, 'the /projects barrel re-exports PersistBaselineInput').toMatch(/PersistBaselineInput/);
     expect(barrel, 'the /projects barrel re-exports PersistBaselineResult').toMatch(/PersistBaselineResult/);
+  });
+
+  it('PR #42 r7: the policy mutation paths acquire the SAME scope-anchor lock the fence holds (the missing-row cases are fenced)', () => {
+    // The architect's round-7 requirement: policy mutations that can
+    // change resolution must acquire the SAME anchor lock before
+    // create/replace/clear project policy or modify/clear organization
+    // policy. The fence holds SELECT ... FOR UPDATE on wfos_projects +
+    // wfos_organizations; the mutation paths in
+    // pg-agent-policy-repository.ts acquire the SAME locks BEFORE the
+    // INSERT/UPDATE/DELETE so the two transactions SERIALIZE even when
+    // the effective policy changes because a row is CREATED (the
+    // architect's missing-row case 1) or DELETED (case 2).
+    const repo = readFileSync(
+      join(MODULES_DIR, 'agents', 'internal', 'pg-agent-policy-repository.ts'),
+      'utf8',
+    );
+    // setProjectPolicy acquires the project-scope anchor lock.
+    expect(repo, 'setProjectPolicy acquires the project anchor lock').toMatch(/async setProjectPolicy\([\s\S]*?SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE[\s\S]*?INSERT INTO wfos_agent_policies/s);
+    // clearProjectPolicy acquires the project-scope anchor lock (the DELETE
+    // itself does NOT auto-lock the parent — the explicit lock is required
+    // to fence the missing-row case 2: project policy deleted → resolution
+    // falls back to organization).
+    expect(repo, 'clearProjectPolicy acquires the project anchor lock').toMatch(/async clearProjectPolicy\([\s\S]*?SELECT id FROM wfos_projects WHERE id = \$1 FOR UPDATE[\s\S]*?DELETE FROM wfos_agent_policies/s);
+    // setOrganizationPolicy acquires the organization-scope anchor lock.
+    expect(repo, 'setOrganizationPolicy acquires the org anchor lock').toMatch(/async setOrganizationPolicy\([\s\S]*?SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE[\s\S]*?INSERT INTO wfos_agent_policies/s);
+    // clearOrganizationPolicy acquires the organization-scope anchor lock.
+    expect(repo, 'clearOrganizationPolicy acquires the org anchor lock').toMatch(/async clearOrganizationPolicy\([\s\S]*?SELECT id FROM wfos_organizations WHERE id = \$1 FOR UPDATE[\s\S]*?DELETE FROM wfos_agent_policies/s);
   });
 
   it('PR #42 r5: the orchestrator captures the persistence snapshot + delegates to persistBaselineWithPolicyFence (the persistence window is fenced)', () => {
@@ -10519,12 +10563,13 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     expect(orchestrator, 'the orchestrator captures the persistence snapshot').toMatch(/capturePersistenceSnapshot\(/);
     expect(orchestrator, 'the orchestrator delegates to persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
     expect(orchestrator, 'the orchestrator passes the snapshot through the input').toMatch(/snapshot:\s*persistenceSnapshot/);
-    // PR #42 round-6: the orchestrator passes organizationId + projectId
-    // (the fence locks the authoritative wfos_agent_policies row for this
-    // org/project). The round-5 revalidate() closure is REMOVED — the
-    // database-level FOR UPDATE lock replaces it.
-    expect(orchestrator, 'round-6: the orchestrator passes organizationId').toMatch(/organizationId:\s*analysisContext\.organizationId/);
-    expect(orchestrator, 'round-6: the orchestrator passes projectId').toMatch(/projectId:\s*analysisContext\.projectId/);
+    // PR #42 round-7: the orchestrator passes organizationId + projectId
+    // (the fence locks the scope ANCHOR rows wfos_projects +
+    // wfos_organizations for this org/project, plus the relevant policy
+    // rows). The round-5 revalidate() closure is REMOVED — the round-7
+    // scope-resolution fence replaces it.
+    expect(orchestrator, 'round-7: the orchestrator passes organizationId').toMatch(/organizationId:\s*analysisContext\.organizationId/);
+    expect(orchestrator, 'round-7: the orchestrator passes projectId').toMatch(/projectId:\s*analysisContext\.projectId/);
     // The fence-rejection paths: markFailed with the 'policy-snapshot-stale-
     // at-persistence' / 'policy-snapshot-revalidation-failed' failure stage.
     expect(orchestrator, 'the fence-stale path markFailed').toMatch(/policy-snapshot-stale-at-persistence/);

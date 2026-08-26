@@ -123,12 +123,43 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     return res.rows[0] ? mapPolicy(res.rows[0]) : null;
   }
 
+  // =========================================================================
+  // PR #42 round-7 (the scope-resolution fence): every mutation that can
+  // change the EFFECTIVE policy resolution for a project scope must acquire
+  // the SAME anchor row lock the persistence fence holds. The anchor is the
+  // `wfos_projects` (or `wfos_organizations`) row itself — the authoritative
+  // scope boundary that EXISTS for every valid scope and that every policy
+  // row references via FK. The fence holds `SELECT ... FOR UPDATE` on the
+  // project + org anchor rows for the WHOLE persistence transaction; the
+  // mutation paths below acquire the SAME `FOR UPDATE` lock BEFORE the
+  // INSERT/UPDATE/DELETE so the two transactions SERIALIZE against each other
+  // even when the EFFECTIVE policy changes because a policy row is CREATED
+  // (setProjectPolicy when no row existed) or DELETED (clearProjectPolicy
+  // when the row falls back to organization). The FK-induced `FOR KEY SHARE`
+  // on the parent row, taken automatically by an INSERT, also conflicts
+  // with the fence's `FOR UPDATE` (so the INSERT alone would block) — but
+  // the explicit `FOR UPDATE` here (a) documents the invariant, (b) covers
+  // the DELETE path (which PostgreSQL does NOT auto-lock the parent for),
+  // and (c) survives a future schema change that drops or weakens the FK.
+  // =========================================================================
+
   async setProjectPolicy(input: {
     organizationId: string;
     projectId: string;
     document: AgentPolicyDocument;
     userId: string;
   }): Promise<AgentPolicyResolution> {
+    // PR #42 round-7: acquire the project-scope anchor lock (FOR UPDATE on
+    // the wfos_projects row). The persistence fence holds this SAME lock
+    // through its whole transaction; a concurrent baseline persistence run
+    // BLOCKS this mutation until the fence commits (or this mutation
+    // BLOCKS the fence — they serialize). This makes "create a NEW project
+    // policy row" (the architect's missing-row case 1) a serialization
+    // point, NOT a TOCTOU hole.
+    await this.deps.db.query(
+      `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+      [input.projectId],
+    );
     const json = JSON.stringify(input.document);
     // ON CONFLICT on the partial unique index
     // (organization_id, project_id) WHERE scope='project'. The trigger
@@ -146,6 +177,20 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
   }
 
   async clearProjectPolicy(organizationId: string, projectId: string): Promise<boolean> {
+    // PR #42 round-7: acquire the project-scope anchor lock (FOR UPDATE on
+    // the wfos_projects row). The DELETE itself does NOT auto-lock the
+    // parent (PostgreSQL's FK machinery locks the parent only on
+    // INSERT/UPDATE of the FK column). The explicit lock makes
+    // "clearProjectPolicy" (the architect's missing-row case 2 — the
+    // project policy is deleted and resolution falls back to organization)
+    // serialize against the persistence fence: the fence either sees the
+    // project policy still present (commits under it) OR sees it gone (the
+    // re-resolution sees the org fallback → source differs from the
+    // snapshot's 'project' source → ROLLBACK → zero stale evidence).
+    await this.deps.db.query(
+      `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
+      [projectId],
+    );
     const res = await this.deps.db.query(
       `DELETE FROM wfos_agent_policies
         WHERE scope = 'project' AND organization_id = $1 AND project_id = $2`,
@@ -159,6 +204,16 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
     document: AgentPolicyDocument;
     userId: string;
   }): Promise<AgentPolicyResolution> {
+    // PR #42 round-7: acquire the organization-scope anchor lock (FOR
+    // UPDATE on the wfos_organizations row). The persistence fence holds
+    // this SAME lock; creating or replacing the org default policy (which
+    // can change the effective resolution for EVERY project in the org
+    // that lacks a project override) serializes against any concurrent
+    // baseline persistence in the org.
+    await this.deps.db.query(
+      `SELECT id FROM wfos_organizations WHERE id = $1 FOR UPDATE`,
+      [input.organizationId],
+    );
     const json = JSON.stringify(input.document);
     const res = await this.deps.db.query<PolicyRow>(
       `INSERT INTO wfos_agent_policies
@@ -173,6 +228,15 @@ export class PgAgentPolicyRepository implements AgentPolicyRepository {
   }
 
   async clearOrganizationPolicy(organizationId: string): Promise<boolean> {
+    // PR #42 round-7: acquire the organization-scope anchor lock (FOR
+    // UPDATE on the wfos_organizations row). Clearing the org default
+    // changes the effective resolution for every project in the org that
+    // lacks a project override (falls back to platform-default). The
+    // explicit lock serializes this against the persistence fence.
+    await this.deps.db.query(
+      `SELECT id FROM wfos_organizations WHERE id = $1 FOR UPDATE`,
+      [organizationId],
+    );
     const res = await this.deps.db.query(
       `DELETE FROM wfos_agent_policies WHERE scope = 'organization' AND organization_id = $1`,
       [organizationId],
