@@ -24,6 +24,7 @@ import type {
   CreateCrossModeHandoffInput,
   CrossModeHandoffRecord,
   CrossModeHandoffRepository,
+  PendingCrossModeHandoff,
 } from './cross-mode-handoff.types.js';
 import { CrossModeHandoffError } from './cross-mode-handoff.types.js';
 
@@ -163,6 +164,49 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
       [key],
     );
     return result.rows[0] ? rowToHandoff(result.rows[0]) : null;
+  }
+
+  /**
+   * PR #46 review #2: the boot-sweep query. Lists ALL pending cross-mode-
+   * handoff obligations (discharged_at IS NULL) joined to the handoff log +
+   * the execution to project the LOGICAL executionId the reconciliation
+   * consumes. Idempotent: a duplicate sweep enqueues duplicate relay jobs,
+   * which are harmless (the reconciliation is idempotent — a complete
+   * handoff discharges + no-ops).
+   */
+  async listPendingHandoffObligations(): Promise<readonly PendingCrossModeHandoff[]> {
+    const result = await this.db.query<{ obligation_id: string; handoff_id: string; execution_id: string }>(
+      `SELECT o.id AS obligation_id, o.handoff_id, e.execution_id
+       FROM wfos_cross_mode_handoff_obligations o
+       JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+       JOIN wfos_executions e ON e.id = o.execution_id
+       WHERE o.discharged_at IS NULL
+       ORDER BY o.created_at ASC`,
+    );
+    return result.rows.map((r) => ({
+      obligationId: r.obligation_id,
+      handoffId: r.handoff_id,
+      executionId: r.execution_id,
+    }));
+  }
+
+  /**
+   * PR #46 review #2: idempotently discharge a cross-mode-handoff obligation
+   * (set discharged_at = NOW()). Returns true when a row was discharged,
+   * false when the obligation was already discharged (a repeated recovery /
+   * a fast path that won the race before the discharge). The obligation is
+   * append-only — only the discharge column changes (the immutability trigger
+   * on wfos_cross_mode_handoff_obligations enforces this).
+   */
+  async dischargeHandoffObligation(handoffId: string): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>(
+      `UPDATE wfos_cross_mode_handoff_obligations
+         SET discharged_at = NOW()
+       WHERE handoff_id = $1 AND discharged_at IS NULL
+       RETURNING id`,
+      [handoffId],
+    );
+    return result.rows.length > 0;
   }
 }
 

@@ -153,6 +153,15 @@ export interface CreateCrossModeHandoffInput {
  * on `execution_record_id` (a second handoff for the same execution) is typed
  * as {@link CrossModeHandoffError} with code 'cross-mode-handoff-already-exists'
  * so the service can decide idempotent-convergence vs reject.
+ *
+ * PR #46 review correction #2 (durable crash recovery): the repository ALSO
+ * owns the cross-mode-handoff obligation surface (migration 0043 — the
+ * transactional-outbox row written ATOMICALLY with the reserve by an AFTER
+ * INSERT trigger). {@link listPendingHandoffObligations} is the boot-sweep
+ * query; {@link dischargeHandoffObligation} is the idempotent discharge. The
+ * obligation row is the durable source of truth for an in-flight handoff; the
+ * relay + the boot sweep guarantee eventual delivery (mirrors the WORK-034
+ * session-terminal obligation + the WORK-035 workspace-release obligation).
  */
 export interface CrossModeHandoffRepository {
   /**
@@ -162,12 +171,48 @@ export interface CrossModeHandoffRepository {
    * `execution_record_id` (the service re-queries to decide convergence vs
    * reject). A 23505 on `idempotency_key` is also surfaced the same way (the
    * service resolves it via {@link findByIdempotencyKey}).
+   *
+   * PR #46 review #2: migration 0043's AFTER INSERT trigger writes the
+   * durable handoff obligation ATOMICALLY with this INSERT — there is no
+   * window where the handoff log exists but the obligation is missing.
    */
   createHandoff(input: CreateCrossModeHandoffInput): Promise<CrossModeHandoffRecord>;
   /** Find the (at most one) handoff row for an execution's record UUID. */
   findByExecutionId(executionId: string): Promise<CrossModeHandoffRecord | null>;
   /** Find a handoff row by its idempotency key (convergence check). */
   findByIdempotencyKey(key: string): Promise<CrossModeHandoffRecord | null>;
+  /**
+   * PR #46 review #2: list ALL pending cross-mode-handoff obligations (the
+   * boot-sweep query — relay jobs are enqueued per obligation on every
+   * worker start). A pending obligation = the handoff log row exists but the
+   * reconciliation has not yet confirmed completion (record.mode === toMode
+   * AND the dispatch outcome is present). Returns the LOGICAL executionId
+   * per obligation (the relay payload). Idempotent: duplicate sweeps are
+   * harmless (the reconciliation is idempotent).
+   */
+  listPendingHandoffObligations(): Promise<readonly PendingCrossModeHandoff[]>;
+  /**
+   * PR #46 review #2: idempotently discharge a cross-mode-handoff obligation
+   * (set discharged_at). Called by the reconciliation when it confirms the
+   * handoff is complete. A repeated discharge is a no-op (the obligation is
+   * append-only; only the discharge column changes).
+   */
+  dischargeHandoffObligation(handoffId: string): Promise<boolean>;
+}
+
+/**
+ * PR #46 review #2: one pending cross-mode-handoff obligation (the durable
+ * replay work list). The {@link executionId} is the LOGICAL identity (TEXT
+ * `wf_xxxxxxxx`) the reconciliation consumes; the {@link handoffId} is the
+ * append-only handoff log row the obligation tracks.
+ */
+export interface PendingCrossModeHandoff {
+  /** The append-only handoff log row UUID (the obligation's UNIQUE key). */
+  readonly handoffId: string;
+  /** The LOGICAL execution identity (TEXT) — the relay payload + the reconcile key. */
+  readonly executionId: string;
+  /** The obligation row UUID (for audit / discharge tracing). */
+  readonly obligationId: string;
 }
 
 /**
@@ -185,10 +230,21 @@ export interface CrossModeHandoffService {
     actor: { userId: string; source: string },
   ): Promise<CrossModeHandoffResult>;
   /**
-   * Idempotent reconciliation (the optional durable relay entry point).
-   * Resumes an interrupted handoff from the appropriate step (reserve ->
-   * mutate -> dispatch). A complete handoff is a no-op. Mirrors
-   * reconcileTerminalForExecution (SessionTerminalReconciler).
+   * PR #46 review correction #2 (durable crash recovery): the idempotent
+   * reconciliation entry point driven by the durable relay job + the
+   * WorkerHost boot sweep (wired in app.ts via the
+   * {@link CrossModeHandoffOutboxRelay} + {@link createCrossModeHandoffRelayJobHandler}).
+   * Resumes an interrupted handoff from the appropriate step:
+   *     - record.mode !== toMode → re-mutate + re-dispatch (crash window #1:
+   *       after reserve, before mutate);
+   *     - record.mode === toMode but dispatch outcome missing → re-dispatch
+   *       (crash window #2: after mutate, before dispatch);
+   *     - complete → discharge the obligation + no-op.
+   * A complete handoff is a no-op. Mirrors
+   * {@link DefaultExecutionSessionService.reconcileTerminalForExecution}.
+   * The relay is NOT optional: the obligation row (migration 0043) is the
+   * durable source of truth, and the boot sweep guarantees eventual
+   * delivery — a caller retry cannot substitute for durable recovery.
    */
   reconcileCrossModeHandoffForExecution(executionId: string): Promise<unknown>;
 }
@@ -244,11 +300,15 @@ export type CrossModeHandoffErrorCode =
   (typeof CROSS_MODE_HANDOFF_ERROR_CODES)[number];
 
 /**
- * The durable relay job type for the OPTIONAL cross-mode-handoff
- * reconciliation relay (mirrors SESSION_TERMINAL_RELAY_JOB_TYPE). IMPL-1
- * defines the constant + the idempotent
- * {@link CrossModeHandoffService.reconcileCrossModeHandoffForExecution}
- * method; the relay wiring (a SessionTerminalOutboxRelay-equivalent) is
- * optional and can be added later without changing the contract.
+ * PR #46 review correction #2 (durable crash recovery): the durable relay
+ * job type for the cross-mode-handoff reconciliation relay (mirrors
+ * SESSION_TERMINAL_RELAY_JOB_TYPE + WORKSPACE_RELEASE_RELAY_JOB_TYPE). The
+ * relay job handler ({@link createCrossModeHandoffRelayJobHandler}) is
+ * registered in the WorkerHost's HandlerRegistry at composition time; the
+ * boot sweep ({@link CrossModeHandoffOutboxRelay}) is registered in
+ * `WorkerHostOptions.outboxRelays`. The obligation row (migration 0043) is
+ * created ATOMICALLY with the reserve by an AFTER INSERT trigger — the
+ * relay + the boot sweep guarantee eventual delivery of an interrupted
+ * handoff (a caller retry cannot substitute for durable recovery).
  */
 export const CROSS_MODE_HANDOFF_RELAY_JOB_TYPE = 'agents.cross-mode-handoff.reconcile';

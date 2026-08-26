@@ -40,6 +40,7 @@
  * wfos_reviews_*.
  */
 import type { Logger } from '@platform/logger.js';
+import type { Queue } from '@platform/index.js';
 import type { AuditService } from '@modules/audit/index.js';
 // Type-only cross-module import (the work-items barrel re-imports the agents
 // barrel for ExecutionTask/ExecutionMode; a runtime cycle is impossible — the
@@ -55,6 +56,19 @@ import type {
   ExecutionProvider,
 } from './execution.types.js';
 import type { AgentRunRepository } from './agent.types.js';
+// PR #46 review #3: the WORK-034 ExecutionSession lifecycle port — the
+// service resolves the session + drives it through the EXISTING non-terminal
+// `interrupted` path on a cross-mode handoff (NEVER silently continues a
+// terminal session). Type-only import (no runtime cycle — the agents barrel
+// re-exports the same names for the composition root).
+import type {
+  ExecutionSession,
+  SessionTransitionResult,
+} from './execution-session.types.js';
+// PR #46 review #1: the WORK-035 AgentWorkspace port — the service resolves
+// the workspace + defends the physical-worktree continuity (rejects a terminal
+// workspace whose working-tree state is gone).
+import type { AgentWorkspace } from './agent-workspace.types.js';
 // Reuse the existing narrow policy-evaluator port (DI cleanliness — mirrors
 // the PolicyGatedExecutionHandoffService decorator precedent).
 import type { AgentPolicyHandoffEvaluator } from './policy-gated-handoff-service.js';
@@ -71,6 +85,10 @@ import type {
   CrossModeHandoffService,
 } from './cross-mode-handoff.types.js';
 import { CrossModeHandoffError } from './cross-mode-handoff.types.js';
+// PR #46 review #2: the durable relay job type (the claim-time enqueue at
+// reserve — the boot sweep is the backstop; mirrors the WORK-034
+// session-terminal relay's claim-time enqueue).
+import { CROSS_MODE_HANDOFF_RELAY_JOB_TYPE } from './cross-mode-handoff.types.js';
 
 /**
  * Narrow execution-policy port (DI cleanliness — the agents module does NOT
@@ -104,6 +122,57 @@ export interface CrossModeAgentProviderRegistryPort {
   ): Promise<boolean>;
 }
 
+/**
+ * PR #46 review #3: the narrow WORK-034 ExecutionSession lifecycle port. The
+ * concrete {@link DefaultExecutionSessionService} satisfies this structurally
+ * (the composition root passes the concrete service). The cross-mode handoff:
+ *   - resolves the session (getSessionForExecution) — if it is TERMINAL
+ *     (completed/failed/cancelled), the handoff is REJECTED (a terminalized
+ *     session is immutable per WORK-034 — it cannot be continued across a
+ *     mode handoff; the correction history is preserved, start a new
+ *     execution). NEVER silently continues a terminal session.
+ *   - on native→external, interrupts a `running` session (running →
+ *     interrupted) — the EXISTING non-terminal interruption path. The
+ *     session-terminal obligation (if pending) is DEFERRED by the existing
+ *     reconcile (it sees `interrupted` + leaves it pending). The session is
+ *     NOT terminalized by the handoff.
+ *   - on external→native, resumes an `interrupted` session (interrupted →
+ *     running) or starts a `created` session (created → running) — the
+ *     EXISTING resume path.
+ */
+export interface CrossModeExecutionSessionPort {
+  getSessionForExecution(executionId: string): Promise<ExecutionSession | null>;
+  interruptSession(
+    sessionId: string,
+    expectedVersion: number,
+  ): Promise<SessionTransitionResult | null>;
+  resumeSession(
+    sessionId: string,
+    expectedVersion: number,
+  ): Promise<SessionTransitionResult | null>;
+  startSession(sessionId: string): Promise<ExecutionSession | null>;
+}
+
+/**
+ * PR #46 review #1: the narrow WORK-035 AgentWorkspace port. The concrete
+ * {@link DefaultAgentWorkspaceService} satisfies this structurally. The
+ * cross-mode handoff resolves the workspace — if it is TERMINAL
+ * (released/failed/cancelled), the handoff is REJECTED (the physical
+ * working-tree state is gone; the workspace-release obligation already
+ * discharged + the worktree was removed). Otherwise the worktree is
+ * PRESERVED: the workspace-release trigger fires ONLY on an execution
+ * terminal transition (migration 0036), and a cross-mode handoff →
+ * `handoff_ready`/`running` does NOT terminalize, so NO release obligation
+ * is created. The NativeExecutionProvider delegates to the AgentGateway
+ * which does NOT touch the workspace — so the worktree + uncommitted
+ * working-tree state stay on disk across the handoff. The continuity is
+ * EXPLICIT (resolved + asserted) + DEFENDED (terminal rejected), not just
+ * an implicit reuse of executionId/branch.
+ */
+export interface CrossModeAgentWorkspacePort {
+  getWorkspaceForExecution(executionId: string): Promise<AgentWorkspace | null>;
+}
+
 export interface DefaultCrossModeHandoffServiceDeps {
   readonly executionRecordRepository: ExecutionRecordRepository;
   readonly crossModeHandoffRepository: CrossModeHandoffRepository;
@@ -117,8 +186,21 @@ export interface DefaultCrossModeHandoffServiceDeps {
   readonly executionPolicyService: CrossModeExecutionPolicyPort;
   /** Native provider availability (WORK-026) — the agent provider registry. */
   readonly agentProviderRegistryService: CrossModeAgentProviderRegistryPort;
+  /** PR #46 review #3: the WORK-034 session lifecycle port. */
+  readonly executionSessionService: CrossModeExecutionSessionPort;
+  /** PR #46 review #1: the WORK-035 workspace port. */
+  readonly agentWorkspaceService: CrossModeAgentWorkspacePort;
   readonly auditService: AuditService;
   readonly logger: Logger;
+  /**
+   * PR #46 review #2: the existing durable queue — the reserve step enqueues
+   * the reconcile relay job (the claim-time durable delivery). The obligation
+   * row itself is written by migration 0043's trigger ATOMICALLY with the
+   * reserve INSERT; the relay job + the WorkerHost boot sweep are the
+   * liveness backstop. OPTIONAL so pure-unit constructions stay queueless
+   * (the boot sweep covers a missing/failed enqueue).
+   */
+  readonly queue?: Queue;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
 }
@@ -222,6 +304,28 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     // 5. Validate eligibility (the from-mode + status preconditions).
     this.assertEligible(record, executionId);
 
+    // 5b. PR #46 review #1 + #3: the CONTINUITY gates. Resolve the existing
+    //     AgentWorkspace + ExecutionSession for this logical execution. A
+    //     TERMINAL workspace (released/failed/cancelled — the physical
+    //     working-tree state is GONE) or a TERMINAL session (completed/failed/
+    //     cancelled — WORK-034 immutability forbids continuing it) REJECTS
+    //     the handoff: a terminalized execution cannot be handed off across
+    //     modes (the correction history is preserved; start a new execution).
+    //     A non-terminal / absent workspace + session is eligible — the
+    //     worktree + session are PRESERVED across the handoff (the
+    //     workspace-release trigger fires ONLY on an execution terminal; a
+    //     handoff → handoff_ready/running does NOT terminalize). The session
+    //     is driven through the EXISTING non-terminal `interrupted` path in
+    //     mutateAndDispatch (NEVER silently continues a terminal session).
+    const existingSession = await this.deps.executionSessionService.getSessionForExecution(
+      executionId,
+    );
+    this.assertSessionContinuityEligible(existingSession, executionId);
+    const existingWorkspace = await this.deps.agentWorkspaceService.getWorkspaceForExecution(
+      executionId,
+    );
+    this.assertWorkspaceContinuityEligible(existingWorkspace, executionId);
+
     // 6. Policy-gate.
     const policySummary = await this.policyGate(record, executionId, input.targetMode);
 
@@ -233,6 +337,11 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     );
 
     // 8. Reserve: INSERT the append-only handoff log row (previous_* snapshot).
+    //    PR #46 review #2: migration 0043's AFTER INSERT trigger writes the
+    //    durable handoff obligation ATOMICALLY with this INSERT. The reserve
+    //    ALSO enqueues the reconcile relay job (the claim-time durable
+    //    delivery) — a live worker drains it without any restart; the boot
+    //    sweep is the backstop.
     const resultingStatus: 'handoff_ready' | 'running' =
       input.targetMode === 'external' ? 'handoff_ready' : 'running';
     const reserved = await this.reserve({
@@ -245,10 +354,18 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       policySummary,
       actor,
     });
+    // Claim-time durable relay job enqueue (best-effort — the boot sweep
+    // covers a failed enqueue; the obligation row is the durable source of
+    // truth either way).
+    await this.enqueueRelayJob(executionId);
 
-    // 9-10. Mutate (transitionMode) THEN dispatch THEN updateStatus (provider
-    //       outcome). Crash-safety: the mutated record is the recoverable
-    //       intermediate state; the dispatch is idempotent on retry.
+    // 9-10. Mutate (transitionMode) THEN drive the session through the
+    //       EXISTING non-terminal path (interrupt on native→external; resume
+    //       /start on external→native) THEN dispatch THEN updateStatus
+    //       (provider outcome). Crash-safety: the mutated record is the
+    //       recoverable intermediate state; the dispatch is idempotent on
+    //       retry; the session transition is idempotent on retry (a CAS loss
+    //       means a concurrent path already moved it — log + continue).
     await this.mutateAndDispatch(
       record,
       executionId,
@@ -256,6 +373,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       provider,
       model,
       resultingStatus,
+      existingSession,
     );
 
     // 11. Audit (best-effort).
@@ -273,21 +391,36 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   }
 
   /**
-   * Idempotent reconciliation (the optional durable relay entry point).
-   * Mirrors reconcileTerminalForExecution. A complete handoff is a no-op;
-   * an interrupted handoff resumes from the appropriate step (mutate ->
-   * dispatch).
+   * PR #46 review #2: idempotent reconciliation — the durable relay entry
+   * point (driven by the {@link CrossModeHandoffOutboxRelay} job + the
+   * WorkerHost boot sweep, both wired in app.ts). A complete handoff is a
+   * no-op + discharges the durable obligation; an interrupted handoff
+   * resumes from the appropriate step:
+   *   - record.mode !== toMode → re-mutate + re-dispatch (crash window #1:
+   *     after reserve, before mutate);
+   *   - record.mode === toMode but dispatch outcome missing → re-dispatch
+   *     (crash window #2: after mutate, before dispatch);
+   *   - complete → discharge + no-op.
+   * Mirrors {@link DefaultExecutionSessionService.reconcileTerminalForExecution}.
+   * The relay is NOT optional: the obligation row (migration 0043) is the
+   * durable source of truth, and the boot sweep guarantees eventual delivery.
    */
   async reconcileCrossModeHandoffForExecution(executionId: string): Promise<unknown> {
     const handoff =
       await this.deps.crossModeHandoffRepository.findByExecutionId(executionId);
     if (!handoff) return null;
-    const record = await this.deps.executionRecordRepository.findByExecutionId(
+    let record = await this.deps.executionRecordRepository.findByExecutionId(
       executionId,
     );
     if (!record) return null;
 
-    // The mutate did not happen -> re-mutate + re-dispatch.
+    let stage: 'mutate-and-dispatch' | 'dispatch-external' | 'dispatch-native' | 'complete' = 'complete';
+
+    // Crash window #1: the mutate did not happen (record.mode !== toMode) →
+    // re-mutate + re-dispatch. Re-fetch the record + fall through to the
+    // complete-check (a single reconcile call drives the handoff to
+    // completion when the dispatch is synchronous — the external package is
+    // generated inline; the native AgentRun is created inline).
     if (record.mode !== handoff.toMode) {
       this.deps.logger.info('cross-mode-handoff.reconcile.re-mutate', {
         executionId,
@@ -295,6 +428,13 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         currentMode: record.mode,
         toMode: handoff.toMode,
       });
+      // Re-resolve the session (it may have moved since the reserve — e.g.
+      // a concurrent path, or the crash happened mid-mutate). The
+      // re-mutate's session transition is idempotent (a CAS loss means a
+      // concurrent path already moved it — log + continue).
+      const session = await this.deps.executionSessionService.getSessionForExecution(
+        executionId,
+      );
       // Re-mutate + re-dispatch using the reserved handoff's intent.
       const input: CrossModeHandoffInput = {
         targetMode: handoff.toMode,
@@ -313,11 +453,18 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         record.provider,
         record.model,
         resultingStatus,
+        session,
       );
-      return { executionId, reconciled: true, stage: 'mutate-and-dispatch' };
+      stage = 'mutate-and-dispatch';
+      // Re-fetch the post-mutate+dispatch record for the complete-check.
+      record = await this.deps.executionRecordRepository.findByExecutionId(
+        executionId,
+      );
+      if (!record) return { executionId, reconciled: true, stage };
     }
 
-    // The mutate happened; check whether the dispatch completed.
+    // Crash window #2: the mutate happened but the dispatch did not. Re-fetch
+    // the record's current state + re-dispatch the missing piece.
     const targetMode = handoff.toMode;
     if (targetMode === 'external') {
       // native -> external: the dispatch is complete when the package is
@@ -329,7 +476,11 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           targetMode,
         });
         await this.dispatchExternal(record, executionId);
-        return { executionId, reconciled: true, stage: 'dispatch-external' };
+        stage = stage === 'complete' ? 'dispatch-external' : stage;
+        record = await this.deps.executionRecordRepository.findByExecutionId(
+          executionId,
+        );
+        if (!record) return { executionId, reconciled: true, stage };
       }
     } else {
       // external -> native: the dispatch is complete when an AgentRun exists
@@ -346,11 +497,48 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           targetMode,
         });
         await this.dispatchNative(record, executionId, record.model);
-        return { executionId, reconciled: true, stage: 'dispatch-native' };
+        stage = stage === 'complete' ? 'dispatch-native' : stage;
       }
     }
-    // Complete — no-op.
-    return { executionId, reconciled: false, stage: 'complete' };
+
+    // PR #46 review #2: complete — discharge the durable obligation. After a
+    // re-mutate+re-dispatch OR a re-dispatch, fall through to the
+    // complete-check (the handoff is now complete: record.mode === toMode +
+    // the dispatch outcome is present). A complete handoff discharges (the
+    // boot-sweep work list drains; a repeated recovery is a no-op). An
+    // incomplete handoff (e.g. the dispatch is async + not yet landed) leaves
+    // the obligation pending for the next pass.
+    const complete = await this.handoffComplete(record, handoff);
+    if (complete) {
+      await this.deps.crossModeHandoffRepository.dischargeHandoffObligation(handoff.id);
+      return { executionId, reconciled: false, stage: 'complete' };
+    }
+    return { executionId, reconciled: true, stage };
+  }
+
+  /**
+   * PR #46 review #2: the complete-check. The handoff is complete when:
+   *   - record.mode === toMode (the mutate landed), AND
+   *   - the dispatch outcome is present: package for native→external,
+   *     AgentRun-or-terminal for external→native.
+   * Used by {@link reconcileCrossModeHandoffForExecution} to decide discharge.
+   */
+  private async handoffComplete(
+    record: ExecutionRecord,
+    handoff: CrossModeHandoffRecord,
+  ): Promise<boolean> {
+    if (record.mode !== handoff.toMode) return false;
+    if (handoff.toMode === 'external') {
+      return record.packageValue != null;
+    }
+    // external → native: complete when an AgentRun exists OR the record
+    // reached a terminal native state.
+    const existingRun = await this.deps.agentRunRepository.findByExecutionId(
+      record.executionId,
+    );
+    const terminalNative =
+      record.status === 'completed' || record.status === 'failed';
+    return existingRun != null || terminalNative;
   }
 
   // ====================================================================
@@ -375,6 +563,162 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           'handoff-ineligible-state',
         );
       }
+    }
+  }
+
+  /**
+   * PR #46 review #3: the WORK-034 session continuity gate. A TERMINAL
+   * session (completed/failed/cancelled) is IMMUTABLE per WORK-034 — it
+   * CANNOT be continued across a mode handoff. Reject with
+   * 'handoff-ineligible-state' (the correction history is preserved; start a
+   * new execution for the new mode). A non-terminal / absent session is
+   * eligible — the session is driven through the EXISTING non-terminal
+   * `interrupted` path in {@link transitionSessionForHandoff} (NEVER silently
+   * continues a terminal session).
+   */
+  private assertSessionContinuityEligible(
+    session: ExecutionSession | null,
+    executionId: string,
+  ): void {
+    if (!session) return; // no session yet — eligible (external phase, or the
+    // native execution never started a session). The handoff may create one
+    // via ensureSession downstream; the continuity gate only REJECTS a
+    // terminal session.
+    if (
+      session.status === 'completed' ||
+      session.status === 'failed' ||
+      session.status === 'cancelled'
+    ) {
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-state: execution ${executionId} has a TERMINAL ExecutionSession (status=${session.status}, sessionId=${session.id}) — WORK-034 terminal immutability forbids continuing a terminalized session across a mode handoff. The correction history is preserved; start a new execution for the new mode.`,
+        'handoff-ineligible-state',
+      );
+    }
+  }
+
+  /**
+   * PR #46 review #1: the WORK-035 workspace continuity gate. A TERMINAL
+   * workspace (released/failed/cancelled) has its physical worktree REMOVED
+   * (the workspace-release obligation discharged) — the uncommitted
+   * working-tree state is GONE + cannot be recovered from branch HEAD.
+   * Reject with 'handoff-ineligible-state'. A non-terminal / absent workspace
+   * is eligible — the worktree is PRESERVED across the handoff (the
+   * workspace-release trigger fires ONLY on an execution terminal; a handoff
+   * → handoff_ready/running does NOT terminalize; the NativeExecutionProvider
+   * delegates to the AgentGateway which does NOT touch the workspace).
+   */
+  private assertWorkspaceContinuityEligible(
+    workspace: AgentWorkspace | null,
+    executionId: string,
+  ): void {
+    if (!workspace) return; // no workspace yet — eligible (the execution may
+    // not have acquired one — e.g. an external phase never had a native
+    // worktree). The continuity gate only REJECTS a terminal workspace.
+    if (workspace.terminalAt !== null) {
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-state: execution ${executionId} has a TERMINAL AgentWorkspace (state=${workspace.state}, workspaceId=${workspace.id}) — the physical worktree was released/removed; the uncommitted working-tree state cannot be recovered across a mode handoff. The correction history is preserved; start a new execution for the new mode.`,
+        'handoff-ineligible-state',
+      );
+    }
+  }
+
+  /**
+   * PR #46 review #2: the claim-time durable relay job enqueue (mirrors the
+   * WORK-034 session-terminal relay's claim-time enqueue in
+   * {@link DefaultExecutionSessionService.terminalForExecution}). Best-effort:
+   * the obligation row (migration 0043) is the durable source of truth; the
+   * boot sweep covers a failed enqueue. A live worker drains the job without
+   * any restart; the relay + the boot sweep guarantee eventual delivery of an
+   * interrupted handoff.
+   */
+  private async enqueueRelayJob(executionId: string): Promise<void> {
+    if (!this.deps.queue) return; // queueless construction (pure-unit tests) —
+    // the boot sweep is the backstop. Production wires the RedisQueue.
+    try {
+      await this.deps.queue.enqueue(CROSS_MODE_HANDOFF_RELAY_JOB_TYPE, { executionId });
+    } catch (err) {
+      this.deps.logger.error('cross-mode-handoff.relay-enqueue-failed', {
+        executionId,
+        error: (err as Error).message,
+      });
+    }
+  }
+
+  /**
+   * PR #46 review #3: drive the ExecutionSession through the EXISTING
+   * non-terminal path on a cross-mode handoff (NEVER silently continues a
+   * terminal session — the eligibility gate already rejected that).
+   *   - native→external: interrupt a `running` session (running → interrupted)
+   *     — the legitimate non-terminal interruption path. The session-terminal
+   *     obligation (if pending) is DEFERRED by the existing reconcile (it sees
+   *     `interrupted` + leaves it pending). The session is NOT terminalized.
+   *   - external→native: resume an `interrupted` session (interrupted →
+   *     running), or start a `created` session (created → running) — the
+   *     legitimate resume path.
+   * Idempotent on retry: a CAS loss (null result) means a concurrent path
+   * already moved the session — log + continue (the handoff is still
+   * authoritative on the record). No session (null) → no-op (the external
+   * phase has no native session; a native handoff may create one downstream).
+   */
+  private async transitionSessionForHandoff(
+    session: ExecutionSession | null,
+    targetMode: ExecutionMode,
+    executionId: string,
+  ): Promise<void> {
+    if (!session) return;
+    try {
+      if (targetMode === 'external') {
+        // native → external: interrupt a running session.
+        if (session.status === 'running') {
+          const result = await this.deps.executionSessionService.interruptSession(
+            session.id,
+            session.version,
+          );
+          if (result) {
+            this.deps.logger.info('cross-mode-handoff.session.interrupted', {
+              executionId, sessionId: session.id, version: session.version,
+            });
+          }
+          // null → a concurrent path already moved it (or the CAS lost) — log.
+        }
+        // created / interrupted → leave (no transition needed; the external
+        // phase does not drive the native session).
+      } else {
+        // external → native: resume an interrupted session, or start a
+        // created session.
+        if (session.status === 'interrupted') {
+          const result = await this.deps.executionSessionService.resumeSession(
+            session.id,
+            session.version,
+          );
+          if (result) {
+            this.deps.logger.info('cross-mode-handoff.session.resumed', {
+              executionId, sessionId: session.id, version: session.version,
+            });
+          }
+        } else if (session.status === 'created') {
+          const result = await this.deps.executionSessionService.startSession(
+            session.id,
+          );
+          if (result) {
+            this.deps.logger.info('cross-mode-handoff.session.started', {
+              executionId, sessionId: session.id,
+            });
+          }
+        }
+        // running → leave (already running — no transition needed).
+      }
+    } catch (err) {
+      // The session transition is best-effort w.r.t. the handoff flow: a
+      // failure here does NOT roll back the record mutation (the record is
+      // the authoritative handoff state; the session is the continuation
+      // context). Log + continue — the reconcile relay + the boot sweep will
+      // re-attempt the session transition on the next pass if needed (the
+      // session stays non-terminal; the obligation stays pending).
+      this.deps.logger.warn('cross-mode-handoff.session-transition-failed', {
+        executionId, sessionId: session.id, targetMode,
+        error: (err as Error).message,
+      });
     }
   }
 
@@ -557,10 +901,14 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
 
   /**
    * Mutate the record to the target mode + status (transitionMode), THEN
-   * dispatch through the appropriate provider, THEN updateStatus with the
-   * provider outcome. Crash-safety: the mutated record is the recoverable
-   * intermediate state (a retry sees record.mode=targetMode, status=
-   * resultingStatus, and re-dispatches).
+   * drive the ExecutionSession through the EXISTING non-terminal path
+   * (interrupt on native→external; resume/start on external→native — PR #46
+   * review #3), THEN dispatch through the appropriate provider, THEN
+   * updateStatus with the provider outcome. Crash-safety: the mutated
+   * record is the recoverable intermediate state (a retry sees
+   * record.mode=targetMode, status=resultingStatus, and re-dispatches); the
+   * session transition is idempotent on retry (a CAS loss means a concurrent
+   * path already moved it — log + continue).
    */
   private async mutateAndDispatch(
     record: ExecutionRecord,
@@ -569,6 +917,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     provider: string,
     model: string | null,
     resultingStatus: 'handoff_ready' | 'running',
+    session: ExecutionSession | null,
   ): Promise<void> {
     // 9. Mutate the record (mode + status + provider + model). The package
     //    (native->external) and agentRunId (external->native) are set AFTER
@@ -591,6 +940,16 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         'execution-not-found',
       );
     }
+
+    // 9b. PR #46 review #3: drive the ExecutionSession through the EXISTING
+    //     non-terminal path (NEVER silently continues a terminal session —
+    //     the eligibility gate already rejected that). native→external
+    //     interrupts a running session (running → interrupted); external→
+    //     native resumes an interrupted session (interrupted → running) or
+    //     starts a created session (created → running). Best-effort w.r.t.
+    //     the handoff flow (a CAS loss + a failure log + continue — the
+    //     record mutation is authoritative; the session stays non-terminal).
+    await this.transitionSessionForHandoff(session, input.targetMode, executionId);
 
     // 10. Dispatch through the target provider. The dispatch sub-methods
     //    use the POST-MUTATE record (provider/model already set) + the

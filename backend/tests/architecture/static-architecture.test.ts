@@ -11169,12 +11169,13 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0042 (WORK-042 cross-mode handoff log) —
-    // WORK-040 added none (0042 belongs to WORK-042, not WORK-040). The
+    // The highest migration is 0043 (PR #46 review #2 — the cross-mode-handoff
+    // durable obligation table; 0042 is the WORK-042 cross-mode handoff log).
+    // WORK-040 added none (0042/0043 belong to WORK-042, not WORK-040). The
     // planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-042 cross-mode handoff log, NOT a planner-owned table)').toMatch(/^0042_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 cross-mode-handoff obligation table, NOT a planner-owned table)').toMatch(/^0043_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -12128,9 +12129,11 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
 
   // -------------------------------------------------------------------------
   // A12: Durable relay constant (IMPL-1 added CROSS_MODE_HANDOFF_RELAY_JOB_TYPE
-  // + the idempotent reconcileCrossModeHandoffForExecution entry point).
+  // + the idempotent reconcileCrossModeHandoffForExecution entry point). PR #46
+  // review #2: the relay is NO LONGER OPTIONAL — R1-A proves it is WIRED into
+  // the WorkerHost (the job handler + the boot-sweep outbox relay).
   // -------------------------------------------------------------------------
-  it('A12. the durable relay constant is exported (the optional cross-mode-handoff reconciliation relay job type)', () => {
+  it('A12. the durable relay constant is exported (the cross-mode-handoff reconciliation relay job type — WIRED, not optional)', () => {
     const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
     expect(typesSrc, 'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE is defined in the types').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
     const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
@@ -12233,5 +12236,119 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // 403 + the service-level defense-in-depth rejection).
     expect(src).toMatch(/403/);
     expect(src).toMatch(/tenant/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 1 — the three blocking fixes' static invariants.
+  // These PREVENT reintroduction of the forbidden patterns (not merely
+  // assert current correctness): a future change that drops the continuity
+  // gates or the durable relay wiring fails the architecture suite.
+  // -------------------------------------------------------------------------
+
+  // R1-A (finding #2): the durable relay is WIRED into the WorkerHost — the
+  // job handler is registered in the handler registry AND the boot-sweep
+  // outbox relay is registered in WorkerHostOptions.outboxRelays. The relay
+  // being merely DEFINED is insufficient (the review found it was declared
+  // "optional" and not wired — a process crash left a stranded handoff).
+  it('R1-A. the cross-mode-handoff durable relay is WIRED into the WorkerHost (the job handler in the registry + the boot-sweep outbox relay) — not merely defined', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    // The relay module is imported by app.ts DIRECTLY from the internal path
+    // (mirrors the WORK-034/035 relay pattern — the barrel exposes only the
+    // contract types; the concrete impls stay internal).
+    expect(appSrc, 'app.ts imports the CrossModeHandoffOutboxRelay').toMatch(/CrossModeHandoffOutboxRelay/);
+    expect(appSrc, 'app.ts imports the createCrossModeHandoffRelayJobHandler').toMatch(/createCrossModeHandoffRelayJobHandler/);
+    expect(appSrc, 'app.ts imports from the internal relay path (NOT the barrel)').toMatch(/from '\.\/modules\/agents\/internal\/cross-mode-handoff-relay\.js'/);
+    // The relay job handler is registered in the handler registry.
+    expect(appSrc, 'the relay job handler is pushed into the handlerList').toMatch(/handlerList\.push\(createCrossModeHandoffRelayJobHandler/);
+    // The boot-sweep outbox relay is registered in outboxRelays.
+    expect(appSrc, 'the cross-mode-handoff outbox relay is in outboxRelays (the boot sweep)').toMatch(/crossModeHandoffRelay \? \[crossModeHandoffRelay\]/);
+    // The barrel exposes ONLY the contract types (the concrete relay impls
+    // stay internal — the module-boundary invariant holds). The barrel
+    // references the relay types (the contract surface) but NOT the concrete
+    // class/function.
+    expect(barrelSrc, 'the barrel exposes the CrossModeHandoffReconciler contract type').toMatch(/CrossModeHandoffReconciler/);
+    expect(barrelSrc, 'the barrel does NOT value-export the concrete CrossModeHandoffOutboxRelay class (module-boundary invariant)').not.toMatch(/export \{[^}]*CrossModeHandoffOutboxRelay/);
+    expect(barrelSrc, 'the barrel does NOT value-export the concrete createCrossModeHandoffRelayJobHandler (module-boundary invariant)').not.toMatch(/export \{[^}]*createCrossModeHandoffRelayJobHandler/);
+  });
+
+  // R1-B (finding #2): the durable obligation table + the AFTER INSERT
+  // trigger exist (migration 0043 — the transactional-outbox row written
+  // ATOMICALLY with the reserve). Without this, the relay has nothing to
+  // sweep + the crash window #1 (reserve → process dies) is unrecoverable.
+  it('R1-B. migration 0043 creates the cross-mode-handoff obligation table + the AFTER INSERT trigger (the durable obligation written ATOMICALLY with the reserve)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0043_cross_mode_handoff_obligations.sql');
+    expect(existsSync(migrationPath), 'migration 0043 must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src, 'the obligation table is created').toMatch(/CREATE TABLE IF NOT EXISTS wfos_cross_mode_handoff_obligations/);
+    expect(src, 'UNIQUE(handoff_id) — one obligation per handoff').toMatch(/UNIQUE \(handoff_id\)/);
+    expect(src, 'the discharged_at column (the durable state)').toMatch(/discharged_at TIMESTAMPTZ/);
+    expect(src, 'the pending index (the boot-sweep work list)').toMatch(/wfos_cross_mode_handoff_obligations_pending_idx/);
+    // The AFTER INSERT trigger writes the obligation ATOMICALLY with the reserve.
+    expect(src, 'the AFTER INSERT trigger function').toMatch(/wfos_cross_mode_handoff_obligation_on_reserve/);
+    expect(src, 'the trigger is AFTER INSERT on the handoff log').toMatch(/AFTER INSERT ON wfos_execution_mode_handoffs/);
+    // The append-only immutability (only the discharge column may change).
+    expect(src, 'the immutability trigger').toMatch(/wfos_cross_mode_handoff_obligation_immutable/);
+  });
+
+  // R1-C (finding #1 + #3): the service COMPOSES the WORK-035 workspace
+  // port + the WORK-034 session port (the continuity gates). A future
+  // change that drops these deps fails the architecture suite — the
+  // physical-worktree continuity + the WORK-034 session-terminal
+  // compatibility are NOT silently removable.
+  it('R1-C. the cross-mode handoff service composes the WORK-035 workspace port + the WORK-034 session port (the continuity gates are NOT optional)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The workspace port (finding #1: physical-worktree continuity).
+    expect(serviceSrc, 'the CrossModeAgentWorkspacePort is declared').toMatch(/CrossModeAgentWorkspacePort/);
+    expect(serviceSrc, 'the agentWorkspaceService dep is required').toMatch(/readonly agentWorkspaceService:/);
+    expect(serviceSrc, 'the workspace continuity gate is called').toMatch(/assertWorkspaceContinuityEligible/);
+    expect(serviceSrc, 'a terminal workspace is REJECTED (handoff-ineligible-state)').toMatch(/terminalAt !== null/);
+    // The session port (finding #3: WORK-034 terminal-session compatibility).
+    expect(serviceSrc, 'the CrossModeExecutionSessionPort is declared').toMatch(/CrossModeExecutionSessionPort/);
+    expect(serviceSrc, 'the executionSessionService dep is required').toMatch(/readonly executionSessionService:/);
+    expect(serviceSrc, 'the session continuity gate is called').toMatch(/assertSessionContinuityEligible/);
+    expect(serviceSrc, 'a terminal session is REJECTED (handoff-ineligible-state)').toMatch(/session\.status === 'completed'/);
+    // The session is driven through the EXISTING non-terminal path
+    // (interrupt on native→external; resume/start on external→native).
+    expect(serviceSrc, 'transitionSessionForHandoff is implemented').toMatch(/transitionSessionForHandoff/);
+    expect(serviceSrc, 'native→external interrupts a running session').toMatch(/interruptSession/);
+    expect(serviceSrc, 'external→native resumes an interrupted session').toMatch(/resumeSession/);
+    // NEVER silently continues a terminal session — the gate rejects it
+    // BEFORE the mutate.
+    const mutateIdx = serviceSrc.indexOf('async mutateAndDispatch(');
+    // The gate is CALLED in the handoff flow (not just defined). Find the
+    // handoff() method body's call to the gate.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const gateCallInHandoff = serviceSrc.indexOf('assertSessionContinuityEligible(', handoffStart);
+    expect(gateCallInHandoff, 'the session continuity gate is called inside handoff()').toBeGreaterThan(handoffStart);
+    expect(gateCallInHandoff, 'the gate call in handoff() precedes the mutateAndDispatch definition').toBeGreaterThan(-1);
+    expect(mutateIdx, 'mutateAndDispatch is defined').toBeGreaterThan(-1);
+  });
+
+  // R1-D (finding #2): the repository implements the obligation surface
+  // (listPendingHandoffObligations + dischargeHandoffObligation) — the relay
+  // + the boot sweep need these to sweep + drain. Without them the relay is
+  // inert.
+  it('R1-D. the cross-mode-handoff repository implements the obligation surface (listPendingHandoffObligations + dischargeHandoffObligation)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'listPendingHandoffObligations is implemented').toMatch(/async listPendingHandoffObligations\(/);
+    expect(repoSrc, 'the pending query filters discharged_at IS NULL').toMatch(/WHERE o\.discharged_at IS NULL/);
+    expect(repoSrc, 'dischargeHandoffObligation is implemented').toMatch(/async dischargeHandoffObligation\(/);
+    expect(repoSrc, 'the discharge UPDATE sets discharged_at').toMatch(/SET discharged_at = NOW\(\)/);
+    // The service discharges the obligation when the reconcile confirms
+    // completion (the boot-sweep work list drains).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service discharges the obligation on completion').toMatch(/dischargeHandoffObligation\(handoff\.id\)/);
+  });
+
+  // R1-E (finding #2): the service enqueues the claim-time relay job at
+  // reserve (the live-worker delivery — a live worker drains the job
+  // without any restart; the boot sweep is the backstop). Without this, the
+  // only delivery path is the boot sweep (requires a restart).
+  it('R1-E. the service enqueues the claim-time relay job at reserve (the live-worker delivery path)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'enqueueRelayJob is defined').toMatch(/private async enqueueRelayJob/);
+    expect(serviceSrc, 'the reserve calls enqueueRelayJob').toMatch(/await this\.enqueueRelayJob\(executionId\)/);
+    expect(serviceSrc, 'the enqueue uses CROSS_MODE_HANDOFF_RELAY_JOB_TYPE').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
   });
 });

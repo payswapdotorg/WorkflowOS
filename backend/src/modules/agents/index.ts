@@ -102,6 +102,22 @@ export {
   CROSS_MODE_HANDOFF_ERROR_CODES,
   CROSS_MODE_HANDOFF_RELAY_JOB_TYPE,
 } from './internal/cross-mode-handoff.types.js';
+// PR #46 review #2: the durable cross-mode-handoff relay (mirrors the
+// WORK-034 session-terminal relay + the WORK-035 workspace-release relay).
+// Wired into the WorkerHost at composition time (app.ts): the job handler is
+// registered in the HandlerRegistry; the boot sweep is registered in
+// WorkerHostOptions.outboxRelays. The obligation row (migration 0043) is the
+// durable source of truth for an in-flight handoff; the relay + the boot
+// sweep guarantee eventual delivery of an interrupted handoff. The concrete
+// CrossModeHandoffOutboxRelay + createCrossModeHandoffRelayJobHandler stay
+// internal (imported by app.ts directly from the internal path — mirrors the
+// WORK-034/035 relay pattern; the barrel exposes ONLY the contract types so
+// the module-boundary invariant "barrels export only types/interfaces" holds).
+export type {
+  CrossModeHandoffReconciler,
+  CrossModeHandoffRelayJobPayload,
+  CrossModeHandoffOutboxRelayDeps,
+} from './internal/cross-mode-handoff-relay.js';
 
 // WORK-034 (first slice): Persistent Session Core — the provider-independent
 // session contracts. An ExecutionSession is the CONTINUATION CONTEXT for

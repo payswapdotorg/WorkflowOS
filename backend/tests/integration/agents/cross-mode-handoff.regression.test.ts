@@ -48,6 +48,22 @@ import { DefaultAuditService } from '../../../src/modules/audit/internal/audit-s
 import { DefaultExecutionHandoffService } from '../../../src/modules/agents/internal/execution-handoff-service.js';
 import { DefaultExecutionCallbackService } from '../../../src/modules/agents/internal/execution-callback-service.js';
 import { DefaultExecutionEventIngestionService } from '../../../src/modules/agents/internal/execution-event-ingestion-service.js';
+// PR #46 review #1 + #3: the real WORK-034 session + WORK-035 workspace
+// services the cross-mode handoff composes (the continuity gates + the
+// interrupt/resume path). A recording worktree materializer tracks the
+// working-tree state so the tests prove physical-worktree continuity.
+import { PgExecutionSessionRepository } from '../../../src/modules/agents/internal/pg-execution-session-repository.js';
+import { DefaultExecutionSessionService } from '../../../src/modules/agents/internal/execution-session-service.js';
+import { PgAgentWorkspaceRepository } from '../../../src/modules/agents/internal/pg-agent-workspace-repository.js';
+import { DefaultAgentWorkspaceService } from '../../../src/modules/agents/internal/agent-workspace-service.js';
+import type { WorktreeMaterializer } from '../../../src/modules/agents/internal/agent-workspace.types.js';
+// PR #46 review #2: the durable relay (mirrors session-terminal-durability
+// test's real InMemoryQueue + WorkerHost + the relay + the boot sweep).
+import { InMemoryQueue, WorkerHost, buildHandlerRegistry } from '@platform/index.js';
+import {
+  CrossModeHandoffOutboxRelay,
+  createCrossModeHandoffRelayJobHandler,
+} from '../../../src/modules/agents/internal/cross-mode-handoff-relay.js';
 import { CrossModeHandoffError } from '../../../src/modules/agents/index.js';
 import type { CrossModeHandoffService } from '../../../src/modules/agents/index.js';
 import type { AgentPolicyExternalDecision } from '../../../src/modules/agents/internal/agent-policy.types.js';
@@ -104,6 +120,57 @@ class StubAgentProviderRegistry implements CrossModeAgentProviderRegistryPort {
 }
 
 /**
+ * PR #46 review #1: a recording worktree materializer that tracks the
+ * working-tree state per token so the tests prove PHYSICAL worktree
+ * continuity across a cross-mode handoff (the uncommitted working-tree state
+ * survives — it is NOT released/recreated). Mirrors the WORK-035 test's
+ * FakeWorktreeMaterializer, extended with a per-token working-tree-state map.
+ */
+class RecordingWorktreeMaterializer implements WorktreeMaterializer {
+  /** token → the uncommitted working-tree state blob (the proof of continuity). */
+  readonly workingTree = new Map<string, string>();
+  /** token → host path (the materialized worktree's location). */
+  readonly hostPaths = new Map<string, string>();
+  readonly removed: string[] = [];
+
+  async materialize(input: {
+    worktreePathToken: string; repositoryOwner: string; repositoryName: string;
+    branch: string; baseRevision: string;
+  }): Promise<string> {
+    const host = `/fake-cmh-workspaces/${input.worktreePathToken}`;
+    // Idempotent: a re-materialize at the SAME token returns the SAME host
+    // path + preserves the working-tree state (the worktree already exists).
+    if (!this.hostPaths.has(input.worktreePathToken)) {
+      this.hostPaths.set(input.worktreePathToken, host);
+      // A fresh worktree starts with NO uncommitted state (the test seeds
+      // working-tree state via setWorkingTree after materialization).
+    }
+    return this.hostPaths.get(input.worktreePathToken)!;
+  }
+
+  async remove(input: { worktreePathToken: string }): Promise<void> {
+    this.removed.push(input.worktreePathToken);
+    this.workingTree.delete(input.worktreePathToken);
+    this.hostPaths.delete(input.worktreePathToken);
+  }
+
+  /** Seed uncommitted working-tree state on a materialized worktree. */
+  setWorkingTree(token: string, state: string): void {
+    this.workingTree.set(token, state);
+  }
+
+  /** The uncommitted working-tree state at a token (undefined if gone). */
+  getWorkingTree(token: string): string | undefined {
+    return this.workingTree.get(token);
+  }
+
+  /** Whether a worktree exists at the token (the simulated disk state). */
+  has(token: string): boolean {
+    return this.hostPaths.has(token);
+  }
+}
+
+/**
  * A recording wrapper around ExecutionRecordRepository whose `transitionMode`
  * throws the FIRST N times it is called (simulating a crash after the reserve
  * step). Subsequent calls delegate to the real repository. Used for the
@@ -153,6 +220,14 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   let externalExecutionProvider: ExternalExecutionProvider;
   let auditService: DefaultAuditService;
   let crossModeHandoffService: CrossModeHandoffService;
+  // PR #46 review #1 + #3: the real WORK-034 session + WORK-035 workspace
+  // services the cross-mode handoff composes (the continuity gates + the
+  // interrupt/resume path).
+  let sessionRepo: PgExecutionSessionRepository;
+  let executionSessionService: DefaultExecutionSessionService;
+  let workspaceRepo: PgAgentWorkspaceRepository;
+  let workspaceMaterializer: RecordingWorktreeMaterializer;
+  let agentWorkspaceService: DefaultAgentWorkspaceService;
   // Hoisted so the tenant-isolation describe can build a proper Project B
   // ImplementationContext via the same builder (the prompt builder requires
   // the full ImplementationContextContent shape — requirements + criteria +
@@ -222,6 +297,54 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       logger: stack.db.logger,
     });
 
+    // PR #46 review #1 + #3: construct the real WORK-034 session + WORK-035
+    // workspace services the cross-mode handoff composes. The session
+    // service owns the interrupt/resume path; the workspace service owns the
+    // physical-worktree continuity. A recording materializer tracks the
+    // working-tree state per token (the proof of continuity).
+    sessionRepo = new PgExecutionSessionRepository(db);
+    executionSessionService = new DefaultExecutionSessionService({
+      sessionRepository: sessionRepo,
+      executionRecordRepository: executionRecordRepo,
+      logger: stack.db.logger,
+    });
+    workspaceMaterializer = new RecordingWorktreeMaterializer();
+    // The workspace repo needs the /github authority lookup (the linked
+    // repository row) + a baseline resolver. The test seeds the row below
+    // (after the project is created); the inline lookup reads the seeded row
+    // at acquireWorkspace time (mirrors the WORK-035 test setup).
+    workspaceRepo = new PgAgentWorkspaceRepository({
+      db,
+      executionRecordRepository: executionRecordRepo,
+      projectGitHubRepositoryLookup: {
+        findByProject: async (pid: string) => {
+          const r = await db.query<{ id: string; project_id: string; owner: string; repository: string; default_branch: string; installation_id: string }>(
+            `SELECT id, project_id, owner, repository, default_branch, installation_id
+             FROM wfos_project_github_repositories WHERE project_id = $1 LIMIT 1`,
+            [pid],
+          );
+          const row = r.rows[0];
+          return row
+            ? {
+                id: row.id, projectId: row.project_id, owner: row.owner,
+                repository: row.repository, defaultBranch: row.default_branch,
+                installationId: row.installation_id,
+              }
+            : null;
+        },
+      },
+      baselineResolver: {
+        getBranch: async (_input: { owner: string; repository: string; branchName: string; installationId: string }) => ({
+          sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+        }),
+      },
+    });
+    agentWorkspaceService = new DefaultAgentWorkspaceService({
+      workspaceRepository: workspaceRepo,
+      materializer: workspaceMaterializer,
+      logger: stack.db.logger,
+    });
+
     crossModeHandoffService = new DefaultCrossModeHandoffService({
       executionRecordRepository: executionRecordRepo,
       crossModeHandoffRepository: crossModeHandoffRepo,
@@ -232,6 +355,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
       agentProviderRegistryService: new StubAgentProviderRegistry(),
+      executionSessionService,
+      agentWorkspaceService,
       auditService,
       logger: stack.db.logger,
     });
@@ -243,6 +368,15 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     orgId = org.id;
     const project = await stack.projectRepository.create({ organizationId: orgId, name: 'W042 CMH Project' });
     projectId = project.id;
+    // PR #46 review #1: the /github authority row (the linked repository) —
+    // required for the workspace repo to resolve the repository coordinates +
+    // the baseline at acquireWorkspace time (mirrors the WORK-035 test setup).
+    await stack.db.client.query(
+      `INSERT INTO wfos_project_github_repositories
+         (project_id, installation_id, owner, repository, default_branch, link_type)
+       VALUES ($1, 'inst-w042', 'w042-org', 'w042-repo', 'main', 'linked')`,
+      [projectId],
+    );
     const arch = await stack.architectureRepository.create({ projectId, name: 'W042 Arch' });
     const version = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: '# W042', digestSha256: 'w042-digest-1' });
     architectureVersionId = version.id;
@@ -378,6 +512,145 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     return { transitions: Number(t.rows[0]?.c ?? 0), executions: Number(e.rows[0]?.c ?? 0) };
   }
 
+  // -------------------------------------------------------------------------
+  // PR #46 review #1 + #3: the REAL session + workspace helpers. These
+  // create the actual continuation-context state the cross-mode handoff
+  // composes, so the tests prove the SAME session/workspace SURVIVES the
+  // handoff (NOT merely that no second row is created).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a REAL running ExecutionSession for an execution (ensureSession +
+   * startSession → status=running). Returns the session id + version so the
+   * test can assert the SAME session survives the handoff (interrupted →
+   * resumed, same id).
+   */
+  async function createRunningSession(executionId: string): Promise<{ sessionId: string; version: number }> {
+    const session = await executionSessionService.ensureSession(executionId);
+    const started = await executionSessionService.startSession(session.id);
+    // startSession returns null if already running; re-fetch to be safe.
+    const current = started ?? await sessionRepo.getSession(session.id);
+    return { sessionId: current!.id, version: current!.version };
+  }
+
+  /**
+   * Create a REAL terminal ExecutionSession (failed) for an execution — the
+   * WORK-034 immutability case the cross-mode handoff MUST reject (a
+   * terminalized session cannot be continued across a mode handoff). Uses
+   * the repository's CAS transitionWithEvent to drive running→failed (the
+   * legal edge) directly, without touching the execution record (so the
+   * obligation machinery is not involved — the session is terminalized in
+   * isolation for the rejection test).
+   */
+  async function createTerminalSession(
+    executionId: string,
+    terminalState: 'failed' | 'completed' | 'cancelled' = 'failed',
+  ): Promise<{ sessionId: string }> {
+    const session = await executionSessionService.ensureSession(executionId);
+    await executionSessionService.startSession(session.id);
+    const running = await sessionRepo.getSession(session.id);
+    // CAS running → terminal (the legal edge). The event type matches the
+    // terminal state (the migration-0034 terminal-event guard allows the
+    // terminal event whose type equals the session's terminal status).
+    await sessionRepo.transitionWithEvent(
+      running!.id, running!.version, 'running', terminalState,
+      terminalState as 'failed' | 'completed' | 'cancelled',
+    );
+    return { sessionId: session.id };
+  }
+
+  /**
+   * Create a REAL ready AgentWorkspace for an execution (acquireWorkspace)
+   * + seed uncommitted working-tree state on the materializer. Returns the
+   * workspace id + the worktreePathToken so the test can assert the SAME
+   * worktree SURVIVES the handoff (still ready, working-tree state intact —
+   * NOT released/recreated).
+   */
+  async function createReadyWorkspace(
+    executionId: string,
+    workingTreeState: string,
+  ): Promise<{ workspaceId: string; worktreePathToken: string }> {
+    const record = await executionRecordRepo.findByExecutionId(executionId);
+    const claim = await agentWorkspaceService.acquireWorkspace({
+      executionId,
+      branch: record!.branch ?? 'feat/work-w042-001',
+    });
+    const workspace = claim.workspace;
+    // Seed the uncommitted working-tree state on the materializer (the proof
+    // of continuity — the state must survive the handoff).
+    workspaceMaterializer.setWorkingTree(workspace.worktreePath, workingTreeState);
+    return { workspaceId: workspace.id, worktreePathToken: workspace.worktreePath };
+  }
+
+  /**
+   * Create a REAL terminal (released) AgentWorkspace for an execution — the
+   * WORK-035 physical-worktree-gone case the cross-mode handoff MUST reject
+   * (the worktree was removed; the uncommitted state cannot be recovered).
+   */
+  async function createReleasedWorkspace(executionId: string): Promise<{ workspaceId: string }> {
+    const record = await executionRecordRepo.findByExecutionId(executionId);
+    const claim = await agentWorkspaceService.acquireWorkspace({
+      executionId,
+      branch: record!.branch ?? 'feat/work-w042-001',
+    });
+    await agentWorkspaceService.releaseWorkspace(claim.workspace.id);
+    return { workspaceId: claim.workspace.id };
+  }
+
+  /** Fetch the current session for an execution (null if none). */
+  async function getSession(executionId: string) {
+    return executionSessionService.getSessionForExecution(executionId);
+  }
+
+  /** Fetch the current workspace for an execution (null if none). */
+  async function getWorkspace(executionId: string) {
+    return agentWorkspaceService.getWorkspaceForExecution(executionId);
+  }
+
+  /**
+   * Wait for a condition to hold (the WorkerHost's poll loop drains relay
+   * jobs asynchronously — mirrors the session-terminal-durability test's
+   * wait pattern). Polls every 20ms up to the deadline (default 8s).
+   */
+  async function waitFor<T>(
+    fn: () => Promise<T>,
+    check: (v: T) => boolean,
+    deadlineMs = 8000,
+  ): Promise<T> {
+    const deadline = Date.now() + deadlineMs;
+    let last: T;
+    do {
+      last = await fn();
+      if (check(last)) return last;
+      await new Promise((r) => setTimeout(r, 20));
+    } while (Date.now() < deadline);
+    return last;
+  }
+
+  /** Count pending (undischarged) cross-mode-handoff obligations for an execution. */
+  async function countPendingObligations(executionId: string): Promise<number> {
+    const res = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_cross_mode_handoff_obligations o
+       JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+       JOIN wfos_executions e ON e.id = o.execution_id
+       WHERE e.execution_id = $1 AND o.discharged_at IS NULL`,
+      [executionId],
+    );
+    return Number(res.rows[0]?.c ?? 0);
+  }
+
+  /** Count discharged cross-mode-handoff obligations for an execution. */
+  async function countDischargedObligations(executionId: string): Promise<number> {
+    const res = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_cross_mode_handoff_obligations o
+       JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+       JOIN wfos_executions e ON e.id = o.execution_id
+       WHERE e.execution_id = $1 AND o.discharged_at IS NOT NULL`,
+      [executionId],
+    );
+    return Number(res.rows[0]?.c ?? 0);
+  }
+
   // ===========================================================================
   // identity preservation (#1, #2, #3, #4, #5, #6, #7, #18, #19, #20)
   // ===========================================================================
@@ -454,45 +727,160 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       expect(after!.id).toBe(before!.id);
     });
 
-    // #4: same ExecutionSession identity is preserved (the cross-mode handoff
-    // does NOT create a new session — the session belongs to the logical
-    // execution; the handoff is a subordinate state transition).
-    it('4. the cross-mode handoff does NOT create a new ExecutionSession (the session belongs to the logical execution; the handoff is a subordinate transition)', async () => {
-      const { executionId, recordId } = await createExternalRecord('handoff_ready');
-      const sessionsBefore = await stack.db.client.query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c FROM wfos_execution_sessions WHERE execution_id = $1`,
-        [recordId],
-      );
+    // #4 (PR #46 review #3 — UPGRADED): the cross-mode handoff preserves the
+    // SAME REAL ExecutionSession across a native→external transition (NOT
+    // merely that no second row is created — the review's exact objection).
+    // The test creates a REAL running session, performs native→external, and
+    // proves the SAME session is now `interrupted` (running → interrupted —
+    // the EXISTING non-terminal path; NEVER terminalized — WORK-034
+    // compatibility), the SAME sessionId survives, the interrupted event is
+    // appended (the correction chain is visible), and exactly ONE session row
+    // exists (no second session). The reverse direction (external→native
+    // resuming an interrupted session) is proven in #4b below (a separate
+    // execution — ONE handoff per execution per the UNIQUE fence).
+    it('4. native→external preserves the SAME REAL ExecutionSession — the session is interrupted (running→interrupted); the SAME sessionId survives; the interrupted event is appended; the session is NEVER terminalized (WORK-034 compatibility)', async () => {
+      // Start a native execution with a REAL running session.
+      const { executionId, recordId } = await createNativeRecord('running');
+      const { sessionId } = await createRunningSession(executionId);
+      expect((await getSession(executionId))!.status).toBe('running');
+
+      // native → external: the session is INTERRUPTED (running → interrupted).
       await crossModeHandoffService.handoff(
         executionId,
-        { targetMode: 'native', idempotencyKey: `sess-${executionId}` },
+        { targetMode: 'external', reason: 'session-survival-n2e', idempotencyKey: `sess-n2e-${executionId}` },
         { userId: 'test-user', source: 'cmh-test' },
       );
-      const sessionsAfter = await stack.db.client.query<{ c: number }>(
+      // PR #46 review #3: the SAME session (NOT a new row) is now
+      // `interrupted` (the EXISTING non-terminal path — NEVER terminalized).
+      const afterN2E = await getSession(executionId);
+      expect(afterN2E, 'the session still exists (NOT deleted)').not.toBeNull();
+      expect(afterN2E!.id).toBe(sessionId);
+      expect(afterN2E!.status).toBe('interrupted');
+      // Exactly ONE session row (no second session created).
+      const sessionsCount = await stack.db.client.query<{ c: number }>(
         `SELECT COUNT(*)::int AS c FROM wfos_execution_sessions WHERE execution_id = $1`,
         [recordId],
       );
-      expect(Number(sessionsAfter.rows[0]?.c ?? 0)).toBe(Number(sessionsBefore.rows[0]?.c ?? 0));
+      expect(Number(sessionsCount.rows[0]?.c ?? 0)).toBe(1);
+      // The interrupted event was appended (the correction chain is visible).
+      const events = await sessionRepo.listEvents(sessionId);
+      expect(events.some((e) => e.eventType === 'interrupted')).toBe(true);
+      // The session is NOT terminal (terminalAt is null — the handoff NEVER
+      // terminalizes the session).
+      expect(afterN2E!.terminalAt).toBeNull();
     });
 
-    // #5: same Workspace/worktree is preserved (the cross-mode handoff does NOT
-    // create a new workspace — UNIQUE(execution_id)).
-    it('5. the cross-mode handoff does NOT create a new AgentWorkspace (the workspace is per-execution; the handoff is a subordinate transition)', async () => {
-      const { executionId, recordId } = await createExternalRecord('handoff_ready');
-      const workspacesBefore = await stack.db.client.query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c FROM wfos_agent_workspaces WHERE execution_id = $1`,
-        [recordId],
+    // #4b (PR #46 review #3): the reverse direction — external→native
+    // resumes an interrupted session (interrupted → running). A separate
+    // execution (ONE handoff per execution). The session is resumed via the
+    // EXISTING non-terminal path; the SAME sessionId survives; the resumed
+    // event is appended.
+    it('4b. external→native resumes an interrupted ExecutionSession (interrupted→running); the SAME sessionId survives; the resumed event is appended (the EXISTING non-terminal path)', async () => {
+      // Start an external execution + a session that is `interrupted`
+      // (simulating a prior native phase that was interrupted — the
+      // external phase does not drive the native session).
+      const { executionId } = await createExternalRecord('handoff_ready');
+      const { sessionId } = await createRunningSession(executionId);
+      // Manually interrupt the session (running → interrupted) — the state
+      // an external→native handoff finds the session in.
+      const running = await sessionRepo.getSession(sessionId);
+      await sessionRepo.transitionWithEvent(
+        running!.id, running!.version, 'running', 'interrupted', 'interrupted',
       );
+      expect((await getSession(executionId))!.status).toBe('interrupted');
+
+      // external → native: the session is RESUMED (interrupted → running).
       await crossModeHandoffService.handoff(
         executionId,
-        { targetMode: 'native', idempotencyKey: `ws-${executionId}` },
+        { targetMode: 'native', reason: 'session-survival-e2n', idempotencyKey: `sess-e2n-${executionId}` },
         { userId: 'test-user', source: 'cmh-test' },
       );
-      const workspacesAfter = await stack.db.client.query<{ c: number }>(
+      const afterE2N = await getSession(executionId);
+      expect(afterE2N, 'the session still exists (NOT deleted)').not.toBeNull();
+      expect(afterE2N!.id).toBe(sessionId);
+      // The resumed event was appended (the correction chain is visible).
+      const events = await sessionRepo.listEvents(sessionId);
+      expect(events.some((e) => e.eventType === 'resumed')).toBe(true);
+      // The SAME sessionId throughout (no second session created). The
+      // session may now be `running` (resumed) or terminalized by the native
+      // dispatch (the FakeAgentAdapter completes the AgentRun → the execution
+      // terminalizes → the WORK-034 obligation terminalizes the session) —
+      // either way it is the SAME session, NOT a new one.
+      expect(['running', 'completed', 'failed']).toContain(afterE2N!.status);
+    });
+
+    // #5 (PR #46 review #1 — UPGRADED): the cross-mode handoff preserves the
+    // SAME REAL AgentWorkspace + the physical worktree + the uncommitted
+    // working-tree state across a native→external transition (NOT merely that
+    // no second row is created — the review's exact objection). The test
+    // creates a REAL ready workspace with seeded uncommitted state, performs
+    // native→external, and proves the SAME workspace is still `ready` (NOT
+    // released — the workspace-release trigger does NOT fire on a non-terminal
+    // handoff), the SAME worktreePathToken + uncommitted state are intact on
+    // the materializer (the worktree is NOT released/recreated). The reverse
+    // direction (external→native reusing the workspace) is proven in #5b.
+    it('5. native→external preserves the SAME REAL AgentWorkspace + the physical worktree + the uncommitted working-tree state (the worktree is NOT released/recreated; the workspace-release trigger does NOT fire on a non-terminal handoff)', async () => {
+      // Start a native execution with a REAL ready workspace + seeded
+      // uncommitted working-tree state.
+      const { executionId, recordId } = await createNativeRecord('running');
+      const uncommittedState = `uncommitted-changes-${executionId}-∂-∫-ç-∆`;
+      const { workspaceId, worktreePathToken } = await createReadyWorkspace(executionId, uncommittedState);
+      expect((await getWorkspace(executionId))!.state).toBe('ready');
+      expect(workspaceMaterializer.has(worktreePathToken)).toBe(true);
+      expect(workspaceMaterializer.getWorkingTree(worktreePathToken)).toBe(uncommittedState);
+
+      // native → external: the workspace is PRESERVED (still ready; the
+      // worktree + uncommitted state intact — NOT released/recreated).
+      await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', reason: 'workspace-continuity-n2e', idempotencyKey: `ws-n2e-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      const afterN2E = await getWorkspace(executionId);
+      expect(afterN2E, 'the workspace still exists (NOT deleted)').not.toBeNull();
+      expect(afterN2E!.id).toBe(workspaceId);
+      expect(afterN2E!.state).toBe('ready');
+      expect(afterN2E!.terminalAt).toBeNull();
+      // The worktree + uncommitted state are INTACT on the materializer
+      // (NOT removed — the workspace-release trigger did NOT fire on the
+      // non-terminal handoff).
+      expect(workspaceMaterializer.has(worktreePathToken)).toBe(true);
+      expect(workspaceMaterializer.getWorkingTree(worktreePathToken)).toBe(uncommittedState);
+      // Exactly ONE workspace row (no second workspace created).
+      const wsCount = await stack.db.client.query<{ c: number }>(
         `SELECT COUNT(*)::int AS c FROM wfos_agent_workspaces WHERE execution_id = $1`,
         [recordId],
       );
-      expect(Number(workspacesAfter.rows[0]?.c ?? 0)).toBe(Number(workspacesBefore.rows[0]?.c ?? 0));
+      expect(Number(wsCount.rows[0]?.c ?? 0)).toBe(1);
+    });
+
+    // #5b (PR #46 review #1): the reverse direction — external→native reuses
+    // an existing ready workspace (the native dispatch goes through the
+    // AgentGateway which does NOT touch the workspace; the worktree +
+    // uncommitted state stay intact). A separate execution.
+    it('5b. external→native reuses the SAME REAL AgentWorkspace + the physical worktree + the uncommitted working-tree state (the native dispatch does NOT touch the workspace)', async () => {
+      // Start an external execution + a REAL ready workspace with seeded
+      // uncommitted state (simulating a workspace that survived a prior
+      // native phase).
+      const { executionId } = await createExternalRecord('handoff_ready');
+      const uncommittedState = `uncommitted-e2n-${executionId}-∆-ƒ-ç-√`;
+      const { workspaceId, worktreePathToken } = await createReadyWorkspace(executionId, uncommittedState);
+
+      // external → native: the SAME workspace is REUSED (the native
+      // dispatch goes through the AgentGateway which does NOT touch the
+      // workspace — the worktree + uncommitted state STILL intact).
+      await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', reason: 'workspace-continuity-e2n', idempotencyKey: `ws-e2n-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      const afterE2N = await getWorkspace(executionId);
+      expect(afterE2N, 'the workspace still exists (NOT deleted)').not.toBeNull();
+      expect(afterE2N!.id).toBe(workspaceId);
+      expect(afterE2N!.state).toBe('ready');
+      // The worktree + uncommitted state STILL intact (NOT released/recreated).
+      expect(workspaceMaterializer.has(worktreePathToken)).toBe(true);
+      expect(workspaceMaterializer.getWorkingTree(worktreePathToken)).toBe(uncommittedState);
     });
 
     // #6: branch state is preserved (the record.branch is unchanged across the
@@ -738,6 +1126,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
         agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
       });
@@ -821,6 +1211,329 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       expect(Number(runsRes.rows[0]?.c ?? 0)).toBe(1);
       // Still exactly ONE handoff log row.
       expect(await countHandoffsForExecution(executionId)).toBe(1);
+    });
+  });
+
+  // ===========================================================================
+  // PR #46 review round 1 — the three blocking fixes' regression coverage.
+  // Finding #3 (terminal-session rejection) + finding #1 (terminal-workspace
+  // rejection) + finding #2 (durable crash recovery via a REAL InMemoryQueue
+  // + WorkerHost + the relay + the boot sweep).
+  // ===========================================================================
+  describe('PR #46 round 1 — continuity gates (session + workspace)', () => {
+    // R1-#3a: a TERMINAL ExecutionSession is REJECTED (WORK-034 immutability —
+    // a terminalized session cannot be continued across a mode handoff). The
+    // handoff NEVER silently continues a terminal session.
+    it('R1-#3a. a TERMINAL ExecutionSession (failed) is REJECTED with handoff-ineligible-state — the handoff NEVER silently continues a terminal session (WORK-034 compatibility)', async () => {
+      const { executionId } = await createNativeRecord('running');
+      await createTerminalSession(executionId, 'failed');
+      const sessionBefore = await getSession(executionId);
+      expect(sessionBefore!.status).toBe('failed');
+      const err = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `term-sess-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-state');
+      expect((err as Error).message).toMatch(/TERMINAL ExecutionSession/);
+      // The session is UNCHANGED (still failed — the gate rejected BEFORE
+      // the mutate; no handoff log row was created).
+      expect((await getSession(executionId))!.status).toBe('failed');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // R1-#3b: a terminal session in OTHER terminal states (completed /
+    // cancelled) is also rejected (the gate covers all terminal states).
+    it('R1-#3b. a TERMINAL ExecutionSession (completed + cancelled) is REJECTED — the gate covers ALL terminal states', async () => {
+      for (const terminalState of ['completed', 'cancelled'] as const) {
+        const { executionId } = await createNativeRecord('running');
+        await createTerminalSession(executionId, terminalState);
+        const err = await crossModeHandoffService.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `term-${terminalState}-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        ).catch((e) => e);
+        expect(err).toBeInstanceOf(CrossModeHandoffError);
+        expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-state');
+      }
+    });
+
+    // R1-#1a: a TERMINAL AgentWorkspace (released) is REJECTED — the physical
+    // worktree is gone; the uncommitted working-tree state cannot be recovered.
+    it('R1-#1a. a TERMINAL AgentWorkspace (released) is REJECTED with handoff-ineligible-state — the physical worktree is gone (cannot preserve continuity)', async () => {
+      const { executionId } = await createExternalRecord('handoff_ready');
+      await createReleasedWorkspace(executionId);
+      const wsBefore = await getWorkspace(executionId);
+      expect(wsBefore!.state).toBe('released');
+      expect(wsBefore!.terminalAt).not.toBeNull();
+      const err = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `term-ws-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-state');
+      expect((err as Error).message).toMatch(/TERMINAL AgentWorkspace/);
+      // The workspace is UNCHANGED (still released — the gate rejected
+      // BEFORE the mutate; no handoff log row was created).
+      expect((await getWorkspace(executionId))!.state).toBe('released');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+  });
+
+  describe('PR #46 round 1 — durable crash recovery (the relay + the boot sweep)', () => {
+    // R1-#2a: crash window #1 (reserve → process dies before mutate). The
+    // durable obligation row exists (migration 0043's trigger wrote it
+    // ATOMICALLY with the reserve). A REAL InMemoryQueue + WorkerHost + the
+    // CrossModeHandoffOutboxRelay boot sweep enqueues the reconcile job; the
+    // createCrossModeHandoffRelayJobHandler runs reconcileCrossModeHandoffForExecution;
+    // the handoff converges (exactly-one handoff, one package, the obligation
+    // discharges).
+    it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', async () => {
+      const { executionId, recordId } = await createNativeRecord('failed');
+      // Build a service whose transitionMode crashes the FIRST time (the
+      // reserve persists the handoff log row + the obligation before the
+      // crash; a queue is wired so the claim-time relay job enqueues).
+      const crashingRepo = new CrashAfterReserveRepo(executionRecordRepo, 1);
+      const queue = new InMemoryQueue();
+      const crashingService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: crashingRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue,
+      });
+      // The relay + the boot sweep (mirrors session-terminal-durability test).
+      const relay = new CrossModeHandoffOutboxRelay({
+        handoffRepository: crossModeHandoffRepo,
+        queue,
+        logger: stack.db.logger,
+      });
+      const worker = new WorkerHost(
+        queue,
+        buildHandlerRegistry([
+          createCrossModeHandoffRelayJobHandler(crashingService, stack.db.logger),
+        ]),
+        stack.db.logger,
+        { outboxRelays: [relay] },
+      );
+      await worker.start();
+
+      try {
+        // The first handoff crashes after the reserve (transitionMode throws).
+        const idempotencyKey = `durable-crash1-${executionId}`;
+        const err = await crashingService.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey },
+          { userId: 'test-user', source: 'cmh-test' },
+        ).catch((e) => e);
+        expect(err).toBeInstanceOf(Error);
+        // The handoff log row + the obligation ARE persisted (the reserve
+        // + migration 0043's trigger ran before the crash).
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        expect(await countPendingObligations(executionId)).toBe(1);
+        // The record is NOT mutated (still native/failed).
+        const midRecord = await executionRecordRepo.findByExecutionId(executionId);
+        expect(midRecord!.mode).toBe('native');
+
+        // The claim-time relay job is on the queue. The WorkerHost's poll
+        // loop drains it (a live worker); wait for the reconcile to converge
+        // (record.mode === external + the obligation discharges).
+        await waitFor(
+          () => executionRecordRepo.findByExecutionId(executionId),
+          (r) => r?.mode === 'external' && r.status === 'handoff_ready' && r.packageValue != null,
+        );
+
+        // The handoff converged (the relay reconciled: re-mutate + re-dispatch).
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.id).toBe(recordId);
+        expect(after!.mode).toBe('external');
+        expect(after!.status).toBe('handoff_ready');
+        expect(after!.packageValue).not.toBeNull();
+        // Exactly ONE handoff log row (no duplicate).
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        // The obligation DISCHARGED (the reconcile confirmed completion).
+        expect(await countDischargedObligations(executionId)).toBe(1);
+        expect(await countPendingObligations(executionId)).toBe(0);
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    // R1-#2b: crash window #2 (mutate → process dies before dispatch). The
+    // boot sweep + the relay re-dispatch; exactly-one AgentRun (the
+    // agentRunRepository.findByExecutionId guard + the UNIQUE fence).
+    it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', async () => {
+      const { executionId, recordId } = await createExternalRecord('handoff_ready');
+      const queue = new InMemoryQueue();
+      // A service wired with the queue (the claim-time relay job enqueues).
+      const relayService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue,
+      });
+      const relay = new CrossModeHandoffOutboxRelay({
+        handoffRepository: crossModeHandoffRepo,
+        queue,
+        logger: stack.db.logger,
+      });
+      const worker = new WorkerHost(
+        queue,
+        buildHandlerRegistry([
+          createCrossModeHandoffRelayJobHandler(relayService, stack.db.logger),
+        ]),
+        stack.db.logger,
+        { outboxRelays: [relay] },
+      );
+      await worker.start();
+
+      try {
+        // Run a successful external→native handoff (the happy path: record
+        // becomes native/completed with an AgentRun).
+        await relayService.handoff(
+          executionId,
+          { targetMode: 'native', idempotencyKey: `durable-crash2-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+        const happy = await executionRecordRepo.findByExecutionId(executionId);
+        expect(happy!.mode).toBe('native');
+        expect(happy!.status).toBe('completed');
+
+        // Simulate the crash-after-mutate state: reset the record to
+        // mode=native, status=running + delete the AgentRun (the dispatch
+        // did not happen). Reset the obligation to pending (the crash
+        // undid the discharge).
+        await stack.db.client.query(
+          `UPDATE wfos_executions SET status = 'running', agent_run_id = NULL, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
+          [recordId],
+        );
+        await stack.db.client.query(
+          `DELETE FROM wfos_agent_runs WHERE execution_id = $1`,
+          [executionId],
+        );
+        await stack.db.client.query(
+          `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+           WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+          [recordId],
+        );
+        const midRecord = await executionRecordRepo.findByExecutionId(executionId);
+        expect(midRecord!.mode).toBe('native');
+        expect(midRecord!.status).toBe('running');
+        expect(await agentRunRepo.findByExecutionId(executionId)).toBeNull();
+
+        // Trigger the boot sweep (the WorkerHost re-enqueues relay jobs for
+        // ALL pending obligations). The WorkerHost's poll loop drains them;
+        // wait for the reconcile to converge (record.status === completed +
+        // the obligation discharges).
+        await relay.enqueuePendingRelayJobs();
+        await waitFor(
+          () => executionRecordRepo.findByExecutionId(executionId),
+          (r) => r?.status === 'completed' && r.agentRunId != null,
+        );
+
+        // The handoff converged (the relay re-dispatched native).
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.mode).toBe('native');
+        expect(after!.status).toBe('completed');
+        expect(after!.agentRunId).not.toBeNull();
+        // Exactly ONE AgentRun (no duplicate from the re-dispatch).
+        const runsRes = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_agent_runs WHERE execution_id = $1`,
+          [executionId],
+        );
+        expect(Number(runsRes.rows[0]?.c ?? 0)).toBe(1);
+        // Exactly ONE handoff log row.
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        // The obligation DISCHARGED.
+        expect(await countDischargedObligations(executionId)).toBe(1);
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    // R1-#2c: the boot sweep is idempotent — a repeated sweep on a COMPLETE
+    // handoff discharges (no-op) + enqueues a relay job that no-ops. No
+    // duplicate handoff, no duplicate dispatch.
+    it('R1-#2c. the boot sweep is idempotent — a repeated sweep on a COMPLETE handoff is a no-op (no duplicate handoff/dispatch; the obligation stays discharged)', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const queue = new InMemoryQueue();
+      const relayService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue,
+      });
+      const relay = new CrossModeHandoffOutboxRelay({
+        handoffRepository: crossModeHandoffRepo,
+        queue,
+        logger: stack.db.logger,
+      });
+      const worker = new WorkerHost(
+        queue,
+        buildHandlerRegistry([
+          createCrossModeHandoffRelayJobHandler(relayService, stack.db.logger),
+        ]),
+        stack.db.logger,
+        { outboxRelays: [relay] },
+      );
+      await worker.start();
+      try {
+        // A successful handoff (completes + discharges the obligation).
+        await relayService.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `idempotent-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+        // The claim-time relay job is on the queue. The WorkerHost's poll
+        // loop drains it (a no-op for a complete handoff); wait for the
+        // obligation to discharge.
+        await waitFor(
+          async () => countDischargedObligations(executionId),
+          (c) => c === 1,
+        );
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        expect(await countDischargedObligations(executionId)).toBe(1);
+
+        // A repeated boot sweep (no pending obligations — the listPending
+        // query returns zero; no relay job enqueued).
+        const enqueued = await relay.enqueuePendingRelayJobs();
+        expect(enqueued).toBe(0);
+        // Still exactly ONE handoff log row (no duplicate).
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+      } finally {
+        await worker.stop();
+      }
     });
   });
 
@@ -1013,6 +1726,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentPolicyEvaluator: new DenyExternalAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
         agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
       });
@@ -1042,6 +1757,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(false), // native NOT allowed
         agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
       });

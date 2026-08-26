@@ -235,6 +235,12 @@ import {
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
 import { DefaultCrossModeHandoffService } from './modules/agents/internal/default-cross-mode-handoff-service.js';
 import { PgCrossModeHandoffRepository } from './modules/agents/internal/pg-cross-mode-handoff-repository.js';
+// PR #46 review #2: the cross-mode-handoff durable relay (mirrors the
+// WORK-034 session-terminal relay + the WORK-035 workspace-release relay).
+import {
+  CrossModeHandoffOutboxRelay,
+  createCrossModeHandoffRelayJobHandler,
+} from './modules/agents/internal/cross-mode-handoff-relay.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
 // WORK-032: Native vs External Execution Benchmark — application-layer
@@ -689,6 +695,15 @@ export async function buildApp(
   // scope; constructed inside the agents block).
   let workspaceReleaseRelay: OutboxRelay | undefined;
   let agentWorkspaceServiceRef: { reconcilePendingReleases(): Promise<number> } | undefined;
+  // PR #46 review #2: the cross-mode-handoff outbox relay (declared at
+  // function scope; constructed inside the agents block, consumed by the
+  // WorkerHost boot sweep below — mirrors the WORK-034/035 relays).
+  let crossModeHandoffRelay: OutboxRelay | undefined;
+  // The cross-mode handoff reconciler reference (typed narrowly for the
+  // handler registry — mirrors executionSessionServiceRef).
+  let crossModeHandoffReconcilerRef:
+    | { reconcileCrossModeHandoffForExecution(executionId: string): Promise<unknown> }
+    | undefined;
   // WORK-036: the governed tool runtime (declared at function scope; the
   // agents block constructs it — exposed for the future native-execution
   // path that drives governed tools inside the workspace).
@@ -1545,6 +1560,25 @@ export async function buildApp(
     // append-only history log row (migration 0042). NEVER creates a second
     // ExecutionRecord, NEVER touches workflow/verification/review state, NEVER
     // persists secrets.
+    //
+    // PR #46 review corrections:
+    //   #1 — the WORK-035 AgentWorkspace port: the service resolves the
+    //     workspace + defends the physical-worktree continuity (rejects a
+    //     terminal workspace whose working-tree state is gone). The worktree
+    //     is PRESERVED across the handoff (the workspace-release trigger
+    //     fires ONLY on an execution terminal; a handoff → handoff_ready/
+    //     running does NOT terminalize; the NativeExecutionProvider delegates
+    //     to the AgentGateway which does NOT touch the workspace).
+    //   #2 — the durable queue: the reserve step enqueues the reconcile relay
+    //     job (the claim-time durable delivery). The obligation row itself
+    //     (migration 0043) is written by the AFTER INSERT trigger ATOMICALLY
+    //     with the reserve; the relay job + the WorkerHost boot sweep are the
+    //     liveness backstop.
+    //   #3 — the WORK-034 ExecutionSession port: the service resolves the
+    //     session + rejects a terminal session (WORK-034 immutability —
+    //     cannot continue a terminalized session across a mode handoff) +
+    //     drives the session through the EXISTING non-terminal `interrupted`
+    //     path (interrupt on native→external; resume/start on external→native).
     const crossModeHandoffRepository = new PgCrossModeHandoffRepository(database);
     crossModeHandoffService = new DefaultCrossModeHandoffService({
       executionRecordRepository,
@@ -1556,9 +1590,21 @@ export async function buildApp(
       agentPolicyEvaluator: agentPolicyEngine,
       executionPolicyService,
       agentProviderRegistryService,
+      executionSessionService,
+      agentWorkspaceService,
       auditService,
       logger,
+      queue,
     });
+    // PR #46 review #2: the cross-mode-handoff outbox relay (the generic
+    // OutboxRelay — the boot sweep re-enqueues reconcile jobs for every
+    // pending obligation, mirroring the WORK-034/035 relays).
+    crossModeHandoffRelay = new CrossModeHandoffOutboxRelay({
+      handoffRepository: crossModeHandoffRepository,
+      queue,
+      logger,
+    });
+    crossModeHandoffReconcilerRef = crossModeHandoffService;
 
     // --- /runtime module: DefaultRuntimeStatusService (SUB-B). ---
     // Aggregates GitHub + Vercel + Architect + Agent status for a project.
@@ -1661,6 +1707,12 @@ export async function buildApp(
   if (agentWorkspaceServiceRef) {
     handlerList.push(createWorkspaceReleaseRelayJobHandler(agentWorkspaceServiceRef, logger));
   }
+  // PR #46 review #2: the cross-mode-handoff reconcile relay job handler
+  // (the durable recovery for an interrupted handoff — mirrors the
+  // WORK-034/035 relay handlers). Idempotent + redeliveryPolicy.
+  if (crossModeHandoffReconcilerRef) {
+    handlerList.push(createCrossModeHandoffRelayJobHandler(crossModeHandoffReconcilerRef, logger));
+  }
   // WORK-040: the durable planning.evaluate job handler — reuses the EXISTING
   // WorkerHost registry (NO new scheduler). Idempotent + redeliveryPolicy.
   if (planningEvaluateJobHandlerRef) {
@@ -1681,6 +1733,10 @@ export async function buildApp(
       ...(sessionTerminalRelay ? [sessionTerminalRelay] : []),
       // WORK-035: the workspace-release obligation boot sweep.
       ...(workspaceReleaseRelay ? [workspaceReleaseRelay] : []),
+      // PR #46 review #2: the cross-mode-handoff obligation boot sweep
+      // (the durable recovery for an interrupted handoff — mirrors the
+      // WORK-034/035 sweeps).
+      ...(crossModeHandoffRelay ? [crossModeHandoffRelay] : []),
     ],
   });
 
