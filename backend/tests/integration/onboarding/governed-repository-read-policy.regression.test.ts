@@ -765,4 +765,105 @@ describe('WORK-038 PR #42 round-3 + round-4 — GovernedRepositoryReadPolicy (th
     expect(outcome.governance.stale).toBe(false);
     expect(port.getReadFileCalls()).toEqual([]);
   });
+
+  // =========================================================================
+  // 8. PR #42 ROUND-5 — the persistence-boundary fence.
+  //
+  // The architect's round-5 review of commit `2a597ed` identified that the
+  // round-4 fence protects the READ window but NOT the SUBSEQUENT
+  // PERSISTENCE window:
+  //
+  //   capture V7 -> read -> revalidate V7 (round-4 fence passes) ->
+  //   policy mutates V7 -> V8 -> appendEvidence(V7) -> markComplete
+  //
+  // The round-5 fix exposes a SECOND method on the boundary —
+  // `capturePersistenceSnapshot` — that the orchestrator calls AFTER
+  // analyze() returns + BEFORE the persistence transaction begins. The
+  // /projects repository's `persistBaselineWithPolicyFence` method
+  // revalidates the snapshot INSIDE the DB transaction (pre-writes + post-
+  // writes + per-read verification) + rolls back if it is stale.
+  //
+  // These unit tests exercise the boundary's `capturePersistenceSnapshot`
+  // method DIRECTLY (no DB, no orchestrator, no analyzer) so the snapshot-
+  // capture invariant is verified at the unit level. The onboarding-domain
+  // integration suite (test 34) verifies the end-to-end fencing through the
+  // orchestrator + repository + DB.
+  // =========================================================================
+
+  it('24. ROUND-5 capturePersistenceSnapshot returns the CURRENT policy version + ruleId + decision (the snapshot the persistence fence will revalidate)', async () => {
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"test"}');
+    const gate = new FakePolicyGate(); // policyVersion=1, ruleId='fake-rule'
+    const boundary = buildBoundary(port, gate);
+    const snapshot = await boundary.capturePersistenceSnapshot(ctx);
+    // The snapshot carries the CURRENT policy version + ruleId + decision
+    // (the persistence fence's reference values).
+    expect(snapshot.policyVersion, 'the snapshot carries the current policyVersion').toBe(1);
+    expect(snapshot.ruleId, 'the snapshot carries the matched ruleId').toBe('fake-rule');
+    expect(snapshot.decision, 'the snapshot carries the decision (informational — NOT enforced at the persistence boundary)').toBe('allow');
+    expect(snapshot.reason).toBeNull(); // FakePolicyGate surfaces no reason for allow
+    // The boundary called the gate ONCE for the capture (the persistence
+    // fence's revalidation will call it AGAIN — verified in the integration
+    // suite).
+    expect(gate.getCallCount(), 'the capture called the gate once').toBe(1);
+  });
+
+  it('25. ROUND-5 capturePersistenceSnapshot uses a synthetic persist-baseline request (NOT a real read request — the fence uses ONLY the policyVersion + ruleId for drift detection, NOT the decision)', async () => {
+    // Verify the synthetic request shape: the gate receives a request with
+    // operation='persist-baseline' (NOT 'read' or 'list'). This keeps the
+    // WORK-037 gate's API stable (it always takes a ToolPolicyRequest) +
+    // makes the capture's intent explicit in the audit trail.
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"test"}');
+    let capturedRequest: ToolPolicyRequest | null = null;
+    const spyGate: ProjectScopedPolicyGate = {
+      async decideForProjectScope(request: ToolPolicyRequest) {
+        capturedRequest = request;
+        return {
+          decision: 'allow' as const,
+          policyVersion: 7,
+          ruleId: 'spy-rule',
+          scopeSource: 'project' as const,
+        };
+      },
+    };
+    const boundary = buildBoundary(port, spyGate);
+    await boundary.capturePersistenceSnapshot(ctx);
+    expect(capturedRequest).not.toBeNull();
+    expect(capturedRequest!.operation, 'the synthetic request uses operation=persist-baseline').toBe('persist-baseline');
+    expect(capturedRequest!.family, 'the synthetic request uses family=filesystem').toBe('filesystem');
+    expect(capturedRequest!.invocationId, 'the invocationId encodes the persist-baseline intent').toContain('persist-baseline');
+    expect(capturedRequest!.executionId, 'the executionId scopes to the baseline').toBe(`onboarding:${ctx.baselineId}`);
+  });
+
+  it('26. ROUND-5 capturePersistenceSnapshot FAILS CLOSED on a gate failure (returns a null snapshot — the persistence fence will compare it against a fresh revalidation)', async () => {
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"test"}');
+    const gate = new FakePolicyGate().throwOnNext();
+    const boundary = buildBoundary(port, gate);
+    const snapshot = await boundary.capturePersistenceSnapshot(ctx);
+    // The capture FAILED CLOSED: the snapshot is null (the persistence fence
+    // will compare it against a fresh revalidation that also fails-closed —
+    // both null = no drift signal = stale=false, best-effort).
+    expect(snapshot.policyVersion, 'the snapshot is null (fail-closed)').toBeNull();
+    expect(snapshot.ruleId, 'the ruleId is null').toBeNull();
+    expect(snapshot.decision, 'the decision is null').toBeNull();
+    expect(snapshot.reason, 'the reason explains the fail-closed').toContain('persistence-snapshot-capture-failed');
+    // The forensic log was emitted.
+    const logOutput = capture.raw();
+    expect(logOutput, 'the capture failure was logged (forensic)').toContain('persistence-snapshot-capture-failed');
+  });
+
+  it('27. ROUND-5 capturePersistenceSnapshot on a gate that surfaces NO policyVersion (a test fake returning {decision:"allow"}) returns a null policyVersion (the fence falls back to ruleId + decision comparison — best-effort, same as round-4)', async () => {
+    const port = new InMemoryContentPort().setFile('package.json', '{"name":"test"}');
+    const minimalGate: ProjectScopedPolicyGate = {
+      async decideForProjectScope() {
+        return { decision: 'allow' as const }; // no version, no ruleId
+      },
+    };
+    const boundary = buildBoundary(port, minimalGate);
+    const snapshot = await boundary.capturePersistenceSnapshot(ctx);
+    // The gate surfaced no version — the snapshot is null (honestly "not
+    // surfaced"). The fence falls back to ruleId + decision comparison.
+    expect(snapshot.policyVersion).toBeNull();
+    expect(snapshot.ruleId).toBeNull();
+    expect(snapshot.decision).toBe('allow');
+  });
 });

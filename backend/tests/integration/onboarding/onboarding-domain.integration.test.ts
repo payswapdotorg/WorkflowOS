@@ -48,14 +48,20 @@ function buildGovernedAnalyzer(
   contentPort: RepositoryContentPort,
   policyGate: ProjectScopedPolicyGate,
   logger: ReturnType<typeof createLogger>,
-): GovernedFilesystemAnalyzer {
+): {
+  analyzer: GovernedFilesystemAnalyzer;
+  governedReadPolicy: DefaultGovernedRepositoryReadPolicy;
+} {
   const governedReadPolicy = new DefaultGovernedRepositoryReadPolicy({
     policyGate,
     contentPort,
     candidateAllowlist: GOVERNED_FILESYSTEM_CANDIDATE_ALLOWLIST,
     logger,
   });
-  return new GovernedFilesystemAnalyzer({ governedReadPolicy, logger });
+  return {
+    analyzer: new GovernedFilesystemAnalyzer({ governedReadPolicy, logger }),
+    governedReadPolicy,
+  };
 }
 
 /** A configurable in-memory repository content provider. */
@@ -129,6 +135,7 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
   private denied = new Set<string>();
   private constrained: { readonly paths: Set<string>; readonly constraints: ToolPolicyConstraints } | null = null;
   private nextPolicyVersion = 1;
+  private callCount = 0;
   denyPath(path: string): this {
     this.denied.add(path);
     return this;
@@ -138,11 +145,16 @@ class FakePolicyGate implements ProjectScopedPolicyGate {
     this.constrained = { paths: new Set(paths), constraints };
     return this;
   }
+  /** PR #42 round-5: the number of times decideForProjectScope was called (for the persistence-fence call-count assertions). */
+  getCallCount(): number {
+    return this.callCount;
+  }
   async decideForProjectScope(
     request: ToolPolicyRequest,
     _projectId: string,
     _organizationId: string,
   ) {
+    this.callCount++;
     const path = request.input.path as string;
     // PR #42 round-3: the fake surfaces policyVersion + ruleId + scopeSource
     // so the governed boundary can record them on the evidence row (drift
@@ -252,6 +264,77 @@ class HookedContentPort implements RepositoryContentPort {
   }
 }
 
+/**
+ * PR #42 round-5: a policy gate that MUTATES after a SPECIFIC call count.
+ * The architect's round-5 regression spec requires: "explicitly mutate the
+ * policy AFTER revalidation but BEFORE persistence." The orchestrator calls
+ * decideForProjectScope() twice per governedRead() (capture + revalidation),
+ * then once for capturePersistenceSnapshot(), then twice inside the
+ * persistence transaction (Check A + Check C revalidations).
+ *
+ * For a 6-candidate analyzer run, that's:
+ *   calls 1-12: analyzer's per-read fence (capture + revalidation per read)
+ *   call 13: capturePersistenceSnapshot (the orchestrator's V_p capture)
+ *   call 14: Check A pre-writes revalidation (inside the transaction)
+ *   call 15: Check C post-writes revalidation (inside the transaction)
+ *
+ * A `CountingMutatingPolicyGate(mutateAfter=12)` returns V7 for calls 1-12
+ * (the analyzer's per-read fence passes — V7 captured + revalidated for
+ * every read), then V8 starting from call 13 (the orchestrator's V_p capture
+ * sees V8). The persistence fence's per-read verification (Check B) catches
+ * the mismatch: V_p (V8) != evidence's per-read policyVersion (V7) →
+ * ROLLBACK. ZERO stale evidence/observations are committed. This is the
+ * architect's exact regression scenario.
+ *
+ * A `CountingMutatingPolicyGate(mutateAfter=13)` returns V7 for calls 1-13
+ * (the capture sees V7), then V8 starting from call 14 (the Check A
+ * revalidation sees V8). The persistence fence's pre-writes revalidation
+ * (Check A) catches the mutation: V_p (V7) != V_current (V8) → ROLLBACK.
+ * ZERO stale evidence/observations are committed.
+ *
+ * A `CountingMutatingPolicyGate(mutateAfter=14)` returns V7 for calls 1-14
+ * (the Check A revalidation passes), then V8 starting from call 15 (the
+ * Check C post-writes revalidation sees V8). The persistence fence's post-
+ * writes revalidation (Check C) catches the mutation DURING the writes:
+ * V_p (V7) != V_current (V8) → ROLLBACK. ZERO stale evidence/observations
+ * are committed.
+ */
+class CountingMutatingPolicyGate implements ProjectScopedPolicyGate {
+  private policyVersion = 7;
+  private ruleId = 'fake-rule-v7';
+  private callCount = 0;
+  private mutated = false;
+  constructor(private readonly mutateAfterCalls: number) {}
+  wasMutated(): boolean {
+    return this.mutated;
+  }
+  getCallCount(): number {
+    return this.callCount;
+  }
+  getPolicyVersion(): number {
+    return this.policyVersion;
+  }
+  async decideForProjectScope(
+    _request: ToolPolicyRequest,
+    _projectId: string,
+    _organizationId: string,
+  ) {
+    this.callCount++;
+    if (this.callCount > this.mutateAfterCalls && !this.mutated) {
+      this.policyVersion = 8;
+      this.ruleId = 'fake-rule-v8';
+      this.mutated = true;
+    }
+    return {
+      decision: 'allow' as const,
+      policyVersion: this.policyVersion,
+      ruleId: this.ruleId,
+      scopeSource: 'project' as const,
+      reason: this.mutated ? 'allowed by V8 (mutated after call ' + this.mutateAfterCalls + ')' : 'allowed by V7',
+    };
+  }
+}
+
 describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboarding capability)', () => {
   let stack: TestAuthStack;
   let githubAdapter: FakeGitHubAdapter;
@@ -278,13 +361,14 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     projectBaselineRepository = new PgProjectBaselineRepository(stack.db.client);
     projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(stack.db.client);
 
-    const analyzer = buildGovernedAnalyzer(contentPort, policyGate, logger);
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(contentPort, policyGate, logger);
     onboardingService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer,
+      governedReadPolicy,
       logger,
     });
 
@@ -684,13 +768,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
 
     // The PRODUCTION content port (delegates to the GitHubAdapter).
     const productionContentPort = new GitHubRepositoryContentPort(githubAdapter);
-    const productionAnalyzer = buildGovernedAnalyzer(productionContentPort, policyGate, logger);
+    const { analyzer: productionAnalyzer, governedReadPolicy: productionGovernedReadPolicy } =
+      buildGovernedAnalyzer(productionContentPort, policyGate, logger);
     const productionService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer: productionAnalyzer,
+      governedReadPolicy: productionGovernedReadPolicy,
       logger,
     });
 
@@ -865,13 +951,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       .setFile('Dockerfile', 'FROM node:20');
     // Do NOT set package.json (file absent → null). Do NOT set .github/workflows
     // (dir absent → []). Do NOT set docker-compose.yml or prisma/schema.prisma.
-    const partialAnalyzer = buildGovernedAnalyzer(partialContentPort, policyGate, logger);
+    const { analyzer: partialAnalyzer, governedReadPolicy: partialGovernedReadPolicy } =
+      buildGovernedAnalyzer(partialContentPort, policyGate, logger);
     const partialService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer: partialAnalyzer,
+      governedReadPolicy: partialGovernedReadPolicy,
       logger,
     });
     const result = await partialService.onboard({ projectId, ref });
@@ -922,13 +1010,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     // 'github-not-configured' until credentials are wired; this fake
     // reproduces that infrastructure-failure mode).
     const failingContentPort = new FailingContentPort('github-not-configured');
-    const failingAnalyzer = buildGovernedAnalyzer(failingContentPort, policyGate, logger);
+    const { analyzer: failingAnalyzer, governedReadPolicy: failingGovernedReadPolicy } =
+      buildGovernedAnalyzer(failingContentPort, policyGate, logger);
     const failingService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer: failingAnalyzer,
+      governedReadPolicy: failingGovernedReadPolicy,
       logger,
     });
     const result = await failingService.onboard({ projectId, ref });
@@ -978,13 +1068,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       .setFile('package.json', '{ this is not valid JSON ((((')
       .setFile('README.md', '# Partial Repo\nSome candidates are missing.')
       .setFile('Dockerfile', 'FROM node:20');
-    const partialAnalyzer = buildGovernedAnalyzer(partialContentPort, policyGate, logger);
+    const { analyzer: partialAnalyzer, governedReadPolicy: partialGovernedReadPolicy } =
+      buildGovernedAnalyzer(partialContentPort, policyGate, logger);
     const partialService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer: partialAnalyzer,
+      governedReadPolicy: partialGovernedReadPolicy,
       logger,
     });
     const result = await partialService.onboard({ projectId, ref });
@@ -1109,13 +1201,15 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     const constrainedPort = new InMemoryContentPort().setFile('package.json', largeContent);
     // Constrain package.json to 64 bytes max.
     const constrainedGate = new FakePolicyGate().constrainPaths(['package.json'], { maxOutputBytes: 64 });
-    const constrainedAnalyzer = buildGovernedAnalyzer(constrainedPort, constrainedGate, logger);
+    const { analyzer: constrainedAnalyzer, governedReadPolicy: constrainedGovernedReadPolicy } =
+      buildGovernedAnalyzer(constrainedPort, constrainedGate, logger);
     const constrainedService = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer: constrainedAnalyzer,
+      governedReadPolicy: constrainedGovernedReadPolicy,
       logger,
     });
     const result = await constrainedService.onboard({ projectId, ref });
@@ -1224,13 +1318,14 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     const ref = 'policy-version-branch';
     const port = new InMemoryContentPort().setFile('package.json', JSON.stringify({ name: 'drift-repo' }));
     const gate = new FakePolicyGate(); // surfaces policyVersion=1, ruleId='fake-rule', scopeSource='project'
-    const analyzer = buildGovernedAnalyzer(port, gate, logger);
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
     const service = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer,
+      governedReadPolicy,
       logger,
     });
     const result = await service.onboard({ projectId, ref });
@@ -1296,13 +1391,14 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
       .setFile('README.md', '# Fenced Repo')
       .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
       .setFile('Dockerfile', 'FROM node:20');
-    const analyzer = buildGovernedAnalyzer(port, gate, logger);
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
     const service = new DefaultOnboardingService({
       projectRepository: stack.projectRepository,
       projectBaselineRepository,
       projectGitHubRepositoryRepository,
       githubAdapter,
       analyzer,
+      governedReadPolicy,
       logger,
     });
     const result = await service.onboard({ projectId, ref });
@@ -1400,5 +1496,235 @@ describe('WORK-038 — Existing Project Onboarding (Project Baseline + onboardin
     expect(logOutput, 'the fence logged the stale snapshot').toContain('policy-snapshot-stale');
     expect(logOutput, 'the log records the snapshot version V7').toContain('"snapshotVersion":7');
     expect(logOutput, 'the log records the revalidation version V8').toContain('"revalidatedVersion":8');
+  });
+
+  // =========================================================================
+  // PR #42 round-5 (the persistence-boundary fence): the architect's exact
+  // regression scenario — mutate the policy AFTER the per-read fence's
+  // revalidation passes BUT BEFORE the persistence transaction commits, and
+  // prove ZERO stale evidence/observations are committed.
+  //
+  // The round-4 fence protects the READ window (capture V7 -> read ->
+  // revalidate V7 -> discard if stale). The round-5 fence protects the
+  // SUBSEQUENT PERSISTENCE window (capture V7 -> ... -> appendEvidence(V7) ->
+  // upsertObservations(V7) -> markComplete) by wrapping the writes in ONE
+  // DB transaction + performing a CAS on the policy version INSIDE the
+  // transaction (pre-writes revalidation + per-read snapshot verification +
+  // post-writes revalidation). If ANY check fails, the transaction is
+  // ROLLED BACK — zero evidence/observations are committed.
+  // =========================================================================
+
+  it('34. PR #42 r5: mutation AFTER the per-read fence passes BUT BEFORE the persistence capture (the architect\'s exact regression scenario) -> the per-read verification (Check B) catches the mismatch (V_p=V8 vs evidence=V7) -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
+    // The architect's round-5 regression spec:
+    //   initial version = 7 (allow)
+    //     ↓
+    //   analyzer runs: per-read fence captures V7 + revalidates V7 for EVERY
+    //   read (the round-4 fence passes — no mutation DURING the reads)
+    //     ↓
+    //   TEST HOOK fires: mutate V7 -> V8 AFTER analyze() returns BUT BEFORE
+    //   the persistence transaction begins
+    //     ↓
+    //   the orchestrator's V_p capture (call 13) sees V8 (post-mutation)
+    //     ↓
+    //   the persistence fence's per-read verification (Check B, inside the
+    //   transaction) catches the mismatch: V_p (V8) != evidence's per-read
+    //   policyVersion (V7) → ROLLBACK
+    //     ↓
+    //   ZERO stale V7 evidence/observations are committed
+    //     ↓
+    //   the baseline is FAILED with failure_stage=
+    //   'policy-snapshot-stale-at-persistence' (forensic provenance)
+    const ref = 'persistence-fence-branch';
+    // The CountingMutatingPolicyGate mutates AFTER the 12th call (the
+    // analyzer's 6 reads × 2 calls per read = 12 calls during analyze()).
+    // Starting from the 13th call (the orchestrator's V_p capture), the
+    // gate returns V8.
+    const gate = new CountingMutatingPolicyGate(12);
+    const port = new InMemoryContentPort()
+      .setFile('package.json', JSON.stringify({ name: 'stale-persistence-repo', version: '1.0.0' }))
+      .setFile('README.md', '# Stale Persistence Repo')
+      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
+      .setFile('Dockerfile', 'FROM node:20');
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      governedReadPolicy,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    // The gate WAS mutated (after the 12th call).
+    expect(gate.wasMutated(), 'the gate was mutated after the analyzer finished').toBe(true);
+    expect(gate.getPolicyVersion(), 'the current policy version is V8').toBe(8);
+    // The gate was called 14 times: 12 (analyzer: 6 reads × 2 calls) + 1
+    // (V_p capture) + 1 (Check A pre-writes revalidation). The transaction
+    // ROLLED BACK at Check B (per-read verification) — Check C (post-writes
+    // revalidation) was never reached.
+    expect(gate.getCallCount(), '12 (analyzer) + 1 (capture) + 1 (Check A) = 14 calls (Check B rolled back before Check C)').toBe(14);
+
+    // CRITICAL: the baseline is FAILED (NOT complete) — the persistence
+    // fence REJECTED the persist. ZERO stale V7 evidence/observations are
+    // committed. The architect's invariant: "zero stale evidence/
+    // observations are committed when the policy mutates after the per-read
+    // revalidation but before persistence."
+    expect(result.baseline.state, 'the baseline is FAILED (the persistence fence rejected the persist)').toBe('failed');
+    expect(result.baseline.failureStage, 'the failure_stage records the fence rejection (forensic provenance)').toBe('policy-snapshot-stale-at-persistence');
+
+    // ZERO evidence rows committed (the transaction was rolled back).
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    expect(evidence.length, 'ZERO evidence rows committed (the transaction was rolled back)').toBe(0);
+
+    // ZERO observations committed (the transaction was rolled back).
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.length, 'ZERO observations committed (the transaction was rolled back)').toBe(0);
+
+    // The fence-rejection log was emitted (forensic audit).
+    const logOutput = capture.raw();
+    expect(logOutput, 'the persistence-fence-rejected log was emitted').toContain('persistence-fence-rejected');
+    expect(logOutput, 'the log records the failure stage').toContain('policy-snapshot-stale-at-persistence');
+    // The log records the snapshot (V8 — what the capture saw) + the
+    // revalidated (V8 — what Check A saw; both V8 because the mutation
+    // happened BEFORE the capture). The PER-READ verification (Check B) is
+    // what caught the mismatch — the log reason explains it.
+    expect(logOutput, 'the log carries the snapshot policyVersion V8').toContain('"policyVersion":8');
+    expect(logOutput, 'the log explains the per-read verification rejection').toContain('PER-READ snapshot verification');
+  });
+
+  it('35. PR #42 r5: mutation BETWEEN the V_p capture and the transaction start (the persistence-boundary pre-writes revalidation — Check A — catches the mutation: V_p=V7 != V_current=V8 -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
+    // A second defense-in-depth scenario: the policy mutates AFTER the V_p
+    // capture (V_p = V7) BUT BEFORE the persistence transaction's Check A
+    // revalidation (V_current = V8). The pre-writes revalidation catches
+    // the mutation: V_p (V7) != V_current (V8) → ROLLBACK.
+    const ref = 'persistence-fence-check-a-branch';
+    // The CountingMutatingPolicyGate mutates AFTER the 13th call (the V_p
+    // capture sees V7; the Check A revalidation — call 14 — sees V8).
+    const gate = new CountingMutatingPolicyGate(13);
+    const port = new InMemoryContentPort()
+      .setFile('package.json', JSON.stringify({ name: 'check-a-repo', version: '1.0.0' }))
+      .setFile('README.md', '# Check A Repo')
+      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
+      .setFile('Dockerfile', 'FROM node:20');
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      governedReadPolicy,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    expect(gate.wasMutated(), 'the gate was mutated after the V_p capture').toBe(true);
+    // The gate was called 14 times: 12 (analyzer) + 1 (V_p capture = V7) +
+    // 1 (Check A revalidation = V8). The transaction ROLLED BACK at Check A.
+    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p capture) + 1 (Check A) = 14 calls (Check A rolled back)').toBe(14);
+    // The baseline is FAILED.
+    expect(result.baseline.state).toBe('failed');
+    expect(result.baseline.failureStage).toBe('policy-snapshot-stale-at-persistence');
+    // ZERO evidence/observations committed.
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    expect(evidence.length, 'ZERO evidence rows committed').toBe(0);
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.length, 'ZERO observations committed').toBe(0);
+    // The log explains the Check A rejection.
+    const logOutput = capture.raw();
+    expect(logOutput, 'the log explains the pre-writes revalidation rejection').toContain('PRE-WRITES revalidation');
+  });
+
+  it('36. PR #42 r5: mutation DURING the writes (the post-writes revalidation — Check C — catches the mutation: V_p=V7 != V_current=V8 -> ROLLBACK -> zero evidence/observations committed + baseline FAILED', async () => {
+    // A third defense-in-depth scenario: the policy mutates DURING the
+    // writes (after Check A passes, before Check C). The post-writes
+    // revalidation catches the mutation: V_p (V7) != V_current (V8) →
+    // ROLLBACK. The writes were rolled back (the evidence + observations
+    // from this transaction are NOT committed).
+    const ref = 'persistence-fence-check-c-branch';
+    // The CountingMutatingPolicyGate mutates AFTER the 14th call (the V_p
+    // capture = V7, the Check A revalidation = V7; the Check C post-writes
+    // revalidation — call 15 — sees V8).
+    const gate = new CountingMutatingPolicyGate(14);
+    const port = new InMemoryContentPort()
+      .setFile('package.json', JSON.stringify({ name: 'check-c-repo', version: '1.0.0' }))
+      .setFile('README.md', '# Check C Repo')
+      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
+      .setFile('Dockerfile', 'FROM node:20');
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      governedReadPolicy,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    expect(gate.wasMutated(), 'the gate was mutated during the writes').toBe(true);
+    // The gate was called 15 times: 12 (analyzer) + 1 (V_p capture = V7) +
+    // 1 (Check A = V7) + 1 (Check C = V8). The transaction ROLLED BACK at
+    // Check C.
+    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p) + 1 (Check A) + 1 (Check C) = 15 calls (Check C rolled back)').toBe(15);
+    // The baseline is FAILED.
+    expect(result.baseline.state).toBe('failed');
+    expect(result.baseline.failureStage).toBe('policy-snapshot-stale-at-persistence');
+    // ZERO evidence/observations committed (the writes were rolled back).
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    expect(evidence.length, 'ZERO evidence rows committed (the writes were rolled back)').toBe(0);
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.length, 'ZERO observations committed (the writes were rolled back)').toBe(0);
+    // The log explains the Check C rejection.
+    const logOutput = capture.raw();
+    expect(logOutput, 'the log explains the post-writes revalidation rejection').toContain('POST-WRITES revalidation');
+  });
+
+  it('37. PR #42 r5: the NORMAL case (no mutation) -> the persistence fence passes (Check A + Check B + Check C all pass) -> the baseline COMPLETES with evidence + observations persisted (the round-5 fence is transparent when there is no drift)', async () => {
+    // The normal case: no policy mutation. The analyzer's per-read fence
+    // passes (V7 for every read), the V_p capture sees V7, the Check A
+    // revalidation sees V7, the per-read verification (Check B) passes
+    // (V_p == evidence's per-read = V7), the writes happen, the Check C
+    // post-writes revalidation sees V7 — the transaction COMMITS. The
+    // baseline COMPLETES with evidence + observations persisted. The round-
+    // 5 fence is transparent when there is no drift.
+    const ref = 'persistence-fence-normal-branch';
+    const gate = new FakePolicyGate(); // policyVersion=1, always allow, no mutation
+    const port = new InMemoryContentPort()
+      .setFile('package.json', JSON.stringify({ name: 'normal-persistence-repo', version: '1.0.0' }))
+      .setFile('README.md', '# Normal Persistence Repo')
+      .setDir('.github/workflows', [{ name: 'ci.yml', type: 'file' }])
+      .setFile('Dockerfile', 'FROM node:20');
+    const { analyzer, governedReadPolicy } = buildGovernedAnalyzer(port, gate, logger);
+    const service = new DefaultOnboardingService({
+      projectRepository: stack.projectRepository,
+      projectBaselineRepository,
+      projectGitHubRepositoryRepository,
+      githubAdapter,
+      analyzer,
+      governedReadPolicy,
+      logger,
+    });
+    const result = await service.onboard({ projectId, ref });
+    // The baseline COMPLETES (the fence passed — no drift).
+    expect(result.baseline.state, 'the baseline completes (the fence passed — no drift)').toBe('complete');
+    expect(result.baseline.failureStage, 'no failure stage (the fence did not reject)').toBeNull();
+    // The FakePolicyGate was called 15 times: 12 (analyzer) + 1 (V_p
+    // capture) + 1 (Check A) + 1 (Check C). ALL return V1 (no mutation).
+    expect(gate.getCallCount(), '12 (analyzer) + 1 (V_p) + 1 (Check A) + 1 (Check C) = 15 calls').toBe(15);
+    // The evidence rows ARE persisted (the transaction committed).
+    const evidence = await projectBaselineRepository.listEvidence(result.baseline.id);
+    expect(evidence.length, 'evidence rows ARE persisted (the transaction committed)').toBeGreaterThan(0);
+    expect(evidence.find((e) => e.locator === 'package.json'), 'package.json evidence IS persisted').toBeDefined();
+    expect(evidence.find((e) => e.locator === 'README.md'), 'README.md evidence IS persisted').toBeDefined();
+    expect(evidence.find((e) => e.locator === 'Dockerfile'), 'Dockerfile evidence IS persisted').toBeDefined();
+    // The observations ARE persisted (the transaction committed).
+    const observations = await projectBaselineRepository.listObservations(result.baseline.id);
+    expect(observations.find((o) => o.kind === 'package_managers'), 'package_managers observation IS persisted').toBeDefined();
+    expect(observations.find((o) => o.kind === 'repository_identity'), 'repository_identity observation IS persisted').toBeDefined();
+    expect(observations.find((o) => o.kind === 'ci'), 'ci observation IS persisted').toBeDefined();
+    // The fence-rejection log was NOT emitted (the fence passed).
+    const logOutput = capture.raw();
+    expect(logOutput, 'no fence-rejection log (the fence passed)').not.toContain('persistence-fence-rejected');
   });
 });

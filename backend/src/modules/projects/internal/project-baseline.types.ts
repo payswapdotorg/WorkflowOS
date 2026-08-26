@@ -305,6 +305,112 @@ export interface EnsureBaselineInput {
   readonly analysisRunId?: string;
 }
 
+// --- PR #42 round-5: the persistence-boundary fence ---
+
+/**
+ * PR #42 round-5 (the persistence-boundary fence): a captured policy snapshot
+ * at the persistence boundary. The orchestrator captures this snapshot AFTER
+ * the analyzer's per-read fence has authorized every evidence row (each under
+ * its own per-read V_p) AND BEFORE the persistence transaction begins. The
+ * snapshot is the persistence-boundary fence's reference value:
+ *
+ *   * BEFORE the writes — verify `snapshot` matches each evidence row's
+ *     per-read `repository_read_enforcement.policyVersion`. If they differ,
+ *     the policy mutated BETWEEN the per-read fence and the persistence
+ *     capture — the evidence is stale; the persistence is REJECTED (no
+ *     writes happen; the baseline is markFailed).
+ *   * INSIDE the transaction (after the writes, before commit) — revalidate
+ *     the snapshot (call the gate again) and compare. If the version/rule/
+ *     decision changed DURING the writes, the transaction is ROLLED BACK
+ *     (zero evidence/observations committed — the architect's invariant:
+ *     "a repository-read result is persisted only if the policy snapshot
+ *     that authorized it is still current when the result is committed").
+ *
+ * The fence is a CAS (compare-and-swap) at the persistence boundary. It does
+ * NOT claim database-style atomicity across the policy engine and the DB
+ * (the policy store cannot participate in the DB transaction). It DETECTS +
+ * REJECTS stale snapshots before the result is committed — the same fencing
+ * protocol as round-4, extended to cover the persistence window the round-4
+ * fence left open.
+ *
+ * This type lives in /projects (the persistence authority) because the
+ * persistence-boundary fence is a STORAGE-level concern: the fence verifies
+ * that the policy version stamped on the evidence (by the analyzer's per-read
+ * fence) is STILL current when the evidence is committed to the DB. The
+ * onboarding orchestrator (src/onboarding/) composes it: it captures the
+ * snapshot via the governed-read boundary + passes it through to the
+ * repository's persistBaselineWithPolicyFence method.
+ */
+export interface PersistencePolicySnapshot {
+  /** The WORK-037 policy version at the persistence boundary (drift detection). */
+  readonly policyVersion: number | null;
+  /** The matched rule id at the persistence boundary (null = default effect / not surfaced). */
+  readonly ruleId: string | null;
+  /** The decision at the persistence boundary (null = the gate surfaced no decision). */
+  readonly decision: 'allow' | 'constrained' | 'deny' | 'ask' | null;
+  /** The decision reason (the WORK-037 reason). */
+  readonly reason: string | null;
+}
+
+/**
+ * Input for the fenced persist operation (PR #42 round-5). Bundles everything
+ * the repository needs to atomically persist evidence + observations +
+ * complete the baseline in ONE DB transaction, under the captured
+ * persistence-boundary snapshot.
+ */
+export interface PersistBaselineInput {
+  readonly baselineId: string;
+  readonly evidence: readonly NewBaselineEvidence[];
+  readonly observations: readonly NewBaselineObservation[];
+  readonly contentDigest: string;
+  /** The baseline.version captured BEFORE the persist (the CAS predicate). */
+  readonly expectedVersion: number;
+  /** The captured persistence-boundary policy snapshot (the fence's reference). */
+  readonly snapshot: PersistencePolicySnapshot;
+}
+
+/**
+ * The result of the fenced persist operation (PR #42 round-5).
+ *
+ *   * `persisted` — the transaction committed; the baseline is complete; the
+ *     evidence rows are returned (with their IDs, for observation linkage by
+ *     the caller if needed).
+ *   * `cas-lost` — the markComplete CAS lost (another worker completed the
+ *     baseline first); the transaction was ROLLED BACK (the caller re-reads
+ *     the winner's row — convergence). NO evidence/observations from this
+ *     call are committed (the winner's evidence is already in).
+ *   * `fence-stale` — the persistence-boundary fence REJECTED the persist:
+ *     the policy mutated either BEFORE the transaction started (the snapshot
+ *     does not match the evidence's per-read policyVersion) OR DURING the
+ *     writes (the post-writes revalidation saw a different version). The
+ *     transaction was ROLLED BACK — zero evidence/observations are
+ *     committed. The baseline is NOT complete; the caller (orchestrator)
+ *     markFailed with failure_stage='policy-snapshot-stale-at-persistence'.
+ *   * `fence-revalidation-failed` — the revalidation call itself failed
+ *     (the gate threw on the revalidation). The boundary FAILS CLOSED: the
+ *     transaction was ROLLED BACK — zero evidence/observations are
+ *     committed. The caller markFailed with failure_stage=
+ *     'policy-snapshot-revalidation-failed'.
+ */
+export type PersistBaselineResult =
+  | {
+      readonly kind: 'persisted';
+      readonly baseline: ProjectBaseline;
+      readonly evidence: BaselineEvidence[];
+    }
+  | { readonly kind: 'cas-lost' }
+  | {
+      readonly kind: 'fence-stale';
+      readonly snapshot: PersistencePolicySnapshot;
+      readonly revalidated: PersistencePolicySnapshot;
+      readonly reason: string;
+    }
+  | {
+      readonly kind: 'fence-revalidation-failed';
+      readonly snapshot: PersistencePolicySnapshot;
+      readonly reason: string;
+    };
+
 // --- Repository ---
 
 /**
@@ -374,6 +480,59 @@ export interface ProjectBaselineRepository {
     contentDigest: string,
     expectedVersion: number,
   ): Promise<ProjectBaseline | null>;
+
+  /**
+   * PR #42 round-5 (the persistence-boundary fence): persist evidence +
+   * observations + complete the baseline in ONE DB transaction, under the
+   * captured persistence-boundary policy snapshot. The fence verifies the
+   * snapshot is STILL current when the result is committed:
+   *
+   *   1. BEGIN TRANSACTION.
+   *   2. INSIDE the transaction:
+   *      a. Call `revalidate()` to fetch the CURRENT policy snapshot.
+   *      b. Verify the snapshot matches the per-read snapshots stamped on
+   *         each evidence row (the `repository_read_enforcement.policyVersion`
+   *         captured by the analyzer's per-read fence). If ANY differ, the
+   *         policy mutated BETWEEN the per-read fence and the persistence
+   *         capture → ROLLBACK → return `fence-stale`.
+   *      c. Verify the snapshot matches the CURRENT policy (the revalidation).
+   *         If they differ, the policy mutated BETWEEN the capture and the
+   *         transaction start → ROLLBACK → return `fence-stale`.
+   *      d. appendEvidence + upsertObservations + markComplete (the CAS on
+   *         baseline.version — convergence if another worker completed it).
+   *      e. REVALIDATE AGAIN (post-writes, pre-commit defense-in-depth). If
+   *         the policy mutated DURING the writes → ROLLBACK → return
+   *         `fence-stale`.
+   *   3. COMMIT (the transaction commits only if every fence check passed).
+   *   4. Return `persisted` with the completed baseline + the evidence rows.
+   *
+   * If the revalidation call itself throws, the boundary FAILS CLOSED: ROLLBACK
+   * + return `fence-revalidation-failed` (a revalidation failure must NOT
+   * become an implicit persist).
+   *
+   * The invariant (the architect's round-5 requirement): "zero stale
+   * evidence/observations are committed when the policy mutates after the
+   * per-read revalidation but before persistence." The fence catches:
+   *   * Mutations BEFORE the transaction starts (the snapshot does not match
+   *     the evidence's per-read policyVersion — step b — OR the snapshot does
+   *     not match the current policy — step c).
+   *   * Mutations DURING the writes (step e).
+   * A mutation BETWEEN step e and COMMIT itself is the same unavoidable
+   * TOCTOU window the architect's earlier rounds acknowledged (the DB cannot
+   * participate in the policy store's transaction); the double-CAS pattern
+   * (revalidate at step c AND step e) keeps this window as small as
+   * possible + makes the failure mode observable.
+   *
+   * The `revalidate` callback is the orchestrator's closure that re-fetches
+   * the current policy snapshot (it calls the governed-read boundary's
+   * capturePersistenceSnapshot — which calls decideForProjectScope AGAIN).
+   * The repository is never coupled to the policy gate directly (the
+   * /projects module stays independent of /agents).
+   */
+  persistBaselineWithPolicyFence(
+    input: PersistBaselineInput,
+    revalidate: () => Promise<PersistencePolicySnapshot>,
+  ): Promise<PersistBaselineResult>;
 
   /**
    * CAS transition analyzing → failed. A failed baseline NEVER carries a

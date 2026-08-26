@@ -1151,6 +1151,15 @@ export async function buildApp(
       projectGitHubRepositoryRepository: projectGitHubRepositoryRepository!,
       githubAdapter,
       analyzer: onboardingAnalyzer,
+      // PR #42 round-5 (the persistence-boundary fence): the same governed
+      // read policy the analyzer uses for per-read fencing is the boundary
+      // the orchestrator uses to capture the persistence-boundary snapshot.
+      // The orchestrator calls capturePersistenceSnapshot() AFTER analyze()
+      // returns + BEFORE the persistence transaction begins; the repository's
+      // persistBaselineWithPolicyFence method revalidates the snapshot
+      // INSIDE the DB transaction (pre-writes + post-writes + per-read
+      // verification) + rolls back if it is stale.
+      governedReadPolicy: onboardingGovernedReadPolicy,
       logger,
     });
     onboardingServiceRef = onboardingService;

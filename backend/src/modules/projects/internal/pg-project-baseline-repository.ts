@@ -38,8 +38,26 @@ import type {
   BaselineState,
   BaselineAnalysisMode,
   RepositoryReadEnforcement,
+  PersistBaselineInput,
+  PersistBaselineResult,
+  PersistencePolicySnapshot,
 } from './project-baseline.types.js';
 import { ProjectBaselineError } from './project-baseline.types.js';
+
+/**
+ * A "queryable" — either the {@link DatabaseClient} (pool-backed) or a
+ * transaction-scoped {@link DatabaseTx} (the connection-bound handle passed to
+ * `db.transaction()`'s callback). Both expose the same `query` API, so the
+ * private `*In(q, ...)` helpers can run against either (the round-5 fenced
+ * persist runs them inside a transaction; the legacy public methods run them
+ * against the pool — identical SQL, identical semantics). Using a structural
+ * type (rather than importing `pg`'s `QueryResult`/`QueryResultRow` directly)
+ * keeps the /projects module free of a direct `pg` dependency — the same
+ * convention every other `pg-*.ts` repository in /modules follows.
+ */
+interface Queryable {
+  query: DatabaseClient['query'];
+}
 
 const BASELINE_COLUMNS = `id, project_id, organization_id, project_github_repository_id,
        repository_owner, repository_name, baseline_commit_sha, revision_ref,
@@ -201,6 +219,71 @@ function mapEvidence(r: EvidenceRow): BaselineEvidence {
   };
 }
 
+/**
+ * PR #42 round-5: determine whether the persistence-boundary snapshot is
+ * STALE relative to a revalidation. Mirrors the round-4 `isSnapshotStale`
+ * logic in the governed-read boundary: compare version (primary) + ruleId
+ * (defense-in-depth) + decision (defense-in-depth — last resort). When the
+ * gate surfaces no version on either side, the fence falls back to
+ * ruleId + decision comparison.
+ */
+function isPersistenceSnapshotStale(
+  snapshot: PersistencePolicySnapshot,
+  revalidation: PersistencePolicySnapshot,
+): boolean {
+  // Primary signal: the policy version changed (the WORK-037 store bumps
+  // policy_version on every document mutation — a version change is the
+  // definitive signal that the policy document the snapshot was captured
+  // against is no longer current).
+  if (
+    snapshot.policyVersion !== null &&
+    revalidation.policyVersion !== null &&
+    snapshot.policyVersion !== revalidation.policyVersion
+  ) {
+    return true;
+  }
+  // Defense-in-depth: the matched rule id changed (a rule replacement
+  // without a version bump would be an engine bug, but the fence catches it).
+  if (
+    (snapshot.ruleId !== null || revalidation.ruleId !== null) &&
+    snapshot.ruleId !== revalidation.ruleId
+  ) {
+    return true;
+  }
+  // Defense-in-depth: the decision itself changed (an allow→deny flip
+  // without a version/rule change would be an engine bug, but the fence
+  // catches it). This is the last-resort signal when the gate surfaces no
+  // version AND no ruleId.
+  if (
+    (snapshot.decision !== null || revalidation.decision !== null) &&
+    snapshot.decision !== revalidation.decision
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * PR #42 round-5: the internal sentinel thrown inside the
+ * `persistBaselineWithPolicyFence` transaction to abort it (the
+ * throw-to-rollback pattern). The outer catch translates this to the public
+ * `PersistBaselineResult` (fence-stale / fence-revalidation-failed /
+ * cas-lost). This is NOT a `ProjectBaselineError` — it is a private control-
+ * flow signal the public method never leaks (the public method returns the
+ * typed result; only genuine infrastructure errors throw).
+ */
+class FenceStaleSignal extends Error {
+  constructor(
+    readonly kind: 'fence-stale' | 'fence-revalidation-failed' | 'cas-lost',
+    readonly snapshot: PersistencePolicySnapshot,
+    readonly revalidated: PersistencePolicySnapshot | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'FenceStaleSignal';
+  }
+}
+
 export class PgProjectBaselineRepository implements ProjectBaselineRepository {
   constructor(private readonly db: DatabaseClient) {}
 
@@ -283,6 +366,22 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     baselineId: string,
     evidence: readonly NewBaselineEvidence[],
   ): Promise<BaselineEvidence[]> {
+    return this.appendEvidenceIn(this.db, baselineId, evidence);
+  }
+
+  /**
+   * PR #42 round-5: the `*In` helper — runs against either the pool
+   * (`this.db`) OR a transaction-scoped `DatabaseTx` (inside
+   * `persistBaselineWithPolicyFence`). The SQL + the idempotency semantics
+   * are identical to the legacy public method (ON CONFLICT DO NOTHING on
+   * (baseline_id, source, locator) — the honest composite key; re-fetches
+   * the existing id on a no-op insert for observation linkage).
+   */
+  private async appendEvidenceIn(
+    q: Queryable,
+    baselineId: string,
+    evidence: readonly NewBaselineEvidence[],
+  ): Promise<BaselineEvidence[]> {
     if (evidence.length === 0) return [];
     const insertedIds: string[] = [];
     // Insert one-by-one with ON CONFLICT DO NOTHING on (baseline_id, source,
@@ -294,7 +393,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     // honest composite key is (source, locator) — a re-drive of the same
     // governed read upserts the same row, no duplicates.
     for (const ev of evidence) {
-      const r = await this.db.query<{ id: string }>(
+      const r = await q.query<{ id: string }>(
         `INSERT INTO wfos_project_baseline_evidence
            (baseline_id, source, locator, content_digest, redacted,
             tool_invocation_id, policy_decision,
@@ -326,7 +425,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
         // ON CONFLICT DO NOTHING — the evidence already exists (idempotent
         // re-drive). Re-fetch the existing row's id for observation linkage
         // by the honest composite key (source, locator).
-        const existing = await this.db.query<{ id: string }>(
+        const existing = await q.query<{ id: string }>(
           `SELECT id FROM wfos_project_baseline_evidence
             WHERE baseline_id = $1 AND source = $2 AND locator = $3`,
           [baselineId, ev.source, ev.locator],
@@ -336,7 +435,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
         }
       }
     }
-    const rows = await this.db.query<EvidenceRow>(
+    const rows = await q.query<EvidenceRow>(
       `SELECT id, baseline_id, source, locator, content_digest, redacted,
               tool_invocation_id, policy_decision,
               repository_read_decision, repository_read_enforcement,
@@ -352,13 +451,23 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     baselineId: string,
     observations: readonly NewBaselineObservation[],
   ): Promise<BaselineObservation[]> {
+    return this.upsertObservationsIn(this.db, baselineId, observations);
+  }
+
+  /**
+   * PR #42 round-5: the `*In` helper — runs against either the pool OR a
+   * transaction-scoped `DatabaseTx`. Idempotent upsert on (baseline_id, kind,
+   * claim_digest). The claim is immutable (the trigger enforces no claim
+   * rewrite); a re-drive is a no-op. ON CONFLICT DO NOTHING.
+   */
+  private async upsertObservationsIn(
+    q: Queryable,
+    baselineId: string,
+    observations: readonly NewBaselineObservation[],
+  ): Promise<BaselineObservation[]> {
     if (observations.length === 0) return [];
-    // Idempotent upsert on (baseline_id, kind, claim_digest). The claim is
-    // immutable (the trigger enforces no claim rewrite); a re-drive is a
-    // no-op. ON CONFLICT DO NOTHING — existing rows are left as-is (their
-    // provenance is immutable except the authorized confirmation path).
     for (const obs of observations) {
-      await this.db.query(
+      await q.query(
         `INSERT INTO wfos_project_baseline_observations
            (baseline_id, kind, provenance, claim, claim_digest, evidence_ref)
          VALUES ($1, $2, $3, $4, $5, $6)
@@ -373,7 +482,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
         ],
       );
     }
-    const rows = await this.db.query<ObservationRow>(
+    const rows = await q.query<ObservationRow>(
       `SELECT id, baseline_id, kind, provenance, claim, claim_digest,
               evidence_ref, confirmed_by, confirmed_at, created_at
          FROM wfos_project_baseline_observations
@@ -412,12 +521,27 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     contentDigest: string,
     expectedVersion: number,
   ): Promise<ProjectBaseline | null> {
+    return this.markCompleteIn(this.db, baselineId, contentDigest, expectedVersion);
+  }
+
+  /**
+   * PR #42 round-5: the `*In` helper — runs against either the pool OR a
+   * transaction-scoped `DatabaseTx`. CAS: analyzing → complete (version +
+   * state predicate). Lost CAS → null (convergence — another worker
+   * completed it; the caller re-reads).
+   */
+  private async markCompleteIn(
+    q: Queryable,
+    baselineId: string,
+    contentDigest: string,
+    expectedVersion: number,
+  ): Promise<ProjectBaseline | null> {
     // No-confirmed-on-failed: refuse to complete a baseline that carries a
     // confirmed observation UNLESS the baseline is already being completed
     // (defensive — the analyzer never confirms; a confirmed observation on an
     // analyzing baseline would be an invariant violation). This is the
     // "failed analysis cannot produce a false confirmed baseline" guard.
-    const confirmedCount = await this.db.query<{ n: number }>(
+    const confirmedCount = await q.query<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM wfos_project_baseline_observations
         WHERE baseline_id = $1 AND provenance = 'confirmed'`,
       [baselineId],
@@ -431,7 +555,7 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
     void confirmedCount;
     // CAS: analyzing → complete (version + state predicate). Lost CAS → null
     // (convergence — another worker completed it; the caller re-reads).
-    const r = await this.db.query<BaselineRow>(
+    const r = await q.query<BaselineRow>(
       `UPDATE wfos_project_baselines
           SET state = 'complete', version = $3, content_digest = $2,
               finalized_at = NOW(), terminal_at = NOW()
@@ -472,6 +596,292 @@ export class PgProjectBaselineRepository implements ProjectBaselineRepository {
       [baselineId, failureStage, expectedVersion + 1, expectedVersion],
     );
     return r.rowCount && r.rows[0] ? mapBaseline(r.rows[0]) : null;
+  }
+
+  // =========================================================================
+  // PR #42 round-5 (the persistence-boundary fence): persist evidence +
+  // observations + complete the baseline in ONE DB transaction, under the
+  // captured persistence-boundary policy snapshot.
+  //
+  // THE ROUND-5 BLOCKER (the architect's review of commit `2a597ed`): the
+  // round-4 fence protects the READ window (capture V7 → read → revalidate V7
+  // → discard if stale) but does NOT protect the SUBSEQUENT PERSISTENCE
+  // window:
+  //
+  //   capture V7
+  //     ↓
+  //   read
+  //     ↓
+  //   revalidate V7                ← round-4 fence passes here
+  //     ↓
+  //   policy mutates V7 → V8       ← the round-4 fence does NOT cover this gap
+  //     ↓
+  //   appendEvidence(V7)           ← STALE V7 evidence committed
+  //     ↓
+  //   upsertObservations(V7)       ← STALE V7 observations committed
+  //     ↓
+  //   markComplete                 ← baseline marked complete under V8 with V7 evidence
+  //
+  // The architect's required fix: a "persistence-boundary CAS/transactional
+  // policy snapshot guard." A regression must explicitly mutate the policy
+  // AFTER revalidation (the per-read fence's revalidation) BUT BEFORE
+  // persistence and prove zero stale evidence/observations are committed.
+  //
+  // THE ROUND-5 FIX (implemented here): the persistence-boundary fence wraps
+  // the appendEvidence + upsertObservations + markComplete in ONE DB
+  // transaction + performs a CAS check on the policy version INSIDE the
+  // transaction (before commit). If the snapshot is stale at any fence check,
+  // the transaction is ROLLED BACK — zero evidence/observations are
+  // committed. The architect's invariant: "a repository-read result is
+  // persisted only if the policy snapshot that authorized it is still current
+  // when the result is committed."
+  //
+  // THE FENCE PROTOCOL (the double-CAS pattern — defense-in-depth):
+  //
+  //   1. BEGIN TRANSACTION.
+  //   2. PRE-WRITES REVALIDATION (Check A) — call `revalidate()` to fetch the
+  //      CURRENT policy snapshot; compare to `input.snapshot`:
+  //      * If they differ, the policy mutated BETWEEN the orchestrator's
+  //        capture and the transaction start → ROLLBACK → return `fence-stale`.
+  //   3. PER-READ SNAPSHOT VERIFICATION (Check B) — verify `input.snapshot`
+  //      matches each evidence row's per-read `repository_read_enforcement
+  //      .policyVersion` (captured by the analyzer's per-read fence). If ANY
+  //      differ, the policy mutated BETWEEN the per-read fence and the
+  //      persistence capture → the evidence is stale → ROLLBACK → return
+  //      `fence-stale`. This is the architect's exact regression scenario
+  //      (the test hook mutates V7 → V8 AFTER the per-read fence passes, BEFORE
+  //      the persistence transaction begins).
+  //   4. WRITES — appendEvidence (idempotent on (baseline_id, source,
+  //      locator)) + upsertObservations (idempotent on (baseline_id, kind,
+  //      claim_digest)) + markComplete (CAS on baseline.version). Lost CAS
+  //      → ROLLBACK → return `cas-lost`.
+  //   5. POST-WRITES REVALIDATION (Check C — defense-in-depth) — call
+  //      `revalidate()` AGAIN; compare to `input.snapshot`. If they differ,
+  //      the policy mutated DURING the writes → ROLLBACK → return `fence-stale`.
+  //   6. COMMIT (the transaction commits only if every fence check passed).
+  //   7. Return `persisted` with the completed baseline + the evidence rows.
+  //
+  // The double-CAS pattern (Check A + Check C) keeps the TOCTOU window
+  // between step 5 and COMMIT itself as small as possible. A mutation in that
+  // final gap is the same unavoidable window the architect's earlier rounds
+  // acknowledged (the DB cannot participate in the policy store's
+  // transaction). The fence DETECTS + REJECTS stale snapshots at every other
+  // point in the persistence flow — same fencing protocol as round-4,
+  // extended to cover the persistence window the round-4 fence left open.
+  //
+  // FAIL-CLOSED: a revalidation call FAILURE (the gate throws on the
+  // revalidation) is treated as STALE — the transaction is ROLLED BACK, the
+  // result is `fence-revalidation-failed`. A revalidation failure must NOT
+  // become an implicit persist (the result cannot be committed without a
+  // successful revalidation).
+  //
+  // CAS-LOST: the markComplete CAS losing (another worker completed the
+  // baseline first) is treated as `cas-lost` — the transaction is ROLLED BACK
+  // (the caller re-reads the winner's row — convergence). The winner's
+  // evidence is already in (idempotent upserts); the rolled-back writes from
+  // this call are no-ops (the ON CONFLICT DO NOTHING semantic).
+  //
+  // WHY THE THROW-TO-ROLLBACK PATTERN: the `db.transaction()` callback rolls
+  // back on any thrown error. The fence throws a `FenceStaleSignal` (a
+  // private internal sentinel — NOT a ProjectBaselineError) to abort the
+  // transaction; the outer catch translates it to the `fence-stale` /
+  // `fence-revalidation-failed` result. This keeps the public method's
+  // contract clean (it never throws for fence-stale — it returns a typed
+  // result; only the genuine infrastructure errors throw).
+  // =========================================================================
+
+  async persistBaselineWithPolicyFence(
+    input: PersistBaselineInput,
+    revalidate: () => Promise<PersistencePolicySnapshot>,
+  ): Promise<PersistBaselineResult> {
+    try {
+      const result = await this.db.transaction(async (tx) => {
+        const q: Queryable = tx as unknown as Queryable;
+
+        // ---- Check A: PRE-WRITES REVALIDATION (the first CAS).
+        // Fetch the current policy snapshot INSIDE the transaction. If the
+        // snapshot mutated between the orchestrator's capture and the
+        // transaction start, this CAS catches it.
+        let revalidationA: PersistencePolicySnapshot;
+        try {
+          revalidationA = await revalidate();
+        } catch (err) {
+          throw new FenceStaleSignal(
+            'fence-revalidation-failed',
+            input.snapshot,
+            null,
+            `the persistence-boundary pre-writes revalidation failed (${(err as Error).message}) — the transaction is rolled back (a revalidation failure must NOT become an implicit persist)`,
+          );
+        }
+        if (isPersistenceSnapshotStale(input.snapshot, revalidationA)) {
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            revalidationA,
+            `the persistence-boundary fence REJECTED the persist at the PRE-WRITES revalidation (Check A): the snapshot (version=${input.snapshot.policyVersion ?? 'not-surfaced'}, rule=${input.snapshot.ruleId ?? 'default'}, decision=${input.snapshot.decision ?? 'none'}) that authorized the persistence is no longer current (revalidation saw version=${revalidationA.policyVersion ?? 'not-surfaced'}, rule=${revalidationA.ruleId ?? 'default'}, decision=${revalidationA.decision ?? 'none'}) — the policy mutated between the orchestrator's capture and the transaction start; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
+        }
+
+        // ---- Check B: PER-READ SNAPSHOT VERIFICATION.
+        // Verify `input.snapshot` matches each evidence row's per-read
+        // `repository_read_enforcement.policyVersion` (the snapshot the
+        // analyzer's per-read fence captured for THAT individual read). If ANY
+        // differ, the policy mutated BETWEEN the per-read fence and the
+        // persistence capture — the evidence is stale → ROLLBACK. This is
+        // the architect's exact regression scenario: the test hook mutates
+        // V7 → V8 AFTER the per-read fence's revalidation passes, BEFORE the
+        // persistence transaction begins. The orchestrator's V_p capture
+        // (post-mutation) would be V8; the evidence's per-read snapshot
+        // (pre-mutation) is V7 → mismatch → ROLLBACK.
+        for (const ev of input.evidence) {
+          // Evidence rows that did NOT come from a governed repository read
+          // carry no per-read snapshot — skip them (no fence reference to
+          // compare against). Currently every evidence row comes from a
+          // governed read, but the check is forward-compatible.
+          if (ev.repositoryReadEnforcement === null) continue;
+          const perReadVersion = ev.repositoryReadEnforcement.policyVersion;
+          const perReadRuleId = ev.repositoryReadEnforcement.ruleId;
+          // If the per-read snapshot surfaced a version, the persistence
+          // snapshot must match it. If the persistence snapshot surfaced a
+          // version, the per-read snapshot must match it. Either direction
+          // of mismatch is stale.
+          if (
+            perReadVersion !== null &&
+            input.snapshot.policyVersion !== null &&
+            perReadVersion !== input.snapshot.policyVersion
+          ) {
+            throw new FenceStaleSignal(
+              'fence-stale',
+              input.snapshot,
+              revalidationA,
+              `the persistence-boundary fence REJECTED the persist at the PER-READ snapshot verification (Check B): the evidence row for locator '${ev.locator}' carries a per-read snapshot (version=${perReadVersion}, rule=${perReadRuleId ?? 'default'}) that does NOT match the persistence-boundary snapshot (version=${input.snapshot.policyVersion}, rule=${input.snapshot.ruleId ?? 'default'}) — the policy mutated between the per-read fence and the persistence capture; the evidence is stale; the transaction is rolled back (zero evidence/observations are committed)`,
+            );
+          }
+          // Defense-in-depth: the per-read ruleId must match too (a rule
+          // replacement without a version bump would be a bug, but the fence
+          // catches it).
+          if (
+            (perReadRuleId !== null || input.snapshot.ruleId !== null) &&
+            perReadRuleId !== input.snapshot.ruleId
+          ) {
+            throw new FenceStaleSignal(
+              'fence-stale',
+              input.snapshot,
+              revalidationA,
+              `the persistence-boundary fence REJECTED the persist at the PER-READ snapshot verification (Check B — ruleId defense-in-depth): the evidence row for locator '${ev.locator}' carries a per-read ruleId '${perReadRuleId ?? 'default'}' that does NOT match the persistence-boundary snapshot's ruleId '${input.snapshot.ruleId ?? 'default'}' — the matched rule changed between the per-read fence and the persistence capture; the transaction is rolled back (zero evidence/observations are committed)`,
+            );
+          }
+        }
+
+        // ---- WRITES (the actual persist).
+        // 1. appendEvidence (idempotent on (baseline_id, source, locator)).
+        const persistedEvidence = await this.appendEvidenceIn(
+          q,
+          input.baselineId,
+          input.evidence,
+        );
+        // 2. Link observations to evidence IDs by locator (the analyzer
+        //    references evidence by LOCATOR, not by a manufactured
+        //    toolInvocationId — round-2 Blocker A preserved). The
+        //    upsertObservationsIn expects observations with resolved evidence
+        //    IDs in evidenceRef.
+        const evidenceByLocator = new Map<string, string>();
+        for (const ev of persistedEvidence) {
+          evidenceByLocator.set(ev.locator, ev.id);
+        }
+        const linkedObservations: NewBaselineObservation[] = input.observations.map(
+          (obs) => ({
+            ...obs,
+            evidenceRef: obs.evidenceRef
+              .map((ref) => evidenceByLocator.get(ref) ?? null)
+              .filter((v): v is string => v !== null),
+          }),
+        );
+        // 3. upsertObservations (idempotent on (baseline_id, kind,
+        //    claim_digest)).
+        await this.upsertObservationsIn(q, input.baselineId, linkedObservations);
+        // 4. markComplete (CAS on baseline.version). Lost CAS → ROLLBACK +
+        //    return `cas-lost` (the caller re-reads the winner's row).
+        const completed = await this.markCompleteIn(
+          q,
+          input.baselineId,
+          input.contentDigest,
+          input.expectedVersion,
+        );
+        if (completed === null) {
+          // CAS lost — another worker completed the baseline first. The
+          // transaction is ROLLED BACK (the caller re-reads the winner's row —
+          // convergence). The winner's evidence is already in (idempotent
+          // upserts); the rolled-back writes from this call are no-ops.
+          throw new FenceStaleSignal(
+            'cas-lost',
+            input.snapshot,
+            revalidationA,
+            'the markComplete CAS lost (another worker completed the baseline first) — the transaction is rolled back; the caller re-reads the winner\'s row (convergence)',
+          );
+        }
+
+        // ---- Check C: POST-WRITES REVALIDATION (defense-in-depth — the
+        // second CAS, just before COMMIT). If the policy mutated DURING the
+        // writes, this CAS catches it.
+        let revalidationB: PersistencePolicySnapshot;
+        try {
+          revalidationB = await revalidate();
+        } catch (err) {
+          throw new FenceStaleSignal(
+            'fence-revalidation-failed',
+            input.snapshot,
+            null,
+            `the persistence-boundary post-writes revalidation failed (${(err as Error).message}) — the transaction is rolled back (a revalidation failure must NOT become an implicit persist)`,
+          );
+        }
+        if (isPersistenceSnapshotStale(input.snapshot, revalidationB)) {
+          throw new FenceStaleSignal(
+            'fence-stale',
+            input.snapshot,
+            revalidationB,
+            `the persistence-boundary fence REJECTED the persist at the POST-WRITES revalidation (Check C — defense-in-depth): the snapshot (version=${input.snapshot.policyVersion ?? 'not-surfaced'}, rule=${input.snapshot.ruleId ?? 'default'}, decision=${input.snapshot.decision ?? 'none'}) that authorized the persistence is no longer current after the writes (revalidation saw version=${revalidationB.policyVersion ?? 'not-surfaced'}, rule=${revalidationB.ruleId ?? 'default'}, decision=${revalidationB.decision ?? 'none'}) — the policy mutated DURING the writes; the transaction is rolled back (zero evidence/observations are committed)`,
+          );
+        }
+
+        // ---- Every fence check passed — the transaction will COMMIT.
+        return {
+          kind: 'persisted' as const,
+          baseline: completed,
+          evidence: persistedEvidence,
+        };
+      });
+      return result;
+    } catch (err) {
+      if (err instanceof FenceStaleSignal) {
+        // The fence rejected the persist (or the CAS lost). Translate the
+        // internal signal to the public typed result.
+        if (err.kind === 'cas-lost') {
+          return { kind: 'cas-lost' };
+        }
+        if (err.kind === 'fence-revalidation-failed') {
+          return {
+            kind: 'fence-revalidation-failed',
+            snapshot: err.snapshot,
+            reason: err.message,
+          };
+        }
+        return {
+          kind: 'fence-stale',
+          snapshot: err.snapshot,
+          revalidated: err.revalidated ?? {
+            policyVersion: null,
+            ruleId: null,
+            decision: null,
+            reason: null,
+          },
+          reason: err.message,
+        };
+      }
+      // A genuine infrastructure error (DB connection lost, serialization
+      // failure, etc.) — re-throw so the caller's catch block handles it.
+      throw err;
+    }
   }
 
   async confirmObservation(

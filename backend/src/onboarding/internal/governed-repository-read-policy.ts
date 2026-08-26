@@ -144,7 +144,10 @@
 import { createHash } from 'node:crypto';
 import type { Logger } from '@platform/logger.js';
 import type { ToolPolicyRequest, ProjectScopedPolicyDecision } from '@modules/agents/index.js';
-import type { RepositoryReadEnforcement } from '@modules/projects/index.js';
+import type {
+  PersistencePolicySnapshot,
+  RepositoryReadEnforcement,
+} from '@modules/projects/index.js';
 import type {
   AnalysisContext,
   GovernedReadRequest,
@@ -555,6 +558,106 @@ export class DefaultGovernedRepositoryReadPolicy implements GovernedRepositoryRe
       enforcement,
     };
     return { request, content, governance };
+  }
+
+  // =========================================================================
+  // PR #42 round-5 (the persistence-boundary fence): capture the CURRENT
+  // policy snapshot at the persistence boundary.
+  //
+  // THE ROUND-5 BLOCKER (the architect's review of commit `2a597ed`): the
+  // round-4 fence protects the READ window (capture V7 -> read -> revalidate
+  // V7 -> discard if stale) but does NOT protect the SUBSEQUENT PERSISTENCE
+  // window. The persistence flow is:
+  //
+  //   analyze() returns evidence[] (each row carries its per-read V7 from
+  //     the round-4 fence)
+  //     ↓
+  //   policy mutates V7 -> V8       ← the round-4 fence does NOT cover this gap
+  //     ↓
+  //   appendEvidence(V7)            ← STALE V7 evidence committed
+  //     ↓
+  //   upsertObservations(V7)       ← STALE V7 observations committed
+  //     ↓
+  //   markComplete
+  //
+  // THE ROUND-5 FIX: the orchestrator captures the CURRENT policy snapshot
+  // (this method) AFTER analyze() returns + BEFORE the persistence transaction
+  // begins. The /projects repository's `persistBaselineWithPolicyFence`
+  // method revalidates this snapshot INSIDE the DB transaction (pre-writes +
+  // post-writes + per-read verification) + rolls back if it is stale. If the
+  // policy mutated BETWEEN the per-read fence and this capture, the snapshot
+  // (V8) differs from the evidence's per-read policyVersion (V7) — the per-
+  // read verification inside the transaction catches the mismatch + rolls
+  // back. ZERO stale evidence/observations are committed.
+  //
+  // THE SYNTHETIC REQUEST: the fence uses ONLY the policyVersion + ruleId
+  // for drift detection (the decision itself is NOT enforced at the
+  // persistence boundary — the per-read fence already enforced it for each
+  // individual read). The synthetic 'persist-baseline' request keeps the
+  // WORK-037 gate's API stable (it always takes a ToolPolicyRequest — no
+  // separate "fetch current version" method is added to the gate, keeping
+  // that frozen boundary intact).
+  //
+  // FAIL-CLOSED: if the gate throws on the capture call, the boundary
+  // returns a null snapshot (policyVersion=null, ruleId=null, decision=null).
+  // The persistence fence's revalidation will compare it against a fresh
+  // revalidation (which will ALSO fail-closed to null) — both null = no drift
+  // signal = stale=false (best-effort). The orchestrator logs the failure
+  // (forensic) + proceeds with the best-effort snapshot.
+  // =========================================================================
+
+  async capturePersistenceSnapshot(
+    ctx: AnalysisContext,
+  ): Promise<PersistencePolicySnapshot> {
+    // Build a synthetic 'persist-baseline' request. The fence uses ONLY the
+    // policyVersion + ruleId for drift detection; the decision/operation/path
+    // are not enforced at the persistence boundary (the per-read fence already
+    // enforced them). The synthetic request keeps the WORK-037 gate's API
+    // stable (it always takes a ToolPolicyRequest).
+    const policyRequest: ToolPolicyRequest = {
+      invocationId: `${ctx.analysisRunId}:persist-baseline`,
+      executionId: `onboarding:${ctx.baselineId}`,
+      sessionId: ctx.analysisRunId,
+      workspaceId: `onboarding:${ctx.baselineId}`,
+      family: 'filesystem',
+      operation: 'persist-baseline',
+      input: { baselineId: ctx.baselineId, mode: 'persist' } as Record<string, unknown>,
+    };
+    try {
+      const decision = await this.deps.policyGate.decideForProjectScope(
+        policyRequest,
+        ctx.projectId,
+        ctx.organizationId,
+      );
+      return {
+        policyVersion: decision.policyVersion ?? null,
+        ruleId: decision.ruleId ?? null,
+        decision: decision.decision,
+        reason: decision.reason ?? null,
+      };
+    } catch (err) {
+      // The gate failed to resolve a decision. FAIL CLOSED: return a null
+      // snapshot (the persistence fence's revalidation will compare it against
+      // a fresh revalidation that also fails-closed — both null = no drift
+      // signal = stale=false, best-effort). The orchestrator logs the failure
+      // (forensic) + proceeds with the best-effort snapshot. This is the
+      // same fail-closed behavior as the round-4 fence's capture-failure
+      // path: a policy-gate failure must NOT become an implicit allow (the
+      // persistence is REJECTED if the revalidation also fails — the
+      // revalidation call's failure is treated as stale by the persistence
+      // fence).
+      this.deps.logger.error('repository-read.persistence-snapshot-capture-failed', {
+        baselineId: ctx.baselineId,
+        projectId: ctx.projectId,
+        error: (err as Error).message,
+      });
+      return {
+        policyVersion: null,
+        ruleId: null,
+        decision: null,
+        reason: `persistence-snapshot-capture-failed: the project-scoped policy gate failed to resolve a decision (${(err as Error).message}) — returning a null snapshot (best-effort; the persistence fence will compare it against a fresh revalidation)`,
+      };
+    }
   }
 
   /**

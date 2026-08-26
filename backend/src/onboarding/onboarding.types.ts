@@ -276,8 +276,8 @@ export interface GovernedReadOutcome {
 }
 
 /**
- * PR #42 round-3 + round-4 — the governed repository-read boundary for
- * /github reads.
+ * PR #42 round-3 + round-4 + round-5 — the governed repository-read boundary
+ * for /github reads.
  *
  * The architect's round-3 review identified that the round-2 path was a
  * check-then-act authorization window:
@@ -332,13 +332,34 @@ export interface GovernedReadOutcome {
  *      else (the snapshot is still current):
  *        return the bound outcome (content + governance + enforcement)
  *
- * The invariant becomes: "a repository-read result is persisted only if
- * the policy snapshot that authorized it is still current when the result
- * is committed." That is achievable even though the GitHub API itself
+ * The architect's round-5 review identified that the round-4 fence protects
+ * the READ window but does NOT protect the SUBSEQUENT PERSISTENCE window:
+ *
+ *   capture V7 -> read -> revalidate V7 (round-4 fence passes here) ->
+ *   policy mutates V7 -> V8 -> appendEvidence(V7) -> upsertObservations(V7)
+ *   -> markComplete
+ *
+ * The architect's round-5 required fix: a "persistence-boundary CAS /
+ * transactional policy snapshot guard." The round-5 boundary exposes a
+ * SECOND method — {@link capturePersistenceSnapshot} — that the orchestrator
+ * calls AFTER analyze() returns + BEFORE the persistence transaction begins.
+ * The snapshot is the persistence-boundary fence's reference value. The
+ * /projects repository's `persistBaselineWithPolicyFence` method wraps the
+ * appendEvidence + upsertObservations + markComplete in ONE DB transaction
+ * + performs a CAS check on the snapshot INSIDE the transaction (before
+ * commit). If the snapshot is stale at any fence check (pre-writes, per-read
+ * verification, post-writes), the transaction is ROLLED BACK — zero stale
+ * evidence/observations are committed.
+ *
+ * The invariant (round-4 + round-5): "a repository-read result is persisted
+ * only if the policy snapshot that authorized it is still current when the
+ * result is committed." That is achievable even though the GitHub API itself
  * cannot participate in the database transaction the WORK-037 policy store
  * uses. The boundary does NOT claim database-style atomicity across the
  * policy engine and the GitHub API — it claims a fencing protocol that
- * DETECTS + REJECTS stale snapshots before the result is persisted.
+ * DETECTS + REJECTS stale snapshots before the result is persisted (round-4,
+ * at the read boundary) AND before the result is committed (round-5, at the
+ * persistence boundary).
  *
  * WHY THE ALTERNATIVE PATH (not the preferred Tool Runtime adaptation):
  * the frozen WORK-036 `DefaultToolRuntime.invoke()` is structurally coupled
@@ -367,12 +388,13 @@ export interface GovernedReadOutcome {
  *   * read-only — the boundary only supports read/list operations; any
  *     other operation is refused (performed=false).
  *
- * Policy drift prevention (round-4 fencing): the snapshot is captured at the
- * START of governedRead(), the read is performed under it, and the snapshot
- * is REVALIDATED at the END. If the snapshot is stale, the result is
- * DISCARDED — no evidence row, no observation is persisted for that path.
- * The invariant: "a repository-read result is persisted only if the policy
- * snapshot that authorized it is still current when the result is committed."
+ * Policy drift prevention (round-4 + round-5 fencing): the snapshot is
+ * captured at the START of governedRead(), the read is performed under it,
+ * the snapshot is REVALIDATED at the END of governedRead() (round-4), AND
+ * the persistence-boundary snapshot is captured + revalidated inside the
+ * persistence transaction (round-5). If a snapshot is stale at any check,
+ * the result is DISCARDED (round-4: no evidence row; round-5: the
+ * transaction is rolled back — zero evidence/observations are committed).
  */
 export interface GovernedRepositoryReadPolicy {
   /**
@@ -403,6 +425,49 @@ export interface GovernedRepositoryReadPolicy {
     request: GovernedReadRequest,
     ctx: AnalysisContext,
   ): Promise<GovernedReadOutcome>;
+
+  /**
+   * PR #42 round-5 (the persistence-boundary fence): capture the CURRENT
+   * policy snapshot at the persistence boundary. The orchestrator calls
+   * this AFTER `analyze()` returns (every evidence row has its per-read
+   * snapshot from the round-4 fence) AND BEFORE the persistence transaction
+   * begins. The returned snapshot is the persistence-boundary fence's
+   * reference value — the /projects repository's `persistBaselineWithPolicyFence`
+   * method revalidates it INSIDE the DB transaction (pre-writes + post-writes
+   * + per-read verification) + rolls back if it is stale.
+   *
+   * The captured snapshot is the CURRENT policy version at the persistence
+   * boundary. If the policy mutated BETWEEN the per-read fence and this
+   * capture (the architect's round-5 regression scenario), the snapshot
+   * differs from the evidence's per-read policyVersion — the per-read
+   * verification inside the transaction catches the mismatch + rolls back
+   * (zero stale evidence/observations are committed).
+   *
+   * The decision is fetched with a synthetic 'persist-baseline' request
+   * (the fence uses ONLY the policyVersion + ruleId for drift detection;
+   * the decision itself is NOT enforced at the persistence boundary — the
+   * per-read fence already enforced it for each individual read). The
+   * synthetic request keeps the gate's API stable (it always takes a
+   * ToolPolicyRequest — no separate "fetch current version" method is
+   * added to the WORK-037 gate, keeping that boundary frozen).
+   *
+   * If the gate surfaces no policyVersion (a test fake returning
+   * `{ decision: 'allow' }`), the fence falls back to ruleId + decision
+   * comparison. The production gate (AgentPolicyEngine) always surfaces a
+   * real policyVersion, so the fence is fully effective in production.
+   *
+   * If the gate FAILS to resolve a decision (it throws), the boundary FAILS
+   * CLOSED: the returned snapshot has a null policyVersion + null ruleId +
+   * null decision. The persistence fence's revalidation will compare it
+   * against a fresh revalidation (which will ALSO fail-closed to null) —
+   * both null = no drift signal = stale=false (best-effort, same as the
+   * round-4 fence's behavior for gates that surface no version). The
+   * orchestrator logs the failure (forensic) + proceeds with the best-effort
+   * snapshot.
+   */
+  capturePersistenceSnapshot(
+    ctx: AnalysisContext,
+  ): Promise<import('@modules/projects/index.js').PersistencePolicySnapshot>;
 }
 
 /** Convenience: the evidence-source vocabulary (mirrors the DB CHECK). */

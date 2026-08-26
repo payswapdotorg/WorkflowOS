@@ -38,7 +38,6 @@ import type { ProjectRepository } from '@modules/projects/index.js';
 import type {
   ProjectBaselineRepository,
   EnsureBaselineInput,
-  NewBaselineObservation,
 } from '@modules/projects/index.js';
 import type { ProjectGitHubRepositoryRepository } from '@modules/github/index.js';
 import type {
@@ -47,6 +46,7 @@ import type {
   OnboardingService,
   RepositoryAnalyzer,
   AnalysisContext,
+  GovernedRepositoryReadPolicy,
 } from '../onboarding.types.js';
 // PR #42 round-2 (Blocker B): the typed onboarding-analysis error. Thrown
 // by the analyzer when a content read hits an infrastructure failure
@@ -63,6 +63,16 @@ export interface DefaultOnboardingServiceDeps {
   readonly projectGitHubRepositoryRepository: ProjectGitHubRepositoryRepository;
   readonly githubAdapter: GitHubAdapter;
   readonly analyzer: RepositoryAnalyzer;
+  /**
+   * PR #42 round-5 (the persistence-boundary fence): the governed repository-
+   * read boundary. The orchestrator calls capturePersistenceSnapshot() AFTER
+   * analyze() returns + BEFORE the persistence transaction begins. The
+   * returned snapshot is the persistence-boundary fence's reference value —
+   * the repository's persistBaselineWithPolicyFence method revalidates it
+   * INSIDE the DB transaction (pre-writes + post-writes + per-read
+   * verification) + rolls back if it is stale.
+   */
+  readonly governedReadPolicy: GovernedRepositoryReadPolicy;
   readonly logger: Logger;
 }
 
@@ -168,46 +178,120 @@ export class DefaultOnboardingService implements OnboardingService {
     try {
       const result = await this.deps.analyzer.analyze(analysisContext);
 
-      // 8. Persist evidence, then link observations to evidence ids.
+      // 8. PR #42 round-5 (the persistence-boundary fence): capture the
+      //    CURRENT policy snapshot AFTER analyze() returns (every evidence
+      //    row has its per-read snapshot from the round-4 fence) AND BEFORE
+      //    the persistence transaction begins. The snapshot is the
+      //    persistence-boundary fence's reference value — the
+      //    persistBaselineWithPolicyFence method revalidates it INSIDE the
+      //    DB transaction (pre-writes + post-writes + per-read verification)
+      //    + rolls back if it is stale.
+      //
+      //    THE ARCHITECT'S ROUND-5 BLOCKER: the round-4 fence protects the
+      //    READ window but NOT the SUBSEQUENT PERSISTENCE window:
+      //
+      //      capture V7 -> read -> revalidate V7 (round-4 fence passes) ->
+      //      policy mutates V7 -> V8 -> appendEvidence(V7) -> markComplete
+      //
+      //    The persistence-boundary fence catches the mutation at THREE
+      //    checkpoints inside the transaction (pre-writes revalidation, per-
+      //    read snapshot verification, post-writes revalidation). If the
+      //    policy mutated BETWEEN the per-read fence and this capture (the
+      //    architect's exact regression scenario), the snapshot (V8) differs
+      //    from the evidence's per-read policyVersion (V7) — the per-read
+      //    verification catches the mismatch + rolls back. ZERO stale
+      //    evidence/observations are committed.
+      const persistenceSnapshot =
+        await this.deps.governedReadPolicy.capturePersistenceSnapshot(analysisContext);
+
+      // 9. Persist evidence + observations + complete the baseline in ONE DB
+      //    transaction, under the captured persistence-boundary snapshot.
       //    PR #42 round-2 (Blocker A): observations reference evidence by
-      //    LOCATOR (the path), not by a manufactured toolInvocationId.
-      //    The orchestrator resolves locator→evidence id by the composite
-      //    (source, locator) key (the evidence row's honest idempotency
-      //    key, per migration 0038 round-2).
-      const persistedEvidence =
-        await this.deps.projectBaselineRepository.appendEvidence(baseline.id, result.evidence);
-      const evidenceByLocator = new Map<string, string>();
-      for (const ev of persistedEvidence) {
-        evidenceByLocator.set(ev.locator, ev.id);
-      }
-      const linkedObservations: NewBaselineObservation[] = result.observations.map((obs) => ({
-        ...obs,
-        evidenceRef: obs.evidenceRef
-          .map((ref) => evidenceByLocator.get(ref) ?? null)
-          .filter((v): v is string => v !== null),
-      }));
+      //    LOCATOR (the path), not by a manufactured toolInvocationId. The
+      //    repository's persistBaselineWithPolicyFence resolves locator→evidence
+      //    id by the composite (source, locator) key inside the transaction.
+      //    PR #42 round-5: the fence revalidates the snapshot INSIDE the
+      //    transaction + rolls back if it is stale (zero stale evidence/
+      //    observations are committed).
+      const persistResult =
+        await this.deps.projectBaselineRepository.persistBaselineWithPolicyFence(
+          {
+            baselineId: baseline.id,
+            evidence: result.evidence,
+            observations: result.observations,
+            contentDigest: result.contentDigest,
+            expectedVersion: baseline.version,
+            snapshot: persistenceSnapshot,
+          },
+          // The revalidate closure: re-fetch the current policy snapshot
+          // INSIDE the transaction. The repository's fence calls this closure
+          // TWICE (pre-writes + post-writes) + compares each revalidation to
+          // the captured snapshot. If either differs, the transaction is
+          // ROLLED BACK.
+          async () =>
+            this.deps.governedReadPolicy.capturePersistenceSnapshot(analysisContext),
+        );
 
-      // 9. Idempotent upsert (claim-digest unique — a re-drive appends no
-      //    duplicates). Observations may only be appended while 'analyzing'.
-      await this.deps.projectBaselineRepository.upsertObservations(baseline.id, linkedObservations);
-
-      // 10. CAS complete (version predicate — concurrent requests converge;
-      //     the loser observes the winner's row via the null return).
-      const completed = await this.deps.projectBaselineRepository.markComplete(
-        baseline.id,
-        result.contentDigest,
-        baseline.version,
-      );
-      if (completed) {
-        return { baseline: toBaselineHeader(completed), analyzed: true };
+      // 10. Handle the persist result. Three success paths + two fence-
+      //     rejection paths.
+      if (persistResult.kind === 'persisted') {
+        return { baseline: toBaselineHeader(persistResult.baseline), analyzed: true };
       }
-      // CAS lost — another concurrent onboarding completed it. Re-read the
-      // winner's row (convergence).
-      const winner = await this.deps.projectBaselineRepository.findById(baseline.id);
-      return {
-        baseline: toBaselineHeader(winner ?? baseline),
-        analyzed: false,
-      };
+      if (persistResult.kind === 'cas-lost') {
+        // CAS lost — another concurrent onboarding completed it. Re-read
+        // the winner's row (convergence).
+        const winner = await this.deps.projectBaselineRepository.findById(baseline.id);
+        return {
+          baseline: toBaselineHeader(winner ?? baseline),
+          analyzed: false,
+        };
+      }
+      // 11. The fence REJECTED the persist (fence-stale OR fence-
+      //     revalidation-failed). ZERO evidence/observations are committed
+      //     (the transaction was rolled back). The baseline is still
+      //     'analyzing' (the markComplete was rolled back too). Mark it
+      //     failed so the staleness is OBSERVABLE in the durable record
+      //     (forensic provenance) + the baseline doesn't get stuck in
+      //     'analyzing' (it's terminal). The orchestrator logs the fence
+      //     rejection + the snapshot/revalidation metadata.
+      const fenceFailureStage =
+        persistResult.kind === 'fence-stale'
+          ? 'policy-snapshot-stale-at-persistence'
+          : 'policy-snapshot-revalidation-failed';
+      this.deps.logger.warn('onboarding.persistence-fence-rejected', {
+        baselineId: baseline.id,
+        failureStage: fenceFailureStage,
+        snapshot: persistResult.snapshot,
+        revalidated:
+          persistResult.kind === 'fence-stale' ? persistResult.revalidated : null,
+        reason: persistResult.reason,
+      });
+      try {
+        const failed = await this.deps.projectBaselineRepository.markFailed(
+          baseline.id,
+          fenceFailureStage,
+          baseline.version,
+        );
+        if (failed) {
+          return { baseline: toBaselineHeader(failed), analyzed: true };
+        }
+        // CAS lost on markFailed (rare — another worker completed/failed
+        // it concurrently). Re-read the winner's row (convergence).
+        const winner = await this.deps.projectBaselineRepository.findById(baseline.id);
+        return {
+          baseline: toBaselineHeader(winner ?? baseline),
+          analyzed: false,
+        };
+      } catch {
+        // markFailed itself failed (e.g. a confirmed observation exists —
+        // invariant violation, OR the baseline is no longer 'analyzing').
+        // Re-throw a synthetic error so the caller's outer catch sees the
+        // fence-rejection root cause; the baseline stays in its current
+        // state for a retry.
+        throw new Error(
+          `onboarding.persistence-fence-rejected-and-markfailed-failed: baseline ${baseline.id} had its persistence rejected by the fence (${fenceFailureStage}) but markFailed itself failed — the baseline is in an unexpected state; reason: ${persistResult.reason}`,
+        );
+      }
     } catch (err) {
       // 11. markFailed on any analysis error (failed analysis cannot produce
       //     a false confirmed baseline — the repository enforces no confirmed

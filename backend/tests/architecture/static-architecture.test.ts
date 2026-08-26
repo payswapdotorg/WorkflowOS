@@ -802,6 +802,13 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // record shape (lives in /projects — the evidence is a /projects
       // artifact; the onboarding boundary consumes it through the barrel).
       'RepositoryReadEnforcement',
+      // PR #42 round-5 (the persistence-boundary fence): the captured
+      // policy snapshot + the fenced persist operation's input/result
+      // (lives in /projects — the persistence authority; the onboarding
+      // orchestrator composes them through the barrel).
+      'PersistencePolicySnapshot',
+      'PersistBaselineInput',
+      'PersistBaselineResult',
       'EnsureBaselineInput',
       'ProjectBaselineRepository',
       'ProjectBaselineErrorCode',
@@ -10363,6 +10370,167 @@ describe('WORK-038 invariants — Existing Project Onboarding (Project Baseline 
     // dependency direction is onboarding → agents).
     const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
     expect(onboardingTypes, 'onboarding re-imports ProjectScopedPolicyDecision from /agents (no duplicate)').toMatch(/import type \{[^}]*ProjectScopedPolicyDecision[^}]*\} from '@modules\/agents\/index\.js'/);
+  });
+
+  // =========================================================================
+  // PR #42 round-5 invariants — the persistence-boundary fence (the double-
+  // CAS protocol that closes the persistence window the round-4 fence left
+  // open). The architect's round-5 review of commit `2a597ed` identified
+  // that the round-4 fence protects the READ window but does NOT protect
+  // the SUBSEQUENT PERSISTENCE window:
+  //
+  //   capture V7 -> read -> revalidate V7 (round-4 fence passes) ->
+  //   policy mutates V7 -> V8 -> appendEvidence(V7) -> markComplete
+  //
+  // The round-5 fix: the orchestrator captures a persistence-boundary
+  // snapshot AFTER analyze() returns + BEFORE the persistence transaction
+  // begins; the /projects repository's `persistBaselineWithPolicyFence`
+  // method wraps the writes in ONE DB transaction + performs a CAS on the
+  // policy version INSIDE the transaction (pre-writes revalidation + per-read
+  // snapshot verification + post-writes revalidation). If ANY check fails,
+  // the transaction is ROLLED BACK — zero stale evidence/observations are
+  // committed.
+  // =========================================================================
+
+  it('PR #42 r5: the boundary exposes capturePersistenceSnapshot (the orchestrator captures the persistence-boundary snapshot AFTER analyze() returns + BEFORE the persistence transaction begins)', () => {
+    // The architect's round-5 requirement: a "persistence-boundary CAS /
+    // transactional policy snapshot guard." The boundary must expose a
+    // SECOND method (capturePersistenceSnapshot) that the orchestrator calls
+    // after analyze() returns. The snapshot is the persistence fence's
+    // reference value.
+    const boundary = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'governed-repository-read-policy.ts'),
+      'utf8',
+    );
+    expect(boundary, 'the boundary exposes capturePersistenceSnapshot').toMatch(/async capturePersistenceSnapshot\(/);
+    // The capture uses a synthetic 'persist-baseline' request (NOT a real
+    // read request — the fence uses ONLY the policyVersion + ruleId for
+    // drift detection; the decision is NOT enforced at the persistence
+    // boundary — the per-read fence already enforced it for each individual
+    // read).
+    expect(boundary, 'the capture uses a synthetic persist-baseline operation').toMatch(/operation:\s*'persist-baseline'/);
+    // The fail-closed path: if the gate throws on the capture call, the
+    // boundary returns a null snapshot (the persistence fence's revalidation
+    // will compare it against a fresh revalidation that also fails-closed —
+    // both null = no drift signal = stale=false, best-effort).
+    expect(boundary, 'the capture fails closed on a gate failure').toMatch(/persistence-snapshot-capture-failed/);
+    // The GovernedRepositoryReadPolicy INTERFACE (in onboarding.types.ts)
+    // declares the method.
+    const onboardingTypes = readFileSync(join(ONBOARDING_DIR, 'onboarding.types.ts'), 'utf8');
+    expect(onboardingTypes, 'the interface declares capturePersistenceSnapshot').toMatch(/capturePersistenceSnapshot\(/);
+  });
+
+  it('PR #42 r5: the /projects repository exposes persistBaselineWithPolicyFence (the transactional CAS guard)', () => {
+    // The architect's round-5 requirement: "persistence-boundary CAS /
+    // transactional policy snapshot guard." The /projects repository must
+    // expose a method that wraps the appendEvidence + upsertObservations +
+    // markComplete in ONE DB transaction + performs a CAS on the policy
+    // version INSIDE the transaction.
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'the repository exposes persistBaselineWithPolicyFence').toMatch(/async persistBaselineWithPolicyFence\(/);
+    // The fence wraps the writes in a DB transaction (the throw-to-rollback
+    // pattern: any fence check failure throws a FenceStaleSignal which the
+    // outer catch translates to the typed result; the db.transaction()
+    // callback rolls back on the throw).
+    expect(repo, 'the fence uses db.transaction').toMatch(/this\.db\.transaction\(/);
+    expect(repo, 'the fence has the FenceStaleSignal sentinel').toMatch(/class FenceStaleSignal extends Error/);
+    expect(repo, 'the fence has the staleness check function').toMatch(/function isPersistenceSnapshotStale/);
+    // The three fence checks: pre-writes revalidation (Check A) + per-read
+    // snapshot verification (Check B) + post-writes revalidation (Check C).
+    expect(repo, 'Check A — pre-writes revalidation').toMatch(/PRE-WRITES REVALIDATION/);
+    expect(repo, 'Check B — per-read snapshot verification').toMatch(/PER-READ SNAPSHOT VERIFICATION/);
+    expect(repo, 'Check C — post-writes revalidation').toMatch(/POST-WRITES REVALIDATION/);
+    // The fence rejects (ROLLBACK) when ANY check fails. The reject
+    // messages reference the per-read verification (the architect's exact
+    // regression scenario).
+    expect(repo, 'Check B rejects on a per-read version mismatch').toMatch(/per-read snapshot.*does NOT match the persistence-boundary snapshot/s);
+    // The orchestrator logs the fence rejection (forensic audit) — the
+    // repository returns the typed result; the orchestrator's catch path
+    // emits the log + markFailed with the 'policy-snapshot-stale-at-
+    // persistence' / 'policy-snapshot-revalidation-failed' failure stage.
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'the orchestrator logs the fence rejection').toMatch(/persistence-fence-rejected/);
+    // The fail-closed path: a revalidation FAILURE (the gate throws on the
+    // revalidation call) is treated as STALE — the transaction is ROLLED BACK
+    // (a revalidation failure must NOT become an implicit persist).
+    expect(repo, 'a revalidation failure fails closed').toMatch(/fence-revalidation-failed/);
+    // The repository interface (project-baseline.types.ts) declares the
+    // method + the input/result types.
+    const types = readFileSync(
+      join(MODULES_DIR, 'projects', 'internal', 'project-baseline.types.ts'),
+      'utf8',
+    );
+    expect(types, 'the interface declares persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
+    expect(types, 'PersistencePolicySnapshot type is defined').toMatch(/export interface PersistencePolicySnapshot/);
+    expect(types, 'PersistBaselineInput type is defined').toMatch(/export interface PersistBaselineInput/);
+    expect(types, 'PersistBaselineResult type is defined').toMatch(/export type PersistBaselineResult/);
+    expect(types, 'PersistBaselineResult has the persisted kind').toMatch(/kind: 'persisted'/);
+    expect(types, 'PersistBaselineResult has the cas-lost kind').toMatch(/kind: 'cas-lost'/);
+    expect(types, 'PersistBaselineResult has the fence-stale kind').toMatch(/kind: 'fence-stale'/);
+    expect(types, 'PersistBaselineResult has the fence-revalidation-failed kind').toMatch(/kind: 'fence-revalidation-failed'/);
+    // The /projects barrel re-exports the new types so the onboarding
+    // orchestrator can compose them.
+    const barrel = readFileSync(join(MODULES_DIR, 'projects', 'index.ts'), 'utf8');
+    expect(barrel, 'the /projects barrel re-exports PersistencePolicySnapshot').toMatch(/PersistencePolicySnapshot/);
+    expect(barrel, 'the /projects barrel re-exports PersistBaselineInput').toMatch(/PersistBaselineInput/);
+    expect(barrel, 'the /projects barrel re-exports PersistBaselineResult').toMatch(/PersistBaselineResult/);
+  });
+
+  it('PR #42 r5: the orchestrator captures the persistence snapshot + delegates to persistBaselineWithPolicyFence (the persistence window is fenced)', () => {
+    // The orchestrator must:
+    //   1. call analyzer.analyze(ctx) -> evidence[] + observations[]
+    //   2. call governedReadPolicy.capturePersistenceSnapshot(ctx) -> V_p
+    //   3. call repository.persistBaselineWithPolicyFence({ snapshot: V_p,
+    //      ... }, revalidate) -> PersistBaselineResult
+    //   4. handle the result: persisted (success) | cas-lost (convergence) |
+    //      fence-stale / fence-revalidation-failed (markFailed with the
+    //      'policy-snapshot-stale-at-persistence' or 'policy-snapshot-
+    //      revalidation-failed' failure stage).
+    const orchestrator = readFileSync(
+      join(ONBOARDING_DIR, 'internal', 'default-onboarding-service.ts'),
+      'utf8',
+    );
+    expect(orchestrator, 'the orchestrator captures the persistence snapshot').toMatch(/capturePersistenceSnapshot\(/);
+    expect(orchestrator, 'the orchestrator delegates to persistBaselineWithPolicyFence').toMatch(/persistBaselineWithPolicyFence\(/);
+    expect(orchestrator, 'the orchestrator passes the snapshot through the input').toMatch(/snapshot:\s*persistenceSnapshot/);
+    expect(orchestrator, 'the orchestrator passes a revalidate closure').toMatch(/async \(\)\s*=>\s*this\.deps\.governedReadPolicy\.capturePersistenceSnapshot/);
+    // The fence-rejection paths: markFailed with the 'policy-snapshot-stale-
+    // at-persistence' / 'policy-snapshot-revalidation-failed' failure stage.
+    expect(orchestrator, 'the fence-stale path markFailed').toMatch(/policy-snapshot-stale-at-persistence/);
+    expect(orchestrator, 'the fence-revalidation-failed path markFailed').toMatch(/policy-snapshot-revalidation-failed/);
+    // The orchestrator's deps interface includes the governedReadPolicy
+    // (the same boundary the analyzer uses for per-read fencing — the
+    // orchestrator uses it for persistence-boundary snapshot capture).
+    expect(orchestrator, 'the deps interface includes governedReadPolicy').toMatch(/readonly governedReadPolicy:\s*GovernedRepositoryReadPolicy/);
+  });
+
+  it('PR #42 r5: app.ts wires the governedReadPolicy into the orchestrator (production onboarding uses the persistence fence)', () => {
+    // The composition root must wire the SAME governedReadPolicy the analyzer
+    // uses into the orchestrator (the orchestrator calls
+    // capturePersistenceSnapshot on it after analyze() returns).
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts passes governedReadPolicy to the orchestrator').toMatch(/governedReadPolicy:\s*onboardingGovernedReadPolicy/);
+  });
+
+  it('PR #42 r5: the *In helpers run inside the transaction (the writes are atomic with the fence checks)', () => {
+    // The /projects repository must have private *In(q, ...) helpers that
+    // run against either the pool OR a transaction-scoped DatabaseTx. The
+    // persistBaselineWithPolicyFence method calls them with the tx-scoped
+    // queryable so the writes are atomic with the fence checks (a rollback
+    // undoes the writes + the markComplete CAS together).
+    const repo = readFileSync(PROJECTS_BASELINE_REPO, 'utf8');
+    expect(repo, 'appendEvidenceIn helper exists').toMatch(/private async appendEvidenceIn\(/);
+    expect(repo, 'upsertObservationsIn helper exists').toMatch(/private async upsertObservationsIn\(/);
+    expect(repo, 'markCompleteIn helper exists').toMatch(/private async markCompleteIn\(/);
+    expect(repo, 'the legacy methods delegate to the helpers').toMatch(/return this\.appendEvidenceIn\(this\.db,/);
+    // The Queryable interface (structural — accepts DatabaseClient OR
+    // DatabaseTx; the /projects module stays free of a direct pg dependency,
+    // matching the convention every other pg-*.ts repository follows).
+    expect(repo, 'the Queryable structural interface is defined').toMatch(/interface Queryable/);
+    expect(repo, 'the Queryable uses the DatabaseClient query signature').toMatch(/query:\s*DatabaseClient\['query'\]/);
   });
 });
 
