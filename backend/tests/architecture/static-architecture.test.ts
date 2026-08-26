@@ -12351,4 +12351,121 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(serviceSrc, 'the reserve calls enqueueRelayJob').toMatch(/await this\.enqueueRelayJob\(executionId\)/);
     expect(serviceSrc, 'the enqueue uses CROSS_MODE_HANDOFF_RELAY_JOB_TYPE').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
   });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 2 — the two REFINED blocking findings. These
+  // PREVENT reintroduction of the forbidden patterns: a future change that
+  // makes the queue optional, swallows enqueue failures, swallows session
+  // transition failures, OR discharges the obligation before the session has
+  // converged fails the architecture suite.
+  // -------------------------------------------------------------------------
+
+  // R2-A (Finding #1): the queue dep is REQUIRED (not optional). The round-1
+  // type contract declared `queue?: Queue` (optional) — the production
+  // durability guarantee depended on a later boot sweep. Now the queue is
+  // REQUIRED: `readonly queue: Queue;` (no `?`). A future change that
+  // re-optionalizes the queue fails this invariant.
+  it('R2-A. the cross-mode handoff service queue dep is REQUIRED (not optional — Finding #1 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The queue dep is declared as REQUIRED (no `?`).
+    expect(serviceSrc, 'the queue dep is declared').toMatch(/readonly queue: Queue;/);
+    // The OPTIONAL declaration is GONE (the round-1 `queue?: Queue` is
+    // forbidden). A negative lookahead on the optional form.
+    expect(serviceSrc, 'the queue dep is NOT optional (no `?`)').not.toMatch(/readonly queue\?: Queue/);
+  });
+
+  // R2-B (Finding #1): the enqueueRelayJob method does NOT swallow enqueue
+  // failures. The round-1 impl wrapped the enqueue in a try/catch that
+  // logged + swallowed (the durability guarantee depended on the boot sweep).
+  // Now an enqueue failure PROPAGATES (the handoff fails fast; the obligation
+  // is durable; the boot sweep reconciles). The method MAY log before the
+  // throw (operator visibility), but the `throw err` MUST be present.
+  it('R2-B. enqueueRelayJob does NOT swallow enqueue failures (the failure propagates — Finding #1 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The enqueueRelayJob method is defined.
+    const methodStart = serviceSrc.indexOf('private async enqueueRelayJob(');
+    expect(methodStart, 'enqueueRelayJob is defined').toBeGreaterThan(-1);
+    // Extract the method body (up to the next method's JSDoc or the closing
+    // brace at the same indentation).
+    const methodBody = serviceSrc.slice(methodStart, methodStart + 800);
+    // The `throw err` (or `throw`) MUST be present — the failure propagates.
+    expect(methodBody, 'enqueueRelayJob re-throws on failure (not swallowed)').toMatch(/throw err/);
+    // The early-return guard for `!this.deps.queue` is GONE (the round-1
+    // `if (!this.deps.queue) return;` is forbidden — the queue is REQUIRED).
+    expect(methodBody, 'no queueless-construction early return (the queue is REQUIRED)').not.toMatch(/if \(!this\.deps\.queue\) return/);
+  });
+
+  // R2-C (Finding #2): the transitionSessionForHandoff method does NOT
+  // swallow session-transition failures. The round-1 impl wrapped the
+  // transition in a try/catch that logged + swallowed (the crash gap — a
+  // crash after the record mutate but before the session transition left
+  // the session mismatched indefinitely). Now a session-transition failure
+  // PROPAGATES (the handoff fails fast; the obligation stays pending; the
+  // reconcile re-attempts). The method MAY log on success (the interrupt/
+  // resume/start log lines), but the catch-and-swallow pattern is GONE.
+  it('R2-C. transitionSessionForHandoff does NOT swallow session-transition failures (the failure propagates — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const methodStart = serviceSrc.indexOf('private async transitionSessionForHandoff(');
+    expect(methodStart, 'transitionSessionForHandoff is defined').toBeGreaterThan(-1);
+    // Extract the method body (up to the next method's JSDoc).
+    const methodEnd = serviceSrc.indexOf('private ', methodStart + 10);
+    const methodBody = serviceSrc.slice(methodStart, methodEnd > methodStart ? methodEnd : methodStart + 1200);
+    // The catch-and-swallow pattern is GONE. The round-1 impl had a
+    // `} catch (err) { ... this.deps.logger.warn(...); }` that swallowed the
+    // error. Now the method has NO try/catch around the transition (a CAS
+    // loss / null result is handled inline — NOT via a catch).
+    expect(methodBody, 'no catch-and-swallow around the session transition').not.toMatch(/catch \(err\) \{[\s\S]*session-transition-failed/);
+    // The session-transition-failed warn log (the round-1 swallow path) is
+    // GONE.
+    expect(methodBody, 'the session-transition-failed swallow log is gone').not.toMatch(/session-transition-failed/);
+  });
+
+  // R2-D (Finding #2): the handoffComplete check INCLUDES session
+  // convergence. The round-1 impl only checked record.mode === toMode + the
+  // dispatch outcome — a crash after the record mutate but before the
+  // session transition discharged the obligation prematurely. Now the
+  // complete-check calls sessionConverged + returns false when the session
+  // has not converged. The obligation stays pending until the session
+  // converges.
+  it('R2-D. handoffComplete includes session convergence (the obligation stays pending until the session converges — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The sessionConverged method is defined.
+    expect(serviceSrc, 'sessionConverged is defined').toMatch(/private sessionConverged\(/);
+    // The handoffComplete method calls sessionConverged.
+    const completeStart = serviceSrc.indexOf('private async handoffComplete(');
+    expect(completeStart, 'handoffComplete is defined').toBeGreaterThan(-1);
+    const completeEnd = serviceSrc.indexOf('private ', completeStart + 10);
+    const completeBody = serviceSrc.slice(completeStart, completeEnd > completeStart ? completeEnd : completeStart + 800);
+    expect(completeBody, 'handoffComplete resolves the session').toMatch(/getSessionForExecution/);
+    expect(completeBody, 'handoffComplete calls sessionConverged').toMatch(/sessionConverged\(session, record, handoff\)/);
+    // The convergence check returns false when not converged (the obligation
+    // stays pending).
+    expect(completeBody, 'handoffComplete returns false when not converged').toMatch(/if \(!this\.sessionConverged\(session, record, handoff\)\) return false/);
+  });
+
+  // R2-E (Finding #2): the reconcile re-attempts the session transition
+  // when the session has NOT converged (crash window #3). The round-1 impl
+  // only revisited the session inside crash window #1 (record.mode !== toMode
+  // — the re-mutate path). A crash after the record mutate but before the
+  // session transition left the session mismatched indefinitely (the
+  // reconcile skipped the session transition when record.mode === toMode).
+  // Now the reconcile resolves the session + re-attempts the transition when
+  // not converged, REGARDLESS of the crash window.
+  it('R2-E. the reconcile re-attempts the session transition when not converged (crash window #3 — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcileCrossModeHandoffForExecution is defined').toBeGreaterThan(-1);
+    // The reconcile body extends to the next method.
+    const reconcileEnd = serviceSrc.indexOf('private async handoffComplete(', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 4000);
+    // The crash window #3: the reconcile resolves the session AFTER the
+    // re-dispatch (crash window #2) + re-attempts the transition when not
+    // converged.
+    expect(reconcileBody, 'the reconcile resolves the session for convergence').toMatch(/getSessionForExecution/);
+    expect(reconcileBody, 'the reconcile uses the sessionForConvergence binding (crash window #3)').toMatch(/sessionForConvergence/);
+    expect(reconcileBody, 'the reconcile calls sessionConverged').toMatch(/sessionConverged\(sessionForConvergence, record, handoff\)/);
+    expect(reconcileBody, 'the reconcile re-attempts the session transition (crash window #3)').toMatch(/transitionSessionForHandoff\(\s*sessionForConvergence/);
+    // The stage type includes the new 'session-convergence' value.
+    expect(reconcileBody, 'the stage type includes session-convergence').toMatch(/'session-convergence'/);
+  });
 });

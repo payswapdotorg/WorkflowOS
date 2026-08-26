@@ -40,6 +40,7 @@ import { DefaultCrossModeHandoffService } from '../../../src/modules/agents/inte
 import type {
   CrossModeAgentProviderRegistryPort,
   CrossModeExecutionPolicyPort,
+  CrossModeExecutionSessionPort,
 } from '../../../src/modules/agents/internal/default-cross-mode-handoff-service.js';
 import { DefaultExecutionTaskService } from '../../../src/modules/work-items/internal/execution-task-service.js';
 import { DefaultImplementationContextBuilder } from '../../../src/modules/work-items/internal/implementation-context-builder.js';
@@ -54,12 +55,17 @@ import { DefaultExecutionEventIngestionService } from '../../../src/modules/agen
 // working-tree state so the tests prove physical-worktree continuity.
 import { PgExecutionSessionRepository } from '../../../src/modules/agents/internal/pg-execution-session-repository.js';
 import { DefaultExecutionSessionService } from '../../../src/modules/agents/internal/execution-session-service.js';
+import type {
+  ExecutionSession,
+  SessionTransitionResult,
+} from '../../../src/modules/agents/internal/execution-session.types.js';
 import { PgAgentWorkspaceRepository } from '../../../src/modules/agents/internal/pg-agent-workspace-repository.js';
 import { DefaultAgentWorkspaceService } from '../../../src/modules/agents/internal/agent-workspace-service.js';
 import type { WorktreeMaterializer } from '../../../src/modules/agents/internal/agent-workspace.types.js';
 // PR #46 review #2: the durable relay (mirrors session-terminal-durability
 // test's real InMemoryQueue + WorkerHost + the relay + the boot sweep).
 import { InMemoryQueue, WorkerHost, buildHandlerRegistry } from '@platform/index.js';
+import type { Queue, JobRecord, EnqueueOptions } from '@platform/index.js';
 import {
   CrossModeHandoffOutboxRelay,
   createCrossModeHandoffRelayJobHandler,
@@ -206,6 +212,80 @@ class CrashAfterReserveRepo implements ExecutionRecordRepository {
   }
   updateStatus(id: string, input: Parameters<ExecutionRecordRepository['updateStatus']>[1]): Promise<ExecutionRecord | null> {
     return this.real.updateStatus(id, input);
+  }
+}
+
+/**
+ * PR #46 review #2 round 2 (Finding #1): a Queue wrapper that THROWS on
+ * `enqueue` for the first N calls (simulating a transient enqueue failure —
+ * the durability guarantee must NOT depend on a swallowed enqueue). After
+ * the crash threshold, it delegates to the wrapped real queue (so the boot
+ * sweep / a retry can drain). All other methods delegate immediately.
+ */
+class FailingQueue implements Queue {
+  private enqueueCallCount = 0;
+  constructor(
+    private readonly real: Queue,
+    private readonly failTimes: number,
+  ) {}
+  async enqueue<T>(type: string, payload: T, options?: EnqueueOptions): Promise<JobRecord<T>> {
+    this.enqueueCallCount++;
+    if (this.enqueueCallCount <= this.failTimes) {
+      throw new Error(`simulated-enqueue-failure: enqueue call #${this.enqueueCallCount} (type=${type})`);
+    }
+    return this.real.enqueue<T>(type, payload, options);
+  }
+  /** The count of enqueue calls so far (for assertions). */
+  get enqueueCalls(): number {
+    return this.enqueueCallCount;
+  }
+  dequeue(): Promise<JobRecord | null> {
+    return this.real.dequeue();
+  }
+  ack(jobId: string): Promise<void> {
+    return this.real.ack(jobId);
+  }
+  size(): Promise<number> {
+    return this.real.size();
+  }
+  close(): Promise<void> {
+    return this.real.close();
+  }
+}
+
+/**
+ * PR #46 review #2 round 2 (Finding #2): a CrossModeExecutionSessionPort
+ * wrapper that THROWS on `interruptSession` for the first N calls
+ * (simulating a crash AFTER the record mutate but BEFORE the session
+ * transition completes — the crash gap the architect identified). After the
+ * crash threshold, it delegates to the wrapped real service (so the
+ * reconcile re-attempt succeeds). Used for the session-convergence crash-gap
+ * regression (R2-#2).
+ */
+class FlakySessionPort implements CrossModeExecutionSessionPort {
+  private interruptCallCount = 0;
+  constructor(
+    private readonly real: CrossModeExecutionSessionPort,
+    private readonly failTimes: number,
+  ) {}
+  getSessionForExecution(executionId: string): Promise<ExecutionSession | null> {
+    return this.real.getSessionForExecution(executionId);
+  }
+  async interruptSession(
+    sessionId: string,
+    expectedVersion: number,
+  ): Promise<SessionTransitionResult | null> {
+    this.interruptCallCount++;
+    if (this.interruptCallCount <= this.failTimes) {
+      throw new Error(`simulated-crash-before-session-transition: interruptSession call #${this.interruptCallCount}`);
+    }
+    return this.real.interruptSession(sessionId, expectedVersion);
+  }
+  resumeSession(sessionId: string, expectedVersion: number): Promise<SessionTransitionResult | null> {
+    return this.real.resumeSession(sessionId, expectedVersion);
+  }
+  startSession(sessionId: string): Promise<ExecutionSession | null> {
+    return this.real.startSession(sessionId);
   }
 }
 
@@ -359,6 +439,12 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       agentWorkspaceService,
       auditService,
       logger: stack.db.logger,
+      // PR #46 review #2 round 2: the queue is REQUIRED (Finding #1). The
+      // main service uses a real InMemoryQueue; the relay job enqueues + sits
+      // on the queue (no worker drains it — the tests check the handoff result
+      // + session/workspace state, not the obligation discharge). The
+      // crash-recovery tests build their own queue + WorkerHost.
+      queue: new InMemoryQueue(),
     });
 
     // Seed a project + architecture version + work item + work order +
@@ -1130,6 +1216,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
+        queue: new InMemoryQueue(), // PR #46 review #2 round 2: queue REQUIRED
       });
       // The first handoff attempt crashes after the reserve.
       const idempotencyKey = `crash-n2e-${executionId}`;
@@ -1538,6 +1625,342 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   });
 
   // ===========================================================================
+  // PR #46 review round 2 — the two refined blocking findings:
+  //   * Finding #1: the durable relay dependency was optional/best-effort
+  //     (`queue?: Queue` + swallowed enqueue failures). Now the queue is
+  //     REQUIRED + an enqueue failure PROPAGATES (the handoff fails fast;
+  //     the obligation is durable; the boot sweep reconciles).
+  //   * Finding #2: the ExecutionSession recovery had a crash gap (the
+  //     record mutation happened before the session transition, but the
+  //     recovery only revisited the session when `record.mode !== toMode`).
+  //     Now session convergence is part of the durable handoff reconciliation
+  //     state machine + the obligation stays pending whenever session
+  //     convergence has not completed.
+  // ===========================================================================
+  describe('PR #46 round 2 — Finding #1: the durable relay is NOT optional (enqueue failures propagate)', () => {
+    // R2-#1: an enqueue failure PROPAGATES — the handoff fails fast (the
+    // caller sees the error). The obligation row (migration 0043's trigger,
+    // written ATOMICALLY with the reserve) is the durable source of truth;
+    // the boot sweep reconciles on the next worker start. The durability
+    // guarantee no longer depends on a later boot sweep: either the enqueue
+    // succeeds (a live worker drains the job) OR the handoff fails fast (the
+    // obligation is pending; the boot sweep reconciles). This proves the
+    // enqueue failure is NOT swallowed.
+    it('R2-#1. a durable enqueue failure PROPAGATES — the handoff fails fast; the obligation stays pending; the boot sweep reconciles → converges → discharges', async () => {
+      const { executionId, recordId } = await createNativeRecord('failed');
+      // A FailingQueue that throws on the FIRST enqueue (simulating a
+      // transient enqueue failure — the durability guarantee must NOT
+      // depend on a swallowed enqueue).
+      const realQueue = new InMemoryQueue();
+      const failingQueue = new FailingQueue(realQueue, 1);
+      const failingService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: failingQueue, // the FailingQueue — enqueue throws + propagates
+      });
+      // The first handoff throws (the enqueue failed + propagated — NOT
+      // swallowed). The reserve + the obligation row ARE durable (the
+      // trigger wrote them before the enqueue).
+      const err = await failingService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `r2-crash1-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/simulated-enqueue-failure/);
+      // The handoff log row + the obligation ARE persisted (the reserve +
+      // migration 0043's trigger ran before the enqueue failure).
+      expect(await countHandoffsForExecution(executionId)).toBe(1);
+      expect(await countPendingObligations(executionId)).toBe(1);
+      // The record is NOT mutated (still native/failed — the enqueue threw
+      // BEFORE the mutate ran).
+      const midRecord = await executionRecordRepo.findByExecutionId(executionId);
+      expect(midRecord!.mode).toBe('native');
+      // The FailingQueue threw exactly once (the enqueue was attempted +
+      // propagated).
+      expect(failingQueue.enqueueCalls).toBe(1);
+
+      // Build a NEW relay service with the REAL queue (the relay job enqueues
+      // successfully — the FailingQueue's crash threshold is exhausted, but
+      // the relay service uses a fresh real queue for clarity).
+      const relayQueue = new InMemoryQueue();
+      const relayService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: relayQueue,
+      });
+      const relay = new CrossModeHandoffOutboxRelay({
+        handoffRepository: crossModeHandoffRepo,
+        queue: relayQueue,
+        logger: stack.db.logger,
+      });
+      const worker = new WorkerHost(
+        relayQueue,
+        buildHandlerRegistry([
+          createCrossModeHandoffRelayJobHandler(relayService, stack.db.logger),
+        ]),
+        stack.db.logger,
+        { outboxRelays: [relay] },
+      );
+      await worker.start();
+      try {
+        // The boot sweep re-enqueues relay jobs for ALL pending obligations
+        // (the FailingQueue's enqueue failed; the boot sweep is the backstop
+        // — the obligation row is the durable source of truth).
+        await relay.enqueuePendingRelayJobs();
+        // Wait for the reconcile to converge (record.mode === external +
+        // packageValue + the obligation discharges).
+        await waitFor(
+          () => executionRecordRepo.findByExecutionId(executionId),
+          (r) => r?.mode === 'external' && r.status === 'handoff_ready' && r.packageValue != null,
+        );
+        await waitFor(
+          async () => countDischargedObligations(executionId),
+          (c) => c === 1,
+        );
+        // The handoff converged (the relay reconciled: re-mutate + re-dispatch).
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.id).toBe(recordId);
+        expect(after!.mode).toBe('external');
+        expect(after!.status).toBe('handoff_ready');
+        expect(after!.packageValue).not.toBeNull();
+        // Exactly ONE handoff log row (no duplicate).
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        // The obligation DISCHARGED (the reconcile confirmed completion).
+        expect(await countDischargedObligations(executionId)).toBe(1);
+        expect(await countPendingObligations(executionId)).toBe(0);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  describe('PR #46 round 2 — Finding #2: session convergence is part of the durable handoff reconciliation state machine', () => {
+    // R2-#2: the crash gap the architect identified. A crash AFTER the record
+    // mutation (transitionMode) but BEFORE the session transition leaves the
+    // logical execution with mismatched record/session state — record.mode ===
+    // toMode but the session is still in its pre-handoff state (running for a
+    // native→external handoff). Previously the recovery only revisited the
+    // session when `record.mode !== toMode` (crash window #1), so the session
+    // stayed mismatched INDEFINITELY + the obligation discharged prematurely.
+    // Now the reconcile re-attempts the session transition (crash window #3)
+    // + the obligation stays pending until the session converges
+    // (handoffComplete includes session convergence).
+    it('R2-#2. crash after record mutate but before session transition → session stays mismatched + obligation PENDING → boot sweep reconciles → session converges → obligation discharges', async () => {
+      const { executionId, recordId } = await createNativeRecord('failed');
+      // Create a REAL running session (the pre-handoff state — the handoff
+      // must interrupt it running → interrupted).
+      const { sessionId } = await createRunningSession(executionId);
+      // A FlakySessionPort that throws on the FIRST interruptSession call
+      // (simulating a crash after the record mutate but before the session
+      // transition completes — the crash gap).
+      const flakySession = new FlakySessionPort(executionSessionService, 1);
+      const realQueue = new InMemoryQueue();
+      const crashingService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService: flakySession, // throws on first interrupt
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: realQueue,
+      });
+      // The first handoff: reserve (succeeds) + enqueue (succeeds) + mutate
+      // (succeeds — record now external/handoff_ready) + interruptSession
+      // (THROWS via FlakySessionPort) → handoff() throws. The record IS
+      // mutated but the session is STILL running (pre-handoff state — NOT
+      // converged) + the dispatch did NOT happen (no packageValue).
+      const err = await crashingService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `r2-crash2-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/simulated-crash-before-session-transition/);
+      // The record IS mutated (external/handoff_ready — the mutate succeeded
+      // before the session transition threw).
+      const midRecord = await executionRecordRepo.findByExecutionId(executionId);
+      expect(midRecord!.id).toBe(recordId);
+      expect(midRecord!.mode).toBe('external');
+      expect(midRecord!.status).toBe('handoff_ready');
+      expect(midRecord!.packageValue).toBeNull(); // dispatch did NOT happen
+      // The session is STILL running (pre-handoff state — NOT converged for
+      // native→external). The crash gap: the session mismatched the record.
+      const midSession = await getSession(executionId);
+      expect(midSession!.id).toBe(sessionId);
+      expect(midSession!.status).toBe('running');
+      // The obligation is PENDING (NOT discharged — the session has not
+      // converged; handoffComplete includes session convergence). This is
+      // the architect's key requirement: "keep the obligation pending
+      // whenever session convergence has not completed."
+      expect(await countPendingObligations(executionId)).toBe(1);
+      expect(await countDischargedObligations(executionId)).toBe(0);
+
+      // Build a NEW relay service with the REAL executionSessionService (the
+      // FlakySessionPort's crash threshold is exhausted, but the relay
+      // service uses the real session service for the reconcile re-attempt).
+      const relayQueue = new InMemoryQueue();
+      const relayService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService, // the REAL session service (no flaky wrapper)
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: relayQueue,
+      });
+      const relay = new CrossModeHandoffOutboxRelay({
+        handoffRepository: crossModeHandoffRepo,
+        queue: relayQueue,
+        logger: stack.db.logger,
+      });
+      const worker = new WorkerHost(
+        relayQueue,
+        buildHandlerRegistry([
+          createCrossModeHandoffRelayJobHandler(relayService, stack.db.logger),
+        ]),
+        stack.db.logger,
+        { outboxRelays: [relay] },
+      );
+      await worker.start();
+      try {
+        // The boot sweep re-enqueues relay jobs for ALL pending obligations.
+        await relay.enqueuePendingRelayJobs();
+        // Wait for the reconcile to converge: crash window #2 (re-dispatch
+        // external → packageValue set) + crash window #3 (re-attempt the
+        // session transition → session interrupted) → handoffComplete
+        // (record.mode === external + packageValue + session converged) →
+        // discharge.
+        await waitFor(
+          () => getSession(executionId),
+          (s) => s?.status === 'interrupted',
+        );
+        await waitFor(
+          () => executionRecordRepo.findByExecutionId(executionId),
+          (r) => r?.mode === 'external' && r.packageValue != null,
+        );
+        await waitFor(
+          async () => countDischargedObligations(executionId),
+          (c) => c === 1,
+        );
+        // The session CONVERGED (interrupted — the crash gap is fixed).
+        const afterSession = await getSession(executionId);
+        expect(afterSession!.id).toBe(sessionId); // SAME session (survived)
+        expect(afterSession!.status).toBe('interrupted'); // converged
+        // The record converged (external + packageValue).
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.mode).toBe('external');
+        expect(after!.packageValue).not.toBeNull();
+        // Exactly ONE handoff log row.
+        expect(await countHandoffsForExecution(executionId)).toBe(1);
+        // The obligation DISCHARGED (the session converged — the complete-
+        // check now includes session convergence).
+        expect(await countDischargedObligations(executionId)).toBe(1);
+        expect(await countPendingObligations(executionId)).toBe(0);
+      } finally {
+        await worker.stop();
+      }
+    });
+
+    // R2-#3: the obligation stays pending when the session has NOT converged
+    // — even when record.mode === toMode + the dispatch outcome is present.
+    // This is the architect's key requirement: "keep the obligation pending
+    // whenever session convergence has not completed." A direct call to
+    // reconcileCrossModeHandoffForExecution on a handoff whose session is
+    // stuck running (simulated by resetting the session) does NOT discharge.
+    it('R2-#3. the obligation stays PENDING when the session has NOT converged (record.mode === toMode + packageValue present but session still running) — the complete-check includes session convergence', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const { sessionId } = await createRunningSession(executionId);
+      // Run a SUCCESSFUL native→external handoff with the main service (the
+      // session is interrupted → converged → the handoff completes).
+      await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `r2-conv-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      const happyRecord = await executionRecordRepo.findByExecutionId(executionId);
+      expect(happyRecord!.mode).toBe('external');
+      expect(happyRecord!.packageValue).not.toBeNull();
+      const happySession = await getSession(executionId);
+      expect(happySession!.status).toBe('interrupted'); // converged
+
+      // Simulate the crash gap: reset the session to RUNNING (the pre-handoff
+      // state — NOT converged) + reset the obligation to PENDING (the crash
+      // undid the discharge). The record stays external/handoff_ready with
+      // packageValue (the mutate + dispatch succeeded).
+      await stack.db.client.query(
+        `UPDATE wfos_execution_sessions SET status = 'running', updated_at = NOW()
+         WHERE id = $1`,
+        [sessionId],
+      );
+      await stack.db.client.query(
+        `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+         WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+        [happyRecord!.id],
+      );
+      // The state is now: record external/handoff_ready + packageValue, but
+      // session RUNNING (NOT converged for native→external).
+      const gapSession = await getSession(executionId);
+      expect(gapSession!.status).toBe('running'); // NOT converged
+      expect(await countPendingObligations(executionId)).toBe(1);
+
+      // A direct reconcile call (no WorkerHost — just the service method).
+      // The complete-check includes session convergence → the session is NOT
+      // converged → handoffComplete returns false → the obligation is NOT
+      // discharged. The crash window #3 re-attempts the session transition
+      // (running → interrupted) → the session converges → handoffComplete
+      // returns true → the obligation discharges.
+      await crossModeHandoffService.reconcileCrossModeHandoffForExecution(executionId);
+
+      // After the reconcile: the session CONVERGED (interrupted) + the
+      // obligation DISCHARGED (the crash gap is fixed — the reconcile
+      // re-attempted the session transition + the complete-check confirmed
+      // convergence before discharging).
+      const afterSession = await getSession(executionId);
+      expect(afterSession!.id).toBe(sessionId);
+      expect(afterSession!.status).toBe('interrupted'); // converged
+      expect(await countDischargedObligations(executionId)).toBe(1);
+      expect(await countPendingObligations(executionId)).toBe(0);
+    });
+  });
+
+  // ===========================================================================
   // tenant isolation (two-project) — the maintenance-domain pattern adapted
   // for cross-mode handoff: a Project A caller CANNOT handoff Project B's
   // execution (requireProjectAuthorization at the route + the service never
@@ -1730,6 +2153,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
+        queue: new InMemoryQueue(), // PR #46 review #2 round 2: queue REQUIRED
       });
       const err = await denyService.handoff(
         executionId,
@@ -1761,6 +2185,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentWorkspaceService,
         auditService,
         logger: stack.db.logger,
+        queue: new InMemoryQueue(), // PR #46 review #2 round 2: queue REQUIRED
       });
       const err = await denyNativeService.handoff(
         executionId,
