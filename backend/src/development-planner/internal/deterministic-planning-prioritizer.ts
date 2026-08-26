@@ -171,6 +171,36 @@ function bandFor(totalWeight: number): PlanningPriority {
 }
 
 /**
+ * TENANT-OWNERSHIP GUARD. Resolve a work item's project through the canonical
+ * traceability chain (WorkItem → ArchitectureVersion → Architecture →
+ * Project). Returns null if the work item (or any link in the chain) is not
+ * found.
+ *
+ * The caller-controlled `PlanningSignal.relatedWorkItemIds` is NOT an
+ * authorization credential — a Project A user must NOT cause traversal of
+ * Project B's dependency graph (cross-tenant information leak). Before ANY
+ * dependency traversal, the prioritizer calls this guard + requires the
+ * resolved projectId === ctx.projectId. Cross-project ids are IGNORED (not
+ * traversed) + recorded honestly. The static-architecture invariant enforces
+ * that `listTransitiveDependencies(relatedId)` is ALWAYS preceded by this guard
+ * in the prioritizer file.
+ */
+async function resolveWorkItemProject(
+  workItemId: string,
+  ctx: PlanningContext,
+): Promise<string | null> {
+  const wi = await ctx.workItemRepository.findById(workItemId);
+  if (!wi) return null;
+  const version = await ctx.architectureVersionRepository.findById(
+    wi.architectureVersionId,
+  );
+  if (!version) return null;
+  const arch = await ctx.architectureRepository.findById(version.architectureId);
+  if (!arch) return null;
+  return arch.projectId;
+}
+
+/**
  * The deterministic, explainable prioritizer.
  */
 export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
@@ -188,12 +218,53 @@ export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
       detail: base.detail,
     });
 
-    // 2. blocks-n-downstream — the signal's explicit declaration OR the count
-    //    of relatedWorkItemIds (the candidate relates to N existing items; a
-    //    rough downstream-impact proxy). The planner does NOT mutate the
-    //    dependency graph; it surfaces this as explanation only.
-    const blocksN =
-      signal.blocksCount ?? signal.relatedWorkItemIds?.length ?? 0;
+    // 2. + 3. TENANT-OWNERSHIP-GUARDED dependency analysis. The caller-
+    //    controlled relatedWorkItemIds is NOT an authorization credential —
+    //    a Project A user must NOT cause traversal of Project B's dependency
+    //    graph (cross-tenant information leak). Before ANY dependency
+    //    traversal, resolve WorkItem → ArchitectureVersion → Architecture →
+    //    Project + require === ctx.projectId. Cross-project ids are IGNORED
+    //    (not traversed) + recorded honestly. The planner does NOT mutate the
+    //    dependency graph; it surfaces the project-scoped chain as explanation.
+    const scopedRelatedIds: string[] = [];
+    let chainDepth = 0;
+    const chainItems: string[] = [];
+    for (const relatedId of signal.relatedWorkItemIds ?? []) {
+      // TENANT-OWNERSHIP GUARD — must precede listTransitiveDependencies.
+      const ownerProjectId = await resolveWorkItemProject(relatedId, ctx);
+      if (ownerProjectId !== ctx.projectId) {
+        // Cross-tenant or not-found: ignore WITHOUT traversal. The planner
+        // does NOT traverse a work item that does not belong to the
+        // authorized project (no cross-tenant dependency leak).
+        ctx.logger.warn('development-planner.related-work-item-not-in-project', {
+          relatedId,
+        });
+        continue;
+      }
+      scopedRelatedIds.push(relatedId);
+      // dependency-chain — read the existing graph (read-only) for the
+      // project-scoped related item to surface the chain in the rationale.
+      // NEVER mutate.
+      try {
+        const transitive =
+          await ctx.workItemDependencyRepository.listTransitiveDependencies(
+            relatedId,
+          );
+        if (transitive.length > 0) {
+          chainDepth += transitive.length;
+          chainItems.push(`${relatedId}→${transitive.length} deps`);
+        }
+      } catch {
+        // A project-scoped related id whose deps can't be read is recorded
+        // honestly — the planner does NOT fabricate a chain.
+        ctx.logger.warn('development-planner.dependency-chain-read-failed', {
+          relatedId,
+        });
+      }
+    }
+    // blocks-n-downstream uses the PROJECT-SCOPED count (cross-tenant ids
+    // were filtered out by the ownership guard).
+    const blocksN = signal.blocksCount ?? scopedRelatedIds.length;
     if (blocksN > 0) {
       factors.push({
         kind: 'blocks-n-downstream',
@@ -201,37 +272,12 @@ export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
         detail: `relates to ${blocksN} existing work item(s) — potential downstream impact`,
       });
     }
-
-    // 3. dependency-chain — read the existing graph (read-only) for each
-    //    related item to surface the chain in the rationale. NEVER mutate.
-    if (signal.relatedWorkItemIds && signal.relatedWorkItemIds.length > 0) {
-      let chainDepth = 0;
-      const chainItems: string[] = [];
-      for (const relatedId of signal.relatedWorkItemIds) {
-        try {
-          const transitive =
-            await ctx.workItemDependencyRepository.listTransitiveDependencies(
-              relatedId,
-            );
-          if (transitive.length > 0) {
-            chainDepth += transitive.length;
-            chainItems.push(`${relatedId}→${transitive.length} deps`);
-          }
-        } catch {
-          // A related id that does not exist (or whose deps can't be read) is
-          // recorded honestly — the planner does NOT fabricate a chain.
-          ctx.logger.warn('development-planner.dependency-chain-read-failed', {
-            relatedId,
-          });
-        }
-      }
-      if (chainDepth > 0) {
-        factors.push({
-          kind: 'dependency-chain',
-          weight: Math.min(chainDepth, 4),
-          detail: `dependency chain depth ${chainDepth} (${chainItems.join('; ')})`,
-        });
-      }
+    if (chainDepth > 0) {
+      factors.push({
+        kind: 'dependency-chain',
+        weight: Math.min(chainDepth, 4),
+        detail: `dependency chain depth ${chainDepth} (${chainItems.join('; ')})`,
+      });
     }
 
     // 4. confidence-evidence-quality — the count + provenance of evidence refs.
@@ -333,7 +379,7 @@ export class DeterministicPlanningPrioritizer implements PlanningPrioritizer {
       rationale,
       whyNow,
       expectedImpact,
-      proposedDependencies: signal.relatedWorkItemIds ?? [],
+      proposedDependencies: scopedRelatedIds,
       executionModeAdvisory: 'native-or-external-per-eligibility',
     };
   }

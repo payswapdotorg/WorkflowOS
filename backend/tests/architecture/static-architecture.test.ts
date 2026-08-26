@@ -11522,4 +11522,41 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
     expect(prioritizer, 'the prioritizer logs honest dependency-chain read failures').toMatch(/dependency-chain-read-failed/);
   });
+
+  it('TENANT-OWNERSHIP GUARD BEFORE DEPENDENCY TRAVERSAL (PR #44 round 2) — listTransitiveDependencies is ALWAYS preceded by a project-ownership check (no cross-tenant dependency leak)', () => {
+    // Blocker: the route accepts caller-controlled PlanningSignal.relatedWorkItemIds.
+    // The prioritizer must NOT call listTransitiveDependencies(relatedId) without
+    // first resolving WorkItem → ArchitectureVersion → Architecture → Project +
+    // requiring === ctx.projectId. A Project A user submitting a Project B work
+    // item id must NOT cause traversal of Project B's dependency graph (cross-
+    // tenant information leak). The fix: a resolveWorkItemProject guard gates
+    // every traversal; cross-project ids are ignored WITHOUT traversal.
+    const prioritizer = readFileSync(join(DP_DIR, 'internal', 'deterministic-planning-prioritizer.ts'), 'utf8');
+    // 1. The ownership-guard helper exists + is called.
+    expect(prioritizer, 'the prioritizer defines + calls resolveWorkItemProject (the ownership guard)').toMatch(/resolveWorkItemProject\(/);
+    // 2. The gate: the resolved projectId is compared to ctx.projectId.
+    expect(prioritizer, 'the prioritizer gates on ownerProjectId === ctx.projectId').toMatch(/ownerProjectId\s*!==\s*ctx\.projectId/);
+    // 3. The honest rejection log for cross-tenant / not-found ids.
+    expect(prioritizer, 'the prioritizer logs cross-tenant related-work-item rejection').toMatch(/related-work-item-not-in-project/);
+    // 4. The traversal is present (gated by the guard). The dotted form
+    //    (.listTransitiveDependencies() matches only the actual method CALL,
+    //    not JSDoc mentions of the symbol — the ordering check below is
+    //    therefore precise).
+    expect(prioritizer, 'the prioritizer calls listTransitiveDependencies (gated by the guard)').toMatch(/\.listTransitiveDependencies\(/);
+    // 5. ORDERING: the guard symbol MUST appear BEFORE the traversal CALL in
+    //    the file (the guard is defined + called before the traversal). This
+    //    is the static proof that the guard precedes the traversal; the
+    //    dynamic proof is the cross-tenant regression test (#8b).
+    const guardIdx = prioritizer.indexOf('resolveWorkItemProject(');
+    const traversalIdx = prioritizer.indexOf('.listTransitiveDependencies(');
+    expect(guardIdx, 'the ownership guard must be present').toBeGreaterThan(-1);
+    expect(traversalIdx, 'the traversal call must be present').toBeGreaterThan(-1);
+    expect(guardIdx, 'the ownership guard must precede the traversal call in the file').toBeLessThan(traversalIdx);
+    // 6. The WorkItem → ArchitectureVersion → Architecture → Project walk is
+    //    present in the guard (the canonical traceability chain).
+    expect(prioritizer, 'the guard resolves the work item').toMatch(/workItemRepository\.findById\(/);
+    expect(prioritizer, 'the guard resolves the architecture version').toMatch(/architectureVersionRepository\.findById\(/);
+    expect(prioritizer, 'the guard resolves the architecture (→ project)').toMatch(/architectureRepository\.findById\(/);
+    expect(prioritizer, 'the guard returns the project id').toMatch(/return arch\.projectId/);
+  });
 });

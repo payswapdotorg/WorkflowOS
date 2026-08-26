@@ -41,7 +41,7 @@ import type {
   PlanningSignal,
   WorkItemRepository,
 } from '@development-planner/index.js';
-import type { WorkItem, CreateWorkItemInput, UpdateWorkItemInput } from '@modules/work-items/index.js';
+import type { WorkItem, CreateWorkItemInput, UpdateWorkItemInput, WorkItemDependency, WorkItemDependencyRepository } from '@modules/work-items/index.js';
 import { createLogger } from '@platform/logger.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
 import { InMemoryQueue } from '@platform/index.js';
@@ -71,6 +71,33 @@ class InterceptableWorkItemRepository implements WorkItemRepository {
   }
   async update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null> {
     return this.real.update(id, input);
+  }
+}
+
+/**
+ * A WorkItemDependencyRepository wrapper that RECORDS every
+ * listTransitiveDependencies call (the cross-tenant regression #8b proves the
+ * prioritizer NEVER calls it with a Project B work item id). Delegates all
+ * methods to the real repo.
+ */
+class RecordingWorkItemDependencyRepository implements WorkItemDependencyRepository {
+  readonly transitiveCalls: string[] = [];
+  constructor(private readonly real: WorkItemDependencyRepository) {}
+  async add(workItemId: string, dependsOnId: string): Promise<WorkItemDependency> {
+    return this.real.add(workItemId, dependsOnId);
+  }
+  async listForWorkItem(workItemId: string): Promise<WorkItemDependency[]> {
+    return this.real.listForWorkItem(workItemId);
+  }
+  async remove(id: string): Promise<void> {
+    return this.real.remove(id);
+  }
+  async wouldCreateCycle(workItemId: string, dependsOnId: string): Promise<boolean> {
+    return this.real.wouldCreateCycle(workItemId, dependsOnId);
+  }
+  async listTransitiveDependencies(workItemId: string): Promise<string[]> {
+    this.transitiveCalls.push(workItemId);
+    return this.real.listTransitiveDependencies(workItemId);
   }
 }
 
@@ -395,6 +422,67 @@ describe('WORK-040 — Continuous Development Planner (16 frozen regressions)', 
   });
 
   // -------------------------------------------------------------------------
+  // 8b. cross-tenant relatedWorkItemIds (PR #44 round 2 blocker)
+  // ---------------------------------------------------------------------------
+  it('8b. cross-tenant relatedWorkItemIds — a Project A signal referencing a Project B work item does NOT traverse or expose Project B dependency graph', async () => {
+    // Build a REAL dependency graph in Project B: B1 → B2 (B1 depends on B2).
+    const b2 = await stack.workItemRepository.create({
+      architectureVersionId: versionB.id,
+      workItemId: 'PLAN-B-PREREQ',
+      title: 'Project B prerequisite',
+    });
+    const b1 = await stack.workItemRepository.create({
+      architectureVersionId: versionB.id,
+      workItemId: 'PLAN-B-DEPENDENT',
+      title: 'Project B dependent',
+    });
+    await stack.workItemDependencyRepository.add(b1.id, b2.id);
+    // Wrap ctxA's dependency repo in a RECORDING wrapper so the test can
+    // PROVE listTransitiveDependencies was NEVER called with the Project B id.
+    const recordingDepRepo = new RecordingWorkItemDependencyRepository(
+      stack.workItemDependencyRepository,
+    );
+    const ctxARecording: PlanningContext = {
+      ...ctxA,
+      workItemDependencyRepository: recordingDepRepo,
+    };
+    // Reset the capture so the log assertion is deterministic to THIS test.
+    capture.reset();
+    // A Project A planning signal that references the Project B work item B1
+    // (cross-tenant). The caller-controlled relatedWorkItemIds is NOT an
+    // authorization credential — the prioritizer's ownership guard must
+    // resolve B1 → versionB → archB → projectB (!== projectA) → IGNORE B1
+    // WITHOUT traversal.
+    const signal: PlanningSignal = {
+      kind: 'technical-debt',
+      canonicalGoal: 'Cross-tenant relatedWorkItemIds guard',
+      provenance: 'inferred',
+      relatedWorkItemIds: [b1.id],
+    };
+    const result = await planner.evaluate(
+      { projectId: projectA.id, architectureVersionId: versionA.id, signals: [signal] },
+      ctxARecording,
+    );
+    const rec = result.recommendations[0]!;
+    expect(rec.status).toBe('created');
+    // The cross-tenant id was filtered out of proposedDependencies.
+    expect(rec.candidate.proposedDependencies).not.toContain(b1.id);
+    // NO dependency-chain factor was produced (B's graph was NOT traversed).
+    expect(
+      rec.candidate.priorityFactors.some((f) => f.kind === 'dependency-chain'),
+      'no dependency-chain factor (Project B graph not traversed)',
+    ).toBe(false);
+    // The rationale does NOT mention the Project B work item id (no leak).
+    expect(rec.candidate.rationale).not.toContain(b1.id);
+    expect(rec.candidate.rationale).not.toContain(b2.id);
+    // PROOF: listTransitiveDependencies was NEVER called with the Project B id
+    // (the ownership guard skipped it before any traversal).
+    expect(recordingDepRepo.transitiveCalls).not.toContain(b1.id);
+    // The honest rejection was logged.
+    expect(capture.raw()).toMatch(/related-work-item-not-in-project/);
+  });
+
+  // ---------------------------------------------------------------------------
   // 9. revision-bound context
   // -------------------------------------------------------------------------
   it('9. revision-bound context — metadata.planner.baselineCommitSha records the revision the signal was bound to', async () => {
