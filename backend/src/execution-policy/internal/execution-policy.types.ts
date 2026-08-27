@@ -60,6 +60,70 @@ export interface ExecutionPolicyRepository {
    */
   insertDecision(organizationId: string, projectId: string, workItemId: string, requestedBy: string | null, row: DecisionRow, guard: DecisionSnapshotGuard): Promise<ExecutionPolicyDecisionRecord | null>;
   listDecisions(workItemId: string, limit?: number): Promise<ExecutionPolicyDecisionRecord[]>;
+
+  // --- WORK-043 (§33.3): quota / rate-limit usage derivation ---
+  //
+  // AR-043-02 — the two usage models are DISTINCT (the shared
+  // one-predicate-for-both seam conflated them):
+  //
+  //   quota usage
+  //     → LOGICAL EXECUTIONS (the max_executions_per_month/day unit —
+  //       one per execution row that dispatched, project-wide)
+  //   rate-limit usage
+  //     → PROVIDER DISPATCH EVENTS (the rate_limit_max_requests unit —
+  //       each actual dispatch attributed to the provider that
+  //       dispatched it, per sliding window)
+  //
+  // Both are derived at evaluation time from the EXISTING authoritative
+  // records through the AR-043-01 DISPATCH PREDICATE — NO parallel usage
+  // ledger:
+  //
+  //   dispatched(e) := EXISTS (a wfos_agent_runs row for e.execution_id)
+  //                    OR e.package_json IS NOT NULL
+  //
+  // An AgentRun ledger row is the durable native provider-operation record
+  // (created by the gateway BEFORE the adapter invocation — a failed run
+  // still dispatched); package_json is the external dispatch artifact
+  // (persisted only after ExternalExecutionProvider.submit succeeded). A
+  // merely-created record, a pre-dispatch rejection, or an attempt that
+  // failed before provider submission is NOT a dispatch — it never counts
+  // in EITHER model. NULL = the usage is unresolvable → an ACTIVE
+  // quota/rate limit FAILS CLOSED in the evaluator.
+  //
+  // AR-043-03 — the EVENT-TIME anchor for the rate-limit sliding window is
+  // the AUTHORITATIVE dispatch timestamp of each event, never a reservation
+  // timestamp:
+  //   native event     → wfos_agent_runs.created_at (the run row is created
+  //                      immediately BEFORE the adapter invocation)
+  //   external event   → ExternalExecutionPackage.dispatchedAt (stamped by
+  //                      the provider at the dispatch initiation) — for the
+  //                      CURRENT phase AND for a HANDED-OFF-AWAY phase's
+  //                      previous_package_json snapshot (the snapshot
+  //                      preserves it)
+  // The execution row's created_at and the handoff log row's created_at are
+  // RESERVATION timestamps — both can precede the actual dispatch by an
+  // arbitrary scheduling gap and must never gate the window.
+  /**
+   * QUOTA usage — the project's LOGICAL EXECUTIONS since `since` (one per
+   * execution row that actually dispatched — the AR-043-01 predicate;
+   * project-wide, NOT provider-attributed). A cross-mode handed-off
+   * execution (two dispatch phases) is ONE logical execution: exactly ONE
+   * unit of quota.
+   */
+  countProjectDispatchedExecutionsSince(projectId: string, since: Date): Promise<number | null>;
+  /**
+   * RATE-LIMIT usage — the project's PROVIDER DISPATCH EVENTS since `since`
+   * for `provider`: each ACTUAL dispatch counted once and attributed to the
+   * provider that dispatched it (the AgentRun ledger row's OWN provider —
+   * native; the ExternalExecutionPackage's OWN provider field — external,
+   * including a handed-off-away external phase's snapshot in the append-only
+   * handoff log). A cross-mode handed-off execution contributes ONE event
+   * to EACH provider that dispatched. Each event is gated by ITS OWN
+   * authoritative dispatch timestamp (AR-043-03): the run row's created_at
+   * (native) / the package's dispatchedAt (external, including snapshots) —
+   * never a reservation timestamp.
+   */
+  countProjectProviderDispatchesSince(projectId: string, provider: string, since: Date): Promise<number | null>;
 }
 
 /**
@@ -101,6 +165,32 @@ export interface DefaultExecutionPolicyServiceDeps {
   readonly benchmarkEvidenceProvider: BenchmarkEvidenceProviderLike;
   /** §31/§32: org-policy resolver (deferred persistence — §32). */
   readonly orgPolicyResolver?: OrgPolicyResolverLike;
+  /**
+   * AR-043-04 (PR #48 round 4): the PROJECT→ORGANIZATION authority — the
+   * server-side source of the eligibility evaluation's organization scope.
+   * The concrete composition-root wiring adapts the projects module's
+   * ProjectRepository (wfos_projects.organization_id is authoritative:
+   * a project belongs to exactly one organization — §7/§8). OPTIONAL in the
+   * deps shape (pre-round-4 constructions keep compiling) but REQUIRED by
+   * evaluateCandidateEligibility — an unwired resolver FAILS CLOSED (the
+   * typed error) because an unresolvable organization scope cannot be
+   * declared unconstrained.
+   */
+  readonly projectOrganizationResolver?: ProjectOrganizationResolverLike;
+  /**
+   * WORK-043 (§33.3): the project-scoped agent-policy external-domain gate
+   * (WORK-037). Optional — when ABSENT the constraint family is INACTIVE
+   * (externalDecision 'allow': this layer has no recommendation-time input,
+   * and the RUNTIME boundaries — the policy-gated handoff decorator + the
+   * cross-mode handoff gate — still enforce the agent policy). When WIRED:
+   * the engine's decision flows into the constraint set (the engine itself
+   * fails closed to 'deny' on internal errors); a THROWN error becomes
+   * 'unresolved' → external candidates fail closed. Wired in app.ts to the
+   * AgentPolicyEngine's evaluateExternalForProject.
+   */
+  readonly agentPolicyProjectGate?: AgentPolicyProjectGateLike;
+  /** WORK-043: clock seam (period/window boundaries). Defaults to real time. */
+  readonly now?: () => Date;
 }
 
 // Local structural interfaces so this file does NOT import the service files
@@ -142,6 +232,16 @@ export interface BenchmarkEvidenceProviderLike {
   aggregateForProject(projectId: string): Promise<import('../types.js').HistoricalPerformance>;
 }
 
+/**
+ * AR-043-04: the PROJECT→ORGANIZATION authority port. The projects module's
+ * ProjectRepository satisfies this structurally (findById →
+ * project.organizationId); the composition root adapts it. Returns NULL when
+ * the project does not resolve (fail-closed upstream).
+ */
+export interface ProjectOrganizationResolverLike {
+  resolveProjectOrganization(projectId: string): Promise<string | null>;
+}
+
 /** §32: resolved org policy (persistence deferred; resolved via composition root). */
 export interface ResolvedOrgPolicy {
   readonly allowedProviders: readonly string[];
@@ -153,4 +253,23 @@ export interface ResolvedOrgPolicy {
 
 export interface OrgPolicyResolverLike {
   resolve(organizationId: string): Promise<ResolvedOrgPolicy>;
+}
+
+/**
+ * WORK-043 (§33.3): the project-scoped agent-policy external-domain gate —
+ * the narrow port of the WORK-037 AgentPolicyEngine's ADDITIVE
+ * `evaluateExternalForProject` entry (non-interactive: 'ask' stays 'ask' —
+ * a recommendation cannot pre-approve a future handoff). Structurally
+ * compatible with AgentPolicyExternalDecision from @modules/agents.
+ */
+export interface AgentPolicyProjectGateLike {
+  evaluateExternalForProject(input: {
+    organizationId: string;
+    projectId: string;
+  }): Promise<{
+    decision: 'allow' | 'deny' | 'ask' | 'constrained';
+    reason: string | null;
+    policyVersion: number | null;
+    scopeSource?: string | null;
+  }>;
 }

@@ -152,6 +152,7 @@ test.beforeAll(async () => {
     providers: [nativeExecutionProvider, externalExecutionProvider],
     auditService,
     logger,
+  
   });
   const executionHandoffService = new DefaultExecutionHandoffService({
     executionRecordRepository: executionRecordRepo,

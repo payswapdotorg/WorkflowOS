@@ -182,7 +182,8 @@ describe('WORK-027 — execution provider abstraction', () => {
       providers: [nativeExecutionProvider, externalExecutionProvider],
       auditService,
       logger: stack.db.logger,
-    });
+    
+  });
     const executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository: executionRecordRepo,
       handoffRepository: executionHandoffRepo,
@@ -446,6 +447,10 @@ describe('WORK-027 — execution provider abstraction', () => {
 
   it('handoff lifecycle: issue → redeem package → replay rejected (409)', async () => {
     const wi = await createReadyWorkItem('EXEC-HANDOFF-001');
+    // AR-043-03: capture the clock at the DISPATCH moment — the external
+    // provider stamps the package's dispatchedAt at the derivation (the
+    // dispatch initiation) with this injectable clock.
+    const dispatchClock = new Date(clockNow).toISOString();
     const created = (
       await server.inject({
         method: 'POST',
@@ -503,6 +508,7 @@ describe('WORK-027 — execution provider abstraction', () => {
         verificationRequirements: string[];
         returnCallback: { eventsPath: string };
         expiration: string;
+        dispatchedAt: string;
       };
     };
     expect(body.status).toBe('submitted');
@@ -515,6 +521,12 @@ describe('WORK-027 — execution provider abstraction', () => {
     expect(body.package.prompt).toContain('## Verification Requirements');
     expect(body.package.verificationRequirements).toEqual(['All tests pass']);
     expect(body.package.returnCallback.eventsPath).toBe(`/execution/${created.executionId}/events`);
+    // AR-043-03: the package carries the AUTHORITATIVE dispatch-event
+    // timestamp — stamped by the provider at the package derivation (the
+    // dispatch initiation), verifiable against the injectable clock. This
+    // is the value the per-provider rate-limit window gates on — NEVER a
+    // reservation timestamp (execution/handoff-log row creation).
+    expect(body.package.dispatchedAt).toBe(dispatchClock);
     // NO secrets of any kind in the package.
     const pkgRaw = JSON.stringify(body.package).toLowerCase();
     expect(pkgRaw).not.toMatch(/githubtoken|api_?key|webhooksecret|access[_-]?token|password|credential/);

@@ -15,6 +15,7 @@
  * This file is private to /agents (PLAT-AC-02).
  */
 import type { DatabaseClient } from '@platform/index.js';
+import { assertDispatchAdmission } from './dispatch-admission.js';
 import type {
   ExternalExecutionPackage,
   ExecutionMode,
@@ -448,17 +449,24 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
 
   /**
    * PR #46 round 6 (the side-effect-boundary fencing fix) + round 7 (the
-   * provider-operation exactly-once boundary): CROSS the fenced dispatch
-   * gate — ONE conditional UPDATE that evaluates the lease fence (the EXACT
-   * owner + epoch + not discharged) ATOMICALLY with opening the durable
-   * dispatch intent (migration 0046's dispatch_state/dispatch_epoch columns
-   * + migration 0047's dispatch_idempotency_key — the durable record of the
+   * provider-operation exactly-once boundary) + WORK-043 round 4 (the
+   * DISPATCH ADMISSION BOUNDARY — AR-043-05): CROSS the fenced dispatch
+   * gate — ONE transaction that evaluates the lease fence (the EXACT owner
+   * + epoch + not discharged) ATOMICALLY with opening the durable dispatch
+   * intent (migration 0046's dispatch_state/dispatch_epoch columns +
+   * migration 0047's dispatch_idempotency_key — the durable record of the
    * dispatch operation identity, derived from the LOGICAL HANDOFF IDENTITY
    * so every actor driving the same handoff records + submits under the SAME
-   * key). This replaces the check-then-act window between the round-5
-   * pre-call `ensureFence()` and the provider submit: an actor whose lease
-   * was reclaimed between the check and the submit affects 0 rows HERE and
-   * aborts BEFORE the provider call.
+   * key) AND with the WORK-043 quota/rate-limit ADMISSION CHECK
+   * ({@link assertDispatchAdmission} — the architect's AR-043-05 hard
+   * admission boundary; the opened gate IS the durable dispatch
+   * reservation). This replaces the check-then-act window between the
+   * round-5 pre-call `ensureFence()` and the provider submit: an actor
+   * whose lease was reclaimed between the check and the submit affects
+   * 0 rows HERE and aborts BEFORE the provider call; an actor whose
+   * dispatch would exceed an active project quota/rate limit is REJECTED
+   * HERE — before the gate opens and before the provider call, with the
+   * obligation left PENDING for the existing reconcile/retry machinery.
    *
    * The state arms:
    *   - `dispatch_state IS NULL` — a fresh gate opens at this lease's epoch;
@@ -483,23 +491,59 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
     claimEpoch: number,
     dispatchIdempotencyKey: string,
   ): Promise<boolean> {
-    const result = await this.db.query<{ id: string }>(
-      `UPDATE wfos_cross_mode_handoff_obligations
-          SET dispatch_state = 'in_flight',
-              dispatch_epoch = $3,
-              dispatch_idempotency_key = $4
-        WHERE handoff_id = $1
-          AND claim_owner = $2
-          AND claim_epoch = $3
-          AND discharged_at IS NULL
-          AND (
-            dispatch_state IS NULL
-            OR (dispatch_state = 'in_flight' AND dispatch_epoch < $3)
-          )
-       RETURNING id`,
-      [handoffId, owner, claimEpoch, dispatchIdempotencyKey],
-    );
-    return result.rows.length > 0;
+    return this.db.transaction(async (tx) => {
+      // Resolve THIS handoff's dispatch context (the project whose policy
+      // limits govern the admission + the destination provider the dispatch
+      // targets + the logical execution whose own contributions are excluded
+      // from its own admission). Resolved INSIDE the transaction — the join
+      // is consistent with the gate CAS that follows.
+      const ctx = await tx.query<{ execution_record_id: string; project_id: string; provider: string }>(
+        `SELECT e.id AS execution_record_id, e.project_id, e.provider
+           FROM wfos_cross_mode_handoff_obligations o
+           JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+           JOIN wfos_executions e ON e.id = h.execution_record_id
+          WHERE o.handoff_id = $1`,
+        [handoffId],
+      );
+      const context = ctx.rows[0];
+      if (!context) {
+        // Unknown handoff (or a torn obligation) — the gate CAS below would
+        // match 0 rows anyway; skip both the admission check and the UPDATE.
+        return false;
+      }
+      // AR-043-05 — THE ADMISSION GATE: the check is ATOMIC with the
+      // gate-open. Throws DispatchAdmissionRejectedError (rolling the whole
+      // transaction back — NO gate opens, NO provider call) when an active
+      // project quota/rate limit would be exceeded by admitting THIS
+      // dispatch. The advisory lock inside serializes concurrent admissions
+      // for the same project; the opened gate IS the durable reservation.
+      await assertDispatchAdmission(tx, {
+        projectId: context.project_id,
+        provider: context.provider,
+        // The CURRENT logical execution's own contributions (its prior-phase
+        // artifacts, its own open gate) are excluded — a handoff dispatch
+        // (including a take-over re-drive of the SAME keyed operation) never
+        // blocks on itself.
+        excludeExecutionRecordId: context.execution_record_id,
+      });
+      const result = await tx.query<{ id: string }>(
+        `UPDATE wfos_cross_mode_handoff_obligations
+            SET dispatch_state = 'in_flight',
+                dispatch_epoch = $3,
+                dispatch_idempotency_key = $4
+          WHERE handoff_id = $1
+            AND claim_owner = $2
+            AND claim_epoch = $3
+            AND discharged_at IS NULL
+            AND (
+              dispatch_state IS NULL
+              OR (dispatch_state = 'in_flight' AND dispatch_epoch < $3)
+            )
+         RETURNING id`,
+        [handoffId, owner, claimEpoch, dispatchIdempotencyKey],
+      );
+      return result.rows.length > 0;
+    });
   }
 
   /**

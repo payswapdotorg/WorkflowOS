@@ -80,6 +80,10 @@ export class DeterministicExternalBenchmarkProvider implements ExecutionProvider
         note: 'Deterministic external benchmark provider — use the scoped callback token issued by the handoff service.',
       },
       expiration: expiresAt.toISOString(),
+      // AR-043-03: the authoritative dispatch-event timestamp (stamped at the
+      // package derivation — the simulated dispatch initiation), mirroring
+      // the real ExternalExecutionProvider's contract.
+      dispatchedAt: now.toISOString(),
     };
 
     return {

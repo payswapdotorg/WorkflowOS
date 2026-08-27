@@ -931,6 +931,14 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'CrossModeHandoffError',                  // @modules/agents — the typed domain error
       'CROSS_MODE_HANDOFF_ERROR_CODES',         // @modules/agents — the stable code list
       'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE',      // @modules/agents — the frozen pure-data relay job-type
+      // WORK-043 round 4 (AR-043-05): the dispatch-admission typed error
+      // (the same sanctioned exception + reasoning — a discriminated error
+      // CLASS consumers instanceof-check; it wires nothing, constructs
+      // nothing, holds only (code, message, detail)) + the frozen pure-data
+      // reservation-horizon constant (a number literal — no wiring, no
+      // credentials).
+      'DispatchAdmissionRejectedError',         // @modules/agents — the typed domain error
+      'DISPATCH_RESERVATION_HORIZON_MS',        // @modules/agents — the frozen pure-data horizon constant
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -7362,10 +7370,15 @@ describe('WORK-033 invariants — execution policy & fair benchmarking', () => {
     // + the mirrored frontend contract).
     const typesSrc = readFileSync(join(EXEC_POLICY_DIR, 'types.ts'), 'utf8');
     expect(typesSrc).toMatch(/'unknown_constrained'/);
-    expect(typesSrc).toMatch(/\| 'evidence';/);
+    // WORK-043 (§33.3) extended the category union — 'evidence' is still a
+    // member, now followed by the four new families (quota, rate_limit,
+    // security, agent_policy).
+    expect(typesSrc).toMatch(/\| 'evidence'/);
+    expect(typesSrc).toMatch(/\| 'agent_policy';/);
     const frontendSrc = readFileSync(join(BACKEND_ROOT, '..', 'frontend', 'src', 'api', 'client.ts'), 'utf8');
     expect(frontendSrc).toMatch(/'unknown_constrained'/);
-    expect(frontendSrc).toMatch(/\| 'evidence';/);
+    expect(frontendSrc).toMatch(/\| 'evidence'/);
+    expect(frontendSrc).toMatch(/\| 'agent_policy';/);
     // The recommendation's neutral-unknown components are only reachable
     // when NO cap is active (fail-closed handles the capped case upstream).
     const recSrc = readFileSync(join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts'), 'utf8');
@@ -11169,18 +11182,23 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0050 (PR #46 round 10 — the EXPLICIT
-    // PROVIDER-OPERATION LIFECYCLE; 0049 is the generation fence + the
-    // operation-identity columns; 0048 is the durable provider-operation
-    // ledger; 0047 is the cross-mode-handoff durable dispatch idempotency
-    // key; 0046 is the fenced dispatch gate; 0045 is the claim_epoch fencing
-    // token; 0044 is the claim/lease columns; 0043 is the obligation table
-    // itself; 0042 is the WORK-042 cross-mode handoff log). WORK-040 added
-    // none (0042-0050 belong to WORK-042, not WORK-040).
+    // The highest migration is 0051 (WORK-043 — the execution-eligibility
+    // constraint columns + the usage-derivation index: ALTER + INDEX ONLY,
+    // no table; renumbered from 0050 after PR #47's round-10
+    // 0050_execution_provider_operation_lifecycle landed on main first —
+    // the integration-branch numbering wins). 0050 is PR #46/47 round 10 —
+    // the EXPLICIT provider-operation lifecycle; 0049 is the generation
+    // fence + the operation-identity columns; 0048 is the durable
+    // provider-operation ledger; 0047 is the cross-mode-handoff durable
+    // dispatch idempotency key; 0046 is the fenced dispatch gate;
+    // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
+    // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
+    // handoff log). WORK-040 added none (0042-0051 belong to WORK-042/043,
+    // not WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-10 explicit provider-operation lifecycle migration, NOT a planner-owned table)').toMatch(/^0050_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-043 execution-eligibility constraint migration — ALTER + INDEX only, no planner-owned table)').toMatch(/^0051_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -13579,7 +13597,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   // awaited until terminal; a stuck run fails closed).
   // -----------------------------------------------------------------------
 
-  const CROSS_MODE_MIGRATION_0050 = join(
+  const CROSS_MODE_MIGRATION_0051 = join(
     BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
     '0050_execution_provider_operation_lifecycle.sql',
   );
@@ -13589,8 +13607,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   // the round-9 unproven handles from in-flight rows (the database never
   // infers a start from a persisted intended identity).
   it('R10-A. migration 0050 exists — the EXPLICIT provider-operation lifecycle (pending/started/completed/failed CHECK + the legacy unproven-handle reset + the corrected-protocol header)', () => {
-    expect(existsSync(CROSS_MODE_MIGRATION_0050), '0050_execution_provider_operation_lifecycle.sql must exist').toBe(true);
-    const src = readFileSync(CROSS_MODE_MIGRATION_0050, 'utf8');
+    expect(existsSync(CROSS_MODE_MIGRATION_0051), '0050_execution_provider_operation_lifecycle.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0051, 'utf8');
     expect(src, 'the lifecycle CHECK is widened to include started').toMatch(/CHECK \(state IN \('pending', 'started', 'completed', 'failed'\)\)/);
     expect(src, 'the round-9 CHECK constraint is replaced').toMatch(/DROP CONSTRAINT IF EXISTS wfos_execution_provider_operations_state_check/);
     expect(src, 'the LEGACY reset clears the unproven handles from in-flight rows').toMatch(/SET provider_operation_handle = NULL,[\s\S]*?WHERE state = 'pending'\s+AND provider_operation_handle IS NOT NULL/);
@@ -13858,5 +13876,664 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // The suite header documents the round-11 layer.
     expect(suiteSrc, 'the suite header documents the round-11 taxonomy').toMatch(/PR #46 ROUND 11 \(the SUBMISSION-ERROR TAXONOMY/);
     expect(suiteSrc, 'the suite describe includes round 11').toMatch(/round 10 \+ round 11/);
+  });
+});
+
+// =============================================================================
+// WORK-043 — Execution Eligibility and Constraint Engine (§33.3): the four
+// new hard-constraint families (quota, rate limits, security requirements,
+// agent policy) evaluated BEFORE performance ranking. The engine is the
+// WORK-033 DefaultExecutionEligibilityService EXTENDED (no parallel engine);
+// usage is DERIVED from the authoritative wfos_executions rows (no parallel
+// usage ledger); the WORK-042 handoff re-evaluates the RESOLVED destination
+// candidate through the SAME engine (evaluateCandidateEligibility). Quotas,
+// rate limits, and security classifications are ELIGIBILITY INPUTS, never
+// quality scores (§33.3) — they never enter the ranking scorer.
+// =============================================================================
+describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (§33.3)', () => {
+  const EXEC_POLICY_DIR = join(BACKEND_ROOT, 'src', 'execution-policy');
+  const EXEC_POLICY_INTERNAL = join(EXEC_POLICY_DIR, 'internal');
+  const ELIGIBILITY_SERVICE = join(EXEC_POLICY_INTERNAL, 'default-execution-eligibility-service.ts');
+  const POLICY_SERVICE = join(EXEC_POLICY_INTERNAL, 'default-execution-policy-service.ts');
+  const RECOMMENDATION_SERVICE = join(EXEC_POLICY_INTERNAL, 'default-execution-recommendation-service.ts');
+  const POLICY_TYPES = join(EXEC_POLICY_DIR, 'types.ts');
+  const POLICY_REPO = join(EXEC_POLICY_INTERNAL, 'pg-execution-policy-repository.ts');
+  const MIGRATION_0051 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0051_execution_eligibility_constraints.sql',
+  );
+  const AGENT_POLICY_ENGINE = join(MODULES_DIR, 'agents', 'internal', 'agent-policy-engine.ts');
+  const HANDOFF_SERVICE = join(MODULES_DIR, 'agents', 'internal', 'default-cross-mode-handoff-service.ts');
+  const HANDOFF_TYPES = join(MODULES_DIR, 'agents', 'internal', 'cross-mode-handoff.types.ts');
+  const EXECUTION_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution.route.ts');
+  const EXECUTION_POLICY_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-policy.route.ts');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const FRONTEND_CLIENT = join(BACKEND_ROOT, '..', 'frontend', 'src', 'api', 'client.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  // --- (a) ONE engine — the WORK-033 service EXTENDED, no parallel engine ---
+
+  it('ONE eligibility engine (the WORK-033 DefaultExecutionEligibilityService EXTENDED — no parallel engine)', () => {
+    // The engine file exists and evaluates the four new families.
+    const src = stripCodeComments(readFileSync(ELIGIBILITY_SERVICE, 'utf8'));
+    expect(src).toMatch(/evaluateSecurity/);
+    expect(src).toMatch(/evaluateAgentPolicy/);
+    expect(src).toMatch(/evaluateQuota/);
+    expect(src).toMatch(/evaluateRateLimit/);
+    // No OTHER file in src/ declares a competing eligibility engine.
+    const srcRoot = join(BACKEND_ROOT, 'src');
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const rel = relative(BACKEND_ROOT, full);
+          if (rel === relative(BACKEND_ROOT, ELIGIBILITY_SERVICE)) continue;
+          const text = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/\bclass\s+\w*(Eligibility|Constraint)Engine\b/.test(text)) {
+            offenders.push(`${rel}: declares a parallel eligibility/constraint engine`);
+          }
+          if (/implements\s+ExecutionEligibilityService\b/.test(text)) {
+            offenders.push(`${rel}: implements ExecutionEligibilityService (the ONE engine is the WORK-033 service)`);
+          }
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  // --- (b) NO parallel usage ledger — the two DISTINCT usage models
+  //         (AR-043-02): quota = LOGICAL EXECUTIONS; rate-limit = PROVIDER
+  //         DISPATCH EVENTS attributed to the dispatching provider, each
+  //         gated by ITS OWN authoritative dispatch timestamp (AR-043-03) --
+
+  it('NO parallel usage ledger — quota counts LOGICAL EXECUTIONS, rate limits count PROVIDER DISPATCH EVENTS (each at its OWN authoritative dispatch time) via the authoritative artifacts (AR-043-01 + AR-043-02 + AR-043-03)', () => {
+    // Migration 0051 adds NO table (ALTER + INDEX only; 0051 after the
+    // renumber — 0050 is PR #46/47 round 10's provider-operation lifecycle).
+    const migration = stripCodeComments(readFileSync(MIGRATION_0051, 'utf8'));
+    expect(migration, 'migration 0050 must not create a usage/quota table').not.toMatch(/CREATE TABLE/i);
+    // No migration anywhere introduces a usage/quota counter table.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = stripCodeComments(readFileSync(join(migrationsDir, f), 'utf8'));
+      expect(text, `${f}: no parallel usage ledger table`).not.toMatch(
+        /CREATE TABLE[^\n]*(usage|quota)/i,
+      );
+    }
+    // The usage queries read the AUTHORITATIVE records and apply the
+    // AR-043-01 DISPATCH PREDICATE: a row counts ONLY when a durable
+    // provider-dispatch artifact exists —
+    //   NATIVE:   an AgentRun ledger row (wfos_agent_runs IS the durable
+    //             native provider-operation ledger, PR #46 round 8 — the
+    //             gateway creates the run BEFORE the adapter invocation)
+    //   EXTERNAL: the persisted ExternalExecutionPackage (package_json —
+    //             written only after ExternalExecutionProvider.submit
+    //             succeeded), including a handed-off-away external phase's
+    //             snapshot in the append-only handoff log
+    const repoSrc = stripCodeComments(readFileSync(POLICY_REPO, 'utf8'));
+    expect(repoSrc, 'the usage queries count wfos_executions').toMatch(/FROM wfos_executions e/);
+    expect(repoSrc, 'the dispatch predicate probes the AgentRun ledger').toMatch(
+      /FROM wfos_agent_runs r[\s\S]{0,120}r\.execution_id = e\.execution_id/,
+    );
+    expect(repoSrc, 'the dispatch predicate probes the external package artifact').toMatch(
+      /e\.package_json IS NOT NULL/,
+    );
+    // AR-043-02 — the RATE-LIMIT query attributes EACH actual dispatch to
+    // the provider that dispatched it (NEVER the execution row's mutable
+    // current provider):
+    //   native events   → the AgentRun row's OWN provider (immutable)
+    //   external events → the package artifact's OWN provider field
+    //                     (ExternalExecutionPackage is self-describing)
+    expect(repoSrc, 'native dispatch events attribute to the run row provider').toMatch(
+      /r\.provider = \$2/,
+    );
+    expect(repoSrc, 'external dispatch events attribute to the package provider field').toMatch(
+      /package_json->>'provider' = \$2/,
+    );
+    expect(repoSrc, 'the handed-off-away external phase attributes through the log snapshot').toMatch(
+      /h\.to_mode = 'native'[\s\S]{0,120}h\.previous_package_json IS NOT NULL/,
+    );
+    // AR-043-03 — every rate-limit event is gated by ITS OWN AUTHORITATIVE
+    // dispatch timestamp, never a reservation timestamp:
+    //   native events   → the run row's OWN created_at (created immediately
+    //                     BEFORE the adapter invocation)
+    //   external events → the package's OWN dispatchedAt (stamped by the
+    //                     provider at the dispatch initiation) — including
+    //                     the handed-off-away phase's snapshot
+    expect(repoSrc, 'the current-phase external arm gates the window on the package dispatchedAt').toMatch(
+      /package_json->>'dispatchedAt'/,
+    );
+    expect(repoSrc, 'the handed-off-away arm gates the window on the SNAPSHOT dispatchedAt').toMatch(
+      /previous_package_json->>'dispatchedAt'/,
+    );
+    expect(repoSrc, 'the native arm gates the window on the run row creation').toMatch(
+      /r\.created_at >= \$3/,
+    );
+    // AR-043-03 regression pin #1: the handoff-log reservation (h.created_at)
+    // must NEVER gate the window — the reserve precedes the actual dispatch
+    // by an arbitrary scheduling gap.
+    expect(
+      repoSrc,
+      'the handoff-log reservation must NOT gate the window (AR-043-03: reserve → gap → dispatch)',
+    ).not.toMatch(/COALESCE\(h\.created_at, e\.created_at\)/);
+    // AR-043-03 regression pin #2: the handed-off-away snapshot arm must not
+    // fall back to the execution row creation (a reservation that can
+    // precede the external dispatch by an arbitrary amount).
+    expect(
+      repoSrc,
+      'the snapshot arm must NOT gate the window on the execution row creation (AR-043-03)',
+    ).not.toMatch(/to_mode = 'native'[\s\S]{0,300}e\.created_at >= \$\d/);
+    // AR-043-03 — the package artifact CARRIES the authoritative dispatch
+    // timestamp (the contract field), and the provider STAMPS it at the
+    // package derivation (the dispatch initiation); the benchmark provider
+    // mirrors the contract.
+    const execTypes = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'execution.types.ts'), 'utf8'),
+    );
+    expect(execTypes, 'ExternalExecutionPackage declares the authoritative dispatchedAt').toMatch(
+      /readonly dispatchedAt: string/,
+    );
+    const extProvider = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'external-execution-provider.ts'), 'utf8'),
+    );
+    expect(extProvider, 'the provider stamps dispatchedAt at the derivation').toMatch(
+      /const dispatchedAt = now\.toISOString\(\)/,
+    );
+    expect(extProvider, 'the stamped value rides on the package artifact').toMatch(
+      /dispatchedAt,\s*\};/,
+    );
+    // AR-043-01 regression pin: the BARE execution-row count (existence +
+    // created_at only — counting executions that never dispatched) must NOT
+    // reappear.
+    expect(
+      repoSrc,
+      'the usage query must NOT be a bare execution-row count (AR-043-01: existence is not dispatch)',
+    ).not.toMatch(
+      /FROM wfos_executions\s+WHERE project_id = \$1 AND provider = \$2 AND created_at >= \$3/,
+    );
+    // AR-043-02 regression pin: attributing the ROW count to the execution
+    // row's CURRENT provider (one row → one provider) understates the
+    // handed-off-from provider's window — each ACTUAL dispatch belongs to
+    // the provider that dispatched it.
+    expect(
+      repoSrc,
+      'usage must NOT be attributed to the execution row current provider (AR-043-02: each actual dispatch belongs to the provider that dispatched it)',
+    ).not.toMatch(/e\.provider = \$\d/);
+    // The repository port exposes the TWO DISTINCT derivation seams (the
+    // AR-043-02 usage-model split: quota = logical executions; rate =
+    // provider dispatch events) + the fail-closed NULL contract.
+    const internalTypes = readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8');
+    expect(internalTypes, 'the quota seam (logical executions)').toMatch(/countProjectDispatchedExecutionsSince/);
+    expect(internalTypes, 'the rate seam (provider dispatch events)').toMatch(/countProjectProviderDispatchesSince/);
+    expect(internalTypes, 'the conflated single seam must not reappear (AR-043-02)').not.toMatch(/countProjectDispatchesSince/);
+    expect(internalTypes).not.toMatch(/countProjectExecutionsSince/);
+    expect(internalTypes, 'the AR-043-02 unit distinction is documented').toMatch(/LOGICAL EXECUTIONS/);
+    expect(internalTypes).toMatch(/PROVIDER DISPATCH EVENTS/);
+    expect(internalTypes).toMatch(/NULL = the usage\s*\*?\s*is unresolvable/);
+    expect(internalTypes).toMatch(/DISPATCH PREDICATE/);
+  });
+
+  // --- (c) the constraint vocabulary: categories + statuses + the ladder ---
+
+  it('the §33.3 constraint vocabulary is closed and complete (categories, statuses, the classification ladder)', () => {
+    const types = readFileSync(POLICY_TYPES, 'utf8');
+    // The four new categories.
+    for (const cat of ["| 'quota'", "| 'rate_limit'", "| 'security'", "| 'agent_policy'"]) {
+      expect(types, `category ${cat} declared`).toMatch(new RegExp(cat.replace(/[|']/g, (m) => `\\${m}`)));
+    }
+    // The four new statuses.
+    for (const status of ["'quota_exhausted'", "'rate_limited'", "'security_blocked'", "'agent_policy_blocked'"]) {
+      expect(types, `status ${status} declared`).toContain(status);
+    }
+    // The ordered classification ladder (standard < confidential < restricted).
+    expect(types).toMatch(/SECURITY_CLASSIFICATION_RANK/);
+    expect(types).toMatch(/standard:\s*0,\s*confidential:\s*1,\s*restricted:\s*2/);
+    // The constraint set carries the four new families.
+    expect(types).toMatch(/readonly quota: QuotaConstraints/);
+    expect(types).toMatch(/readonly rateLimit: RateLimitConstraints/);
+    expect(types).toMatch(/readonly security: SecurityConstraints/);
+    expect(types).toMatch(/readonly agentPolicy: AgentPolicyConstraints/);
+  });
+
+  // --- (d) FAIL-CLOSED: unresolvable usage under an ACTIVE constraint ------
+
+  it('the engine FAILS CLOSED on unresolvable usage under an ACTIVE quota/rate constraint', () => {
+    const src = stripCodeComments(readFileSync(ELIGIBILITY_SERVICE, 'utf8'));
+    // Quota: usage null under an active quota → blocked.
+    expect(src).toMatch(/monthly_quota_usage_unresolvable/);
+    expect(src).toMatch(/daily_quota_usage_unresolvable/);
+    // Rate limit: unresolvable window map under an active limit → blocked.
+    expect(src).toMatch(/rate_limit_usage_unresolvable/);
+    // Agent policy: unresolved decision → fail-closed for external candidates.
+    expect(src).toMatch(/external_handoff_unresolved/);
+  });
+
+  // --- (e) eligibility inputs are NEVER scores (§33.3) ---------------------
+
+  it('quota/rate/security/agent-policy constraints NEVER enter the ranking scorer (§33.3: eligibility inputs, not quality scores)', () => {
+    const scorer = stripCodeComments(readFileSync(RECOMMENDATION_SERVICE, 'utf8'));
+    expect(scorer, 'the scorer must not read quota constraints').not.toMatch(/\bquota\b/i);
+    expect(scorer, 'the scorer must not read rate-limit constraints').not.toMatch(/rateLimit|rate_limit/i);
+    expect(scorer, 'the scorer must not read security constraints').not.toMatch(/securityClassification|externalCeiling|security_/);
+    expect(scorer, 'the scorer must not read agent-policy constraints').not.toMatch(/agentPolicy|agent_policy/i);
+  });
+
+  // --- (f) the recommend() path resolves the new families BEFORE ranking ---
+
+  it('recommend() resolves usage + the agent-policy decision into the constraint set BEFORE ranking', () => {
+    const src = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    expect(src).toMatch(/resolveUsageConstraints/);
+    expect(src).toMatch(/resolveAgentPolicyConstraint/);
+    // The usage derivation only queries while the constraint is ACTIVE.
+    expect(src).toMatch(/quotaActive/);
+    expect(src).toMatch(/rateActive/);
+    // Eligibility runs BEFORE ranking (§3 order preserved with the new
+    // families) — code-level anchors (comments are stripped).
+    const recommendStart = src.indexOf('async recommend(input: RecommendInput)');
+    const recommendBody = src.slice(recommendStart, recommendStart + 9000);
+    const eligibilityIdx = recommendBody.indexOf('this.deps.eligibilityService.evaluate');
+    const rankIdx = recommendBody.indexOf('this.deps.recommendationService.rank');
+    expect(eligibilityIdx).toBeGreaterThan(-1);
+    expect(rankIdx, 'ranking runs after eligibility in recommend()').toBeGreaterThan(eligibilityIdx);
+    // The policy-boundary validation (clean domain errors; DB CHECK backstop).
+    expect(src).toMatch(/validateWork043PolicyFields/);
+  });
+
+  // --- (g) the point-in-time seam (the WORK-042 handoff gate input) --------
+
+  it('the point-in-time evaluateCandidateEligibility seam exists and persists NOTHING', () => {
+    const src = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    expect(src).toMatch(/async evaluateCandidateEligibility/);
+    // It reuses the SAME per-provider candidate builder (one construction path).
+    expect(src).toMatch(/buildCandidateForProvider/);
+    expect(src).toMatch(/buildSingleCandidate/);
+    // It never writes a §22 decision (that is the recommendation path's job).
+    const seamBody = src.slice(
+      src.indexOf('async evaluateCandidateEligibility'),
+      src.indexOf('async evaluateCandidateEligibility') + 4000,
+    );
+    expect(seamBody, 'the seam must not insert decisions').not.toMatch(/insertDecision/);
+    // The public contract carries the seam.
+    const types = readFileSync(POLICY_TYPES, 'utf8');
+    expect(types).toMatch(/evaluateCandidateEligibility\(input: CandidateEligibilityInput\)/);
+  });
+
+  // --- (h) the WORK-042 handoff destination re-eligibility gate ------------
+
+  it('the handoff gate re-evaluates the RESOLVED destination AFTER provider resolution + BEFORE the reserve', () => {
+    const src = stripCodeComments(readFileSync(HANDOFF_SERVICE, 'utf8'));
+    // The gate method exists.
+    expect(src).toMatch(/destinationEligibilityGate/);
+    // ORDER: policyGate → resolveProviderModel → destinationEligibilityGate → reserveAndClaim.
+    const policyGateIdx = src.indexOf('await this.policyGate(');
+    const resolveIdx = src.indexOf('await this.resolveProviderModel(');
+    const destGateIdx = src.indexOf('await this.destinationEligibilityGate(');
+    const reserveIdx = src.indexOf('await this.reserveAndClaim(');
+    expect(policyGateIdx).toBeGreaterThan(-1);
+    expect(resolveIdx).toBeGreaterThan(policyGateIdx);
+    expect(destGateIdx, 'the destination gate runs after provider resolution').toBeGreaterThan(resolveIdx);
+    expect(reserveIdx, 'the destination gate runs before the reserve (side-effect-free rejection)').toBeGreaterThan(destGateIdx);
+    // Fail-closed on a THROWING evaluation + the structured rejection.
+    expect(src).toMatch(/handoff-ineligible-destination/);
+    expect(src).toMatch(/failing closed/);
+    // PR #48 round 4 (AR-043-04): the destination gate passes NO
+    // organization id — the concrete service resolves the AUTHORITATIVE
+    // organization scope SERVER-SIDE from the project authority (the
+    // seam-side projectOrganizationResolver; see the R4-B invariant). The
+    // port seam stays OPTIONAL (pre-WORK-043 fakes still satisfy it) and
+    // the skip is recorded HONESTLY.
+    expect(src).toMatch(/not_evaluated/);
+    expect(src).not.toMatch(/organizationId:\s*null/);
+    // The error code is in the stable vocabulary.
+    const types = stripCodeComments(readFileSync(HANDOFF_TYPES, 'utf8'));
+    expect(types).toMatch(/'handoff-ineligible-destination'/);
+    // The route maps it to 409.
+    const route = stripCodeComments(readFileSync(EXECUTION_ROUTE, 'utf8'));
+    expect(route).toMatch(/case 'handoff-ineligible-destination'/);
+  });
+
+  // --- (i) the WORK-037 recommendation-time seam (non-interactive) ---------
+
+  it('the agent-policy evaluateExternalForProject seam is NON-INTERACTIVE (no approval creation/consultation at recommendation time)', () => {
+    const src = stripCodeComments(readFileSync(AGENT_POLICY_ENGINE, 'utf8'));
+    expect(src).toMatch(/async evaluateExternalForProject/);
+    // The method body must NOT create or consult approvals (an 'ask' stays
+    // 'ask' — a recommendation cannot pre-approve a future handoff). The
+    // body is sliced to the NEXT method boundary (a fixed-size slice would
+    // bleed into resolveAsk, which legitimately consults approvals).
+    const bodyStart = src.indexOf('async evaluateExternalForProject');
+    const bodyEnd = (() => {
+      const next = src.slice(bodyStart + 10).search(/\n  (?:private |async |\/\/ =)/);
+      return next === -1 ? bodyStart + 3000 : bodyStart + 10 + next;
+    })();
+    const body = src.slice(bodyStart, bodyEnd);
+    expect(body).not.toMatch(/ensurePending|consultApproval/);
+    // The composition root wires the gate into the execution-policy service.
+    const appSrc = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(appSrc).toMatch(/agentPolicyProjectGate:\s*agentPolicyEngine/);
+  });
+
+  // --- (j) migration 0050 — the policy-boundary CHECK backstops ------------
+
+  it('migration 0051 carries the rate-limit/window + classification-ladder + non-negative CHECKs and the usage index', () => {
+    const migration = readFileSync(MIGRATION_0051, 'utf8');
+    expect(migration).toMatch(/wfos_execution_policy_rate_limit_requires_window/);
+    expect(migration).toMatch(/wfos_execution_policy_security_classification_valid/);
+    expect(migration).toMatch(/wfos_execution_policy_quota_nonnegative/);
+    expect(migration).toMatch(/idx_executions_project_provider_created/);
+    // The new columns.
+    for (const col of [
+      'max_executions_per_month',
+      'max_executions_per_day',
+      'rate_limit_max_requests',
+      'rate_limit_window_seconds',
+      'security_classification',
+      'external_security_ceiling',
+    ]) {
+      expect(migration).toContain(col);
+    }
+  });
+
+  // --- (k) the PATCH route maps the constraint-validation errors to 400 ----
+
+  it('the execution-policy PATCH route maps execution-policy-invalid-constraint to HTTP 400', () => {
+    const route = stripCodeComments(readFileSync(EXECUTION_POLICY_ROUTE, 'utf8'));
+    expect(route).toMatch(/execution-policy-invalid-constraint/);
+    expect(route).toMatch(/invalid-policy-constraint/);
+  });
+
+  // --- (l) the frontend mirror types stay in sync (the §33.3 vocabulary) ---
+
+  it('the frontend mirror types declare the new statuses, categories, and the policy fields', () => {
+    const client = readFileSync(FRONTEND_CLIENT, 'utf8');
+    for (const status of ["'quota_exhausted'", "'rate_limited'", "'security_blocked'", "'agent_policy_blocked'"]) {
+      expect(client, `frontend mirror declares ${status}`).toContain(status);
+    }
+    for (const cat of ["'quota'", "'rate_limit'", "'security'", "'agent_policy'"]) {
+      expect(client, `frontend mirror declares ${cat}`).toContain(cat);
+    }
+    expect(client).toMatch(/maxExecutionsPerMonth:\s*number \| null/);
+    expect(client).toMatch(/securityClassification:\s*SecurityClassification/);
+    expect(client).toMatch(/externalSecurityCeiling/);
+  });
+
+  // --- (m) the test coverage exists (pure + PG + handoff-gate suites) ------
+
+  it('the WORK-043 test suites exist with the required scenario coverage', () => {
+    const regression = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-eligibility-constraints.regression.test.ts'),
+      'utf8',
+    );
+    expect(regression).toMatch(/FAIL-CLOSED: an ACTIVE monthly quota with UNRESOLVABLE usage/);
+    expect(regression).toMatch(/the limit is PER-PROVIDER/);
+    expect(regression).toMatch(/project classification ABOVE the external ceiling/);
+    expect(regression).toMatch(/a recommendation is NON-INTERACTIVE/);
+    expect(regression).toMatch(/§33.3 — a quota block is a BLOCK/);
+
+    const integration = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-eligibility-engine.integration.test.ts'),
+      'utf8',
+    );
+    // AR-043-01: the PG suite must create BOTH dispatched and non-dispatched
+    // execution records and prove the distinction.
+    // AR-043-02: the suite must prove the per-provider split — each ACTUAL
+    // dispatch attributed to the provider that dispatched it, including
+    // cross-mode handoffs in BOTH directions (the architect's four-line
+    // proof table + the reverse-direction log-snapshot attribution).
+    // AR-043-03: the suite must prove the window boundary is gated by each
+    // event's OWN authoritative dispatch timestamp (the package's
+    // dispatchedAt — current phase AND handoff snapshot), straddling the
+    // boundary in BOTH directions against every reservation timestamp.
+    expect(integration).toMatch(/countProjectDispatchedExecutionsSince/);
+    expect(integration).toMatch(/countProjectProviderDispatchesSince/);
+    expect(integration).toMatch(/WITHOUT dispatch → NOT counted/);
+    expect(integration).toMatch(/rejected before dispatch → NOT counted/);
+    expect(integration).toMatch(/FAILED run still dispatched/);
+    expect(integration).toMatch(/EXACTLY ONCE/);
+    expect(integration).toMatch(/A window = 1, B window = 1/);
+    expect(integration).toMatch(/blocked at limit 1/);
+    expect(integration).toMatch(/REVERSE cross-mode handoff/);
+    expect(integration).toMatch(/previous_package_json/);
+    expect(integration).toMatch(/falls out of the window by ITS OWN event time/);
+    expect(integration).toMatch(/AR-043-03, both boundary directions/);
+    expect(integration).toMatch(/NEVER the handoff-log reservation/);
+    expect(integration).toMatch(/SNAPSHOT preserves dispatchedAt/);
+    // AR-043-03 round 5: the inverse boundary on the SNAPSHOT arm (a recent
+    // handoff reservation of an OLD dispatch → excluded), completing the
+    // "reservation now + dispatch old → excluded" line for the handed-off
+    // external phase.
+    expect(integration).toMatch(/the inverse boundary/);
+    expect(integration).toMatch(/NEVER the recent handoff reservation/);
+    expect(integration).toMatch(/an exhausted monthly quota EXCLUDES every candidate/);
+    expect(integration).toMatch(/an UNKNOWN provider → the honest configuration_missing verdict/);
+
+    const handoff = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff.regression.test.ts'),
+      'utf8',
+    );
+    expect(handoff).toMatch(/WORK-043 destination re-eligibility/);
+    expect(handoff).toMatch(/quota-exhausted external destination/);
+    expect(handoff).toMatch(/a throwing evaluation → fail-closed/);
+    expect(handoff).toMatch(/the verdict is recorded on the append-only log row/);
+    // AR-043-03 round 5 — the writer-level preservation proofs:
+    // handoff snapshots preserve the original timestamp byte-for-byte (#17b)
+    // and the retried logical handoff mutates nothing (#10b).
+    expect(handoff).toMatch(/17b\. AR-043-03/);
+    expect(handoff).toMatch(/NEVER re-stamps the historical dispatch timestamp/);
+    expect(handoff).toMatch(/10b\. AR-043-03/);
+    expect(handoff).toMatch(/the persisted dispatch timestamp is byte-identical/);
+
+    const claimLease = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff-claim-lease-concurrency.regression.test.ts'),
+      'utf8',
+    );
+    // AR-043-03 round 5 — the idempotency/retry timestamp proofs with
+    // DIVERGENT INJECTABLE CLOCKS (a re-stamp would carry the later actor's
+    // clock): the reclaiming owner's same-key re-dispatch replays the FIRST
+    // dispatch's stored package verbatim; the stale owner's late completion
+    // is discarded; the post-completion same-key replay preserves the
+    // original stamp.
+    expect(claimLease).toMatch(/R-W43-#1 \(AR-043-03\)/);
+    expect(claimLease).toMatch(/idempotent replay preserves original dispatch timestamp/);
+    expect(claimLease).toMatch(/never re-stamped/);
+    expect(claimLease).toMatch(/never mutated across the whole retried-handoff interleaving/);
+  });
+
+  // =========================================================================
+  // PR #48 round 4 — AR-043-03 (the READ-ONLY seam) + AR-043-04 (the
+  // SERVER-SIDE organization scope) + AR-043-05 (the DISPATCH ADMISSION
+  // BOUNDARY). The three architectural blockers of the round-2 review.
+  // =========================================================================
+
+  // --- AR-043-03: the eligibility seam NEVER persists policy state --------
+
+  it('R4-A. evaluateCandidateEligibility is READ-ONLY — no insertDefaultProjectPolicy call inside the eligibility seam (the write path stays the ONLY policy creator)', () => {
+    const src = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    // The seam's body: from the method signature to the next method.
+    const seamStart = src.indexOf('async evaluateCandidateEligibility(');
+    expect(seamStart).toBeGreaterThan(-1);
+    const seamEnd = src.indexOf('private buildPolicySnapshot', seamStart);
+    expect(seamEnd).toBeGreaterThan(seamStart);
+    const seamBody = src.slice(seamStart, seamEnd);
+    expect(
+      seamBody,
+      'the eligibility seam must not insert policy rows (AR-043-03)',
+    ).not.toMatch(/insertDefaultProjectPolicy/);
+    expect(
+      seamBody,
+      'the missing-policy fallback evaluates against the IN-MEMORY default mirror',
+    ).toMatch(/defaultProjectPolicyRecord/);
+    // The insert remains available ONLY on the write paths (recommend —
+    // the §22 decision flow — + ensureProjectPolicy — the explicit creator).
+    const recommendStart = src.indexOf('async recommend(');
+    const recommendEnd = src.indexOf('async ensureProjectPolicy', recommendStart);
+    const recommendBody = src.slice(recommendStart, recommendEnd);
+    expect(recommendBody).toMatch(/insertDefaultProjectPolicy/);
+    const ensureStart = src.indexOf('async ensureProjectPolicy(');
+    const ensureEnd = src.indexOf('\n  }', ensureStart);
+    expect(src.slice(ensureStart, ensureEnd)).toMatch(/insertDefaultProjectPolicy/);
+  });
+
+  // --- AR-043-04: the organization scope is server-side, never supplied ---
+
+  it('R4-B. CandidateEligibilityInput carries NO organizationId — the org scope is resolved SERVER-SIDE from the project authority and can never be omitted or spoofed', () => {
+    const types = readFileSync(POLICY_TYPES, 'utf8');
+    // The interface body carries no organizationId field.
+    const inputStart = types.indexOf('export interface CandidateEligibilityInput');
+    const inputEnd = types.indexOf('}', inputStart);
+    const inputBody = types.slice(inputStart, inputEnd);
+    expect(
+      inputBody,
+      'AR-043-04: no caller-supplied organization id on the eligibility input',
+    ).not.toMatch(/organizationId/);
+    // The advisory admission-semantics contract is stated on the input's
+    // doc block (the comment window immediately above the interface).
+    const docWindow = types.slice(Math.max(0, inputStart - 1800), inputStart);
+    expect(docWindow).toMatch(/AR-043-04/);
+    expect(docWindow).toMatch(/ADMISSION SEMANTICS/);
+    expect(docWindow).toMatch(/ADVISORY point-in-time eligibility/);
+    expect(docWindow).toMatch(/admits EXACTLY ONE/);
+
+    // The resolver dep exists and the seam resolves through it.
+    const internalTypes = stripCodeComments(
+      readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8'),
+    );
+    expect(internalTypes).toMatch(/projectOrganizationResolver\?: ProjectOrganizationResolverLike/);
+    expect(internalTypes).toMatch(/resolveProjectOrganization\(projectId: string\): Promise<string \| null>/);
+    const service = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    expect(service).toMatch(/resolveOrganizationScope/);
+    expect(service).toMatch(/execution-policy-organization-scope-unresolvable/);
+
+    // The handoff port + call site pass NO organization id.
+    const handoffSvc = stripCodeComments(readFileSync(HANDOFF_SERVICE, 'utf8'));
+    expect(handoffSvc).not.toMatch(/organizationId: null/);
+    const portStart = handoffSvc.indexOf('evaluateCandidateEligibility?(input: {');
+    const portEnd = handoffSvc.indexOf('}): Promise<{', portStart);
+    expect(handoffSvc.slice(portStart, portEnd)).not.toMatch(/organizationId/);
+
+    // The composition root wires the REAL project authority.
+    const app = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(app).toMatch(/projectOrganizationResolver:/);
+    expect(app).toMatch(/resolveProjectOrganization/);
+  });
+
+  // --- AR-043-05: the DISPATCH ADMISSION BOUNDARY -------------------------
+
+  it('R4-C. the dispatch admission boundary exists — ONE seam, crossed by BOTH dispatch mutation boundaries, advisory-lock-serialized, NO parallel usage ledger', () => {
+    const admissionPath = join(MODULES_DIR, 'agents', 'internal', 'dispatch-admission.ts');
+    const admission = readFileSync(admissionPath, 'utf8');
+    const admissionCode = stripCodeComments(admission);
+    // The seam + the serialization + the typed rejection.
+    expect(admissionCode).toMatch(/export async function assertDispatchAdmission/);
+    expect(admissionCode).toMatch(/pg_advisory_xact_lock/);
+    expect(admissionCode).toMatch(/hashtextextended/);
+    expect(admissionCode).toMatch(/class DispatchAdmissionRejectedError/);
+    expect(admissionCode).toMatch(/execution-admission-rejected/);
+    // The pressure model: the AR-043-01/02 artifact arms + the reservation
+    // arms (the OPEN dispatch gate + the horizon-bounded created row).
+    expect(admissionCode).toMatch(/dispatch_state = 'in_flight'/);
+    expect(admissionCode).toMatch(/e\.status = 'created'/);
+    expect(admissionCode).toMatch(/DISPATCH_RESERVATION_HORIZON_MS/);
+    // The exclusion: a dispatch never blocks on itself.
+    expect(admissionCode).toMatch(/excludeExecutionRecordId/);
+    // NO parallel usage ledger: the module declares no table, no column —
+    // it is pure SQL over the EXISTING authoritative structures.
+    expect(admission).not.toMatch(/CREATE TABLE/i);
+    expect(admission).not.toMatch(/ALTER TABLE/i);
+    expect(admission).not.toMatch(/CREATE INDEX/i);
+
+    // DIRECT boundary: the execution record creation crosses the gate.
+    const execRepo = stripCodeComments(
+      readFileSync(join(MODULES_DIR, 'agents', 'internal', 'pg-execution-repository.ts'), 'utf8'),
+    );
+    const createStart = execRepo.indexOf('async create(input: CreateExecutionRecordInput)');
+    const createEnd = execRepo.indexOf('async findById', createStart);
+    const createBody = execRepo.slice(createStart, createEnd);
+    expect(createBody).toMatch(/this\.db\.transaction/);
+    expect(createBody).toMatch(/assertDispatchAdmission/);
+
+    // HANDOFF boundary: beginFencedDispatch crosses the gate INSIDE the
+    // gate-open transaction, BEFORE the gate CAS.
+    const handoffRepo = stripCodeComments(
+      readFileSync(join(MODULES_DIR, 'agents', 'internal', 'pg-cross-mode-handoff-repository.ts'), 'utf8'),
+    );
+    const beginStart = handoffRepo.indexOf('async beginFencedDispatch(');
+    const beginEnd = handoffRepo.indexOf('async completeFencedDispatch', beginStart);
+    const beginBody = handoffRepo.slice(beginStart, beginEnd);
+    expect(beginBody).toMatch(/this\.db\.transaction/);
+    const admissionIdx = beginBody.indexOf('assertDispatchAdmission');
+    const casIdx = beginBody.indexOf('UPDATE wfos_cross_mode_handoff_obligations');
+    expect(admissionIdx).toBeGreaterThan(-1);
+    expect(casIdx).toBeGreaterThan(admissionIdx);
+
+    // The handoff service converts the typed rejection (BOTH arms) + the
+    // reconcile treats it as retryable (obligation PENDING, relay acks).
+    const handoffSvc = stripCodeComments(readFileSync(HANDOFF_SERVICE, 'utf8'));
+    expect(handoffSvc).toMatch(/DispatchAdmissionRejectedError/);
+    expect(handoffSvc).toMatch(/'handoff-admission-rejected'/);
+    expect(handoffSvc).toMatch(/stage: 'admission-rejected'/);
+
+    // The route mappings: BOTH rejections map to HTTP 429 (retryable).
+    const execRoute = stripCodeComments(readFileSync(EXECUTION_ROUTE, 'utf8'));
+    expect(execRoute).toMatch(/case 'handoff-admission-rejected'/);
+    expect(execRoute).toMatch(/status: 429/);
+    const workflowRoute = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8'),
+    );
+    expect(workflowRoute).toMatch(/execution-admission-rejected/);
+    expect(workflowRoute).toMatch(/429/);
+
+    // The error vocabulary includes the new code (the stable-code invariant).
+    const handoffTypes = readFileSync(HANDOFF_TYPES, 'utf8');
+    expect(handoffTypes).toMatch(/'handoff-admission-rejected'/);
+
+    // The barrel exports the typed rejection for route/consumer typing.
+    const barrel = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrel).toMatch(/DispatchAdmissionRejectedError/);
+  });
+
+  it('R4-D. the round-4 regressions exist with the architect\'s required scenario coverage (read-only seam, server-side org scope, the limit=1 admission races)', () => {
+    const integration = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-eligibility-engine.integration.test.ts'),
+      'utf8',
+    );
+    // AR-043-03: the read-only proof.
+    expect(integration).toMatch(/AR-043-03: the eligibility seam is READ-ONLY/);
+    expect(integration).toMatch(/creates NO policy row/);
+    // AR-043-04: the two-project/org scope proof.
+    expect(integration).toMatch(/AR-043-04: the organization scope is resolved SERVER-SIDE \(two-project\/org\)/);
+    expect(integration).toMatch(/ORG-SCOPED policy constraint makes the otherwise-resolved destination INELIGIBLE/);
+    expect(integration).toMatch(/ORG-SCOPED agent-policy context is ACTIVE at the seam/);
+    expect(integration).toMatch(/unresolvable organization scope/);
+
+    const admission = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'dispatch-admission.regression.test.ts'),
+      'utf8',
+    );
+    // AR-043-05: the limit=1 two-actor races at BOTH boundaries + the
+    // cross-boundary pressure + the release semantics.
+    expect(admission).toMatch(/R4-B\. two concurrent DIRECT submissions, daily quota = 1/);
+    expect(admission).toMatch(/R4-C\. two concurrent DIRECT submissions to the SAME provider/);
+    expect(admission).toMatch(/R4-F\. two concurrent HANDOFF gate-opens/);
+    expect(admission).toMatch(/R4-D\. an OPEN handoff dispatch gate is admission pressure for the DIRECT path/);
+    expect(admission).toMatch(/R4-E\. a pre-dispatch-rejected execution releases its reservation/);
+    expect(admission).toMatch(/exactly ONE record created/);
+    expect(admission).toMatch(/exactly ONE gate opens/);
+
+    const handoff = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff.regression.test.ts'),
+      'utf8',
+    );
+    // The service-level end-to-end: advisory ELIGIBLE + the hard boundary
+    // rejects BEFORE the provider call, obligation PENDING.
+    expect(handoff).toMatch(/R4-#1\. advisory gate ELIGIBLE \+ a saturated window/);
+    expect(handoff).toMatch(/handoff-admission-rejected/);
+    expect(handoff).toMatch(/the obligation stays PENDING \(recoverable\)/);
   });
 });

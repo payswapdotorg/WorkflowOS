@@ -164,7 +164,8 @@ describe('WORK-034 — session-aware execution integration', () => {
       } as never,
       logger: stack.db.logger,
       sessionService,
-    });
+    
+  });
   }
 
   /** A passing native provider (the real one, against the FakeAgentAdapter). */

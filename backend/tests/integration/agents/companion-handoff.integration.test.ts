@@ -169,7 +169,8 @@ describe('WORK-028 — Companion handoff redemption (token-only)', () => {
       ],
       auditService,
       logger: stack.db.logger,
-    });
+    
+  });
     const executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository: executionRecordRepo,
       handoffRepository: new PgExecutionHandoffRepository(stack.db.client),

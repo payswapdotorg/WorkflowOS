@@ -194,6 +194,7 @@ import { CROSS_MODE_HANDOFF_RELAY_JOB_TYPE } from './cross-mode-handoff.types.js
 // renewal + the epoch fence keep a live owner's lease from expiring
 // mid-flight while rejecting a stalled owner's authoritative mutations
 // after a reclaim (the round-5 lease-expiry fix).
+import { DispatchAdmissionRejectedError } from './dispatch-admission.js';
 import {
   CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX,
   CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX,
@@ -212,6 +213,44 @@ export interface CrossModeExecutionPolicyPort {
   getProjectPolicy(
     projectId: string,
   ): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null>;
+  /**
+   * WORK-043 (§33.3): the point-in-time destination-candidate eligibility
+   * seam (the full constraint engine — quota, rate limits, security,
+   * subscription, capability, project policy, ORG-scoped policy — evaluated
+   * against the RESOLVED destination provider+model+mode at handoff time).
+   * AR-043-04 (PR #48 round 4): the port input carries NO organization id —
+   * the concrete service resolves the authoritative organization scope
+   * SERVER-SIDE from the project authority, so the org-scoped policy
+   * families + the org-scoped agent-policy context are ACTIVE at the
+   * handoff destination gate (they can no longer be bypassed by declaring
+   * the scope absent). OPTIONAL so pre-WORK-043 fakes/ports still satisfy
+   * the interface; the destination gate is skipped when absent (the
+   * composition root always wires it).
+   *
+   * ADMISSION SEMANTICS (AR-043-05): this seam is ADVISORY point-in-time
+   * eligibility. The HARD admission boundary is the dispatch mutation
+   * boundary (beginFencedDispatch — the admission gate) crossed later in
+   * the flow.
+   */
+  evaluateCandidateEligibility?(input: {
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly {
+        category: string;
+        constraint: string;
+        reason: string;
+      }[];
+    };
+    policyVersion: number;
+  }>;
 }
 
 /**
@@ -373,6 +412,22 @@ const EXTERNAL_TO_NATIVE_ELIGIBLE = new Set([
 ]);
 
 /**
+ * WORK-043: compose an additive verdict block into the policy summary JSON
+ * (the summary is always this service's own JSON.stringify output — the
+ * parse is safe; a defensive fallback keeps the original summary if a
+ * future shape ever diverges). The composed summary lands on the
+ * append-only handoff log row (policy_decision) + the audit event.
+ */
+function composeSummary(policySummary: string, block: Record<string, unknown>): string {
+  try {
+    const parsed = JSON.parse(policySummary) as Record<string, unknown>;
+    return JSON.stringify({ ...parsed, ...block });
+  } catch {
+    return policySummary;
+  }
+}
+
+/**
  * PR #46 round 5: the in-flight claim lease guard — the heartbeat renewal +
  * the fence for ONE critical-section invocation. Created by
  * {@link DefaultCrossModeHandoffService.startClaimLease} after a successful
@@ -529,6 +584,28 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       input,
     );
 
+    // 7b. WORK-043 (§33.3): destination RE-ELIGIBILITY. The logical task
+    //     continues in the OTHER mode; the RESOLVED destination candidate
+    //     (provider + model + mode) must still clear the FULL constraint
+    //     engine — quota, rate limits, security classification, capability,
+    //     subscription, privacy, project policy — the SAME families the
+    //     recommendation path evaluates BEFORE ranking. An ineligible
+    //     destination rejects the handoff with every blocking reason named
+    //     (the caller sees exactly WHY); an eligible verdict is composed into
+    //     the policy summary recorded on the append-only handoff log row.
+    //     This gate runs AFTER provider resolution (the verdict is about the
+    //     CONCRETE destination) and BEFORE the reserve (no side effect has
+    //     happened yet — the rejection is side-effect-free).
+    const summaryWithDestination = await this.destinationEligibilityGate(
+      record,
+      executionId,
+      input,
+      provider,
+      model,
+      actor,
+      policySummary,
+    );
+
     // 8. Reserve + claim: INSERT the append-only handoff log row (previous_*
     //    snapshot) AND claim the durable obligation in ONE transaction (PR
     //    #46 round 4). migration 0043's AFTER INSERT trigger writes the
@@ -566,7 +643,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       provider,
       resultingStatus,
       idempotencyKey,
-      policySummary,
+      policySummary: summaryWithDestination,
       actor,
       claimOwner,
     });
@@ -689,7 +766,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     }
 
     // 11. Audit (best-effort).
-    await this.audit(record, executionId, input, reserved, actor, policySummary);
+    await this.audit(record, executionId, input, reserved, actor, summaryWithDestination);
 
     // 12. Return the post-handoff record (re-fetch).
     const finalRecord = await this.deps.executionRecordRepository.findByExecutionId(
@@ -780,7 +857,14 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       // nullable-typed (inferred from the fetch above) + narrowed by the
       // null check; re-fetches reassign nullable → nullable naturally.
 
-      let stage: 'mutate-and-dispatch' | 'dispatch-external' | 'dispatch-native' | 'session-convergence' | 'complete' = 'complete';
+      let stage:
+        | 'mutate-and-dispatch'
+        | 'dispatch-external'
+        | 'dispatch-native'
+        | 'session-convergence'
+        | 'complete'
+        | 'fence-lost'
+        | 'admission-rejected' = 'complete';
 
       // Crash window #1: the mutate did not happen (record.mode !== toMode) →
       // re-mutate + re-dispatch. Re-fetch the record + fall through to the
@@ -946,6 +1030,20 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           phase: err.message,
         });
         return { executionId, reconciled: false, stage: 'fence-lost' };
+      }
+      // AR-043-05 (the dispatch admission boundary): the re-drive was NOT
+      // ADMITTED — an active project quota/rate limit is exhausted. NOT an
+      // error: the obligation is healthy and stays PENDING; the relay job
+      // can ack + the next sweep re-drives the dispatch once the constraint
+      // frees capacity (the quota period / rate window rolls, or a
+      // concurrent dispatch's reservation completes).
+      if (err instanceof CrossModeHandoffError && err.code === 'handoff-admission-rejected') {
+        this.deps.logger.info('cross-mode-handoff.reconcile.admission-rejected', {
+          executionId,
+          handoffId: handoff.id,
+          phase: err.message,
+        });
+        return { executionId, reconciled: false, stage: 'admission-rejected' };
       }
       throw err;
     } finally {
@@ -1325,6 +1423,86 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       target: 'native',
       nativeExecutionAllowed: nativeAllowed,
       policyVersion: projectPolicy?.policyVersion ?? null,
+    });
+  }
+
+  /**
+   * WORK-043 (§33.3): the destination RE-ELIGIBILITY gate. Evaluates the
+   * RESOLVED destination candidate (provider + model + target mode) through
+   * the execution-policy constraint engine — the SAME engine the
+   * recommendation path applies BEFORE ranking. Rejection is
+   * side-effect-free (this runs before the reserve) and names EVERY
+   * blocking reason (the caller sees exactly why the destination is
+   * ineligible). An eligible verdict is composed into the policy summary
+   * (recorded on the append-only handoff log row + the audit event).
+   *
+   * Fail-closed: a THROWING engine rejects the handoff (an unresolvable
+   * constraint evaluation is NOT neutral — the destination cannot be
+   * declared eligible). When the port lacks the WORK-043 seam (pre-WORK-043
+   * fakes), the gate is skipped (the composition root always wires it).
+   */
+  private async destinationEligibilityGate(
+    record: ExecutionRecord,
+    executionId: string,
+    input: CrossModeHandoffInput,
+    provider: string,
+    model: string | null,
+    actor: { userId: string; source: string },
+    policySummary: string,
+  ): Promise<string> {
+    const seam = this.deps.executionPolicyService.evaluateCandidateEligibility;
+    if (!seam) {
+      // Pre-WORK-043 port — the destination gate is not wired. Compose a
+      // skip marker so the log row records the gate's absence honestly.
+      return composeSummary(policySummary, {
+        destinationEligibility: { status: 'not_evaluated', eligible: null, reason: 'WORK-043 destination eligibility seam not wired' },
+      });
+    }
+    let verdict;
+    try {
+      verdict = await seam.call(
+        this.deps.executionPolicyService,
+        {
+          // AR-043-04: NO organization context is passed (and none can be):
+          // the concrete service resolves the AUTHORITATIVE organization
+          // scope SERVER-SIDE from the project authority
+          // (wfos_projects.organization_id) — the org-scoped policy
+          // families + the org-scoped agent-policy context are ACTIVE at
+          // this gate exactly as on the recommendation path. The
+          // per-execution agent-policy gate (step 6) still runs downstream
+          // as the STRICTER runtime enforcement.
+          projectId: record.projectId,
+          workItemId: record.workItemId,
+          provider,
+          model,
+          executionMode: input.targetMode,
+          userId: actor.userId,
+        },
+      );
+    } catch (err) {
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-destination: the destination eligibility evaluation failed for execution ${executionId} (${(err as Error).message}) — failing closed`,
+        'handoff-ineligible-destination',
+      );
+    }
+    if (!verdict.eligibility.eligible) {
+      const reasons = verdict.eligibility.blockingReasons
+        .map((b) => `${b.category}/${b.constraint}: ${b.reason}`)
+        .join('; ');
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-destination: the ${input.targetMode} destination ${provider}${model ? `/${model}` : ''} is ineligible for execution ${executionId} (${verdict.eligibility.status}: ${reasons || 'no reason surfaced'}) — the logical task cannot continue on this destination under the current constraints`,
+        'handoff-ineligible-destination',
+      );
+    }
+    return composeSummary(policySummary, {
+      destinationEligibility: {
+        status: verdict.eligibility.status,
+        eligible: true,
+        policyVersion: verdict.policyVersion,
+        provider,
+        model,
+        mode: input.targetMode,
+      },
     });
   }
 
@@ -1837,6 +2015,27 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       if (err instanceof CrossModeHandoffError && err.code === 'claim-fence-lost') {
         throw err;
       }
+      // AR-043-05 (the dispatch admission boundary): the dispatch was NOT
+      // ADMITTED — an active project quota/rate limit would be exceeded.
+      // The admission gate rolled back BEFORE the gate opened (no
+      // reservation, no provider call); the obligation stays PENDING for
+      // the existing reconcile/retry machinery once the constraint frees
+      // capacity (the quota period / rate window rolls). This is RETRYABLE
+      // state (HTTP 429), not an execution failure.
+      if (err instanceof DispatchAdmissionRejectedError) {
+        const d = err.detail;
+        this.deps.logger.warn('cross-mode-handoff.dispatch-admission-rejected', {
+          executionId,
+          category: d.category,
+          constraint: d.constraint,
+          usage: d.usage,
+          limit: d.limit,
+        });
+        throw new CrossModeHandoffError(
+          `handoff-admission-rejected: the native->external dispatch for execution ${executionId} was not admitted (${d.category}/${d.constraint}: ${d.reason})`,
+          'handoff-admission-rejected',
+        );
+      }
       // The dispatch failed — the record stays at mode=external/status=
       // handoff_ready (the mutated intermediate state); the gate stays
       // in_flight at this actor's epoch (the next claim takes it over).
@@ -1920,13 +2119,37 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence
     // evaluated ATOMICALLY with the durable dispatch intent, BEFORE any
     // provider call.
-    const began =
-      await this.deps.crossModeHandoffRepository.beginFencedDispatch(
+    let began: boolean;
+    try {
+      began = await this.deps.crossModeHandoffRepository.beginFencedDispatch(
         lease.handoffId,
         lease.owner,
         lease.claimEpoch,
         dispatchKey,
       );
+    } catch (err) {
+      // AR-043-05 (the dispatch admission boundary): beginFencedDispatch is
+      // the ADMISSION GATE for the native arm — an active project quota/
+      // rate limit rejected this dispatch BEFORE the gate opened (no
+      // reservation, no gateway call, no run row). The obligation stays
+      // PENDING for the existing reconcile/retry machinery; the rejection
+      // is RETRYABLE state (HTTP 429), not an execution failure.
+      if (err instanceof DispatchAdmissionRejectedError) {
+        const d = err.detail;
+        this.deps.logger.warn('cross-mode-handoff.dispatch-admission-rejected', {
+          executionId,
+          category: d.category,
+          constraint: d.constraint,
+          usage: d.usage,
+          limit: d.limit,
+        });
+        throw new CrossModeHandoffError(
+          `handoff-admission-rejected: the external->native dispatch for execution ${executionId} was not admitted (${d.category}/${d.constraint}: ${d.reason})`,
+          'handoff-admission-rejected',
+        );
+      }
+      throw err;
+    }
     if (!began) {
       throw new CrossModeHandoffError(
         `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed before the native dispatch boundary (owner ${lease.owner}, epoch ${lease.claimEpoch}) — aborting BEFORE the provider submit to prevent a second concurrent handoff driver`,

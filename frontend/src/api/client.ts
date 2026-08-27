@@ -1950,7 +1950,12 @@ export type ExecutionEligibilityStatus =
   | 'privacy_blocked'
   | 'project_policy_blocked'
   | 'configuration_missing'
-  | 'provider_temporarily_unavailable';
+  | 'provider_temporarily_unavailable'
+  /** WORK-043 (§33.3) — the new constraint families. */
+  | 'quota_exhausted'
+  | 'rate_limited'
+  | 'security_blocked'
+  | 'agent_policy_blocked';
 
 /** §4 hard constraint categories that compose the eligibility verdict. */
 export type ExecutionConstraintCategory =
@@ -1961,7 +1966,15 @@ export type ExecutionConstraintCategory =
   | 'availability'
   | 'subscription'
   | 'privacy'
-  | 'evidence';
+  | 'evidence'
+  /** WORK-043 (§33.3) — the new constraint families. */
+  | 'quota'
+  | 'rate_limit'
+  | 'security'
+  | 'agent_policy';
+
+/** WORK-043 (§33.3) — the security classification ladder (standard < confidential < restricted). */
+export type SecurityClassification = 'standard' | 'confidential' | 'restricted';
 
 /** §10 capability requirement kinds feeding the eligibility filter. */
 export type CapabilityRequirement =
@@ -2207,6 +2220,13 @@ export interface ProjectPolicyRecord {
   allowedProviders: string[];
   deniedProviders: string[];
   allowedModes: ExecutionMode[];
+  /** WORK-043 (§33.3) — quota / rate-limit / security constraint columns. */
+  maxExecutionsPerMonth: number | null;
+  maxExecutionsPerDay: number | null;
+  rateLimitMaxRequests: number | null;
+  rateLimitWindowSeconds: number | null;
+  securityClassification: SecurityClassification;
+  externalSecurityCeiling: SecurityClassification | null;
   frozen: boolean;
   policyVersion: number;
   createdAt: string;
@@ -2272,6 +2292,13 @@ export interface UpdateProjectPolicyInput {
   allowedProviders?: string[];
   deniedProviders?: string[];
   allowedModes?: ExecutionMode[];
+  /** WORK-043 (§33.3) — quota / rate-limit / security constraint fields. */
+  maxExecutionsPerMonth?: number | null;
+  maxExecutionsPerDay?: number | null;
+  rateLimitMaxRequests?: number | null;
+  rateLimitWindowSeconds?: number | null;
+  securityClassification?: SecurityClassification;
+  externalSecurityCeiling?: SecurityClassification | null;
 }
 
 /** §12 input for PATCH /projects/:projectId/execution-preferences. */

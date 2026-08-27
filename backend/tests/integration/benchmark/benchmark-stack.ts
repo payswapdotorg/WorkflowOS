@@ -216,6 +216,7 @@ export async function buildBenchmarkStack(opts: {
     providers: [deterministicNativeProvider, deterministicExternalProvider],
     auditService,
     logger: logger as never,
+  
   });
   const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
     repository: benchmarkRepository,

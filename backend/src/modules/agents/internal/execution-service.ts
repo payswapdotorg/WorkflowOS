@@ -135,7 +135,11 @@ export class DefaultExecutionService implements ExecutionService {
       await this.deps.sessionService.startSession(session.id);
     }
 
-    // 3. Dispatch through the provider boundary.
+    // 3. Dispatch through the provider boundary. (WORK-043 round 4: the
+    // HARD ADMISSION boundary is the execution record's creation — step 1
+    // above — which crosses assertDispatchAdmission INSIDE its transaction,
+    // advisory-lock-serialized per project. A denied admission never creates
+    // the record and never reaches the provider.)
     let submission;
     try {
       submission = await provider.submit(task);

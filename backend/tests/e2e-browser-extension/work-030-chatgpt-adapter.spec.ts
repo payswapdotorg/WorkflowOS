@@ -209,6 +209,7 @@ test.beforeAll(async () => {
     ],
     auditService,
     logger,
+  
   });
   const executionHandoffService = new DefaultExecutionHandoffService({
     executionRecordRepository: executionRecordRepo,

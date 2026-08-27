@@ -38,6 +38,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
               max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
               human_intervention_allowed, privacy_level,
               allowed_providers, denied_providers, allowed_modes,
+              max_executions_per_month, max_executions_per_day,
+              rate_limit_max_requests, rate_limit_window_seconds,
+              security_classification, external_security_ceiling,
               frozen, policy_version, created_at, updated_at
          FROM wfos_execution_policies
         WHERE project_id = $1
@@ -58,6 +61,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                  max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                  human_intervention_allowed, privacy_level,
                  allowed_providers, denied_providers, allowed_modes,
+                 max_executions_per_month, max_executions_per_day,
+                 rate_limit_max_requests, rate_limit_window_seconds,
+                 security_classification, external_security_ceiling,
                  frozen, policy_version, created_at, updated_at`,
       [organizationId, projectId],
     );
@@ -87,6 +93,13 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
     if (input.allowedProviders != null) push('allowed_providers', Array.from(input.allowedProviders));
     if (input.deniedProviders != null) push('denied_providers', Array.from(input.deniedProviders));
     if (input.allowedModes != null) push('allowed_modes', Array.from(input.allowedModes));
+    // WORK-043 (§33.3): quota + rate-limit + security columns.
+    if ('maxExecutionsPerMonth' in input) push('max_executions_per_month', input.maxExecutionsPerMonth ?? null);
+    if ('maxExecutionsPerDay' in input) push('max_executions_per_day', input.maxExecutionsPerDay ?? null);
+    if ('rateLimitMaxRequests' in input) push('rate_limit_max_requests', input.rateLimitMaxRequests ?? null);
+    if ('rateLimitWindowSeconds' in input) push('rate_limit_window_seconds', input.rateLimitWindowSeconds ?? null);
+    if (input.securityClassification != null) push('security_classification', input.securityClassification);
+    if ('externalSecurityCeiling' in input) push('external_security_ceiling', input.externalSecurityCeiling ?? null);
     if (sets.length === 0) return this.getProjectPolicy(projectId);
     params.push(projectId);
     const res = await this.db.query<ProjectPolicyRow>(
@@ -98,6 +111,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                   max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                   human_intervention_allowed, privacy_level,
                   allowed_providers, denied_providers, allowed_modes,
+                  max_executions_per_month, max_executions_per_day,
+                  rate_limit_max_requests, rate_limit_window_seconds,
+                  security_classification, external_security_ceiling,
                   frozen, policy_version, created_at, updated_at`,
       params,
     );
@@ -115,11 +131,192 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                   max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                   human_intervention_allowed, privacy_level,
                   allowed_providers, denied_providers, allowed_modes,
+                  max_executions_per_month, max_executions_per_day,
+                  rate_limit_max_requests, rate_limit_window_seconds,
+                  security_classification, external_security_ceiling,
                   frozen, policy_version, created_at, updated_at`,
       [projectId],
     );
     const row = res.rows[0];
     return row ? mapProjectPolicy(row) : null;
+  }
+
+  // ---------------------------------------------------------------- usage (WORK-043)
+
+  /**
+   * The AR-043-01 DISPATCH PREDICATE — shared by both usage queries. A
+   * logical execution row counts as EXECUTED only when a durable
+   * provider-dispatch artifact exists:
+   *
+   *   dispatched(e) :=
+   *     EXISTS (SELECT 1 FROM wfos_agent_runs r
+   *              WHERE r.execution_id = e.execution_id)
+   *     OR e.package_json IS NOT NULL
+   *
+   *   - NATIVE arm — wfos_agent_runs IS the durable native provider-operation
+   *     ledger (PR #46 round 8): the AgentGateway creates the run row BEFORE
+   *     invoking the adapter (and only after the adapter-support check), so
+   *     a run row exists IFF the native provider operation actually
+   *     initiated. A FAILED run still counts — the provider operation ran
+   *     and consumed provider capacity. A pre-dispatch rejection (no model,
+   *     no adapter) leaves NO run row and does not count. execution_id is
+   *     UNIQUE on wfos_agent_runs → structurally one run per logical
+   *     execution.
+   *   - EXTERNAL arm — package_json IS the external dispatch artifact: it is
+   *     persisted ONLY by the dispatch-outcome writes (the execution
+   *     service's handoff_ready path and the cross-mode
+   *     completeFencedDispatch gate), both strictly AFTER
+   *     ExternalExecutionProvider.submit() succeeded. A provider-submit
+   *     failure or a fence-lost dispatch leaves package_json NULL and does
+   *     not count.
+   *   - The predicate is deliberately MODE-INDEPENDENT (the artifact
+   *     disjunction): a cross-mode handoff mutates mode BEFORE the target
+   *     dispatch, so a mode-gated predicate would misclassify in-flight and
+   *     failed handoffs.
+   */
+  private static readonly DISPATCHED_PREDICATE = `EXISTS (
+        SELECT 1 FROM wfos_agent_runs r
+         WHERE r.execution_id = e.execution_id
+      )
+      OR e.package_json IS NOT NULL`;
+
+  /**
+   * WORK-043 (§33.3) — QUOTA usage (AR-043-02): counts the project's LOGICAL
+   * EXECUTIONS since `since` — ONE per execution row that actually
+   * dispatched (the AR-043-01 predicate above), project-wide and
+   * deliberately NOT provider-attributed: the policy columns are
+   * max_executions_per_month / max_executions_per_day — the quota's unit is
+   * the LOGICAL EXECUTION, so a cross-mode handed-off execution (two
+   * provider dispatch phases — a native AgentRun row AND an external
+   * package) consumes exactly ONE unit of quota. No parallel usage ledger:
+   * the count is derived from the authoritative records at evaluation time.
+   *
+   * Returns NULL when the query fails: an ACTIVE quota whose usage cannot
+   * be resolved fails CLOSED in the evaluator.
+   */
+  async countProjectDispatchedExecutionsSince(
+    projectId: string,
+    since: Date,
+  ): Promise<number | null> {
+    try {
+      const res = await this.db.query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+           FROM wfos_executions e
+          WHERE e.project_id = $1
+            AND e.created_at >= $2
+            AND (${PgExecutionPolicyRepository.DISPATCHED_PREDICATE})`,
+        [projectId, since],
+      );
+      return Number(res.rows[0]?.c ?? 0);
+    } catch {
+      // Unresolvable usage — the evaluator's fail-closed posture handles it.
+      return null;
+    }
+  }
+
+  /**
+   * WORK-043 (§33.3) — RATE-LIMIT usage (AR-043-02 + AR-043-03): counts the
+   * project's PROVIDER DISPATCH EVENTS since `since` for `provider` — each
+   * ACTUAL dispatch attributed to the provider that dispatched it, never to
+   * the execution row's (mutable, current) provider. The unit is the DISPATCH
+   * EVENT (rate_limit_max_requests per sliding window), so a cross-mode
+   * handed-off execution contributes ONE event to EACH provider that
+   * actually dispatched. Three arms over the EXISTING authoritative
+   * artifacts (NO parallel usage ledger — no dual-write, no drift):
+   *
+   *   1. NATIVE events — one per wfos_agent_runs ledger row, attributed to
+   *      the run row's OWN provider (immutable — updateSuccess/updateFailed
+   *      never touch it). Event time = the run row's created_at (the row is
+   *      created immediately BEFORE the adapter invocation — the dispatch
+   *      initiation). A FAILED run still dispatched.
+   *   2. EXTERNAL events (the CURRENT external phase) — one per package
+   *      artifact on the execution row, attributed to the package's OWN
+   *      `provider` field (ExternalExecutionPackage is self-describing).
+   *      Event time = the package's OWN `dispatchedAt` (AR-043-03): the
+   *      AUTHORITATIVE dispatch-event timestamp stamped by the provider at
+   *      the moment the dispatch initiated — NEVER the execution row's or
+   *      the handoff log row's created_at (both are RESERVATION timestamps
+   *      that can precede the actual dispatch by an arbitrary scheduling
+   *      gap).
+   *   3. EXTERNAL events (a HANDED-OFF-AWAY external phase) — one per
+   *      previous_package_json snapshot in the append-only
+   *      wfos_execution_mode_handoffs log (to_mode = 'native'), attributed
+   *      to the snapshot package's OWN `provider` field. Event time = the
+   *      SNAPSHOT's OWN `dispatchedAt` — the snapshot preserves the
+   *      dispatched-away phase's authoritative dispatch timestamp (again
+   *      NEVER the execution row's creation).
+   *
+   * Arms 2 and 3 are MUTUALLY EXCLUSIVE per external dispatch: arm 2
+   * requires mode = 'external' (the current phase) while arm 3 requires
+   * to_mode = 'native' (the phase was handed off away — transitionMode's
+   * COALESCE RETAINS the prior package on the row, so the row's package
+   * would otherwise be invisible after the handoff). Every external
+   * dispatch is therefore counted EXACTLY ONCE, from exactly one arm.
+   *
+   * FAIL-CLOSED on a missing timestamp: both external arms count the event
+   * when its package lacks `dispatchedAt` (COALESCE(..., TRUE)) — a dispatch
+   * whose event time cannot be resolved is assumed IN the window
+   * (conservative admission control; structurally impossible through the
+   * typed package constructors, which REQUIRE the field). A MALFORMED
+   * dispatchedAt throws in the cast → the whole query returns NULL → the
+   * evaluator fails closed.
+   */
+  async countProjectProviderDispatchesSince(
+    projectId: string,
+    provider: string,
+    since: Date,
+  ): Promise<number | null> {
+    try {
+      const res = await this.db.query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+           FROM (
+                  -- (1) NATIVE dispatch events: the AgentRun ledger row's
+                  --     OWN provider + OWN creation time (the row is created
+                  --     immediately BEFORE the adapter invocation).
+                  SELECT 1
+                    FROM wfos_agent_runs r
+                    JOIN wfos_executions e ON e.execution_id = r.execution_id
+                   WHERE e.project_id = $1
+                     AND r.provider = $2
+                     AND r.created_at >= $3
+                  UNION ALL
+                  -- (2) EXTERNAL dispatch events — the CURRENT external
+                  --     phase's package artifact (self-describing provider).
+                  --     Event time = the package's OWN dispatchedAt — the
+                  --     AUTHORITATIVE dispatch timestamp (AR-043-03), NEVER
+                  --     the execution/handoff-log row creation (reservations).
+                  --     COALESCE(..., TRUE): a package without dispatchedAt
+                  --     counts FAIL-CLOSED (assumed in-window).
+                  SELECT 1
+                    FROM wfos_executions e
+                   WHERE e.project_id = $1
+                     AND e.mode = 'external'
+                     AND e.package_json IS NOT NULL
+                     AND e.package_json->>'provider' = $2
+                     AND COALESCE((e.package_json->>'dispatchedAt')::timestamptz >= $3, TRUE)
+                  UNION ALL
+                  -- (3) EXTERNAL dispatch events — the HANDED-OFF-AWAY
+                  --     external phase's package snapshot in the append-only
+                  --     handoff log. Event time = the SNAPSHOT's OWN
+                  --     dispatchedAt (the snapshot preserves the dispatched-
+                  --     away phase's authoritative dispatch timestamp).
+                  --     COALESCE(..., TRUE): fail-closed as in arm (2).
+                  SELECT 1
+                    FROM wfos_execution_mode_handoffs h
+                    JOIN wfos_executions e ON e.id = h.execution_record_id
+                   WHERE e.project_id = $1
+                     AND h.to_mode = 'native'
+                     AND h.previous_package_json IS NOT NULL
+                     AND h.previous_package_json->>'provider' = $2
+                     AND COALESCE((h.previous_package_json->>'dispatchedAt')::timestamptz >= $3, TRUE)
+                ) dispatch_events`,
+        [projectId, provider, since],
+      );
+      return Number(res.rows[0]?.c ?? 0);
+    } catch {
+      // Unresolvable usage — the evaluator's fail-closed posture handles it.
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------- user prefs
@@ -354,6 +551,9 @@ interface ProjectPolicyRow {
   max_time_to_pr_ms: number | null;
   human_intervention_allowed: boolean; privacy_level: string;
   allowed_providers: string[]; denied_providers: string[]; allowed_modes: string[];
+  max_executions_per_month: number | null; max_executions_per_day: number | null;
+  rate_limit_max_requests: number | null; rate_limit_window_seconds: number | null;
+  security_classification: string; external_security_ceiling: string | null;
   frozen: boolean; policy_version: number;
   created_at: Date; updated_at: Date;
 }
@@ -372,6 +572,12 @@ function mapProjectPolicy(r: ProjectPolicyRow): ProjectPolicyRecord {
     allowedProviders: r.allowed_providers ?? [],
     deniedProviders: r.denied_providers ?? [],
     allowedModes: (r.allowed_modes ?? []) as ('native' | 'external')[],
+    maxExecutionsPerMonth: r.max_executions_per_month,
+    maxExecutionsPerDay: r.max_executions_per_day,
+    rateLimitMaxRequests: r.rate_limit_max_requests,
+    rateLimitWindowSeconds: r.rate_limit_window_seconds,
+    securityClassification: (r.security_classification ?? 'standard') as ProjectPolicyRecord['securityClassification'],
+    externalSecurityCeiling: (r.external_security_ceiling ?? null) as ProjectPolicyRecord['externalSecurityCeiling'],
     frozen: r.frozen, policyVersion: r.policy_version,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };

@@ -309,7 +309,8 @@ describe('PR #35 fix #2 — compare authorization across tenants', () => {
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+  });
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,
       executionService,

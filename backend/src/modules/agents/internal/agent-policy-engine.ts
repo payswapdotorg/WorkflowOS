@@ -386,6 +386,81 @@ export class AgentPolicyEngine implements ToolPolicyGate {
   }
 
   // ====================================================================
+  // WORK-043: project-scoped external execution eligibility (recommendation time)
+  // ====================================================================
+  //
+  // The WORK-043 execution-eligibility engine evaluates EXTERNAL candidates
+  // BEFORE performance ranking (§33.3) — including the agent-policy
+  // external-domain rule (WORK-037 execution modes: "policies apply to
+  // native execution and to external handoff eligibility/observability").
+  // At recommendation time there is NO execution yet, so this ADDITIVE entry
+  // takes the (organizationId, projectId) scope directly — the same
+  // decideForProjectScope precedent as WORK-038's onboarding entry.
+  //
+  // NON-INTERACTIVE (deliberate): an 'ask' effect stays 'ask' — this
+  // evaluation neither CREATES nor CONSULTS a pending approval. There is no
+  // execution to attach the approval interaction to, and a recommendation
+  // must never PRE-APPROVE a future handoff. The eligibility evaluator
+  // treats 'ask' as a hard block for external candidates; the ask→approval
+  // interaction belongs exclusively to the handoff path
+  // (evaluateExternalHandoff, which runs per executionId).
+  //
+  // The runtime enforcement boundary is UNCHANGED: the policy-gated handoff
+  // decorator + the cross-mode-handoff policy gate still call
+  // evaluateExternalHandoff at handoff time. This entry only feeds the
+  // pre-ranking eligibility verdict.
+
+  async evaluateExternalForProject(input: {
+    organizationId: string;
+    projectId: string;
+  }): Promise<AgentPolicyExternalDecision> {
+    try {
+      const resolution = await this.deps.repository.getEffectivePolicy(
+        input.organizationId,
+        input.projectId,
+      );
+      const document = resolution?.document ?? PLATFORM_DEFAULT_AGENT_POLICY_DOCUMENT;
+      const version = resolution?.policyVersion ?? 0;
+      const source = resolution?.source ?? 'platform-default';
+      const match = matchDocument(document, EXTERNAL_TAGS);
+
+      if (match.effect === 'ask') {
+        return {
+          decision: 'ask',
+          reason: reasonFor(version, match, 'external execution requires approval at handoff time (non-interactive recommendation evaluation)'),
+          policyVersion: version,
+          scopeSource: source,
+        };
+      }
+      if (match.effect === 'constrained') {
+        return {
+          decision: 'constrained',
+          reason: reasonFor(version, match, 'external execution under constraints'),
+          policyVersion: version,
+          scopeSource: source,
+          constraints: match.rule?.constraints ?? {},
+        };
+      }
+      return {
+        decision: match.effect as 'allow' | 'deny',
+        reason: reasonFor(version, match, undefined),
+        policyVersion: version,
+        scopeSource: source,
+      };
+    } catch (err) {
+      this.deps.logger.warn('agent-policy.evaluate-external-project-failed', {
+        organizationId: input.organizationId,
+        projectId: input.projectId,
+        error: (err as Error).message,
+      });
+      return this.failClosedExternal(
+        'agent-policy-unavailable',
+        `the policy gate could not evaluate external execution eligibility for project ${input.projectId} (${(err as Error).message}) — failing closed`,
+      );
+    }
+  }
+
+  // ====================================================================
   // The ASK resolution + pending-creation path (shared by native + external)
   // ====================================================================
 

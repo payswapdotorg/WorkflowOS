@@ -763,6 +763,19 @@ export async function workflowRoutes(
           expiresAt: result.expiresAt,
         });
       } catch (err) {
+        // WORK-043 round 4 (AR-043-05 — the dispatch admission boundary):
+        // the execution record's creation was NOT ADMITTED — an active
+        // project quota/rate limit would be exceeded. NO execution row, NO
+        // provider submit, NO audit event happened (the admission gate
+        // rolled back before the insert). 429: RETRYABLE — the quota
+        // period / rate window rolls or a concurrent dispatch's reservation
+        // completes.
+        if ((err as { code?: string })?.code === 'execution-admission-rejected') {
+          return reply.code(429).send({
+            error: 'execution-admission-rejected',
+            message: (err as Error).message,
+          });
+        }
         if (mode === 'native') {
           return reply.code(502).send({
             error: 'agent-gateway-failed',

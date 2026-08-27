@@ -189,7 +189,8 @@ describe('PR #35 fix #1 — snapshot preview is read-only', () => {
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+  });
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,
       executionService,

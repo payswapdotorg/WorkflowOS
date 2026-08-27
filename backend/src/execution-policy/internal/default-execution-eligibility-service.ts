@@ -1,5 +1,5 @@
 /**
- * WORK-033 §3/§4 — ExecutionEligibilityService (the HARD filter).
+ * WORK-033 §3/§4 + WORK-043 §33.3 — ExecutionEligibilityService (the HARD filter).
  *
  * Eligibility is a HARD filter. Benchmark quality MUST NEVER make an
  * ineligible candidate eligible (§3). Every blocking reason names the
@@ -7,8 +7,17 @@
  * show "why" (§19, §23).
  *
  * Constraint precedence (most specific wins the final status):
- *   capability > subscription > privacy > project_policy > policy(org) >
- *   configuration_missing > unavailable > provider_temporarily_unavailable
+ *   capability > subscription > unknown_constrained > privacy > security >
+ *   project_policy > policy(org) > agent_policy > quota_exhausted >
+ *   rate_limited > configuration_missing > unavailable >
+ *   provider_temporarily_unavailable
+ *
+ * WORK-043 (§33.3) adds four families, ALL evaluated BEFORE performance
+ * ranking, ALL fail-closed when an ACTIVE constraint cannot be verified:
+ *   quota        — period execution limits vs. derived usage
+ *   rate_limit   — per-provider sliding-window dispatch limits
+ *   security     — project classification vs. the external-mode ceiling
+ *   agent_policy — the WORK-037 project-scoped external-domain decision
  *
  * Pure function — no I/O. Deterministic. Fully unit-testable.
  */
@@ -21,14 +30,19 @@ import type {
   ExecutionEligibilityService,
   ExecutionEligibilityStatus,
 } from '../types.js';
+import { SECURITY_CLASSIFICATION_RANK } from '../types.js';
 
 const STATUS_PRECEDENCE: readonly ExecutionEligibilityStatus[] = [
   'capability_blocked',
   'subscription_blocked',
   'unknown_constrained',
   'privacy_blocked',
+  'security_blocked',
   'project_policy_blocked',
   'policy_blocked',
+  'agent_policy_blocked',
+  'quota_exhausted',
+  'rate_limited',
   'configuration_missing',
   'unavailable',
   'provider_temporarily_unavailable',
@@ -58,6 +72,15 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
     this.evaluateSubscription(input, blocks, satisfied);
     // §4/§26 Privacy + human-intervention constraints.
     this.evaluatePrivacy(input, blocks, satisfied);
+    // WORK-043 (§33.3): security requirements — the project classification
+    // vs. the external-mode ceiling.
+    this.evaluateSecurity(input, blocks, satisfied);
+    // WORK-043 (§33.3): the WORK-037 project-scoped external-domain decision.
+    this.evaluateAgentPolicy(input, blocks, satisfied);
+    // WORK-043 (§33.3): quota — period execution limits vs. derived usage.
+    this.evaluateQuota(input, blocks, satisfied);
+    // WORK-043 (§33.3): rate limits — per-provider sliding window.
+    this.evaluateRateLimit(input, blocks, satisfied);
 
     if (blocks.length === 0) {
       return {
@@ -95,6 +118,11 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
       // not policy-blocked or unavailable; it CANNOT BE VERIFIED against the
       // constraint, so it is 'unknown_constrained'.
       case 'evidence': return 'unknown_constrained';
+      // WORK-043 (§33.3): the new constraint families.
+      case 'quota': return 'quota_exhausted';
+      case 'rate_limit': return 'rate_limited';
+      case 'security': return 'security_blocked';
+      case 'agent_policy': return 'agent_policy_blocked';
     }
   }
 
@@ -365,6 +393,195 @@ export class DefaultExecutionEligibilityService implements ExecutionEligibilityS
     // external surface requires it, the candidate is ineligible.
     if (!policy.humanInterventionPolicy.allowed && taskProfile.humanInterventionLikely && candidate.executionMode === 'external') {
       blocks.push({ category: 'privacy', constraint: 'human_intervention_disallowed', reason: 'Policy disallows human intervention; external execution may require it.' });
+    }
+  }
+
+  // ----- WORK-043 (§33.3): security requirements -----
+  /**
+   * The project's security classification vs. the classification ceiling the
+   * destination MODE is permitted to carry. Native execution stays inside
+   * the WorkflowOS boundary (subject to the privacy family); EXTERNAL
+   * execution sends code/context to a third-party provider product — a
+   * project classified above the external ceiling must not leave.
+   *
+   *   external + ceiling set + rank(classification) > rank(ceiling)
+   *     → security_blocked
+   *
+   * NULL ceiling = no external security restriction (the existing privacy
+   * family still applies independently).
+   */
+  private evaluateSecurity(
+    input: EligibilityEvaluationInput,
+    blocks: EligibilityBlock[],
+    satisfied: string[],
+  ): void {
+    const { candidate, constraints } = input;
+    const { projectClassification, externalCeiling } = constraints.security;
+    if (candidate.executionMode === 'external' && externalCeiling != null) {
+      const classificationRank = SECURITY_CLASSIFICATION_RANK[projectClassification] ?? 0;
+      const ceilingRank = SECURITY_CLASSIFICATION_RANK[externalCeiling] ?? 0;
+      if (classificationRank > ceilingRank) {
+        blocks.push({
+          category: 'security',
+          constraint: 'external_security_ceiling',
+          reason: `Project security classification '${projectClassification}' exceeds the external execution ceiling '${externalCeiling}' — this work must not leave the native boundary.`,
+        });
+        return;
+      }
+      satisfied.push('security:external_ceiling');
+    } else {
+      satisfied.push('security:within_ceiling');
+    }
+  }
+
+  // ----- WORK-043 (§33.3): agent policy (WORK-037) -----
+  /**
+   * The project-scoped agent-policy external-domain decision, applied to
+   * EXTERNAL candidates (WORK-037 execution modes: "policies apply to native
+   * execution and to external handoff eligibility/observability").
+   *
+   *   deny       → agent_policy_blocked (denied)
+   *   ask        → agent_policy_blocked (approval required — a
+   *                recommendation is NON-INTERACTIVE and cannot pre-approve
+   *                a future handoff; the approval interaction belongs to the
+   *                handoff path)
+   *   unresolved → agent_policy_blocked (FAIL-CLOSED: an unresolvable policy
+   *                constraint is NOT neutral)
+   *   allow | constrained → pass (constrained constraints are ADVISORY to
+   *                the external runtime — the same posture as the WORK-037
+   *                policy-gated handoff decorator).
+   */
+  private evaluateAgentPolicy(
+    input: EligibilityEvaluationInput,
+    blocks: EligibilityBlock[],
+    satisfied: string[],
+  ): void {
+    const { candidate, constraints } = input;
+    if (candidate.executionMode !== 'external') {
+      satisfied.push('agent_policy:native_within_boundary');
+      return;
+    }
+    const decision = constraints.agentPolicy.externalDecision;
+    const reason = constraints.agentPolicy.reason ?? 'no reason surfaced';
+    if (decision === 'deny') {
+      blocks.push({
+        category: 'agent_policy',
+        constraint: 'external_handoff_denied',
+        reason: `Agent policy denies external execution for this project (${reason}).`,
+      });
+    } else if (decision === 'ask') {
+      blocks.push({
+        category: 'agent_policy',
+        constraint: 'external_handoff_approval_required',
+        reason: `Agent policy requires approval for external execution (${reason}) — approve the handoff or select a native candidate.`,
+      });
+    } else if (decision === 'unresolved') {
+      blocks.push({
+        category: 'agent_policy',
+        constraint: 'external_handoff_unresolved',
+        reason: `The agent-policy decision for external execution could not be resolved (${reason}) — failing closed.`,
+      });
+    } else {
+      satisfied.push(`agent_policy:external_${decision}`);
+    }
+  }
+
+  // ----- WORK-043 (§33.3): quota -----
+  /**
+   * Period execution quotas vs. the usage derived from the AUTHORITATIVE
+   * execution records. FAIL-CLOSED (the evaluateConstrainedEvidence
+   * precedent): an ACTIVE quota whose usage is UNRESOLVABLE (null) is NOT
+   * neutral — the candidate cannot be declared eligible against a constraint
+   * that cannot be verified.
+   *
+   *   quota set + usage null      → quota_exhausted (unverifiable, fail-closed)
+   *   quota set + usage ≥ quota   → quota_exhausted
+   *   quota set + usage < quota   → satisfied
+   *   no quota                    → satisfied (no constraint active)
+   */
+  private evaluateQuota(
+    input: EligibilityEvaluationInput,
+    blocks: EligibilityBlock[],
+    satisfied: string[],
+  ): void {
+    const { constraints } = input;
+    const q = constraints.quota;
+    const quotaActive = q.monthlyMaxExecutions != null || q.dailyMaxExecutions != null;
+    if (!quotaActive) {
+      satisfied.push('quota:unlimited');
+      return;
+    }
+    if (q.monthlyMaxExecutions != null) {
+      if (q.monthlyUsed == null) {
+        blocks.push({
+          category: 'quota',
+          constraint: 'monthly_quota_usage_unresolvable',
+          reason: `A monthly execution quota is active (max ${q.monthlyMaxExecutions}) but current usage could not be resolved — it cannot be verified against the quota (fail-closed).`,
+        });
+      } else if (q.monthlyUsed >= q.monthlyMaxExecutions) {
+        blocks.push({
+          category: 'quota',
+          constraint: 'monthly_quota_exhausted',
+          reason: `Monthly execution quota exhausted (${q.monthlyUsed}/${q.monthlyMaxExecutions} used this period).`,
+        });
+      } else {
+        satisfied.push(`quota:monthly_${q.monthlyUsed}/${q.monthlyMaxExecutions}`);
+      }
+    }
+    if (q.dailyMaxExecutions != null) {
+      if (q.dailyUsed == null) {
+        blocks.push({
+          category: 'quota',
+          constraint: 'daily_quota_usage_unresolvable',
+          reason: `A daily execution quota is active (max ${q.dailyMaxExecutions}) but current usage could not be resolved — it cannot be verified against the quota (fail-closed).`,
+        });
+      } else if (q.dailyUsed >= q.dailyMaxExecutions) {
+        blocks.push({
+          category: 'quota',
+          constraint: 'daily_quota_exhausted',
+          reason: `Daily execution quota exhausted (${q.dailyUsed}/${q.dailyMaxExecutions} used today).`,
+        });
+      } else {
+        satisfied.push(`quota:daily_${q.dailyUsed}/${q.dailyMaxExecutions}`);
+      }
+    }
+  }
+
+  // ----- WORK-043 (§33.3): rate limits -----
+  /**
+   * The per-provider sliding-window dispatch limit. The window usage map is
+   * provider-scoped by the orchestrator; a candidate whose provider is
+   * ABSENT from a resolved (non-null) map used 0. FAIL-CLOSED while a limit
+   * is active and the window usage is unresolvable (null map).
+   */
+  private evaluateRateLimit(
+    input: EligibilityEvaluationInput,
+    blocks: EligibilityBlock[],
+    satisfied: string[],
+  ): void {
+    const { candidate, constraints } = input;
+    const rl = constraints.rateLimit;
+    if (rl.maxRequestsPerWindow == null || rl.windowSeconds == null) {
+      satisfied.push('rate_limit:none');
+      return;
+    }
+    if (rl.providerWindowUsage == null) {
+      blocks.push({
+        category: 'rate_limit',
+        constraint: 'rate_limit_usage_unresolvable',
+        reason: `A rate limit is active (max ${rl.maxRequestsPerWindow} per ${rl.windowSeconds}s) but current window usage could not be resolved — it cannot be verified against the limit (fail-closed).`,
+      });
+      return;
+    }
+    const used = rl.providerWindowUsage[candidate.provider] ?? 0;
+    if (used >= rl.maxRequestsPerWindow) {
+      blocks.push({
+        category: 'rate_limit',
+        constraint: 'rate_limit_window_exhausted',
+        reason: `Provider ${candidate.provider} is rate limited (${used}/${rl.maxRequestsPerWindow} dispatches in the last ${rl.windowSeconds}s window).`,
+      });
+    } else {
+      satisfied.push(`rate_limit:${used}/${rl.maxRequestsPerWindow}`);
     }
   }
 }

@@ -206,7 +206,8 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+  });
 
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,

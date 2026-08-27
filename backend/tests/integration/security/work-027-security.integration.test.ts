@@ -186,7 +186,8 @@ describe('WORK-027 — execution handoff security + tenant isolation', () => {
       ],
       auditService,
       logger: stack.db.logger,
-    });
+    
+  });
     const executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository: executionRecordRepo,
       handoffRepository: new PgExecutionHandoffRepository(stack.db.client),

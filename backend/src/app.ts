@@ -277,7 +277,9 @@ import {
   DefaultBenchmarkEvidenceProvider,
   PgExecutionPolicyRepository,
 } from './execution-policy/index.js';
-import type { ExecutionPolicyService } from './execution-policy/index.js';
+import type {
+  ExecutionPolicyService,
+} from './execution-policy/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -1556,8 +1558,32 @@ export async function buildApp(
       taskProfileBuilder: executionTaskProfileBuilder,
       agentProviderRegistry: agentProviderRegistryService,
       benchmarkEvidenceProvider: executionEvidenceProvider,
+      // AR-043-04 (PR #48 round 4): the PROJECT→ORGANIZATION authority — the
+      // eligibility seam resolves the authoritative organization scope
+      // SERVER-SIDE from wfos_projects.organization_id (the projects
+      // module's repository IS the authority; no caller-supplied org id
+      // exists anywhere on the evaluation input). Without this wiring the
+      // single-candidate seam fails closed (an unresolvable scope cannot be
+      // declared unconstrained).
+      projectOrganizationResolver: {
+        resolveProjectOrganization: async (projectId: string) => {
+          const project = await projectRepository!.findById(projectId);
+          return project?.organizationId ?? null;
+        },
+      },
+      // WORK-043 (§33.3): the project-scoped agent-policy external-domain
+      // gate (WORK-037) feeds recommendation-time eligibility for external
+      // candidates. Non-interactive by design — the ask→approval interaction
+      // stays on the handoff path (evaluateExternalHandoff); this gate only
+      // decides the pre-ranking eligibility verdict. The AgentPolicyEngine
+      // structurally satisfies AgentPolicyProjectGateLike.
+      agentPolicyProjectGate: agentPolicyEngine,
     });
-
+    // WORK-043 (final admission): NOW the policy service exists — construct
+    // the concrete admission boundary + bind it into the executionService's
+    // delegating port (see the agents block above for the forward
+    // reference). The org scope is resolved AUTHORITATIVELY from the
+    // Project → Organization relation (never caller-supplied).
     // --- WORK-042: Cross-Mode Execution Handoff. ---
     // Constructed AFTER the execution-policy service (the native target gate
     // consumes getProjectPolicy().nativeExecutionAllowed) + the agent-provider-

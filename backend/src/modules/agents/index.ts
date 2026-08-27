@@ -76,6 +76,8 @@ export type {
   ExecutionEventIngestionService,
   ExecutionSubmitResult,
   ExecutionService,
+  // WORK-043: the provider-independent final admission contract (the
+  // execution-side boundary immediately before provider dispatch).
 } from './internal/execution.types.js';
 
 // WORK-042: Cross-Mode Execution Handoff — the cross-mode transition boundary
@@ -102,6 +104,17 @@ export {
   CROSS_MODE_HANDOFF_ERROR_CODES,
   CROSS_MODE_HANDOFF_RELAY_JOB_TYPE,
 } from './internal/cross-mode-handoff.types.js';
+// WORK-043 round 4 (AR-043-05 — the dispatch admission boundary): the typed
+// admission rejection thrown by the dispatch mutation boundary (the direct
+// execution record creation + the cross-mode handoff's beginFencedDispatch
+// gate). Re-exported for the route layer's 429 mapping + consumer typing.
+export { DispatchAdmissionRejectedError } from './internal/dispatch-admission.js';
+export type {
+  DispatchAdmissionRejectionDetail,
+  DispatchAdmissionCategory,
+  DispatchAdmissionInput,
+} from './internal/dispatch-admission.js';
+export { DISPATCH_RESERVATION_HORIZON_MS } from './internal/dispatch-admission.js';
 // PR #46 review #2: the durable cross-mode-handoff relay (mirrors the
 // WORK-034 session-terminal relay + the WORK-035 workspace-release relay).
 // Wired into the WorkerHost at composition time (app.ts): the job handler is

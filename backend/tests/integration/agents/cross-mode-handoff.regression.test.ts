@@ -37,6 +37,7 @@ import { NativeExecutionProvider } from '../../../src/modules/agents/internal/na
 import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
 import { PgExecutionProviderOperationRepository } from '../../../src/modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { PgCrossModeHandoffRepository } from '../../../src/modules/agents/internal/pg-cross-mode-handoff-repository.js';
+import { EXTERNAL_UI_CATALOG } from '../../../src/modules/agents/internal/agent-provider-registry.types.js';
 import { DefaultCrossModeHandoffService } from '../../../src/modules/agents/internal/default-cross-mode-handoff-service.js';
 import type {
   CrossModeAgentProviderRegistryPort,
@@ -111,6 +112,98 @@ class StubExecutionPolicyService implements CrossModeExecutionPolicyPort {
   constructor(private readonly nativeAllowed: boolean = true) {}
   async getProjectPolicy(_projectId: string): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null> {
     return { nativeExecutionAllowed: this.nativeAllowed, policyVersion: 1 };
+  }
+  // WORK-043 remediation: the destination-eligibility seam is REQUIRED —
+  // the stub returns an ELIGIBLE verdict (the verdict-driven destination
+  // tests live in the WORK-043 destination re-eligibility describe below,
+  // which uses VerdictExecutionPolicyService).
+  async evaluateCandidateEligibility(_input: {
+    organizationId: string;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly { category: string; constraint: string; reason: string }[];
+    };
+    policyVersion: number;
+  }> {
+    return {
+      eligibility: { status: 'eligible', eligible: true, blockingReasons: [] },
+      policyVersion: 1,
+    };
+  }
+}
+
+/**
+ * WORK-043 (§33.3): a stub policy service WITH the destination-eligibility
+ * seam — verdicts are configurable (eligible / ineligible with structured
+ * blocking reasons / throwing). Records every call for seam-input assertions
+ * (provider + model + mode + workItemId are the RESOLVED destination).
+ */
+class VerdictExecutionPolicyService implements CrossModeExecutionPolicyPort {
+  readonly calls: {
+    organizationId: string | null | undefined;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId: string | null | undefined;
+  }[] = [];
+  constructor(
+    private readonly nativeAllowed: boolean = true,
+    private readonly verdict:
+      | { kind: 'eligible' }
+      | { kind: 'ineligible'; status: string; reasons: { category: string; constraint: string; reason: string }[] }
+      | { kind: 'throw' } = { kind: 'eligible' },
+  ) {}
+  async getProjectPolicy(_projectId: string): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null> {
+    return { nativeExecutionAllowed: this.nativeAllowed, policyVersion: 1 };
+  }
+  async evaluateCandidateEligibility(input: {
+    organizationId?: string | null;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly { category: string; constraint: string; reason: string }[];
+    };
+    policyVersion: number;
+  }> {
+    this.calls.push({
+      organizationId: input.organizationId,
+      projectId: input.projectId,
+      workItemId: input.workItemId,
+      provider: input.provider,
+      model: input.model,
+      executionMode: input.executionMode,
+      userId: input.userId,
+    });
+    if (this.verdict.kind === 'throw') {
+      throw new Error('stub evaluation failure');
+    }
+    if (this.verdict.kind === 'ineligible') {
+      return {
+        eligibility: { status: this.verdict.status, eligible: false, blockingReasons: this.verdict.reasons },
+        policyVersion: 7,
+      };
+    }
+    return {
+      eligibility: { status: 'eligible', eligible: true, blockingReasons: [] },
+      policyVersion: 7,
+    };
   }
 }
 
@@ -573,10 +666,14 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   /** Create an external execution record in the given state (with a
    * representative ExternalExecutionPackage persisted on the record so the
    * cross-mode handoff log's previous_package_json snapshot is non-null —
-   * the prior phase's authoritative evidence is preserved). */
+   * the prior phase's authoritative evidence is preserved). AR-043-03: the
+   * optional `dispatchedAt` overrides the package's authoritative
+   * dispatch-event timestamp (back-dating the dispatch for the window /
+   * snapshot-preservation proofs). */
   async function createExternalRecord(
     status: 'handoff_ready' | 'submitted' | 'failed' | 'expired' = 'handoff_ready',
     branch: string | null = 'feat/work-w042-001',
+    dispatchedAt?: Date,
   ): Promise<{ executionId: string; recordId: string }> {
     const executionId = nextExecId();
     const record = await executionRecordRepo.create({
@@ -604,6 +701,9 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         auth: 'x-callback-token', note: 'test package',
       },
       expiration: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      // AR-043-03: the authoritative dispatch-event timestamp (the real
+      // provider stamps it at the package derivation).
+      dispatchedAt: (dispatchedAt ?? new Date()).toISOString(),
     };
     if (status === 'handoff_ready' || status === 'submitted') {
       await executionRecordRepo.updateStatus(record.id, { status, packageValue: pkg });
@@ -1166,6 +1266,61 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // preserved (the correction chain is visible).
       expect(e2nResult.handoff.previousPackageValue).not.toBeNull();
     });
+
+    // #17b (WORK-043 AR-043-03): the handoff SNAPSHOT preserves the external
+    // dispatch's ORIGINAL dispatchedAt byte-for-byte — the recent handoff
+    // reservation NEVER re-stamps the historical dispatch timestamp. This is
+    // the writer-level proof for the handed-off-away arm of the rate-limit
+    // query (the eligibility suite's snapshot proofs gate the window on this
+    // exact value).
+    it('17b. AR-043-03 — the handoff snapshot preserves the external dispatch\'s ORIGINAL dispatchedAt byte-for-byte (the recent handoff reservation NEVER re-stamps the historical dispatch timestamp)', async () => {
+      // An external dispatch whose authoritative dispatchedAt is BACK-DATED
+      // (2000 — the dispatch happened long ago), whose external phase is
+      // handed off to native NOW.
+      const oldDispatch = new Date(Date.UTC(2000, 0, 1));
+      const { executionId } = await createExternalRecord('handoff_ready', undefined, oldDispatch);
+      const recordBefore = await executionRecordRepo.findByExecutionId(executionId);
+      const originalPackage = recordBefore!.packageValue!;
+      expect(originalPackage.dispatchedAt).toBe(oldDispatch.toISOString());
+
+      const result = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `ar43-snap-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+
+      // The snapshot preserves the ORIGINAL package VERBATIM — dispatchedAt
+      // included (byte-for-byte, NOT a re-stamp at the handoff time).
+      expect(result.handoff.fromMode).toBe('external');
+      expect(result.handoff.previousPackageValue).not.toBeNull();
+      expect(result.handoff.previousPackageValue!.dispatchedAt).toBe(oldDispatch.toISOString());
+      expect(result.handoff.previousPackageValue).toEqual(originalPackage);
+
+      // The handoff log row (the RESERVATION) is created NOW — long AFTER
+      // the dispatch — yet the snapshot it carries is the ORIGINAL
+      // dispatch-time package: the reservation timestamp and the
+      // dispatch-event timestamp are DISTINCT, and the snapshot keeps the
+      // latter (the rate-limit window gates on the dispatch event — never
+      // the reservation).
+      const logRow = await stack.db.client.query<{ created_at: Date; previous_package_json: { dispatchedAt: string } }>(
+        `SELECT h.created_at, h.previous_package_json
+           FROM wfos_execution_mode_handoffs h
+           JOIN wfos_executions e ON e.id = h.execution_record_id
+          WHERE e.execution_id = $1`,
+        [executionId],
+      );
+      expect(logRow.rows.length).toBe(1);
+      const reservation = new Date(logRow.rows[0]!.created_at);
+      expect(reservation.getTime(), 'the handoff reservation is NOW (millennia after the 2000 dispatch)').toBeGreaterThan(oldDispatch.getTime() + 60 * 60 * 1000);
+      expect(logRow.rows[0]!.previous_package_json!.dispatchedAt, 'the snapshot carries the ORIGINAL dispatch timestamp — never the reservation time').toBe(oldDispatch.toISOString());
+
+      // The record's RETAINED package (transitionMode COALESCE) is also the
+      // ORIGINAL — the handed-off-away phase's evidence is unchanged on the
+      // row.
+      const recordAfter = await executionRecordRepo.findByExecutionId(executionId);
+      expect(recordAfter!.packageValue!.dispatchedAt).toBe(oldDispatch.toISOString());
+      expect(recordAfter!.packageValue).toEqual(originalPackage);
+    });
   });
 
   // ===========================================================================
@@ -1194,6 +1349,58 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const events = await auditService.listForProject(projectId, { eventTypes: ['EXECUTION_CROSS_MODE_HANDOFF'], limit: 100 });
       const mine = events.filter((e) => e.executionId === executionId);
       expect(mine.length).toBe(1);
+    });
+
+    // #10b (WORK-043 AR-043-03): "same logical handoff retried → no timestamp
+    // mutation" at the SERVICE boundary. A duplicate handoff call (the same
+    // idempotencyKey) converges at the reserve boundary WITHOUT re-dispatching
+    // (claimed:false → the caller never reaches the dispatch): still ONE
+    // durable provider-operation ledger row, and the persisted package —
+    // dispatchedAt included — is byte-identical. (The re-dispatch retry shape
+    // — the reclaiming owner's same-key re-dispatch — is proven with
+    // divergent clocks in the claim-lease concurrency suite, R-W43-#1.)
+    it('10b. AR-043-03 — the same logical handoff RETRIED (a duplicate idempotency-key call) mutates NOTHING: no re-dispatch (still ONE provider-operation ledger row) + the persisted dispatch timestamp is byte-identical', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const idempotencyKey = `ar43-retry-${executionId}`;
+      const first = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(first.handoff.fromMode).toBe('native');
+      // The first dispatch persisted the external package (with its
+      // authoritative dispatchedAt) through the fenced outcome write.
+      const recordAfterFirst = await executionRecordRepo.findByExecutionId(executionId);
+      const firstPackage = recordAfterFirst!.packageValue!;
+      expect(firstPackage.dispatchedAt).toBeTruthy();
+      // The keyed external dispatch left exactly ONE durable
+      // provider-operation ledger row (the ONE dispatch event).
+      const countLedgerRows = async (): Promise<number> => {
+        const res = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations WHERE execution_id = $1`,
+          [executionId],
+        );
+        return Number(res.rows[0]?.c ?? 0);
+      };
+      expect(await countLedgerRows()).toBe(1);
+
+      // The SAME logical handoff retried: converges at the reserve boundary
+      // (no second handoff log row, no re-dispatch).
+      const second = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(second.handoff.id).toBe(first.handoff.id);
+      expect(await countHandoffsForExecution(executionId)).toBe(1);
+      // Still ONE dispatch event — the retry never reached the provider.
+      expect(await countLedgerRows()).toBe(1);
+
+      // The persisted dispatch timestamp is UNCHANGED (byte-identical
+      // package — the retry wrote NOTHING).
+      const recordAfterSecond = await executionRecordRepo.findByExecutionId(executionId);
+      expect(recordAfterSecond!.packageValue).toEqual(firstPackage);
+      expect(recordAfterSecond!.packageValue!.dispatchedAt).toBe(firstPackage.dispatchedAt);
     });
 
     // #11: concurrent handoff has one winner.
@@ -2647,6 +2854,319 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const after = await executionRecordRepo.findByExecutionId(executionId);
       expect(after!.mode).toBe('external');
       expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // WORK-043 (§33.3) — destination RE-ELIGIBILITY (the full constraint engine
+  // applied to the RESOLVED destination candidate at handoff time).
+  // =========================================================================
+  /** WORK-043 (§33.3) + round 4: build a handoff service with the given
+   * execution-policy port (shared by the destination-gate + admission
+   * describes — the real repositories, the real providers). */
+  function serviceWith(policy: CrossModeExecutionPolicyPort): DefaultCrossModeHandoffService {
+    return new DefaultCrossModeHandoffService({
+      executionRecordRepository: executionRecordRepo,
+      crossModeHandoffRepository: crossModeHandoffRepo,
+      executionTaskService,
+      nativeExecutionProvider,
+      externalExecutionProvider,
+      agentRunRepository: agentRunRepo,
+      agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+      executionPolicyService: policy,
+      agentProviderRegistryService: new StubAgentProviderRegistry(),
+      executionSessionService,
+      agentWorkspaceService,
+      auditService,
+      logger: stack.db.logger,
+      queue: new InMemoryQueue(),
+    });
+  }
+
+  describe('WORK-043 destination re-eligibility', () => {
+
+    // 43a: an INELIGIBLE external destination (quota-exhausted) rejects the
+    // handoff BEFORE the reserve (side-effect-free) with EVERY blocking
+    // reason named in the error.
+    it('43a. quota-exhausted external destination → handoff-ineligible-destination with the named reasons, NO side effects', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, {
+        kind: 'ineligible',
+        status: 'quota_exhausted',
+        reasons: [
+          { category: 'quota', constraint: 'monthly_quota_exhausted', reason: 'Monthly execution quota exhausted (10/10 used this period).' },
+        ],
+      });
+      const svc = serviceWith(policy);
+      const err = await svc.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-q-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('quota_exhausted');
+      expect((err as Error).message).toContain('monthly_quota_exhausted');
+      expect((err as Error).message).toContain('Monthly execution quota exhausted');
+      // The seam saw the RESOLVED destination (external + the catalog
+      // provider) + the execution's work item + the actor.
+      expect(policy.calls).toHaveLength(1);
+      expect(policy.calls[0]!.executionMode).toBe('external');
+      expect(policy.calls[0]!.provider).toBeTruthy();
+      expect(policy.calls[0]!.userId).toBe('test-user');
+      // Side-effect-free rejection: mode unchanged, no handoff log row.
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('native');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43b: an INELIGIBLE native destination (security-blocked) rejects an
+    // external→native handoff the same way.
+    it('43b. security-blocked native destination → handoff-ineligible-destination (external→native)', async () => {
+      const { executionId } = await createExternalRecord('handoff_ready');
+      const policy = new VerdictExecutionPolicyService(true, {
+        kind: 'ineligible',
+        status: 'security_blocked',
+        reasons: [
+          { category: 'security', constraint: 'external_security_ceiling', reason: "Project security classification 'restricted' exceeds the external execution ceiling 'confidential'." },
+        ],
+      });
+      const err = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `w043-s-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('security_blocked');
+      // The seam saw the RESOLVED native destination (provider + model).
+      expect(policy.calls[0]!.executionMode).toBe('native');
+      expect(policy.calls[0]!.provider).toBe('fake');
+      expect(policy.calls[0]!.model).toBe('test-model');
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('external');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43c: a THROWING evaluation fails CLOSED (an unresolvable constraint
+    // evaluation is NOT neutral).
+    it('43c. a throwing evaluation → fail-closed handoff-ineligible-destination', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, { kind: 'throw' });
+      const err = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-t-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('failing closed');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43d: an ELIGIBLE destination proceeds AND the verdict is composed into
+    // the handoff log row's policy_decision (the audit trail).
+    it('43d. eligible destination → handoff proceeds + the verdict is recorded on the append-only log row', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, { kind: 'eligible' });
+      const result = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-e-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(result.handoff).toBeTruthy();
+      expect(result.record.mode).toBe('external');
+      // The composed summary: the original external policy decision + the
+      // destinationEligibility block (status/policyVersion/provider/mode).
+      const parsed = JSON.parse(result.handoff.policyDecision ?? '{}') as Record<string, unknown>;
+      expect(parsed.target).toBe('external');
+      const dest = parsed.destinationEligibility as {
+        status: string; eligible: boolean; policyVersion: number; provider: string; mode: string;
+      };
+      expect(dest.status).toBe('eligible');
+      expect(dest.eligible).toBe(true);
+      expect(dest.policyVersion).toBe(7);
+      expect(dest.mode).toBe('external');
+      expect(dest.provider).toBeTruthy();
+    });
+
+    // 43e (WORK-043 remediation): the destination-eligibility seam is
+    // MANDATORY — the pre-WORK-043 optional-seam bypass ('not_evaluated') is
+    // REMOVED. Every port implements the seam (the interface requires it);
+    // even the permissive stub's verdict is EVALUATED + recorded — there is
+    // no code path that skips the destination gate.
+    it("43e. the MANDATORY destination gate always evaluates — the permissive stub's eligible verdict is recorded (no not_evaluated bypass)", async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const result = await serviceWith(new StubExecutionPolicyService(true)).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-n-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(result.record.mode).toBe('external');
+      const parsed = JSON.parse(result.handoff.policyDecision ?? '{}') as Record<string, unknown>;
+      const dest = parsed.destinationEligibility as { status: string; eligible: boolean };
+      expect(dest.status).toBe('eligible');
+      expect(dest.eligible).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PR #48 round 4 — AR-043-05: the DISPATCH ADMISSION BOUNDARY at the
+  // cross-mode handoff (the architect's exact two-actor scenario,
+  // end-to-end through the REAL repository boundary).
+  //
+  //   Both actors pass the ADVISORY destination gate (eligible=true — the
+  //   stub port's verdict mirrors what the real engine returns at
+  //   usage=0/limit=N: both eligible). Both proceed to dispatch. The HARD
+  //   ADMISSION boundary — beginFencedDispatch, advisory-lock-serialized
+  //   per project, atomic with the gate-open — admits EXACTLY ONE: the
+  //   loser is 'handoff-admission-rejected' BEFORE the provider submit,
+  //   with its obligation left PENDING (recoverable by the existing
+  //   reconcile once the window frees capacity).
+  //
+  // The rate limit is set to (the project's CURRENT in-window 'zai'
+  // dispatch count + 1) so the race has exactly one unit of remaining
+  // capacity regardless of the earlier tests' dispatch fixtures.
+  // ---------------------------------------------------------------------------
+  describe('WORK-043 round 4 — the DISPATCH ADMISSION BOUNDARY (AR-043-05)', () => {
+    // The architect's scenario, single-actor form, end-to-end through the
+    // REAL repository boundary + the REAL service flow:
+    //
+    //   the ADVISORY destination gate returns eligible=true (usage 0 < the
+    //   limit — the stub port's verdict mirrors what the real engine
+    //   returns at usage=0), the window is ALREADY saturated by another
+    //   execution's dispatch, and the HARD ADMISSION boundary —
+    //   beginFencedDispatch, advisory-lock-serialized per project, atomic
+    //   with the gate-open — rejects the dispatch BEFORE the provider call
+    //   with the typed 'handoff-admission-rejected' error, leaving the
+    //   obligation PENDING for the existing reconcile/retry machinery.
+    //
+    // (The TRUE two-actor race — two independent connections, exactly one
+    // admitted — is proven at BOTH boundaries in
+    // dispatch-admission.regression.test.ts R4-B/R4-C/R4-F, the established
+    // second-client concurrency harness. This test proves the SERVICE
+    // semantics around the boundary: the error mapping, the no-provider-call
+    // guarantee, and the recoverable post-state.)
+    it('R4-#1. advisory gate ELIGIBLE + a saturated window → the dispatch is admission-rejected at the boundary BEFORE the provider call; the obligation stays PENDING (recoverable); no package is written', async () => {
+      // Seed a SATURATED per-provider window: a dispatched external
+      // execution whose package artifact is attributed to the destination
+      // provider (arm 2 of the rate-pressure derivation — the same
+      // authoritative evidence the advisory engine derives usage from).
+      const destinationProvider = EXTERNAL_UI_CATALOG[0]!.provider;
+      // Create the fixtures FIRST (before the policy row exists — the
+      // admission boundary is a no-op without active limits), then
+      // activate the limit, then hand off.
+      const seed = await createExternalRecord('handoff_ready');
+      // (createExternalRecord's package carries provider 'external' —
+      // rewrite it to the destination provider so the window pressure is
+      // attributed correctly.)
+      await stack.db.client.query(
+        `UPDATE wfos_executions
+            SET package_json = jsonb_set(package_json, '{provider}', $2::jsonb)
+          WHERE execution_id = $1`,
+        [seed.executionId, JSON.stringify(destinationProvider)],
+      );
+      const { executionId } = await createNativeRecord('failed');
+      await stack.db.client.query(
+        `INSERT INTO wfos_execution_policies
+           (organization_id, project_id, rate_limit_max_requests, rate_limit_window_seconds)
+         VALUES ($1, $2, 1, 3600)
+         ON CONFLICT (project_id) DO UPDATE SET
+           rate_limit_max_requests = EXCLUDED.rate_limit_max_requests,
+           rate_limit_window_seconds = EXCLUDED.rate_limit_window_seconds`,
+        [orgId, projectId],
+      );
+      try {
+        const policy = new VerdictExecutionPolicyService(true, { kind: 'eligible' });
+        const err = await serviceWith(policy)
+          .handoff(
+            executionId,
+            { targetMode: 'external', idempotencyKey: `r4-1-${executionId}` },
+            { userId: 'test-user', source: 'cmh-test' },
+          )
+          .catch((e) => e);
+
+        // The ADVISORY gate passed (the eligible verdict was recorded on
+        // the composed summary path BEFORE the boundary rejected).
+        expect(policy.calls).toHaveLength(1);
+        expect(policy.calls[0]!.executionMode).toBe('external');
+
+        // ...but the HARD boundary rejected the dispatch.
+        expect(err).toBeInstanceOf(CrossModeHandoffError);
+        expect((err as CrossModeHandoffError).code).toBe('handoff-admission-rejected');
+        expect((err as Error).message).toContain('rate_limit_window_exhausted');
+        expect((err as Error).message).toContain(destinationProvider);
+
+        // NO provider dispatch happened for the rejected handoff: the
+        // record is the mutated recoverable intermediate (mode=external)
+        // with NO package artifact.
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.mode).toBe('external');
+        expect(after!.packageValue).toBeNull();
+        // No external provider-operation ledger row was ever registered
+        // (the rejection preceded the provider submit entirely).
+        const ops = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations
+            WHERE execution_id = $1`,
+          [executionId],
+        );
+        expect(Number(ops.rows[0]!.c)).toBe(0);
+
+        // The obligation stays PENDING (recoverable): the existing
+        // reconcile re-drives the dispatch once the window frees capacity.
+        const obligation = await stack.db.client.query<{ discharged_at: string | null; dispatch_state: string | null }>(
+          `SELECT o.discharged_at, o.dispatch_state
+             FROM wfos_cross_mode_handoff_obligations o
+             JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+             JOIN wfos_executions e ON e.id = h.execution_record_id
+            WHERE e.execution_id = $1`,
+          [executionId],
+        );
+        expect(obligation.rows).toHaveLength(1);
+        expect(obligation.rows[0]!.discharged_at).toBeNull();
+        // The gate was NEVER opened (the admission check rolled back before
+        // the gate-open — no reservation leaked).
+        expect(obligation.rows[0]!.dispatch_state).toBeNull();
+
+        // The recoverable semantics: a SAME-KEY retry of the handoff
+        // converges onto the EXISTING pending obligation (the idempotent
+        // no-op — the caller retry NEVER re-drives the dispatch; the
+        // durable relay/boot-sweep machinery owns the re-drive). The
+        // obligation stays PENDING, still no package, still no provider
+        // operation — the admission rejection left the obligation in the
+        // exact state the reconcile machinery recovers from.
+        const retry = await serviceWith(new VerdictExecutionPolicyService(true, { kind: 'eligible' }))
+          .handoff(
+            executionId,
+            { targetMode: 'external', idempotencyKey: `r4-1-${executionId}` },
+            { userId: 'test-user', source: 'cmh-test' },
+          );
+        expect(retry.handoff.id).toBeTruthy();
+        const afterRetry = await executionRecordRepo.findByExecutionId(executionId);
+        expect(afterRetry!.packageValue).toBeNull();
+        const obligationAfterRetry = await stack.db.client.query<{ discharged_at: string | null }>(
+          `SELECT o.discharged_at
+             FROM wfos_cross_mode_handoff_obligations o
+             JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+             JOIN wfos_executions e ON e.id = h.execution_record_id
+            WHERE e.execution_id = $1`,
+          [executionId],
+        );
+        expect(obligationAfterRetry.rows[0]!.discharged_at).toBeNull();
+        const opsAfterRetry = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations
+            WHERE execution_id = $1`,
+          [executionId],
+        );
+        expect(Number(opsAfterRetry.rows[0]!.c)).toBe(0);
+      } finally {
+        // Remove the admission policy row — the rest of the file's tests
+        // run with no active limits (the fast path).
+        await stack.db.client.query(
+          `DELETE FROM wfos_execution_policies WHERE project_id = $1`,
+          [projectId],
+        );
+      }
     });
   });
 });

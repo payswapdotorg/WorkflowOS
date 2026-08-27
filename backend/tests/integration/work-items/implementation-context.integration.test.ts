@@ -183,7 +183,8 @@ describe('WORK-026 — ImplementationContext + start-implementation', () => {
       providers: [nativeExecutionProvider],
       auditService: new DefaultAuditService(stack.db.client, stack.db.logger),
       logger: stack.db.logger,
-    });
+    
+  });
     const startImplementationService = new DefaultStartImplementationService({
       executionTaskService,
       executionService,

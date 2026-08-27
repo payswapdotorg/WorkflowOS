@@ -168,6 +168,12 @@ export async function executionPolicyRoutes(app: FastifyInstance, deps: Executio
         if (msg.includes('execution-policy-invalid-mode-constraint')) {
           return reply.code(400).send({ error: 'invalid-mode-constraint', message: msg });
         }
+        // WORK-043 (§33.3): invalid quota / rate-limit / security field
+        // combinations are client-supplied semantics errors → 400 (the
+        // migration-0050 CHECKs are the DB backstop).
+        if (msg.includes('execution-policy-invalid-constraint')) {
+          return reply.code(400).send({ error: 'invalid-policy-constraint', message: msg });
+        }
         if (msg.includes('frozen')) return reply.code(409).send({ error: 'policy-frozen', message: msg });
         return reply.code(404).send({ error: 'not-found', message: msg });
       }
