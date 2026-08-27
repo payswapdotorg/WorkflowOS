@@ -70,7 +70,8 @@ describe('ARCH-001..004 — architecture management', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
-        architectureService: stack.architectureService,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
+      architectureService: stack.architectureService,
       },
     });
     await server.ready();

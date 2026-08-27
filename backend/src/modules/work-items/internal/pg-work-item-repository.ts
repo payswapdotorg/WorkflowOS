@@ -32,11 +32,12 @@ export class PgWorkItemRepository implements WorkItemRepository {
     const result = await this.db.query<WiRow>(
       `INSERT INTO wfos_work_items
          (architecture_version_id, work_item_id, title, objective, scope,
-          out_of_scope, architecture_constraints, assignee, execution_metadata, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          out_of_scope, architecture_constraints, assignee, execution_metadata, metadata,
+          architecture_impact)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
-                 completed, metadata, created_at, updated_at`,
+                 completed, metadata, architecture_impact, created_at, updated_at`,
       [
         input.architectureVersionId,
         input.workItemId,
@@ -48,6 +49,11 @@ export class PgWorkItemRepository implements WorkItemRepository {
         input.assignee ?? null,
         JSON.stringify(input.executionMetadata ?? {}),
         JSON.stringify(input.metadata ?? {}),
+        // WORK-051 round 1 (HIGH — protected impact): the governed, monotonic
+        // declaration. Deliberately absent from UpdateWorkItemInput; the
+        // migration-0054 trigger rejects any weakening at the persistence
+        // layer.
+        input.architectureImpact ?? null,
       ],
     );
     return mapWi(result.rows[0]!);
@@ -57,7 +63,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
     const result = await this.db.query<WiRow>(
       `SELECT id, architecture_version_id, work_item_id, title, objective, scope,
               out_of_scope, architecture_constraints, assignee, execution_metadata,
-              completed, metadata, created_at, updated_at
+              completed, metadata, architecture_impact, created_at, updated_at
        FROM wfos_work_items WHERE id = $1`,
       [id],
     );
@@ -69,7 +75,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
     const result = await this.db.query<WiRow>(
       `SELECT id, architecture_version_id, work_item_id, title, objective, scope,
               out_of_scope, architecture_constraints, assignee, execution_metadata,
-              completed, metadata, created_at, updated_at
+              completed, metadata, architecture_impact, created_at, updated_at
        FROM wfos_work_items WHERE architecture_version_id = $1
        ORDER BY work_item_id`,
       [architectureVersionId],
@@ -96,7 +102,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
       `UPDATE wfos_work_items SET ${sets.join(', ')} WHERE id = $1
        RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
-                 completed, metadata, created_at, updated_at`,
+                 completed, metadata, architecture_impact, created_at, updated_at`,
       params,
     );
     if (result.rows.length === 0) return null;
@@ -108,7 +114,7 @@ export class PgWorkItemRepository implements WorkItemRepository {
       `UPDATE wfos_work_items SET completed = $1 WHERE id = $2
        RETURNING id, architecture_version_id, work_item_id, title, objective, scope,
                  out_of_scope, architecture_constraints, assignee, execution_metadata,
-                 completed, metadata, created_at, updated_at`,
+                 completed, metadata, architecture_impact, created_at, updated_at`,
       [completed, id],
     );
     if (result.rows.length === 0) return null;
@@ -456,6 +462,7 @@ interface WiRow {
   execution_metadata: Record<string, unknown>;
   completed: boolean;
   metadata: Record<string, unknown>;
+  architecture_impact: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -522,6 +529,7 @@ function mapWi(row: WiRow): WorkItem {
     executionMetadata: row.execution_metadata ?? {},
     completed: row.completed,
     metadata: row.metadata ?? {},
+    architectureImpact: (row.architecture_impact as WorkItem['architectureImpact']) ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

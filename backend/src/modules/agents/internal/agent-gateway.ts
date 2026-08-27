@@ -4,6 +4,7 @@ import type {
   AgentGateway, AgentRequest, AgentExecutionResult, AgentError,
   AgentProviderAdapter,
 } from './agent.types.js';
+import { AgentPullRequestProhibitedError } from './agent.types.js';
 import { PgAgentRunRepository } from './pg-agent-repository.js';
 
 /** Deterministic fake agent adapter for tests. */
@@ -37,12 +38,18 @@ export class FakeAgentAdapter implements AgentProviderAdapter {
         provider: this.providerName, retryable: this.failure.retryable,
       } as AgentError;
     }
+    // WORK-051 round 1 (BLOCKER 2): a CONTRACT-ABIDING provider honors the
+    // pull-request policy — under 'prohibited' it never creates a PR (the
+    // implementation commits to the branch; PR creation is a separate,
+    // post-gate operation owned by the orchestrator's PR boundary).
+    const prohibited = request.pullRequestPolicy === 'prohibited';
     return {
       status: 'success', output: this.output,
       startedAt: new Date(), completedAt: new Date(),
       executionId: request.executionId, provider: this.providerName,
       configuration: request.configuration,
-      commitRef: 'abc123', pullRequestRef: 'github:owner/repo#1',
+      commitRef: 'abc123',
+      pullRequestRef: prohibited ? null : 'github:owner/repo#1',
       reportedTests: [{ name: 'test-1', status: 'pass' }],
       reportedBlockers: [],
       error: null, metadata: {},
@@ -89,10 +96,35 @@ export class DefaultAgentGateway implements AgentGateway {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const result = await adapter.execute(request);
+        // WORK-051 round 1 (PR #52 review, BLOCKER 2): CONTRACT ENFORCEMENT —
+        // a provider that reports a pull request for a 'prohibited' phase
+        // violates the agent contract. The gateway fails the run and throws
+        // the typed error: the pre-checkpoint phase STRUCTURALLY cannot yield
+        // a PR, no matter what the provider did.
+        if (
+          request.pullRequestPolicy === 'prohibited' &&
+          result.pullRequestRef !== null &&
+          result.pullRequestRef !== undefined &&
+          result.pullRequestRef !== ''
+        ) {
+          const violation = new AgentPullRequestProhibitedError(
+            request.provider,
+            request.executionId,
+            result.pullRequestRef,
+          );
+          await this.runRepo.updateFailed(run.id, violation, attempt);
+          this.logger.warn('agent.execute.pr_prohibited_violation', {
+            executionId: request.executionId,
+            provider: request.provider,
+            pullRequestRef: result.pullRequestRef,
+          });
+          throw violation;
+        }
         await this.runRepo.updateSuccess(run.id, result);
         this.logger.info('agent.execute.success', { executionId: request.executionId, attempt });
         return result;
       } catch (err) {
+        if (err instanceof AgentPullRequestProhibitedError) throw err;
         lastError = err as AgentError;
         if (!lastError.retryable || attempt >= this.maxRetries) {
           await this.runRepo.updateFailed(run.id, lastError, attempt);

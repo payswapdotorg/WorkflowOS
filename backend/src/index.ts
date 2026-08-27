@@ -88,6 +88,7 @@ async function main(): Promise<void> {
       app.deps.architectureVersionRepository &&
       app.deps.architectureDecisionRepository &&
       app.deps.architectureChangeRequestRepository &&
+      app.deps.architectureAssertionRepository &&
       app.deps.architectureService
         ? {
             architecture: {
@@ -97,6 +98,9 @@ async function main(): Promise<void> {
               architectureVersionRepository: app.deps.architectureVersionRepository,
               architectureDecisionRepository: app.deps.architectureDecisionRepository,
               architectureChangeRequestRepository: app.deps.architectureChangeRequestRepository,
+              // WORK-051: the assertion store (the governed population path
+              // for a version's assertion set before freeze).
+              architectureAssertionRepository: app.deps.architectureAssertionRepository,
               architectureService: app.deps.architectureService,
             },
           }

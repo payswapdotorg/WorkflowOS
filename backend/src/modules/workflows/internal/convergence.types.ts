@@ -423,6 +423,53 @@ export interface ArchitectureCheckpointGate {
   evaluate(input: ArchitectureCheckpointGateInput): Promise<ArchitectureCheckpointGateResult>;
 }
 
+// --- WORK-051 round 1 (PR #52 review, BLOCKER 2): the PR-creation boundary ---
+//
+// The governed convergence path is a TWO-STAGE protocol:
+//
+//   stage 1 — the pre-gate implementation phase: the agent executes with
+//     pullRequestPolicy 'prohibited' (structurally cannot yield a PR; the
+//     gateway enforces the contract with a typed violation error);
+//   stage 2 — PR creation, ONLY after the pr_conformance checkpoint allows
+//     it, through THIS port: the actual PR-creation boundary owned by the
+//     orchestrator's PR path, satisfied in production by the /github
+//     authority's createPullRequest (repository coordinates resolved
+//     SERVER-SIDE from the project's /github link).
+//
+// The architectural property is structural: with a blocking architecture
+// violation, ZERO createPullRequest side effects occur; a PR exists in the
+// governed lifecycle only when the gate allowed it first. A pullRequestRef
+// reported by an EXTERNAL actor (e.g. a human opening a PR on GitHub) is
+// adopted by the webhook path — and is only associated + transitioned into
+// the governed lifecycle after the same gate passes.
+
+/** The result of a governed PR creation. */
+export interface CreatedPullRequest {
+  /** The provider-independent PR identity (e.g. 'github:owner/repo#12'). */
+  readonly externalPrId: string;
+  /** The PR head commit reported by the PR authority (null when unknown). */
+  readonly headCommit: string | null;
+}
+
+/**
+ * The PR-creation boundary consumed by the WorkflowOrchestrator. Called ONLY
+ * after the pr_conformance checkpoint gate allows progression — never before,
+ * never as an agent side effect.
+ */
+export interface PullRequestCreationPort {
+  createPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    workItemId: string;
+    /** The EXACT implementation revision the checkpoint gated on. */
+    headRevision: string;
+    /** The implementation branch (when known — used as the PR head). */
+    branch: string | null;
+    title: string;
+    body?: string | null;
+  }): Promise<CreatedPullRequest>;
+}
+
 /**
  * Typed error thrown by the orchestrator when a lifecycle operation is
  * refused because the architecture checkpoint gate denied progression

@@ -7,14 +7,18 @@
  * (issue #51: "No scheduler/cron/setInterval in this initial increment").
  *
  * detectorConfig:
- *   rootDir: string (required)
+ *   rootPath: string (default '' — the repository root) — repository-relative
+ *     scan root (must be observable at the bound revision, else inconclusive
+ *     — fail closed)
  *   forbiddenPatterns: Array<{
  *     pathIncludes: string,   // files whose path contains this are checked
  *     pattern: string,        // regex source applied to file contents
  *     description: string,    // human-readable rule name
  *   }> (required)
  *
- * Deterministic: violations in (rule, relativePath) order.
+ * Deterministic: violations in (rule, path) order. Reads EXCLUSIVELY through
+ * the revision-bound snapshot (PR #52 round 1, BLOCKER 1) — an unobservable
+ * tree is INCONCLUSIVE, never a zero-file pass (PR #52 round 1, HIGH).
  */
 
 import type {
@@ -22,7 +26,11 @@ import type {
   DetectorInput,
   DetectorResult,
 } from '../../types.js';
-import { byRelativePath, stripCodeComments, walkFiles } from './file-tree.js';
+import {
+  snapshotFailureMessage,
+  stripCodeComments,
+  walkSnapshotFiles,
+} from './snapshot-tree.js';
 
 interface ForbiddenPattern {
   pathIncludes: string;
@@ -34,13 +42,22 @@ export class RuntimeConfigurationDetector implements ArchitectureAssertionDetect
   readonly detectorKind = 'runtime-configuration';
 
   async evaluate(input: DetectorInput): Promise<DetectorResult> {
+    const snapshot = input.snapshot;
+    if (!snapshot) {
+      return {
+        status: 'not_applicable',
+        summary:
+          `no implementation snapshot is bound at the ${input.checkpointKind} checkpoint — ` +
+          'this assertion applies to revision-bound checkpoints only',
+      };
+    }
     const cfg = input.assertion.detectorConfig ?? {};
-    const rootDir = typeof cfg.rootDir === 'string' ? cfg.rootDir : null;
+    const rootPath = typeof cfg.rootPath === 'string' ? cfg.rootPath : '';
     const raw = cfg.forbiddenPatterns;
-    if (!rootDir || !Array.isArray(raw) || raw.length === 0) {
+    if (!Array.isArray(raw) || raw.length === 0) {
       return {
         status: 'inconclusive',
-        summary: 'detectorConfig requires rootDir and a non-empty forbiddenPatterns list',
+        summary: 'detectorConfig requires a non-empty forbiddenPatterns list',
       };
     }
     const rules: ForbiddenPattern[] = [];
@@ -67,11 +84,21 @@ export class RuntimeConfigurationDetector implements ArchitectureAssertionDetect
       };
     }
 
-    const files = walkFiles(rootDir, '.ts').sort(byRelativePath);
+    let files;
+    try {
+      files = await walkSnapshotFiles(snapshot, rootPath, '.ts');
+    } catch (err) {
+      return {
+        status: 'inconclusive',
+        summary:
+          `the governed tree could not be inspected — ${snapshotFailureMessage(err, rootPath || '/', snapshot.revision)}`,
+      };
+    }
+
     const violations: string[] = [];
     for (const file of files) {
       for (const rule of rules) {
-        if (!file.relativePath.includes(rule.pathIncludes)) continue;
+        if (!file.path.includes(rule.pathIncludes)) continue;
         let re: RegExp;
         try {
           re = new RegExp(rule.pattern);
@@ -85,7 +112,7 @@ export class RuntimeConfigurationDetector implements ArchitectureAssertionDetect
         // static-architecture precedent).
         if (re.test(stripCodeComments(file.source))) {
           violations.push(
-            `${file.relativePath}: ${rule.description} (matches /${rule.pattern}/)`,
+            `${file.path}: ${rule.description} (matches /${rule.pattern}/)`,
           );
         }
       }
@@ -100,7 +127,7 @@ export class RuntimeConfigurationDetector implements ArchitectureAssertionDetect
     }
     return {
       status: 'pass',
-      summary: `no forbidden runtime patterns (${rules.length} rule(s), ${files.length} files checked)`,
+      summary: `no forbidden runtime patterns at revision ${snapshot.revision} (${rules.length} rule(s), ${files.length} files checked)`,
     };
   }
 }

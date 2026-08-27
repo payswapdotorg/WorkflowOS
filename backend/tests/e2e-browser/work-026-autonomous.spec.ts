@@ -412,6 +412,7 @@ test.beforeAll(async () => {
     stack.projectRepository,
     new AllowAllCheckpointGate(),
     generateExecutionId,
+      new FakePullRequestCreationPort(),
   );
 
   // WORK-026 (SUB-B): /runtime module — DeploymentService + RuntimeStatusService.
@@ -494,6 +495,7 @@ test.beforeAll(async () => {
       architectureVersionRepository: stack.architectureVersionRepository,
       architectureDecisionRepository: stack.architectureDecisionRepository,
       architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+      architectureAssertionRepository: stack.architectureAssertionRepository,
       architectureService: stack.architectureService,
     },
     workItems: {
@@ -841,10 +843,12 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     // ---------------------------------------------------------------
     // 8. Freeze the architecture version.
     // ---------------------------------------------------------------
+    // WORK-051 round 1: the governed no-assertions declaration.
     const freezeRes = await server.inject({
       method: 'POST',
       url: `/architecture-versions/${versionId}/freeze`,
       headers: { 'x-api-key': API_KEY },
+      payload: { allowEmptyAssertionSet: true },
     });
     expect(freezeRes.statusCode).toBe(200);
     expect((freezeRes.json() as { state: string }).state).toBe('frozen');
@@ -1338,3 +1342,4 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     expect(eventTypes).toContain('WORKFLOW_TRANSITION');
   });
 });
+import { FakePullRequestCreationPort } from '../helpers/fake-pr-creation-port.js';

@@ -153,7 +153,11 @@ import type { WorkflowOrchestrator, ArchitectureCheckpointGate } from '@modules/
 import {
   DefaultArchitectureCheckpointService,
   createDefaultDetectorRegistry,
+  GithubRepositorySnapshotProvider,
 } from '@root/architecture-checkpoints/index.js';
+// WORK-051 round 1 (BLOCKER 2): the production PR-creation boundary — the
+// orchestrator's governed PR creation through /github's createPullRequest.
+import { GithubBackedPullRequestCreationPort } from './modules/workflows/internal/github-pr-creation-port.js';
 import { DefaultAgentGateway } from './modules/agents/internal/agent-gateway.js';
 import type { AgentGateway } from '@modules/agents/index.js';
 import { PgAgentRunRepository } from './modules/agents/internal/pg-agent-repository.js';
@@ -920,6 +924,12 @@ export async function buildApp(
       logger,
       database,
     );
+    // --- /github module: project↔GitHub repository provisioning (SUB-C). ---
+    // (Assigned BEFORE the orchestrator block: the WORK-051 wiring below —
+    // the revision-bound snapshot reader and the governed PR-creation port —
+    // resolves repository coordinates through this authority row.)
+    projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(database);
+
     // WORK-017/018: workflow orchestrator (convergence loop). Requires
     // Redis for the queue — constructed only when redisClient is available.
     if (redisClient) {
@@ -929,6 +939,11 @@ export async function buildApp(
       // /verification) and returns the gating result the orchestrator
       // consumes before each gated lifecycle transition. The readers are
       // the STRUCTURALLY NARROWED read-only views (no mutation capability).
+      //
+      // WORK-051 round 1 (BLOCKER 1): the snapshot reader opens EXACT-REVISION
+      // repository snapshots through the /github authority's content reads
+      // (repository coordinates resolved server-side from the project's
+      // /github link) — detectors never read the working tree.
       const architectureCheckpointGate: ArchitectureCheckpointGate =
         new DefaultArchitectureCheckpointService({
           workItemReader: workItemRepository,
@@ -936,9 +951,21 @@ export async function buildApp(
           architectureReader: architectureRepository,
           assertionReader: architectureAssertionRepository,
           verificationService,
+          snapshotReader: new GithubRepositorySnapshotProvider(
+            projectGitHubRepositoryRepository,
+            githubAdapter,
+          ),
           detectors: createDefaultDetectorRegistry(),
           logger,
         });
+      // WORK-051 round 1 (BLOCKER 2): the ACTUAL PR-creation boundary — the
+      // orchestrator creates a governed PR through /github's
+      // createPullRequest ONLY after the pr_conformance checkpoint allows
+      // it (never as a pre-gate agent side effect).
+      const pullRequestCreationPort = new GithubBackedPullRequestCreationPort(
+        projectGitHubRepositoryRepository,
+        githubAdapter,
+      );
       orchestrator = new DefaultWorkflowOrchestrator(
         database, logger, queue, workflowEngine,
         workItemRepository, workOrderRepository, depService,
@@ -949,6 +976,7 @@ export async function buildApp(
         verificationService, reviewService, githubAdapter,
         architectureVersionRepository, architectureRepository,
         projectRepository, architectureCheckpointGate, generateExecutionId,
+        pullRequestCreationPort,
       );
     }
     authProvider = new ApiKeyAuthProvider(database, secretStore);
@@ -995,9 +1023,6 @@ export async function buildApp(
         reason: 'VERCEL_API_TOKEN not set; runtime deployments surface not-configured',
       });
     }
-
-    // --- /github module: project↔GitHub repository provisioning (SUB-C). ---
-    projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(database);
 
     // --- /work-items module: ImplementationContextBuilder (SUB-D). ---
     // The builder consumes the 10 repository deps + 4 optional callback

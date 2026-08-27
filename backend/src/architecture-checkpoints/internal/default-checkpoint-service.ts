@@ -7,27 +7,38 @@
  *      SERVER-SIDE (work item → version → architecture → project). Caller
  *      identity is never trusted: the expected project is VALIDATED against
  *      the resolved project and a mismatch throws BEFORE any detector runs.
- *   2. Derive the impact profile (metadata.architectureImpact, fail-closed
- *      default 'high') and check checkpoint applicability.
+ *   2. Derive the impact profile from the GOVERNED work-item declaration
+ *      (`architectureImpact` — monotonic, migration-0054 protected; NEVER
+ *      mutable metadata), fail-closed default 'high', and check checkpoint
+ *      applicability.
  *   3. Idempotent replay: an identical idempotency key with a recorded
- *      completed checkpoint returns the recorded result (determinism across
- *      signal retries).
+ *      completed checkpoint returns the recorded result. The identity is the
+ *      DURABLE /verification orchestration key (unique, indexed) — not a
+ *      metadata scan (PR #52 round 1, BLOCKER 4).
  *   4. Revision-bound kinds (pr_conformance, verification_entry) require an
  *      implementation revision — a null revision is 'inconclusive' (fail
- *      closed).
+ *      closed) — and open the EXACT-REVISION repository snapshot through the
+ *      /github authority (BLOCKER 1). A revision that cannot be bound to a
+ *      snapshot (no linked repository, unresolvable ref) is 'inconclusive'
+ *      (fail closed) — detectors NEVER read the working tree.
  *   5. The governing version must be FROZEN (immutable) — anything else is
  *      'inconclusive' (fail closed).
  *   6. Evaluate the version's assertion set with the deterministic
  *      detectors (appliesToCheckpoints pre-filter, unknown-detector ⇒
- *      inconclusive).
+ *      inconclusive). An EMPTY assertion set is 'inconclusive' (fail closed)
+ *      unless the Architecture authority explicitly froze the version as
+ *      assertion-free (allowEmptyAssertionSet ⇒ metadata.assertionSetPolicy
+ *      === 'none-declared') — a governed checkpoint can never vacuously
+ *      PASS with no executable rules (PR #52 round 1, HIGH).
  *   7. Aggregate: any blocking fail OR blocking inconclusive ⇒ 'blocked'
  *      (fail-closed); else any advisory fail/inconclusive ⇒
  *      'passed_with_advisories'; else 'passed'.
  *   8. Persist the FULL traceability chain through the /verification public
- *      contract (createRun → one Evidence row per assertion → one summary
- *      Evidence row → finalizeOrchestrationRun). Every later checkpoint
- *      creates a NEW revision-bound run — a prior result is never
- *      overwritten.
+ *      contract in ONE ATOMIC transaction (recordOrchestrationRun: the run
+ *      row + one Evidence row per assertion + one summary Evidence row + the
+ *      terminal finalization — a crash at any point leaves NOTHING). Every
+ *      later checkpoint creates a NEW revision-bound run — a prior result is
+ *      never overwritten.
  *
  * The service NEVER mutates workflow state (no WorkflowEngine, no
  * workflow-transition calls), NEVER writes architecture definitions (the
@@ -50,6 +61,8 @@ import type {
   AssertionEvaluation,
   DetectorInput,
   DetectorResult,
+  RepositorySnapshot,
+  RepositorySnapshotReader,
   VerificationService,
   WorkItemReader,
 } from '../types.js';
@@ -71,6 +84,13 @@ export interface DefaultArchitectureCheckpointServiceDeps {
     listForVersion(architectureVersionId: string): Promise<ArchitectureAssertion[]>;
   };
   verificationService: VerificationService;
+  /**
+   * The EXACT-REVISION snapshot source (PR #52 round 1, BLOCKER 1): opens
+   * repository snapshots through the /github authority's content reads.
+   * Repository coordinates are resolved SERVER-SIDE from the project's
+   * /github link.
+   */
+  snapshotReader: RepositorySnapshotReader;
   detectors: Map<string, import('../types.js').ArchitectureAssertionDetector>;
   logger?: Logger;
 }
@@ -130,6 +150,8 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
     }
 
     // --- 3. Impact profile + applicability -------------------------------
+    // Derivation reads the GOVERNED, monotonic work-item declaration ONLY
+    // (PR #52 round 1, HIGH) — mutable metadata is not a governance input.
     const impact = deriveImpact(workItem);
     const applicableKinds = IMPACT_CHECKPOINT_MATRIX[input.checkpointKind];
     const applicable = applicableKinds.includes(impact);
@@ -160,10 +182,13 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       };
     }
 
-    // --- 4. Idempotent replay ---------------------------------------------
+    // --- 4. Idempotent replay (the DURABLE /verification identity) --------
     if (input.idempotencyKey) {
-      const replay = await this.findRecordedResult(input.workItemId, input.idempotencyKey);
-      if (replay) {
+      const recorded = await this.deps.verificationService.findOrchestrationRun(
+        this.orchestrationKey(input),
+      );
+      if (recorded && (recorded.status === 'completed' || recorded.status === 'failed')) {
+        const replay = this.resultFromRecordedRun(recorded, input.workItemId);
         this.deps.logger?.info('checkpoint.replayed', {
           workItemId: input.workItemId,
           checkpointKind: input.checkpointKind,
@@ -194,6 +219,29 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       );
     }
 
+    // The EXACT-REVISION snapshot (BLOCKER 1): repository-backed detectors
+    // may ONLY read a snapshot bound to the claimed revision. No snapshot ⇒
+    // inconclusive ⇒ blocking assertions block. There is NO working-tree
+    // fallback, ever.
+    let snapshot: RepositorySnapshot | null = null;
+    if (REVISION_BOUND_KINDS.includes(input.checkpointKind) && implementationRevision) {
+      try {
+        snapshot = await this.deps.snapshotReader.openSnapshot(
+          architecture.projectId,
+          implementationRevision,
+        );
+      } catch (err) {
+        contextReasons.push(
+          `the implementation revision ${implementationRevision} could not be bound to a repository snapshot: ${(err as Error).message} (fail closed)`,
+        );
+      }
+      if (snapshot === null) {
+        contextReasons.push(
+          'the project has no linked repository — the claimed implementation revision cannot be evaluated against any revision-bound snapshot (fail closed)',
+        );
+      }
+    }
+
     if (contextReasons.length > 0) {
       const result: ArchitectureCheckpointResult = {
         checkpointKind: input.checkpointKind,
@@ -221,10 +269,71 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
 
     // --- 6. Evaluate the assertion set ------------------------------------
     const assertions = await this.deps.assertionReader.listForVersion(version.id);
+
+    // Empty-set contract (PR #52 round 1, HIGH): a governed checkpoint with
+    // NO executable architectural rules is INCONCLUSIVE (fail closed) unless
+    // the Architecture authority explicitly froze the version as
+    // assertion-free (freeze-time allowEmptyAssertionSet declaration, durable
+    // on the immutable version row).
+    if (assertions.length === 0) {
+      const declaredEmpty =
+        version.metadata?.assertionSetPolicy === 'none-declared';
+      if (!declaredEmpty) {
+        const result: ArchitectureCheckpointResult = {
+          checkpointKind: input.checkpointKind,
+          workItemId: input.workItemId,
+          architectureVersionId: version.id,
+          implementationRevision,
+          impact,
+          applicable: true,
+          status: 'inconclusive',
+          allowed: false,
+          evaluations: [],
+          blockingFindings: [
+            'the governing architecture version has no architecture assertions and no explicit no-assertions declaration — conformance cannot be proven by an empty rule set (fail closed; freeze with an assertion set, or explicitly declare the version assertion-free at freeze time)',
+          ],
+          advisories: [],
+          checkpointId: null,
+          replayed: false,
+          evaluatedAt: new Date().toISOString(),
+        };
+        result.checkpointId = await this.persistCheckpointEvidence(
+          architecture.projectId,
+          result,
+          input,
+        );
+        return result;
+      }
+      // Explicitly assertion-free version: nothing to evaluate — a PASS with
+      // zero evaluations is the DECLARED contract, recorded in the evidence.
+      const result: ArchitectureCheckpointResult = {
+        checkpointKind: input.checkpointKind,
+        workItemId: input.workItemId,
+        architectureVersionId: version.id,
+        implementationRevision,
+        impact,
+        applicable: true,
+        status: 'passed',
+        allowed: true,
+        evaluations: [],
+        blockingFindings: [],
+        advisories: [],
+        checkpointId: null,
+        replayed: false,
+        evaluatedAt: new Date().toISOString(),
+      };
+      result.checkpointId = await this.persistCheckpointEvidence(
+        architecture.projectId,
+        result,
+        input,
+      );
+      return result;
+    }
+
     const evaluations: AssertionEvaluation[] = [];
     for (const assertion of assertions) {
       evaluations.push(
-        await this.evaluateAssertion(assertion, input, {
+        await this.evaluateAssertion(assertion, input, snapshot, {
           projectId: architecture.projectId,
           workItemId: input.workItemId,
           architectureVersionId: version.id,
@@ -272,7 +381,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       evaluatedAt: new Date().toISOString(),
     };
 
-    // --- 8. Durable evidence through /verification ------------------------
+    // --- 8. Durable evidence through /verification (ONE atomic record) ----
     result.checkpointId = await this.persistCheckpointEvidence(
       architecture.projectId,
       result,
@@ -288,6 +397,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
   private async evaluateAssertion(
     assertion: ArchitectureAssertion,
     input: ArchitectureCheckpointGateInput,
+    snapshot: RepositorySnapshot | null,
     context: DetectorInput['context'],
   ): Promise<AssertionEvaluation> {
     const cfg = assertion.detectorConfig ?? {};
@@ -325,7 +435,12 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
 
     let result: DetectorResult;
     try {
-      result = await detector.evaluate({ assertion, checkpointKind: input.checkpointKind, context });
+      result = await detector.evaluate({
+        assertion,
+        checkpointKind: input.checkpointKind,
+        snapshot,
+        context,
+      });
     } catch (err) {
       // A detector crash is an INCONCLUSIVE evaluation — never a pass.
       result = {
@@ -345,8 +460,19 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
   }
 
   // -------------------------------------------------------------------------
-  // Evidence persistence (through the /verification public contract ONLY)
+  // Evidence persistence (through the /verification public contract ONLY —
+  // ONE atomic record: run + evidence rows + finalization)
   // -------------------------------------------------------------------------
+
+  /**
+   * The durable orchestration identity for this evaluation. The caller's
+   * idempotency key names the logical evaluation; the checkpoint kind +
+   * work item scope it. (BLOCKER 4: the identity lives in /verification as a
+   * UNIQUE indexed column — not in scanned metadata.)
+   */
+  private orchestrationKey(input: ArchitectureCheckpointGateInput): string {
+    return `${input.workItemId}:checkpoint:${input.checkpointKind}:${input.idempotencyKey}`;
+  }
 
   private async persistCheckpointEvidence(
     projectId: string,
@@ -359,54 +485,35 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
     //   ArchitectureVersion → WorkItem → implementation revision →
     //     assertion set (one Evidence row per assertion) → checkpoint
     //     result (summary Evidence row + run summary).
-    let runId: string | null = null;
-    try {
-      const run = await this.deps.verificationService.createRun({
-        projectId,
-        workItemId: result.workItemId,
-        workOrderId: input.workOrderId ?? null,
-        architectureVersionId: result.architectureVersionId,
-        source: CHECKPOINT_RUN_SOURCE,
-        sourceRef: result.implementationRevision ?? result.checkpointKind,
-        executionId: input.executionId,
-        metadata: {
-          checkpointKind: result.checkpointKind,
-          implementationRevision: result.implementationRevision,
-          impact: result.impact,
-          checkpointIdempotencyKey: input.idempotencyKey ?? null,
-          workOrderId: input.workOrderId ?? null,
-        },
-      });
-      runId = run.id;
-
+    //
+    // PR #52 round 1 (BLOCKER 4 + crash safety): the entire record — run
+    // row, every evidence row, and the terminal finalization — is written
+    // through ONE recordOrchestrationRun transaction. Concurrent callers
+    // with the same key converge on the single run; a crash at ANY point
+    // leaves NOTHING (no pending run, no partial evidence). There is no
+    // cleanup path because no partial state can exist.
+    const evidence = [
       // One Evidence row per assertion evaluation (deterministic order).
-      for (const e of result.evaluations) {
-        await this.deps.verificationService.attachEvidence({
-          projectId,
-          verificationRunId: run.id,
-          evidenceType: 'architecture-assertion',
-          provider: 'architecture-checkpoint',
-          externalRef: e.assertionId,
-          headSha: result.implementationRevision,
-          result: detectorStatusToEvidenceResult(e.status),
-          contentSummary: `${e.status}: ${e.summary}`,
-          metadata: {
-            assertionId: e.assertionId,
-            assertionRowId: e.assertionRowId,
-            severity: e.severity,
-            detectorKind: e.detectorKind,
-            detectorStatus: e.status,
-            checkpointKind: result.checkpointKind,
-            architectureVersionId: result.architectureVersionId,
-            details: e.details,
-          },
-        });
-      }
-
+      ...result.evaluations.map((e) => ({
+        evidenceType: 'architecture-assertion',
+        provider: 'architecture-checkpoint',
+        externalRef: e.assertionId,
+        headSha: result.implementationRevision,
+        result: detectorStatusToEvidenceResult(e.status),
+        contentSummary: `${e.status}: ${e.summary}`,
+        metadata: {
+          assertionId: e.assertionId,
+          assertionRowId: e.assertionRowId,
+          severity: e.severity,
+          detectorKind: e.detectorKind,
+          detectorStatus: e.status,
+          checkpointKind: result.checkpointKind,
+          architectureVersionId: result.architectureVersionId,
+          details: e.details,
+        },
+      })),
       // The summary Evidence row: the checkpoint result itself.
-      await this.deps.verificationService.attachEvidence({
-        projectId,
-        verificationRunId: run.id,
+      {
         evidenceType: 'architecture-checkpoint',
         provider: 'architecture-checkpoint',
         externalRef: result.checkpointKind,
@@ -424,71 +531,74 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
           advisories: result.advisories,
           evaluationCount: result.evaluations.length,
         },
-      });
+      },
+    ];
 
-      // Finalize the run through /verification — a checkpoint evaluation
-      // that completes (even a 'blocked' verdict) is a COMPLETED evaluation
-      // whose result lives in the summary. Never re-finalized, never
-      // overwritten: the next checkpoint creates a NEW run.
-      await this.deps.verificationService.finalizeOrchestrationRun({
-        verificationRunId: run.id,
-        status: 'completed',
-        summary: {
+    const summary = {
+      checkpointKind: result.checkpointKind,
+      status: result.status,
+      allowed: result.allowed,
+      impact: result.impact,
+      architectureVersionId: result.architectureVersionId,
+      implementationRevision: result.implementationRevision,
+      blockingFindings: result.blockingFindings,
+      advisories: result.advisories,
+      checkpointIdempotencyKey: input.idempotencyKey ?? null,
+      evaluationSummaries: result.evaluations.map((e) => ({
+        assertionId: e.assertionId,
+        severity: e.severity,
+        detectorKind: e.detectorKind,
+        status: e.status,
+        summary: e.summary,
+      })),
+    };
+
+    const recorded = await this.deps.verificationService.recordOrchestrationRun({
+      run: {
+        projectId,
+        workItemId: result.workItemId,
+        workOrderId: input.workOrderId ?? null,
+        architectureVersionId: result.architectureVersionId,
+        source: CHECKPOINT_RUN_SOURCE,
+        sourceRef: result.implementationRevision ?? result.checkpointKind,
+        executionId: input.executionId,
+        metadata: {
           checkpointKind: result.checkpointKind,
-          status: result.status,
-          allowed: result.allowed,
-          impact: result.impact,
-          architectureVersionId: result.architectureVersionId,
           implementationRevision: result.implementationRevision,
-          blockingFindings: result.blockingFindings,
-          advisories: result.advisories,
+          impact: result.impact,
           checkpointIdempotencyKey: input.idempotencyKey ?? null,
-          evaluationSummaries: result.evaluations.map((e) => ({
-            assertionId: e.assertionId,
-            severity: e.severity,
-            detectorKind: e.detectorKind,
-            status: e.status,
-            summary: e.summary,
-          })),
+          workOrderId: input.workOrderId ?? null,
         },
-      });
-      return run.id;
-    } catch (err) {
-      // Fail closed on evidence-persistence errors — but never leave a
-      // pending checkpoint run behind (beginVerification's run-reuse query
-      // must never adopt an orphaned checkpoint run).
-      if (runId) {
-        try {
-          await this.deps.verificationService.finalizeOrchestrationRun({
-            verificationRunId: runId,
-            status: 'failed',
-            summary: { checkpointKind: result.checkpointKind },
-            errorMetadata: { error: (err as Error).message },
-          });
-        } catch {
-          // best-effort cleanup only; the original error propagates
-        }
-      }
-      throw err;
-    }
+        orchestrationKey: this.orchestrationKey(input),
+      },
+      evidence,
+      finalize: {
+        // A checkpoint evaluation that completes (even a 'blocked' verdict)
+        // is a COMPLETED evaluation whose result lives in the summary. Never
+        // re-finalized, never overwritten: the next checkpoint creates a NEW
+        // run.
+        status: 'completed',
+        summary,
+      },
+    });
+    return recorded.run.id;
   }
 
   // -------------------------------------------------------------------------
-  // Idempotent replay
+  // Idempotent replay (the durable identity lookup)
   // -------------------------------------------------------------------------
 
-  private async findRecordedResult(
+  private resultFromRecordedRun(
+    recorded: {
+      id: string;
+      architectureVersionId: string;
+      metadata: Record<string, unknown>;
+      summary: Record<string, unknown>;
+      finishedAt: Date | null;
+      createdAt: Date;
+    },
     workItemId: string,
-    idempotencyKey: string,
-  ): Promise<ArchitectureCheckpointResult | null> {
-    const runs = await this.deps.verificationService.listRunsForWorkItem(workItemId);
-    const recorded = runs.find(
-      (r) =>
-        r.source === CHECKPOINT_RUN_SOURCE &&
-        r.status === 'completed' &&
-        r.metadata?.checkpointIdempotencyKey === idempotencyKey,
-    );
-    if (!recorded) return null;
+  ): ArchitectureCheckpointResult {
     const s = recorded.summary ?? {};
     return {
       checkpointKind: (s.checkpointKind as ArchitectureCheckpointKind) ?? 'pr_conformance',
@@ -515,9 +625,16 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Impact derivation: explicit metadata value or the fail-closed default 'high'. */
-export function deriveImpact(workItem: { metadata?: Record<string, unknown> }): ArchitectureImpactLevel {
-  const declared = workItem.metadata?.architectureImpact;
+/**
+ * Impact derivation (PR #52 round 1, HIGH — protected impact): the Work
+ * Item's GOVERNED declaration only. The column is set at creation and can
+ * only STRENGTHEN (migration-0054 trigger); the mutable-metadata update
+ * contract cannot touch it. Unset ⇒ fail-closed 'high'.
+ */
+export function deriveImpact(workItem: {
+  architectureImpact?: 'low' | 'medium' | 'high' | null;
+}): ArchitectureImpactLevel {
+  const declared = workItem.architectureImpact;
   if (declared === 'low' || declared === 'medium' || declared === 'high') {
     return declared;
   }

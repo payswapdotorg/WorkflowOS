@@ -98,7 +98,8 @@ describe('WORK-016 — Architect Reviews and Review Findings', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
-        architectureService: stack.architectureService,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
+      architectureService: stack.architectureService,
       },
       workItems: {
         authorizationService: stack.authorizationService,

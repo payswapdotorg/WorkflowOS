@@ -7,48 +7,54 @@
  * (design §7 "interface/contract detector").
  *
  * detectorConfig:
- *   rootDir: string (required)
  *   modulesDir: string (default 'src/modules')
  *   moduleDir: string (required) — the module whose barrel is asserted
  *   symbol: string (required) — the export name that must be present
  *
- * Deterministic: a pure read of the barrel source.
+ * Deterministic: a pure read of the barrel source AT THE BOUND REVISION
+ * (PR #52 round 1, BLOCKER 1). An unreadable or absent barrel is
+ * 'inconclusive' (fail closed) — never a pass.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type {
   ArchitectureAssertionDetector,
   DetectorInput,
   DetectorResult,
 } from '../../types.js';
+import { readRequiredFile, snapshotFailureMessage } from './snapshot-tree.js';
 
 export class InterfaceContractDetector implements ArchitectureAssertionDetector {
   readonly detectorKind = 'interface-contract';
 
   async evaluate(input: DetectorInput): Promise<DetectorResult> {
+    const snapshot = input.snapshot;
+    if (!snapshot) {
+      return {
+        status: 'not_applicable',
+        summary:
+          `no implementation snapshot is bound at the ${input.checkpointKind} checkpoint — ` +
+          'this assertion applies to revision-bound checkpoints only',
+      };
+    }
     const cfg = input.assertion.detectorConfig ?? {};
-    const rootDir = typeof cfg.rootDir === 'string' ? cfg.rootDir : null;
     const moduleDir = typeof cfg.moduleDir === 'string' ? cfg.moduleDir : null;
     const symbol = typeof cfg.symbol === 'string' ? cfg.symbol : null;
-    if (!rootDir || !moduleDir || !symbol) {
+    if (!moduleDir || !symbol) {
       return {
         status: 'inconclusive',
-        summary: 'detectorConfig requires rootDir, moduleDir, and symbol',
+        summary: 'detectorConfig requires moduleDir and symbol',
       };
     }
     const modulesDir = typeof cfg.modulesDir === 'string' ? cfg.modulesDir : 'src/modules';
-    const barrelPath = join(
-      rootDir.replace(/\/+$/, ''), modulesDir, moduleDir, 'index.ts',
-    );
+    const barrelPath = `${modulesDir.replace(/^\/+|\/+$/g, '')}/${moduleDir}/index.ts`;
 
     let source: string;
     try {
-      source = readFileSync(barrelPath, 'utf8');
-    } catch {
+      source = await readRequiredFile(snapshot, barrelPath);
+    } catch (err) {
       return {
         status: 'inconclusive',
-        summary: `module barrel ${modulesDir}/${moduleDir}/index.ts is unreadable`,
+        summary: `the governed tree could not be inspected — ${snapshotFailureMessage(err, barrelPath, snapshot.revision)}`,
       };
     }
 
@@ -59,12 +65,12 @@ export class InterfaceContractDetector implements ArchitectureAssertionDetector 
     if (!exportRe.test(source)) {
       return {
         status: 'fail',
-        summary: `the /${moduleDir} public barrel no longer exports ${symbol}`,
+        summary: `the /${moduleDir} public barrel at revision ${snapshot.revision} no longer exports ${symbol}`,
       };
     }
     return {
       status: 'pass',
-      summary: `the /${moduleDir} public barrel exports ${symbol}`,
+      summary: `the /${moduleDir} public barrel at revision ${snapshot.revision} exports ${symbol}`,
     };
   }
 }

@@ -2,29 +2,29 @@
  * WORK-051 — the workflow-transition detector
  * (`detectorKind: 'workflow-transition'`).
  *
- * Asserts that the canonical LEGAL_TRANSITIONS map in the live source still
- * equals the transition graph declared in the assertion's detectorConfig —
- * the machine-checkable guard against introducing new lifecycle states or
- * illegal transitions (design §7 "workflow-transition detector"; issue #51
- * "no new workflow states").
+ * Asserts that the canonical LEGAL_TRANSITIONS map in the source AT THE
+ * BOUND REVISION still equals the transition graph declared in the
+ * assertion's detectorConfig — the machine-checkable guard against
+ * introducing new lifecycle states or illegal transitions (design §7
+ * "workflow-transition detector"; issue #51 "no new workflow states").
  *
  * detectorConfig:
- *   rootDir: string (required)
- *   transitionsFile: string (required) — path of the file containing
- *     LEGAL_TRANSITIONS, relative to rootDir
+ *   transitionsFile: string (required) — repository-relative path of the file
+ *     containing LEGAL_TRANSITIONS. Missing/unreadable at the bound revision
+ *     ⇒ 'inconclusive' (fail closed).
  *   expectedTransitions: Record<string, string[]> (required) — the frozen
  *     transition graph as data
  *
- * Deterministic: a pure read + literal parse + deep comparison.
+ * Deterministic: a pure read + literal parse + deep comparison through the
+ * revision-bound snapshot (PR #52 round 1, BLOCKER 1).
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type {
   ArchitectureAssertionDetector,
   DetectorInput,
   DetectorResult,
 } from '../../types.js';
+import { readRequiredFile, snapshotFailureMessage } from './snapshot-tree.js';
 
 function parseLegalTransitions(source: string): Record<string, string[]> | null {
   const start = source.indexOf('LEGAL_TRANSITIONS');
@@ -64,26 +64,32 @@ export class WorkflowTransitionDetector implements ArchitectureAssertionDetector
   readonly detectorKind = 'workflow-transition';
 
   async evaluate(input: DetectorInput): Promise<DetectorResult> {
+    const snapshot = input.snapshot;
+    if (!snapshot) {
+      return {
+        status: 'not_applicable',
+        summary:
+          `no implementation snapshot is bound at the ${input.checkpointKind} checkpoint — ` +
+          'this assertion applies to revision-bound checkpoints only',
+      };
+    }
     const cfg = input.assertion.detectorConfig ?? {};
-    const rootDir = typeof cfg.rootDir === 'string' ? cfg.rootDir : null;
     const transitionsFile = typeof cfg.transitionsFile === 'string' ? cfg.transitionsFile : null;
     const expected = cfg.expectedTransitions;
-    if (!rootDir || !transitionsFile || typeof expected !== 'object' || expected === null) {
+    if (!transitionsFile || typeof expected !== 'object' || expected === null) {
       return {
         status: 'inconclusive',
-        summary:
-          'detectorConfig requires rootDir, transitionsFile, and expectedTransitions',
+        summary: 'detectorConfig requires transitionsFile and expectedTransitions',
       };
     }
 
-    const filePath = join(rootDir.replace(/\/+$/, ''), transitionsFile);
     let source: string;
     try {
-      source = readFileSync(filePath, 'utf8');
-    } catch {
+      source = await readRequiredFile(snapshot, transitionsFile);
+    } catch (err) {
       return {
         status: 'inconclusive',
-        summary: `transitions file ${transitionsFile} is unreadable`,
+        summary: `the governed tree could not be inspected — ${snapshotFailureMessage(err, transitionsFile, snapshot.revision)}`,
       };
     }
 
@@ -91,7 +97,7 @@ export class WorkflowTransitionDetector implements ArchitectureAssertionDetector
     if (!actual) {
       return {
         status: 'inconclusive',
-        summary: `could not parse a LEGAL_TRANSITIONS literal in ${transitionsFile}`,
+        summary: `could not parse a LEGAL_TRANSITIONS literal in ${transitionsFile} at revision ${snapshot.revision}`,
       };
     }
 
@@ -125,7 +131,7 @@ export class WorkflowTransitionDetector implements ArchitectureAssertionDetector
     }
     return {
       status: 'pass',
-      summary: `the workflow transition graph matches the frozen map (${allKeys.length} states)`,
+      summary: `the workflow transition graph at revision ${snapshot.revision} matches the frozen map (${allKeys.length} states)`,
     };
   }
 }

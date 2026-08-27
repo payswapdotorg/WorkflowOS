@@ -80,7 +80,8 @@ describe('REQ/AC — requirements and acceptance criteria', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
-        architectureService: stack.architectureService,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
+      architectureService: stack.architectureService,
       },
       requirements: {
         authorizationService: stack.authorizationService,

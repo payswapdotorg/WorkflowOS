@@ -2,31 +2,44 @@
  * WORK-051 — the schema/migration invariant detector
  * (`detectorKind: 'schema-migration'`).
  *
- * Evaluates the integrity of the PostgreSQL migration sequence: unique,
- * numeric, and (optionally) pinned to an expected latest number — the exact
- * revision binding for schema state (design §7 "schema/migration invariant
- * detector").
+ * Evaluates the integrity of the PostgreSQL migration sequence AT THE BOUND
+ * REVISION: unique, numeric, and (optionally) pinned to an expected latest
+ * number — the exact revision binding for schema state (design §7
+ * "schema/migration invariant detector").
  *
  * detectorConfig:
- *   migrationsDir: string (required) — directory containing NNNN_*.sql files
+ *   migrationsDir: string (required) — repository-relative directory
+ *     containing NNNN_*.sql files. Must EXIST at the bound revision —
+ *     otherwise the result is inconclusive (fail closed; a missing
+ *     migrations directory is never "zero migrations ⇒ vacuous pass").
  *   expectedLastMigrationNumber: number (optional) — when present, the
  *     highest migration number must equal exactly this value (a pinned
  *     expectation; drift in EITHER direction fails).
  *
- * Deterministic: violations are derived solely from the directory listing.
+ * Deterministic: violations are derived solely from the revision-bound
+ * snapshot directory listing (PR #52 round 1, BLOCKER 1).
  */
 
-import { readdirSync } from 'node:fs';
 import type {
   ArchitectureAssertionDetector,
   DetectorInput,
   DetectorResult,
 } from '../../types.js';
+import { listRequiredDir, snapshotFailureMessage } from './snapshot-tree.js';
 
 export class SchemaMigrationDetector implements ArchitectureAssertionDetector {
   readonly detectorKind = 'schema-migration';
 
   async evaluate(input: DetectorInput): Promise<DetectorResult> {
+    const snapshot = input.snapshot;
+    if (!snapshot) {
+      return {
+        status: 'not_applicable',
+        summary:
+          `no implementation snapshot is bound at the ${input.checkpointKind} checkpoint — ` +
+          'this assertion applies to revision-bound checkpoints only',
+      };
+    }
     const cfg = input.assertion.detectorConfig ?? {};
     const migrationsDir = typeof cfg.migrationsDir === 'string' ? cfg.migrationsDir : null;
     if (!migrationsDir) {
@@ -36,13 +49,18 @@ export class SchemaMigrationDetector implements ArchitectureAssertionDetector {
       };
     }
 
-    let entries: string[];
+    let entries: readonly string[];
     try {
-      entries = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
-    } catch {
+      const listing = await listRequiredDir(snapshot, migrationsDir);
+      entries = listing
+        .filter((e) => e.type === 'file' && e.name.endsWith('.sql'))
+        .map((e) => e.name)
+        .sort();
+    } catch (err) {
       return {
         status: 'inconclusive',
-        summary: `migrations directory ${migrationsDir} is unreadable — cannot evaluate schema invariants`,
+        summary:
+          `the governed tree could not be inspected — ${snapshotFailureMessage(err, migrationsDir, snapshot.revision)}`,
       };
     }
 
@@ -87,7 +105,7 @@ export class SchemaMigrationDetector implements ArchitectureAssertionDetector {
     }
     return {
       status: 'pass',
-      summary: `migration sequence is valid (${entries.length} migrations${
+      summary: `migration sequence is valid at revision ${snapshot.revision} (${entries.length} migrations${
         expected !== null ? `, latest pinned at ${expected}` : ''
       })`,
     };

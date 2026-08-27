@@ -3,7 +3,8 @@
  * (`detectorKind: 'repository-structure'`).
  *
  * Evaluates the frozen module-boundary rules (spec/architecture.md §1, §3;
- * PLAT-AC-01/02) over a repository tree:
+ * PLAT-AC-01/02) over the EXACT-REVISION repository snapshot (PR #52 round
+ * 1, BLOCKER 1 — no working-tree reads):
  *
  *   rule 'no-internal-cross-imports' — no module file may import another
  *     module's `internal/` area.
@@ -12,11 +13,15 @@
  *     non-index file.
  *
  * detectorConfig:
- *   rootDir: string (required) — repository root to evaluate
- *   modulesDir: string (default 'src/modules') — where frozen modules live
+ *   modulesDir: string (default 'src/modules') — repository-relative
+ *     location of the frozen modules (must EXIST at the bound revision,
+ *     otherwise the result is inconclusive — fail closed)
  *   rules: string[] (default both rules)
  *
- * Deterministic: violations are collected in (relativePath, specifier) order.
+ * Deterministic: violations are collected in (path, specifier) order. A
+ * snapshot must be bound (revision-bound checkpoint); without one the
+ * assertion is not_applicable at this checkpoint kind — it can never fall
+ * back to reading the current working tree.
  */
 
 import type {
@@ -24,7 +29,12 @@ import type {
   DetectorInput,
   DetectorResult,
 } from '../../types.js';
-import { extractImportSpecifiers, stripCodeComments, walkFiles } from './file-tree.js';
+import {
+  extractImportSpecifiers,
+  snapshotFailureMessage,
+  stripCodeComments,
+  walkSnapshotFiles,
+} from './snapshot-tree.js';
 
 const DEFAULT_RULES = ['no-internal-cross-imports', 'barrel-only-imports'] as const;
 
@@ -32,27 +42,41 @@ export class RepositoryStructureDetector implements ArchitectureAssertionDetecto
   readonly detectorKind = 'repository-structure';
 
   async evaluate(input: DetectorInput): Promise<DetectorResult> {
-    const cfg = input.assertion.detectorConfig ?? {};
-    const rootDir = typeof cfg.rootDir === 'string' ? cfg.rootDir : null;
-    if (!rootDir) {
+    const snapshot = input.snapshot;
+    if (!snapshot) {
       return {
-        status: 'inconclusive',
-        summary: "detectorConfig.rootDir is missing — cannot evaluate the repository tree",
+        status: 'not_applicable',
+        summary:
+          `no implementation snapshot is bound at the ${input.checkpointKind} checkpoint — ` +
+          'this assertion applies to revision-bound checkpoints only',
       };
     }
+    const cfg = input.assertion.detectorConfig ?? {};
     const modulesDir = typeof cfg.modulesDir === 'string' ? cfg.modulesDir : 'src/modules';
     const rules = Array.isArray(cfg.rules) && cfg.rules.length > 0
       ? (cfg.rules as string[])
       : ([...DEFAULT_RULES] as string[]);
 
-    const modulesRoot = `${rootDir.replace(/\/+$/, '')}/${modulesDir}`;
-    const files = walkFiles(modulesRoot, '.ts');
+    let files;
+    try {
+      files = await walkSnapshotFiles(snapshot, modulesDir, '.ts');
+    } catch (err) {
+      return {
+        status: 'inconclusive',
+        summary:
+          `the governed tree could not be inspected — ${snapshotFailureMessage(err, modulesDir, snapshot.revision)}`,
+      };
+    }
 
     const violations: string[] = [];
+    // Paths are REPOSITORY-relative; the importing file's own module is the
+    // first segment UNDER the modules root (e.g. 'agents' for
+    // 'src/modules/agents/internal/x.ts' when modulesDir='src/modules').
+    const modulesPrefix = `${modulesDir.replace(/^\/+|\/+$/g, '')}/`;
+    const relativeToModules = (path: string): string =>
+      path.startsWith(modulesPrefix) ? path.slice(modulesPrefix.length) : path;
     for (const file of files) {
-      // The importing file's own module: the first path segment under the
-      // modules dir (e.g. 'agents' for 'agents/internal/x.ts').
-      const ownModule = file.relativePath.split('/')[0] ?? '';
+      const ownModule = relativeToModules(file.path).split('/')[0] ?? '';
       const code = stripCodeComments(file.source);
       for (const spec of extractImportSpecifiers(code)) {
         const m = /^@modules\/([^/]+)(\/.*)?$/.exec(spec);
@@ -65,7 +89,7 @@ export class RepositoryStructureDetector implements ArchitectureAssertionDetecto
           targetPath.startsWith('/internal/')
         ) {
           violations.push(
-            `${file.relativePath}: imports ${spec} (cross-module internal/ access)`,
+            `${file.path}: imports ${spec} (cross-module internal/ access)`,
           );
         }
         if (
@@ -74,7 +98,7 @@ export class RepositoryStructureDetector implements ArchitectureAssertionDetecto
           !/\/index(\.js)?$/.test(targetPath)
         ) {
           violations.push(
-            `${file.relativePath}: imports ${spec} (non-barrel cross-module import)`,
+            `${file.path}: imports ${spec} (non-barrel cross-module import)`,
           );
         }
       }
@@ -92,7 +116,7 @@ export class RepositoryStructureDetector implements ArchitectureAssertionDetecto
     }
     return {
       status: 'pass',
-      summary: `module boundaries hold (${files.length} files, rules: ${rules.join(', ')})`,
+      summary: `module boundaries hold at revision ${snapshot.revision} (${files.length} files, rules: ${rules.join(', ')})`,
     };
   }
 }

@@ -35,16 +35,24 @@ export type {
   DetectorResult,
   ArchitectureAssertionDetector,
   ArchitectureCheckpointService,
+  SnapshotDirEntry,
+  RepositorySnapshot,
+  RepositorySnapshotReader,
 } from './types.js';
 export {
   ARCHITECTURE_IMPACT_LEVELS,
   IMPACT_CHECKPOINT_MATRIX,
   CrossTenantCheckpointAccessError,
+  SnapshotReadError,
 } from './types.js';
 
 export { DefaultArchitectureCheckpointService } from './internal/default-checkpoint-service.js';
 export type { DefaultArchitectureCheckpointServiceDeps } from './internal/default-checkpoint-service.js';
 export { CHECKPOINT_RUN_SOURCE, deriveImpact } from './internal/default-checkpoint-service.js';
+export {
+  GithubRepositorySnapshot,
+  GithubRepositorySnapshotProvider,
+} from './internal/github-snapshot-provider.js';
 export {
   createDefaultDetectorRegistry,
   INITIAL_DETECTOR_KINDS,

@@ -243,8 +243,22 @@ export interface ArchitectureService {
   /**
    * Freeze a DRAFT version. Validates the transition (DRAFT → FROZEN only).
    * Once frozen, the version's content is immutable (persistence-enforced).
+   *
+   * WORK-051 round 1 (PR #52 review, HIGH — empty-set semantics): freezing
+   * a version with ZERO architecture assertions requires the EXPLICIT
+   * `allowEmptyAssertionSet` declaration — the closing of the assertion set
+   * is the governed moment. With the declaration, the freeze records the
+   * durable `assertionSetPolicy: 'none-declared'` marker on the (now
+   * immutable) version row: checkpoints against the version may pass with
+   * zero evaluations BECAUSE the architecture authority said so. Without
+   * it, freezing an assertion-less version fails closed — a governed
+   * checkpoint can never vacuously PASS with no executable rules.
    */
-  freezeVersion(versionId: string, frozenBy: string): Promise<ArchitectureVersion>;
+  freezeVersion(
+    versionId: string,
+    frozenBy: string,
+    options?: { allowEmptyAssertionSet?: boolean },
+  ): Promise<ArchitectureVersion>;
 
   /**
    * Approve a Change Request and atomically create a replacement version.

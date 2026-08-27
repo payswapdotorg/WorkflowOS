@@ -197,6 +197,14 @@ export class PgArchitectureVersionRepository implements ArchitectureVersionRepos
  * the PostgreSQL BEFORE UPDATE OR DELETE trigger rejects direct SQL mutation
  * even if this contract were bypassed. Creation is trigger-gated to DRAFT
  * versions (the assertion set is immutable with its ArchitectureVersion).
+ *
+ * PR #52 round 1 (BLOCKER 3): create() runs in a SINGLE transaction that
+ * takes a FOR SHARE lock on the target ArchitectureVersion row BEFORE the
+ * insert, serializing against version freezing (freezeVersion/
+ * transitionState update the same row under FOR UPDATE). An assertion can
+ * never commit after the version becomes frozen: the attach either observes
+ * the committed freeze (rejected below AND by the trigger) or holds the row
+ * against the freeze until the attach commits (serialized before it).
  */
 export class PgArchitectureAssertionRepository
   implements ArchitectureAssertionRepository, ArchitectureAssertionReader
@@ -204,43 +212,48 @@ export class PgArchitectureAssertionRepository
   constructor(private readonly db: DatabaseClient) {}
 
   async create(input: CreateArchitectureAssertionInput): Promise<ArchitectureAssertion> {
-    // Validate the version exists + is DRAFT for a clean typed error before
-    // the persistence-layer trigger (which remains the authoritative gate).
-    const version = await this.db.query<{ state: string }>(
-      'SELECT state FROM wfos_architecture_versions WHERE id = $1',
-      [input.architectureVersionId],
-    );
-    if (version.rows.length === 0) {
-      throw new Error(
-        `architecture assertion: architecture version ${input.architectureVersionId} not found`,
+    return this.db.transaction(async (tx) => {
+      // Locking read — the serialization boundary shared with version
+      // freezing. The persistence-layer trigger (which takes the same FOR
+      // SHARE lock) remains the authoritative gate for every other insert
+      // path; this typed pre-check gives a clean error for repository
+      // callers.
+      const version = await tx.query<{ state: string }>(
+        'SELECT state FROM wfos_architecture_versions WHERE id = $1 FOR SHARE',
+        [input.architectureVersionId],
       );
-    }
-    const state = version.rows[0]!.state;
-    if (state !== 'draft') {
-      throw new Error(
-        `architecture assertion: cannot attach to ${state} version ${input.architectureVersionId} — ` +
-          'the assertion set is immutable with a frozen/superseded version; ' +
-          'use the Architecture Change Request path',
+      if (version.rows.length === 0) {
+        throw new Error(
+          `architecture assertion: architecture version ${input.architectureVersionId} not found`,
+        );
+      }
+      const state = version.rows[0]!.state;
+      if (state !== 'draft') {
+        throw new Error(
+          `architecture assertion: cannot attach to ${state} version ${input.architectureVersionId} — ` +
+            'the assertion set is immutable with a frozen/superseded version; ' +
+            'use the Architecture Change Request path',
+        );
+      }
+      const result = await tx.query<AssertionRow>(
+        `INSERT INTO wfos_architecture_assertions
+           (architecture_version_id, assertion_id, severity, scope, statement,
+            detector_kind, detector_config)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, architecture_version_id, assertion_id, severity, scope,
+                   statement, detector_kind, detector_config, created_at`,
+        [
+          input.architectureVersionId,
+          input.assertionId,
+          input.severity,
+          input.scope,
+          input.statement,
+          input.detectorKind,
+          JSON.stringify(input.detectorConfig ?? {}),
+        ],
       );
-    }
-    const result = await this.db.query<AssertionRow>(
-      `INSERT INTO wfos_architecture_assertions
-         (architecture_version_id, assertion_id, severity, scope, statement,
-          detector_kind, detector_config)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, architecture_version_id, assertion_id, severity, scope,
-                 statement, detector_kind, detector_config, created_at`,
-      [
-        input.architectureVersionId,
-        input.assertionId,
-        input.severity,
-        input.scope,
-        input.statement,
-        input.detectorKind,
-        JSON.stringify(input.detectorConfig ?? {}),
-      ],
-    );
-    return mapAssertion(result.rows[0]!);
+      return mapAssertion(result.rows[0]!);
+    });
   }
 
   async findById(id: string): Promise<ArchitectureAssertion | null> {

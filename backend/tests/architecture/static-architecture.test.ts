@@ -11207,7 +11207,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 architecture-assertions migration — /architecture-owned assertion storage, no planner-owned table)').toMatch(/^0052_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-1 work-item impact column — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054; no planner-owned table)').toMatch(/^0054_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -14569,6 +14569,22 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
   const ARCH_BARREL = join(MODULES_DIR, 'architecture', 'index.ts');
   const VER_TYPES = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
   const VER_SERVICE = join(MODULES_DIR, 'verification', 'internal', 'verification-service.ts');
+  const VER_REPO = join(MODULES_DIR, 'verification', 'internal', 'pg-verification-repository.ts');
+  const VER_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0053_verification_orchestration_key.sql',
+  );
+  const IMPACT_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0054_work_item_architecture_impact.sql',
+  );
+  const AGENT_TYPES = join(MODULES_DIR, 'agents', 'internal', 'agent.types.ts');
+  const AGENT_GATEWAY = join(MODULES_DIR, 'agents', 'internal', 'agent-gateway.ts');
+  const PR_PORT = join(MODULES_DIR, 'workflows', 'internal', 'github-pr-creation-port.ts');
+  const SNAPSHOT_PROVIDER = join(AC_INTERNAL, 'github-snapshot-provider.ts');
+  const SNAPSHOT_TREE = join(AC_DETECTORS, 'snapshot-tree.ts');
+  const ARCH_SERVICE = join(MODULES_DIR, 'architecture', 'internal', 'architecture-service.ts');
+  const WORK_ITEM_REPO = join(MODULES_DIR, 'work-items', 'internal', 'pg-work-item-repository.ts');
   const WORKFLOW_TYPES = join(MODULES_DIR, 'workflows', 'internal', 'workflow.types.ts');
   const MIGRATION_0052 = join(
     BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
@@ -14582,6 +14598,9 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
   );
   const ASSERTION_TESTS = join(
     BACKEND_ROOT, 'tests', 'integration', 'architecture', 'architecture-assertions.integration.test.ts',
+  );
+  const ORCH_RUNS_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'verification', 'orchestration-runs.integration.test.ts',
   );
 
   function strip(src: string): string {
@@ -14658,14 +14677,42 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
       );
     }
     const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
-    expect(svc).toMatch(/verificationService\.createRun/);
-    expect(svc).toMatch(/verificationService\.attachEvidence/);
-    expect(svc).toMatch(/verificationService\.finalizeOrchestrationRun/);
-    // /verification owns the finalize contract (the ONLY new method, on the
-    // existing authority).
+    // PR #52 round 1 (BLOCKER 4 + crash safety): the ENTIRE evidence record —
+    // run + evidence rows + terminal finalization — is ONE atomic
+    // recordOrchestrationRun transaction (no createRun/attachEvidence/
+    // finalize sequence that a crash can leave partial).
+    expect(svc).toMatch(/verificationService\.recordOrchestrationRun/);
+    expect(svc, 'no stepwise evidence persistence in the checkpoint service').not.toMatch(
+      /verificationService\.createRun/,
+    );
+    expect(svc, 'no stepwise evidence attachment in the checkpoint service').not.toMatch(
+      /verificationService\.attachEvidence/,
+    );
+    // /verification owns the orchestration-record contract (the durable
+    // identity + the atomic record on the existing authority).
     const verTypes = strip(readFileSync(VER_TYPES, 'utf8'));
     expect(verTypes).toMatch(/finalizeOrchestrationRun/);
+    expect(verTypes).toMatch(/recordOrchestrationRun/);
+    expect(verTypes).toMatch(/findOrchestrationRun/);
     expect(readFileSync(VER_TYPES, 'utf8')).toMatch(/SOLE evidence authority/);
+    // Migration 0053: the durable orchestration identity — a UNIQUE partial
+    // index owned by /verification (NO new evidence store: no table).
+    const verMigration = strip(readFileSync(VER_MIGRATION, 'utf8'));
+    expect(verMigration).toMatch(/orchestration_key TEXT/);
+    expect(verMigration).toMatch(/CREATE UNIQUE INDEX wfos_verification_runs_orchestration_key_uidx/);
+    expect(
+      [...verMigration.matchAll(/CREATE TABLE (\w+)/g)].map((m) => m[1]),
+      '0053 creates NO table',
+    ).toEqual([]);
+    // The repository implements create-or-converge (ON CONFLICT DO NOTHING)
+    // + the CAS finalize; the service wraps them in ONE transaction.
+    const verRepo = strip(readFileSync(VER_REPO, 'utf8'));
+    expect(verRepo).toMatch(/ON CONFLICT \(orchestration_key\)/);
+    expect(verRepo).toMatch(/findByOrchestrationKey/);
+    expect(verRepo).toMatch(/WHERE id = \$\d+ AND status IN \('pending', 'running'\)/);
+    const verService = strip(readFileSync(VER_SERVICE, 'utf8'));
+    expect(verService).toMatch(/this\.db\.transaction/);
+    expect(verService).toMatch(/insertOrGetOrchestrationRun/);
   });
 
   // --- (3) NO second architecture authority -----------------------------------
@@ -14866,19 +14913,38 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
 
   it('MUTATION-PROOF — the four gates guard EVERY gated transition site in the orchestrator (counting, not first-occurrence)', () => {
     const orch = readFileSync(ORCHESTRATOR, 'utf8');
-    // 8 gate invocations (readiness ×1, work_order ×2, pr_conformance ×3,
-    // verification_entry ×2) + 1 private method definition = 9 occurrences.
+    // PR #52 round 1 (BLOCKER 2): the three former pr_conformance call sites
+    // CONSOLIDATED into the single governed PR-creation boundary
+    // (openGovernedPullRequest) — 6 gate invocations (readiness ×1,
+    // work_order ×2, pr_conformance ×1 inside openGovernedPullRequest,
+    // verification_entry ×2) + 1 private method definition = 7 occurrences.
     const gateCalls = [...orch.matchAll(/this\.runArchitectureCheckpointGate\(/g)].length;
-    expect(gateCalls, 'all four gate kinds × all sites must evaluate the gate').toBe(8);
+    expect(gateCalls, 'all four gate kinds × all sites must evaluate the gate').toBe(6);
     const gateDefs = [...orch.matchAll(/private async runArchitectureCheckpointGate\(/g)].length;
     expect(gateDefs).toBe(1);
 
-    // Each gated transition site is immediately preceded by its gate check:
-    // counting pairs — 'allowed' check BEFORE 'transition(' — at every site.
+    // The pr_conformance gate lives INSIDE the governed PR-creation boundary,
+    // and the ONLY PR-creation side-effect site (the port call) is strictly
+    // AFTER the gate check — code-order proof (BLOCKER 2).
+    const boundaryStart = orch.indexOf('private async openGovernedPullRequest(');
+    expect(boundaryStart).toBeGreaterThanOrEqual(0);
+    const boundary = orch.slice(boundaryStart, orch.indexOf('\n  }', boundaryStart));
+    const gateCheck = boundary.indexOf('this.runArchitectureCheckpointGate(');
+    const deniedReturn = boundary.indexOf('if (!prGate.allowed)');
+    const portCall = boundary.indexOf('this.pullRequestCreationPort.createPullRequest(');
+    expect(gateCheck).toBeGreaterThanOrEqual(0);
+    expect(deniedReturn).toBeGreaterThan(gateCheck);
+    expect(portCall, 'the PR-creation side effect is INSIDE the boundary').toBeGreaterThan(deniedReturn);
+    // The boundary is the ONLY port call site in the orchestrator.
+    expect([...orch.matchAll(/this\.pullRequestCreationPort\.createPullRequest\(/g)].length).toBe(1);
+
+    // Every pr_open transition is gated by the boundary (3 sites: initiate,
+    // correction, agent_run_completed — each immediately preceded by an
+    // openGovernedPullRequest call).
     const prOpenTransitions = [...orch.matchAll(/this\.transition\(signal, 'pr_open'\)/g)].length;
     expect(prOpenTransitions).toBe(3);
-    const prGates = [...orch.matchAll(/this\.runArchitectureCheckpointGate\(\s*\n?\s*this\.checkpointGateInput\(\s*\n?\s*signal,\s*\n?\s*'pr_conformance'/g)].length;
-    expect(prGates, 'every pr_open transition has a pr_conformance gate').toBe(3);
+    const boundaryCalls = [...orch.matchAll(/await this\.openGovernedPullRequest\(/g)].length;
+    expect(boundaryCalls, 'every PR-open path goes through the governed boundary').toBe(3);
 
     const assignedTransitions = [...orch.matchAll(/this\.transition\(signal, 'assigned'\)/g)].length;
     expect(assignedTransitions).toBe(1);
@@ -14935,8 +15001,9 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(types).toMatch(
       /readiness: \['high'\],\s*work_order: \['medium', 'high'\],\s*pr_conformance: \['low', 'medium', 'high'\],\s*verification_entry: \['high'\],/,
     );
-    // The fail-closed default: unknown/absent impact derives 'high'.
-    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/FAIL-CLOSED default 'high'/);
+    // The fail-closed default: unknown/absent impact derives 'high'
+    // (raw source — the prose lives in the doc comment).
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/FAIL-CLOSED[\s\S]{0,20}default 'high'/);
     const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
     expect(svc).toMatch(/return 'high';/);
     // Impact controls frequency ONLY — the checkpoint never downgrades
@@ -14969,11 +15036,17 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
 
   it('checkpoint evidence is revision-bound, append-only, and finalized exactly once', () => {
     const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // PR #52 round 1: the evidence rows are built as data and recorded
+    // atomically; each row pins the exact revision.
     expect(svc).toMatch(/headSha: result\.implementationRevision/);
-    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/the next checkpoint creates a NEW run/);
+    expect(readFileSync(VER_TYPES, 'utf8')).toMatch(/NOTHING is appended/);
     const ver = strip(readFileSync(VER_SERVICE, 'utf8'));
     expect(ver).toMatch(/finalized exactly once/);
     expect(ver).toMatch(/orchestration runs are finalized exactly once/);
+    // BLOCKER 4: the durable identity (unique, indexed) — never a metadata scan.
+    expect(strip(readFileSync(AC_SERVICE, 'utf8'))).not.toMatch(/listRunsForWorkItem/);
+    expect(svc).toMatch(/findOrchestrationRun/);
+    expect(svc).toMatch(/orchestrationKey\(/);
   });
 
   // --- the self-hosting boundary -----------------------------------------------------
@@ -14995,6 +15068,173 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(tests).toMatch(/claim-authority/);
   });
 
+  // --- PR #52 round 1, BLOCKER 1: the EXACT-REVISION snapshot read boundary ------------
+
+  it('BLOCKER 1 — detectors read ONLY the revision-bound snapshot: NO filesystem access, NO working-tree fallback (fail-closed reads)', () => {
+    // (a) NO detector touches the filesystem at all — every read flows through
+    // the RepositorySnapshot port (the /github authority's exact-revision
+    // content reads).
+    for (const f of listAcFiles(AC_DETECTORS)) {
+      const src = readFileSync(f, 'utf8');
+      expect(src, `${f}: detectors import no filesystem APIs`).not.toMatch(
+        /from 'node:fs'/,
+      );
+      expect(strip(src), `${f}: detectors call no filesystem APIs`).not.toMatch(
+        /\b(readdirSync|readFileSync|statSync|walkFiles)\(/,
+      );
+    }
+    // (b) The snapshot contract exists and is the ONLY repository input on
+    // DetectorInput; without a bound snapshot, repository-backed assertions
+    // are not_applicable — never a working-tree read.
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(/interface RepositorySnapshot/);
+    expect(types).toMatch(/interface RepositorySnapshotReader/);
+    expect(types).toMatch(/snapshot: RepositorySnapshot \| null;/);
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/never silently read the current working tree instead/);
+    // (c) The service opens the snapshot ONLY for revision-bound kinds, and a
+    // failed/absent snapshot is a fail-closed context denial.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/snapshotReader\.openSnapshot/);
+    expect(svc).toMatch(/REVISION_BOUND_KINDS/);
+    expect(svc).toMatch(/no linked repository/);
+    // (d) The production snapshot provider delegates to the EXISTING /github
+    // authority (getFileContent/listDir) with SERVER-SIDE repository
+    // resolution (no caller-supplied coordinates) and fail-closed reads.
+    const provider = readFileSync(SNAPSHOT_PROVIDER, 'utf8');
+    expect(provider).toMatch(/findByProject/);
+    expect(provider).toMatch(/getFileContent/);
+    expect(provider).toMatch(/listDir/);
+    expect(provider).toMatch(/SnapshotReadError/);
+    expect(provider).not.toMatch(/from 'node:fs'/);
+    // (e) The walker: missing roots, unreadable dirs/files, and listed-but-
+    // unreadable files are ALL typed failures (never empty scans).
+    const walker = readFileSync(SNAPSHOT_TREE, 'utf8');
+    expect(walker).toMatch(/'root-missing'/);
+    expect(walker).toMatch(/'unreadable'/);
+    expect(walker).toMatch(/'inconsistent'/);
+    expect(readFileSync(SNAPSHOT_TREE, 'utf8')).toMatch(/vacuous PASS|zero files vacuously/i);
+  });
+
+  // --- PR #52 round 1, BLOCKER 2: the actual PR-creation boundary -----------------------
+
+  it('BLOCKER 2 — the governed PR-creation boundary: pre-gate agent phases are PR-prohibited; the port is the ONLY creation site', () => {
+    // (a) The agent contract carries the pull-request policy; the violation
+    // is a typed error.
+    const agentTypes = readFileSync(AGENT_TYPES, 'utf8');
+    expect(agentTypes).toMatch(/pullRequestPolicy\?: 'prohibited' \| 'provider-managed'/);
+    expect(agentTypes).toMatch(/class AgentPullRequestProhibitedError/);
+    // (b) The gateway ENFORCES the prohibition (a violating provider's run is
+    // failed, the typed error is thrown — never a success with a PR).
+    const gateway = strip(readFileSync(AGENT_GATEWAY, 'utf8'));
+    expect(gateway).toMatch(/request\.pullRequestPolicy === 'prohibited'/);
+    expect(gateway).toMatch(/AgentPullRequestProhibitedError/);
+    // (c) BOTH orchestrator agent-launch sites (initiate + correction) run
+    // the pre-gate phase under the prohibition — counting proof.
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    const prohibited = [...orch.matchAll(/pullRequestPolicy: 'prohibited'/g)].length;
+    expect(prohibited, 'both pre-gate agent-launch sites are PR-prohibited').toBe(2);
+    // (d) The PR-creation port is a /workflows contract; the production
+    // implementation resolves the repository SERVER-SIDE and creates through
+    // the /github authority.
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/interface PullRequestCreationPort/);
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/findByProject/);
+    expect(prPort).toMatch(/createPullRequest\(/);
+    // (e) The orchestrator NEVER persists a provider-reported PR association
+    // before the gate: the only pre-gate association writes happen inside
+    // openGovernedPullRequest (post-gate), and agent result PR refs are
+    // treated as external observations adopted only post-gate.
+    expect(orch).toMatch(/pullRequestAssociationRepository\.create/);
+    const associationWrites = [...orch.matchAll(/this\.pullRequestAssociationRepository\.create\(/g)].length;
+    expect(associationWrites).toBe(2); // the external-adoption + the creation result — both inside the boundary
+    expect(orch).toMatch(/EXTERNAL[\s\S]{0,200}PR observation/);
+    // (f) The composition root wires the /github-backed implementations.
+    const app = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(app).toMatch(/GithubBackedPullRequestCreationPort/);
+    expect(app).toMatch(/GithubRepositorySnapshotProvider/);
+  });
+
+  // --- PR #52 round 1, BLOCKER 3: serialized assertion attach vs freeze ------------------
+
+  it('BLOCKER 3 — assertion attachment is SERIALIZED against version freezing at the database boundary', () => {
+    // (a) The repository's create() runs in ONE transaction with a FOR SHARE
+    // lock on the version row — the same serialization domain as the freeze
+    // path's FOR UPDATE.
+    const repo = strip(readFileSync(ARCH_REPO, 'utf8'));
+    expect(repo).toMatch(/SELECT state FROM wfos_architecture_versions WHERE id = \$1 FOR SHARE/);
+    expect(repo).toMatch(/this\.db\.transaction/);
+    // (b) The migration-0052 trigger takes the SAME lock (every insert path,
+    // including direct SQL, serializes).
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/WHERE id = NEW\.architecture_version_id\s+\n?\s*FOR SHARE/);
+    // (c) The freeze path locks the row FOR UPDATE inside its transaction.
+    const archService = strip(readFileSync(ARCH_SERVICE, 'utf8'));
+    expect(archService).toMatch(/FOR UPDATE/);
+    // (d) The two-connection regressions exist (freeze-wins + attach-wins
+    // interleavings on independent pg connections).
+    const tests = readFileSync(ASSERTION_TESTS, 'utf8');
+    expect(tests).toMatch(/BLOCKER 3 — FREEZE WINS/);
+    expect(tests).toMatch(/BLOCKER 3 — ATTACH WINS/);
+    expect(tests).toMatch(/createSecondClient/);
+  });
+
+  // --- PR #52 round 1, HIGH: the protected impact profile ---------------------------------
+
+  it('HIGH — the impact profile is a GOVERNED MONOTONIC work-item declaration (mutable metadata is not a governance input)', () => {
+    // (a) The derivation reads the governed column ONLY.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/workItem\.architectureImpact/);
+    expect(svc, 'the derivation must not read mutable metadata').not.toMatch(
+      /metadata\?\.architectureImpact/,
+    );
+    // (b) Migration 0054: the column + the monotonic trigger (strengthening
+    // only; weakening/clearing rejected even via direct SQL).
+    const migration = strip(readFileSync(IMPACT_MIGRATION, 'utf8'));
+    expect(migration).toMatch(/ADD COLUMN architecture_impact TEXT/);
+    expect(migration).toMatch(/wfos_work_items_impact_monotonic/);
+    expect(migration).toMatch(/new_rank < old_rank/);
+    // (c) The update contract CANNOT touch the column: UpdateWorkItemInput
+    // has no architectureImpact field, and the update() builder never sets
+    // architecture_impact.
+    const wiTypes = strip(readFileSync(join(MODULES_DIR, 'work-items', 'internal', 'work-item.types.ts'), 'utf8'));
+    const updateIface = wiTypes.slice(
+      wiTypes.indexOf('interface UpdateWorkItemInput'),
+      wiTypes.indexOf('}', wiTypes.indexOf('interface UpdateWorkItemInput') + 1),
+    );
+    expect(updateIface, 'UpdateWorkItemInput cannot declare the impact field').not.toMatch(/architectureImpact/);
+    const wiRepo = strip(readFileSync(WORK_ITEM_REPO, 'utf8'));
+    expect(wiRepo, 'update() never writes the impact column').not.toMatch(
+      /architecture_impact = \$/,
+    );
+    // (d) The regression exists (metadata downgrade is inert; SQL weakening
+    // is trigger-rejected).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/mutable metadata can NEVER downgrade/);
+    expect(tests).toMatch(/direct SQL WEAKENING/);
+  });
+
+  // --- PR #52 round 1, HIGH: the explicit empty-assertion-set semantics --------------------
+
+  it('HIGH — an EMPTY assertion set fails closed unless the Architecture authority explicitly declared it at freeze time', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/assertions\.length === 0/);
+    expect(svc).toMatch(/assertionSetPolicy === 'none-declared'/);
+    expect(svc).toMatch(/empty rule set/);
+    // The freeze-time declaration gate + the durable marker.
+    const archService = strip(readFileSync(ARCH_SERVICE, 'utf8'));
+    expect(archService).toMatch(/allowEmptyAssertionSet/);
+    expect(archService).toMatch(/assertionSetPolicy.*none-declared/);
+    // The governed population path: assertion create/list routes exist.
+    const route = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'architecture.route.ts'), 'utf8');
+    expect(route).toMatch(/architecture-versions\/:versionId\/assertions/);
+    // The regressions exist.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/no declaration fails closed/);
+    expect(tests).toMatch(/EXPLICIT no-assertions declaration/);
+    expect(tests).toMatch(/governed population path/);
+  });
+
   // --- the mandatory regression coverage exists ---------------------------------------
 
   it('the mandatory WORK-051 regression coverage exists (all 11 proofs mapped to executable tests)', () => {
@@ -15003,7 +15243,8 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     const assertions = readFileSync(ASSERTION_TESTS, 'utf8');
     // 1 — violation detected before PR creation.
     expect(service).toMatch(/PROOF 1 —/);
-    expect(gates).toMatch(/drift caught before PR creation/);
+    expect(gates).toMatch(/ZERO PR-creation side effects/);
+    expect(gates).toMatch(/AFTER the gate passes/);
     // 2 — determinism.
     expect(service).toMatch(/PROOF 2 —/);
     // 3 — evidence binding.
@@ -15017,7 +15258,6 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(gates).toMatch(/PROOF 6 \(lifecycle\)/);
     // 7 — inconclusive blocking assertions fail closed.
     expect(service).toMatch(/PROOF 7a —/);
-    expect(service).toMatch(/PROOF 7b —/);
     expect(service).toMatch(/PROOF 7c —/);
     expect(service).toMatch(/PROOF 7d —/);
     // 8 — intentional architecture changes never mutate frozen versions.
@@ -15031,6 +15271,22 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     //      (That is THIS block: invariants (1)-(6) above are the executable proof.)
     // 11 — self-hosting without unchecked authority.
     expect(service).toMatch(/PROOF 11 —/);
+    // PR #52 round 1 regressions: the exact-revision binding, the
+    // PR-creation boundary, the concurrency proofs, the orchestration-record
+    // contract, and the fail-closed reads.
+    expect(service).toMatch(/BLOCKER 1 — an UNRESOLVABLE revision/);
+    expect(service).toMatch(/mutating the on-disk fixture/);
+    expect(service).toMatch(/BLOCKER 4 — two CONCURRENT same-key evaluations/);
+    expect(gates).toMatch(/BLOCKER 2 — with a BLOCKING architecture violation/);
+    expect(gates).toMatch(/BLOCKER 2 — with a CONFORMANT revision/);
+    expect(gates).toMatch(/EXACTLY ONE PR is created and only AFTER the gate passes/);
+    expect(gates).toMatch(/PR-creation side-effect count is ZERO/);
+    expect(assertions).toMatch(/BLOCKER 3 — FREEZE WINS/);
+    expect(assertions).toMatch(/BLOCKER 3 — ATTACH WINS/);
+    const orchRuns = readFileSync(ORCH_RUNS_TESTS, 'utf8');
+    expect(orchRuns).toMatch(/ATOMICALLY/);
+    expect(orchRuns).toMatch(/crash safety/);
+    expect(orchRuns).toMatch(/UNIQUE identity/);
   });
 });
 

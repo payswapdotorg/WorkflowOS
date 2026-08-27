@@ -99,6 +99,7 @@ export class DefaultVerificationService implements VerificationService {
   private readonly runRepo: PgVerificationRunRepository;
   private readonly evidenceRepo: PgEvidenceRepository;
   private readonly mappingRepo: PgCriterionEvidenceMappingRepository;
+  private readonly db: DatabaseClient;
 
   constructor(
     db: DatabaseClient,
@@ -112,6 +113,7 @@ export class DefaultVerificationService implements VerificationService {
     private readonly objectStore: ObjectStore,
     private readonly logger: Logger,
   ) {
+    this.db = db;
     this.runRepo = new PgVerificationRunRepository(db);
     this.evidenceRepo = new PgEvidenceRepository(db);
     this.mappingRepo = new PgCriterionEvidenceMappingRepository(db);
@@ -612,13 +614,13 @@ export class DefaultVerificationService implements VerificationService {
     return this.objectStore.put(input);
   }
 
-  // --- WORK-051: orchestration-run finalization ---
+  // --- WORK-051: orchestration-run persistence ---
   //
   // The architecture checkpoint subsystem (application layer) persists its
   // evidence through this /verification public contract. Runs it creates
-  // reach a terminal state ONLY through this method — /verification stays
-  // the sole evidence authority and the caller holds no verification-table
-  // write capability.
+  // reach a terminal state ONLY through this method or the atomic
+  // recordOrchestrationRun below — /verification stays the sole evidence
+  // authority and the caller holds no verification-table write capability.
 
   async finalizeOrchestrationRun(input: {
     verificationRunId: string;
@@ -626,34 +628,99 @@ export class DefaultVerificationService implements VerificationService {
     summary?: Record<string, unknown>;
     errorMetadata?: Record<string, unknown> | null;
   }): Promise<VerificationRun> {
+    // PR #52 round 1 (BLOCKER 4): the terminal transition is a SINGLE CAS
+    // UPDATE guarded by the current status — no read-then-write window. One
+    // concurrent writer wins; losers observe the winner's terminal row.
+    const finalized = await this.runRepo.finalize(input.verificationRunId, {
+      status: input.status,
+      summary: input.summary ?? {},
+      errorMetadata: input.errorMetadata ?? null,
+    });
+    if (finalized) return finalized;
+    // No row updated: the run is missing, or already terminal (an immutable
+    // historical record — re-finalization would overwrite history; the
+    // checkpoint contract: a later checkpoint creates a NEW run, never
+    // overwrites).
     const run = await this.runRepo.findById(input.verificationRunId);
     if (!run) {
       throw new Error(
         `finalizeOrchestrationRun: verification run ${input.verificationRunId} not found`,
       );
     }
-    // Fail closed: only non-terminal runs may be finalized, and only to a
-    // terminal status. A completed/failed run is an immutable historical
-    // record — re-finalization would overwrite history (the checkpoint
-    // contract: a later checkpoint creates a NEW run, never overwrites).
-    if (run.status === 'completed' || run.status === 'failed') {
+    throw new Error(
+      `finalizeOrchestrationRun: verification run ${input.verificationRunId} is already ` +
+        `${run.status} — orchestration runs are finalized exactly once`,
+    );
+  }
+
+  async findOrchestrationRun(orchestrationKey: string): Promise<VerificationRun | null> {
+    // The durable identity lookup owned by /verification (BLOCKER 4): the
+    // replay path for orchestration producers — no metadata scanning.
+    return this.runRepo.findByOrchestrationKey(orchestrationKey);
+  }
+
+  async recordOrchestrationRun(input: {
+    run: CreateVerificationRunInput & { orchestrationKey: string };
+    evidence: ReadonlyArray<Omit<CreateEvidenceInput, 'projectId' | 'verificationRunId'>>;
+    finalize: {
+      status: 'completed' | 'failed';
+      summary: Record<string, unknown>;
+      errorMetadata?: Record<string, unknown> | null;
+    };
+  }): Promise<{ run: VerificationRun; created: boolean }> {
+    // Traceability validation identical to createRun (the persistence-layer
+    // integrity trigger remains the authoritative gate).
+    const wi = await this.workItemRepository.findById(input.run.workItemId);
+    if (!wi) {
+      throw new Error(`orchestration run: work item ${input.run.workItemId} not found`);
+    }
+    if (wi.architectureVersionId !== input.run.architectureVersionId) {
       throw new Error(
-        `finalizeOrchestrationRun: verification run ${input.verificationRunId} is already ` +
-          `${run.status} — orchestration runs are finalized exactly once`,
+        `orchestration run: work item ${input.run.workItemId} belongs to architecture version ${wi.architectureVersionId}, not ${input.run.architectureVersionId}`,
       );
     }
-    const updated = await this.runRepo.update(input.verificationRunId, {
-      status: input.status,
-      finishedAt: new Date(),
-      summary: input.summary ?? {},
-      errorMetadata: input.errorMetadata ?? null,
+    // PR #52 round 1 (BLOCKER 4 + crash safety): ONE transaction for the
+    // whole record — the create-or-converge run insert, every evidence row,
+    // and the terminal finalization commit or abort together. A crash at any
+    // point leaves NOTHING (no pending run, no partial evidence).
+    return this.db.transaction(async (tx) => {
+      const runRepo = new PgVerificationRunRepository(tx);
+      const evidenceRepo = new PgEvidenceRepository(tx);
+      const { run, created } = await runRepo.insertOrGetOrchestrationRun(input.run);
+      if (!created && (run.status === 'completed' || run.status === 'failed')) {
+        // A terminal run for this key exists — immutable history. Return it
+        // unchanged; the caller replays the recorded summary. NOTHING is
+        // appended (the convergence contract).
+        return { run, created: false };
+      }
+      // created === true (fresh run) OR a non-terminal legacy/partial
+      // reservation to adopt: attach the evidence rows + finalize.
+      for (const e of input.evidence) {
+        // AUTHORITY BOUNDARY: orchestration-produced evidence is ALWAYS
+        // 'claim' — the orchestration path is never authoritative evidence
+        // (same rule as the public/manual attachEvidence path).
+        await evidenceRepo.create(
+          { ...e, projectId: input.run.projectId, verificationRunId: run.id },
+          'claim',
+        );
+      }
+      const finalized = await runRepo.finalize(run.id, input.finalize);
+      if (!finalized) {
+        // Another writer finalized this run between our read and the CAS
+        // (the adoption race on real PG; the same-session interleave on
+        // single-connection engines). Convergence, not an error: re-read and
+        // return the terminal record — one finalization wins, both callers
+        // observe the same durable result.
+        const reread = await runRepo.findById(run.id);
+        if (reread && (reread.status === 'completed' || reread.status === 'failed')) {
+          return { run: reread, created: false };
+        }
+        throw new Error(
+          `recordOrchestrationRun: run ${run.id} could not be finalized and is not terminal`,
+        );
+      }
+      return { run: finalized, created };
     });
-    if (!updated) {
-      throw new Error(
-        `finalizeOrchestrationRun: verification run ${input.verificationRunId} not found`,
-      );
-    }
-    return updated;
   }
 }
 

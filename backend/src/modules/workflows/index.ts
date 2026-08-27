@@ -47,6 +47,11 @@ export type {
   ArchitectureCheckpointGateInput,
   ArchitectureCheckpointGateResult,
   ArchitectureCheckpointGate,
+  // WORK-051 round 1 (PR #52 review, BLOCKER 2): the PR-creation boundary
+  // consumed by the orchestrator — called ONLY after the pr_conformance
+  // checkpoint allows progression.
+  PullRequestCreationPort,
+  CreatedPullRequest,
 } from './internal/convergence.types.js';
 
 /**

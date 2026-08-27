@@ -75,6 +75,17 @@ ALTER TABLE wfos_architecture_assertions
 -- SET immutability: assertions attach only to DRAFT versions. The moment a
 -- version is FROZEN its assertion set is closed; any later change requires
 -- the Architecture Change Request → new immutable version path.
+--
+-- PR #52 round 1 (BLOCKER 3): the state read takes a FOR SHARE lock on the
+-- version row, so EVERY insert path (repository or direct SQL) serializes
+-- against version freezing (transitionState/freezeVersion update the same
+-- row under FOR UPDATE inside their transaction). The interleaving
+--
+--   T1: trigger reads draft → T2: freeze commits → T1: insert commits
+--
+-- is no longer possible: T1's FOR SHARE either observes the freeze's
+-- committed state (rejected) or holds the row against the freeze's UPDATE
+-- until T1 commits (the attach serialized BEFORE the freeze).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION wfos_arch_assertions_require_draft_version()
 RETURNS TRIGGER AS $$
@@ -83,7 +94,8 @@ DECLARE
 BEGIN
   SELECT state INTO v_state
     FROM wfos_architecture_versions
-   WHERE id = NEW.architecture_version_id;
+   WHERE id = NEW.architecture_version_id
+     FOR SHARE;
   IF v_state IS DISTINCT FROM 'draft' THEN
     RAISE EXCEPTION
       'cannot attach architecture assertion to % version % — the assertion set is immutable with a frozen/superseded version; use the Architecture Change Request path',

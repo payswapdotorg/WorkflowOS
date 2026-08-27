@@ -1,8 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stack.js';
+import { FakePullRequestCreationPort } from '../../helpers/fake-pr-creation-port.js';
 import { InMemoryQueue, createLogger, InMemoryObjectStore } from '@platform/index.js';
 
 import { DefaultWorkflowEngine } from '../../../src/modules/workflows/internal/workflow-engine.js';
@@ -17,43 +15,61 @@ import type {
   ArchitectureCheckpointKind,
 } from '@modules/workflows/index.js';
 import { DefaultWorkItemDependencyService } from '../../../src/modules/work-items/internal/work-item-dependency-service.js';
-import { DefaultAgentGateway, FakeAgentAdapter } from '../../../src/modules/agents/internal/agent-gateway.js';
+import {
+  DefaultAgentGateway,
+  FakeAgentAdapter,
+} from '../../../src/modules/agents/internal/agent-gateway.js';
+import { AgentPullRequestProhibitedError } from '../../../src/modules/agents/internal/agent.types.js';
+import type { AgentProviderAdapter } from '../../../src/modules/agents/internal/agent.types.js';
 import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-agent-repository.js';
 import { DefaultLlmGateway, FakeLlmAdapter } from '../../../src/modules/llm/internal/llm-gateway.js';
 import { DefaultArchitectService } from '../../../src/modules/llm/internal/architect-service.js';
 import { DefaultVerificationService } from '../../../src/modules/verification/internal/verification-service.js';
 import { DefaultReviewService } from '../../../src/modules/reviews/internal/review-service.js';
 import { DefaultGitHubAdapter } from '../../../src/modules/github/internal/pg-github-repository.js';
+import { FakeGitHubAdapter } from '../../../src/modules/github/internal/fake-github-adapter.js';
+import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
 import { PgArchitectureAssertionRepository } from '../../../src/modules/architecture/internal/pg-architecture-repository.js';
 import {
   DefaultArchitectureCheckpointService,
   createDefaultDetectorRegistry,
+  GithubRepositorySnapshotProvider,
   CHECKPOINT_RUN_SOURCE,
 } from '../../../src/architecture-checkpoints/index.js';
 import { generateExecutionId } from '@platform/ids.js';
 
 /**
- * WORK-051 — the four architecture checkpoint LIFECYCLE GATES in the workflow
- * orchestrator.
+ * WORK-051 round 1 — the architecture checkpoint LIFECYCLE GATES in the
+ * workflow orchestrator, INCLUDING the actual PR-creation boundary
+ * (PR #52 review, BLOCKER 2):
  *
- * Mandatory proof 5 (issue #51): blocking checkpoint failures prevent the
- * relevant workflow transition. Plus: advisory results do not block (proof 6
- * at the lifecycle level), the fail-closed gate-error posture, the impact
- * policy through the REAL checkpoint service, and the end-to-end correction
- * loop (blocked → tree corrected → progression) driven by the real detectors.
+ *   - the pre-gate implementation phase executes under pullRequestPolicy
+ *     'prohibited' (the gateway ENFORCES the contract with a typed error —
+ *     a violating provider can never yield a PR for that phase);
+ *   - with a BLOCKING architecture violation, the recorded PR-creation
+ *     side-effect count is ZERO;
+ *   - with a CONFORMANT revision, EXACTLY ONE PR is created and only AFTER
+ *     the gate passes (event-order proof);
+ *   - the four lifecycle gates block their transitions (proof 5 + the
+ *     readiness/work-order/verification-entry gates);
+ *   - advisory results allow; a throwing gate fails closed;
+ *   - the end-to-end correction loop (violation → new revision → pass).
  */
-describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
+describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creation boundary', () => {
   let stack: TestAuthStack;
   let queue: InMemoryQueue;
   let workflowEngine: DefaultWorkflowEngine;
   let fakeAgent: FakeAgentAdapter;
   let fakeLlm: FakeLlmAdapter;
-  let agentGateway: DefaultAgentGateway;
   let verificationService: DefaultVerificationService;
   let assertionRepo: PgArchitectureAssertionRepository;
+  let fakeGithub: FakeGitHubAdapter;
+  let snapshotProvider: GithubRepositorySnapshotProvider;
   let org: { id: string };
   let user: { id: string };
   let project: { id: string };
+  const OWNER = 'gates-org';
+  const REPO = 'gates-repo';
 
   /** A scriptable gate: per-kind responses + an invocation log. */
   class ScriptedGate implements ArchitectureCheckpointGate {
@@ -81,8 +97,83 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     }
   }
 
-  const buildOrchestrator = (gate: ArchitectureCheckpointGate): DefaultWorkflowOrchestrator => {
+  /**
+   * A gate wrapper that RECORDS evaluation events into a shared event log —
+   * proves the gate ran BEFORE the PR-creation side effect (ordering).
+   */
+  class RecordingGate implements ArchitectureCheckpointGate {
+    constructor(
+      private readonly inner: ArchitectureCheckpointGate,
+      private readonly events: Array<{ type: string; detail: string }>,
+    ) {}
+
+    async evaluate(input: ArchitectureCheckpointGateInput): Promise<ArchitectureCheckpointGateResult> {
+      this.events.push({ type: 'gate', detail: `${input.checkpointKind}@${input.implementationRevision ?? 'no-rev'}` });
+      return this.inner.evaluate(input);
+    }
+  }
+
+  /** A recording PR-creation authority (the two-stage fake). */
+  class RecordingPrPort extends FakePullRequestCreationPort {
+    constructor(private readonly events: Array<{ type: string; detail: string }>) {
+      super();
+    }
+
+    override async createPullRequest(input: {
+      projectId: string;
+      workItemId: string;
+      headRevision: string;
+      branch: string | null;
+      title: string;
+      body?: string | null;
+    }): Promise<{ externalPrId: string; headCommit: string | null }> {
+      const result = await super.createPullRequest(input);
+      this.events.push({ type: 'pr-create', detail: input.headRevision });
+      return result;
+    }
+  }
+
+  /** A scriptable agent provider: a settable commitRef + policy-honoring PR refs. */
+  class ScriptedAgentAdapter implements AgentProviderAdapter {
+    readonly providerName = 'scripted';
+    private commitRef = 'rev-corrupt';
+    private reportPullRequest = false;
+    readonly calls: Array<{ pullRequestPolicy?: string }> = [];
+
+    setCommitRef(ref: string): void { this.commitRef = ref; }
+    setReportPullRequest(v: boolean): void { this.reportPullRequest = v; }
+
+    supports(provider: string): boolean { return provider === 'scripted'; }
+
+    async execute(request: import('../../../src/modules/agents/internal/agent.types.js').AgentRequest) {
+      this.calls.push({ pullRequestPolicy: request.pullRequestPolicy });
+      return {
+        status: 'success' as const,
+        output: 'scripted output',
+        startedAt: new Date(),
+        completedAt: new Date(),
+        executionId: request.executionId,
+        provider: this.providerName,
+        configuration: request.configuration,
+        commitRef: this.commitRef,
+        pullRequestRef: this.reportPullRequest ? 'github:gates/leak#1' : null,
+        reportedTests: [],
+        reportedBlockers: [],
+        error: null,
+        metadata: {},
+      };
+    }
+  }
+
+  let scriptedAgent: ScriptedAgentAdapter;
+
+  const buildOrchestrator = (
+    gate: ArchitectureCheckpointGate,
+    prPort: FakePullRequestCreationPort,
+    agentAdapters: readonly import('../../../src/modules/agents/internal/agent.types.js').AgentProviderAdapter[] = [fakeAgent],
+  ): DefaultWorkflowOrchestrator => {
     const logger = createLogger({ level: 'silent' });
+    const gateway = new DefaultAgentGateway(stack.db.client, logger, agentAdapters, 3);
     const llmGateway = new DefaultLlmGateway(stack.db.client, logger, [fakeLlm], 3);
     const architectService = new DefaultArchitectService(stack.db.client, llmGateway, stack.workOrderRepository, logger);
     const agentRunRepo = new PgAgentRunRepository(stack.db.client);
@@ -91,12 +182,13 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
       stack.db.client, logger, queue, workflowEngine,
       stack.workItemRepository, stack.workOrderRepository, depService,
       stack.workItemCompletionService,
-      stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
+      stack.pullRequestAssociationRepository, gateway, agentRunRepo,
       architectService,
       verificationService, new DefaultReviewService(stack.db.client, stack.workItemRepository, logger),
       new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
       stack.projectRepository, gate, generateExecutionId,
+      prPort,
     );
   };
 
@@ -104,11 +196,16 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     (await workflowEngine.getState(workItemId))?.currentState ?? null;
 
   /** Drive initiate synchronously (no worker; processSignal directly). */
-  const initiate = async (orchestrator: DefaultWorkflowOrchestrator, workItemId: string) => {
+  const initiate = async (
+    orchestrator: DefaultWorkflowOrchestrator,
+    workItemId: string,
+    agentProvider?: string,
+  ) => {
     const signal = await orchestrator.initiateConvergence({
       workItemId,
       sourceEventId: `initiate-${generateExecutionId()}`,
       executionId: generateExecutionId(),
+      ...(agentProvider ? { payload: { agentProvider } } : {}),
     });
     await orchestrator.processSignal(signal.id);
   };
@@ -118,7 +215,7 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     queue = new InMemoryQueue();
     const logger = createLogger({ level: 'silent' });
     fakeAgent = new FakeAgentAdapter();
-    agentGateway = new DefaultAgentGateway(stack.db.client, logger, [fakeAgent], 3);
+    scriptedAgent = new ScriptedAgentAdapter();
     fakeLlm = new FakeLlmAdapter();
     // The architect fake returns a valid work-order candidate whenever the
     // orchestrator generates a Work Order during convergence.
@@ -147,6 +244,11 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
       logger,
     );
     assertionRepo = new PgArchitectureAssertionRepository(stack.db.client);
+    fakeGithub = new FakeGitHubAdapter();
+    snapshotProvider = new GithubRepositorySnapshotProvider(
+      new PgProjectGitHubRepositoryRepository(stack.db.client),
+      fakeGithub,
+    );
     const depService = new DefaultWorkItemDependencyService(stack.db.client);
     workflowEngine = new DefaultWorkflowEngine(
       stack.db.client, logger,
@@ -157,39 +259,64 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     user = await stack.userRepository.upsertByExternalId({ externalId: 'gate-user', displayName: 'User' });
     await stack.membershipRepository.assign({ userId: user.id, organizationId: org.id, roleId: 'owner' });
     project = await stack.projectRepository.create({ organizationId: org.id, name: 'Gate Project' });
+
+    // The project's /github repository link (server-side snapshot resolution)
+    // + seeded exact-revision trees.
+    const linkRepo = new PgProjectGitHubRepositoryRepository(stack.db.client);
+    await linkRepo.create({
+      projectId: project.id,
+      installationId: 'inst-gates',
+      owner: OWNER,
+      repository: REPO,
+      defaultBranch: 'main',
+    });
   });
 
   afterAll(async () => {
     await stack.teardown();
   });
 
-  const tempRoots: string[] = [];
-  const makeTempTree = (): string => {
-    const root = mkdtempSync(join(tmpdir(), 'wfos-gates-'));
-    tempRoots.push(root);
-    return root;
-  };
-  afterAll(() => {
-    for (const r of tempRoots) {
-      try { rmSync(r, { recursive: true, force: true }); } catch { /* best effort */ }
+  // --- /github fixture seeding ------------------------------------------------
+
+  const seedTree = (ref: string, files: Record<string, string>): void => {
+    const dirs = new Map<string, Map<string, 'file' | 'dir'>>();
+    const ensureDir = (dir: string): Map<string, 'file' | 'dir'> => {
+      if (!dirs.has(dir)) dirs.set(dir, new Map());
+      return dirs.get(dir)!;
+    };
+    ensureDir('');
+    for (const [path, content] of Object.entries(files)) {
+      fakeGithub.setFile(OWNER, REPO, ref, path, content);
+      const segments = path.split('/');
+      const parent = segments.slice(0, -1).join('/');
+      ensureDir(parent).set(segments[segments.length - 1]!, 'file');
+      for (let i = segments.length - 2; i >= 0; i--) {
+        const dirPath = segments.slice(0, i + 1).join('/');
+        ensureDir(segments.slice(0, i).join('/')).set(segments[i]!, 'dir');
+        ensureDir(dirPath);
+      }
     }
-  });
-  const writeCleanTree = (root: string): void => {
-    mkdirSync(join(root, 'src', 'modules', 'alpha', 'internal'), { recursive: true });
-    writeFileSync(join(root, 'src', 'modules', 'alpha', 'index.ts'), 'export type { A } from \'./internal/a.types.js\';\n');
-    writeFileSync(join(root, 'src', 'modules', 'alpha', 'internal', 'a.types.ts'), 'export interface A { x: number }\n');
-  };
-  const writeViolatingTree = (root: string): void => {
-    writeCleanTree(root);
-    mkdirSync(join(root, 'src', 'modules', 'beta', 'internal'), { recursive: true });
-    writeFileSync(join(root, 'src', 'modules', 'beta', 'index.ts'), 'export type {}\n');
-    writeFileSync(join(root, 'src', 'modules', 'beta', 'internal', 'b.types.ts'), 'export interface B { y: number }\n');
-    writeFileSync(join(root, 'src', 'modules', 'alpha', 'internal', 'leak.ts'),
-      "import type { B } from '@modules/beta/internal/b.types.js';\nexport const leak = (b: B): number => b.y;\n");
+    for (const [dir, entries] of dirs) {
+      fakeGithub.setDir(
+        OWNER, REPO, ref, dir,
+        [...entries.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, type]) => ({ name, type })),
+      );
+    }
   };
 
+  const cleanTree = (): Record<string, string> => ({
+    'src/modules/alpha/index.ts': "export type { A } from './internal/a.types.js';\n",
+    'src/modules/alpha/internal/a.types.ts': 'export interface A { x: number }\n',
+  });
+  const violatingTree = (): Record<string, string> => ({
+    ...cleanTree(),
+    'src/modules/beta/index.ts': 'export type {}\n',
+    'src/modules/beta/internal/b.types.ts': 'export interface B { y: number }\n',
+    'src/modules/alpha/internal/leak.ts':
+      "import type { B } from '@modules/beta/internal/b.types.js';\nexport const leak = (b: B): number => b.y;\n",
+  });
+
   const frozenVersionWithAssertion = async (
-    detectorConfig: Record<string, unknown>,
     severity: 'blocking' | 'advisory' = 'blocking',
   ): Promise<{ id: string }> => {
     const arch = await stack.architectureRepository.create({ projectId: project.id, name: `Arch-${generateExecutionId()}` });
@@ -201,13 +328,222 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
       scope: 'repository',
       statement: 'gate rule',
       detectorKind: 'repository-structure',
-      detectorConfig,
+      detectorConfig: {},
     });
     await stack.architectureVersionRepository.transitionState(v.id, 'frozen', user.id);
     return v;
   };
 
-  // --- PROOF 5: a blocking failure prevents the PR_OPEN transition ----------
+  const workItemOn = async (versionId: string) =>
+    stack.workItemRepository.create({
+      architectureVersionId: versionId,
+      workItemId: `WI-${generateExecutionId()}`,
+      title: 'gate proof',
+    });
+
+  const realService = () =>
+    new DefaultArchitectureCheckpointService({
+      workItemReader: stack.workItemRepository,
+      architectureVersionReader: stack.architectureVersionRepository,
+      architectureReader: stack.architectureRepository,
+      assertionReader: assertionRepo,
+      verificationService,
+      snapshotReader: snapshotProvider,
+      detectors: createDefaultDetectorRegistry(),
+      logger: createLogger({ level: 'silent' }),
+    });
+
+  // --- BLOCKER 2: the PR-creation boundary (the required two-stage proof) ------
+
+  it('BLOCKER 2 — with a BLOCKING architecture violation, the recorded PR-creation side-effect count is ZERO (state stays implementing)', async () => {
+    seedTree('rev-corrupt', violatingTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+    scriptedAgent.setCommitRef('rev-corrupt');
+
+    await initiate(orchestrator, wi.id, 'scripted');
+
+    // The agent phase ran (prohibited policy — no PR from the provider)…
+    expect(scriptedAgent.calls.some((c) => c.pullRequestPolicy === 'prohibited')).toBe(true);
+    // …the gate evaluated the EXACT revision and BLOCKED…
+    expect(events.some((e) => e.type === 'gate' && e.detail === 'pr_conformance@rev-corrupt')).toBe(true);
+    // …and the PR authority recorded ZERO createPullRequest side effects.
+    expect(prPort.calls).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'pr-create')).toHaveLength(0);
+    // The work item stays IMPLEMENTING (no PR association, no PR_OPEN).
+    expect(await state(wi.id)).toBe('implementing');
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs).toHaveLength(0);
+    const history = await workflowEngine.getHistory(wi.id);
+    expect(history.some((t) => t.toState === 'pr_open')).toBe(false);
+  });
+
+  it('BLOCKER 2 — with a CONFORMANT revision, EXACTLY ONE PR is created and only AFTER the gate passes (event order)', async () => {
+    seedTree('rev-clean', cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+    scriptedAgent.setCommitRef('rev-clean');
+
+    await initiate(orchestrator, wi.id, 'scripted');
+
+    // Exactly one PR-creation side effect…
+    expect(prPort.calls).toHaveLength(1);
+    // …bound to the EXACT revision the gate evaluated…
+    expect(prPort.calls[0]!.headRevision).toBe('rev-clean');
+    // …and it happened AFTER the gate allowed it.
+    const gateIndex = events.findIndex(
+      (e) => e.type === 'gate' && e.detail === 'pr_conformance@rev-clean',
+    );
+    const createIndex = events.findIndex((e) => e.type === 'pr-create');
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    expect(createIndex).toBeGreaterThan(gateIndex);
+
+    // The lifecycle completed: PR association + PR_OPEN.
+    expect(await state(wi.id)).toBe('pr_open');
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs.length).toBe(1);
+    expect(prs[0]!.headCommit).toBe('rev-clean');
+  });
+
+  it('BLOCKER 2 — the agent gateway ENFORCES the prohibition: a provider reporting a PR for a prohibited phase fails the run with the typed violation', async () => {
+    seedTree('rev-gwviolation', cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+    // A CONTRACT-VIOLATING provider: reports a PR for the prohibited phase.
+    scriptedAgent.setCommitRef('rev-gwviolation');
+    scriptedAgent.setReportPullRequest(true);
+
+    // The gateway throws the typed violation (the initiate path's catch
+    // handles the agent failure; the run is recorded FAILED).
+    await initiate(orchestrator, wi.id, 'scripted');
+
+    // ZERO PR-creation side effects (the violation was rejected before any
+    // gated boundary was reached).
+    expect(prPort.calls).toHaveLength(0);
+    // The typed error exists and the agent run is failed (not success).
+    const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
+    expect(runs.length).toBeGreaterThanOrEqual(1);
+    expect(runs.some((r) => r.status === 'failed')).toBe(true);
+    // The prohibited policy was requested of the provider.
+    expect(scriptedAgent.calls.some((c) => c.pullRequestPolicy === 'prohibited')).toBe(true);
+
+    scriptedAgent.setReportPullRequest(false);
+  });
+
+  it('BLOCKER 2 (unit) — the gateway throws AgentPullRequestProhibitedError for a prohibited-phase PR report', async () => {
+    const logger = createLogger({ level: 'silent' });
+    const violatingProvider: AgentProviderAdapter = {
+      providerName: 'pr-violator',
+      supports: (p: string) => p === 'pr-violator',
+      async execute(request) {
+        return {
+          status: 'success',
+          output: 'x',
+          startedAt: new Date(),
+          completedAt: new Date(),
+          executionId: request.executionId,
+          provider: 'pr-violator',
+          configuration: {},
+          commitRef: 'abc',
+          pullRequestRef: 'github:x/y#1', // VIOLATION under prohibition
+          reportedTests: [],
+          reportedBlockers: [],
+          error: null,
+          metadata: {},
+        };
+      },
+    };
+    const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'GW Arch' });
+    const v = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: 'c' });
+    const wi = await workItemOn(v.id);
+    // A REAL work order (the agent-run FK requires one).
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wi.id, projectId: project.id, architectureVersionId: v.id,
+    });
+    const gateway = new DefaultAgentGateway(stack.db.client, logger, [violatingProvider], 3);
+    await expect(
+      gateway.execute({
+        provider: 'pr-violator',
+        configuration: {},
+        workItemId: wi.id,
+        workOrderId: wo.id,
+        executionId: generateExecutionId(),
+        input: 'impl',
+        pullRequestPolicy: 'prohibited',
+      }),
+    ).rejects.toBeInstanceOf(AgentPullRequestProhibitedError);
+    // The run is FAILED (not a success carrying a forbidden PR).
+    const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
+    expect(runs[0]!.status).toBe('failed');
+    expect(runs[0]!.pullRequestRef).toBeNull();
+  });
+
+  it('BLOCKER 2 (agent_run_completed path) — the same boundary holds: gate FIRST, exactly one creation, external PR refs adopted only post-gate', async () => {
+    seedTree('rev-arc-completed', cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+
+    // Drive to IMPLEMENTING with a violating revision: the gate blocks, no PR.
+    seedTree('rev-arc-bad', violatingTree());
+    scriptedAgent.setCommitRef('rev-arc-bad');
+    await initiate(orchestrator, wi.id, 'scripted');
+    expect(await state(wi.id)).toBe('implementing');
+    expect(prPort.calls).toHaveLength(0);
+
+    // The corrected revision arrives as a NEW agent run (the trusted
+    // agent_run_completed signal carries the AUTHORITATIVE run record's
+    // commitRef — so the run must actually be at the corrected revision).
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wi.id, projectId: project.id, architectureVersionId: v.id,
+    });
+    scriptedAgent.setCommitRef('rev-arc-completed');
+    const gateway = new DefaultAgentGateway(
+      stack.db.client, createLogger({ level: 'silent' }), [scriptedAgent], 3,
+    );
+    await gateway.execute({
+      provider: 'scripted',
+      configuration: {},
+      workItemId: wi.id,
+      workOrderId: wo.id,
+      architectureVersionId: v.id,
+      executionId: generateExecutionId(),
+      input: 'corrected implementation',
+      pullRequestPolicy: 'prohibited',
+    });
+    const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
+    const correctedRun = runs.find((r) => r.commitRef === 'rev-arc-completed');
+    expect(correctedRun).toBeTruthy();
+
+    const signal = await orchestrator.submitAgentRunCompleted({
+      workItemId: wi.id,
+      agentRunId: correctedRun!.id,
+      executionId: generateExecutionId(),
+    });
+    await orchestrator.processSignal(signal.id);
+
+    // Exactly ONE creation, after the gate, bound to the fixed revision.
+    expect(prPort.calls).toHaveLength(1);
+    expect(prPort.calls[0]!.headRevision).toBe('rev-arc-completed');
+    expect(await state(wi.id)).toBe('pr_open');
+  });
+
+  // --- PROOF 5: a blocking failure prevents the PR_OPEN transition ------------
 
   it('PROOF 5 — a BLOCKED pr_conformance gate prevents IMPLEMENTING → PR_OPEN (state stays implementing; no transition recorded)', async () => {
     const arch = await stack.architectureRepository.create({ projectId: project.id, name: `Arch-${generateExecutionId()}` });
@@ -219,10 +555,13 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
 
     const gate = new ScriptedGate();
     gate.respond('pr_conformance', { allowed: false, status: 'blocked', reasons: ['ARCH-GATE-001 [blocking/fail]: violation'] });
-    const orchestrator = buildOrchestrator(gate);
+    const prPort = new FakePullRequestCreationPort();
+    const orchestrator = buildOrchestrator(gate, prPort);
 
     await initiate(orchestrator, wi.id);
     expect(await state(wi.id)).toBe('implementing'); // agent ran, but NO pr_open
+    // ZERO PR creations under the denied gate.
+    expect(prPort.calls).toHaveLength(0);
 
     const history = await workflowEngine.getHistory(wi.id);
     expect(history.some((t) => t.toState === 'pr_open')).toBe(false);
@@ -234,7 +573,7 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     expect(prCall!.implementationRevision).toBe('abc123'); // FakeAgentAdapter's commitRef
   });
 
-  // --- the other three gates -------------------------------------------------
+  // --- the other three gates ---------------------------------------------------
 
   it('a BLOCKED readiness gate prevents READY → ASSIGNED (no assignment, no agent run)', async () => {
     const arch = await stack.architectureRepository.create({ projectId: project.id, name: `Arch-${generateExecutionId()}` });
@@ -246,7 +585,7 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
 
     const gate = new ScriptedGate();
     gate.respond('readiness', { allowed: false, status: 'inconclusive', reasons: ['version not frozen'] });
-    const orchestrator = buildOrchestrator(gate);
+    const orchestrator = buildOrchestrator(gate, new FakePullRequestCreationPort());
 
     const callsBefore = fakeAgent.getCallCount();
     await initiate(orchestrator, wi.id);
@@ -266,7 +605,7 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
 
     const gate = new ScriptedGate();
     gate.respond('work_order', { allowed: false, status: 'blocked', reasons: ['scope violates assertion'] });
-    const orchestrator = buildOrchestrator(gate);
+    const orchestrator = buildOrchestrator(gate, new FakePullRequestCreationPort());
 
     const callsBefore = fakeAgent.getCallCount();
     await initiate(orchestrator, wi.id);
@@ -283,7 +622,7 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     });
 
     const gate = new ScriptedGate(); // all gates permissive on the way up
-    const orchestrator = buildOrchestrator(gate);
+    const orchestrator = buildOrchestrator(gate, new FakePullRequestCreationPort());
     await initiate(orchestrator, wi.id);
     expect(await state(wi.id)).toBe('pr_open');
 
@@ -302,9 +641,9 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     expect(runs.filter((r) => r.source !== CHECKPOINT_RUN_SOURCE)).toHaveLength(0); // no verification run
   });
 
-  // --- advisory + fail-closed-error postures ----------------------------------
+  // --- advisory + fail-closed-error postures ------------------------------------
 
-  it('PROOF 6 (lifecycle) — passed_with_advisories ALLOWS the transition', async () => {
+  it('PROOF 6 (lifecycle) — passed_with_advisories ALLOWS the transition (the PR is created post-gate)', async () => {
     const arch = await stack.architectureRepository.create({ projectId: project.id, name: `Arch-${generateExecutionId()}` });
     const v = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: 'c' });
     await stack.architectureVersionRepository.transitionState(v.id, 'frozen', user.id);
@@ -314,9 +653,11 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
 
     const gate = new ScriptedGate();
     gate.respond('pr_conformance', { allowed: true, status: 'passed_with_advisories', reasons: ['advisory: docs drift'] });
-    const orchestrator = buildOrchestrator(gate);
+    const prPort = new FakePullRequestCreationPort();
+    const orchestrator = buildOrchestrator(gate, prPort);
     await initiate(orchestrator, wi.id);
     expect(await state(wi.id)).toBe('pr_open');
+    expect(prPort.calls).toHaveLength(1); // the PR creation happened (post-gate)
   });
 
   it('a THROWING gate fails CLOSED (no transition on an unevaluable checkpoint)', async () => {
@@ -332,39 +673,30 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
         throw new Error('checkpoint infrastructure down');
       },
     };
-    const orchestrator = buildOrchestrator(throwingGate);
+    const orchestrator = buildOrchestrator(throwingGate, new FakePullRequestCreationPort());
     await initiate(orchestrator, wi.id);
     // The readiness gate failed closed: the work item never left READY.
     expect(await state(wi.id)).toBe('ready');
   });
 
-  // --- impact policy through the REAL checkpoint service ----------------------
+  // --- impact policy through the REAL checkpoint service ------------------------
 
   it('impact policy (real service) — a LOW-impact work item skips pre-implementation gates but still runs the PR checkpoint at full severity', async () => {
-    const badRoot = makeTempTree();
-    writeViolatingTree(badRoot);
-    const v = await frozenVersionWithAssertion({ rootDir: badRoot });
+    seedTree('rev-impact-low', violatingTree());
+    const v = await frozenVersionWithAssertion();
 
     const lowWi = await stack.workItemRepository.create({
       architectureVersionId: v.id, workItemId: `WI-${generateExecutionId()}`, title: 'low impact',
-      metadata: { architectureImpact: 'low' },
+      architectureImpact: 'low',
     });
 
-    const realGate = new DefaultArchitectureCheckpointService({
-      workItemReader: stack.workItemRepository,
-      architectureVersionReader: stack.architectureVersionRepository,
-      architectureReader: stack.architectureRepository,
-      assertionReader: assertionRepo,
-      verificationService,
-      detectors: createDefaultDetectorRegistry(),
-      logger: createLogger({ level: 'silent' }),
-    });
-    const orchestrator = buildOrchestrator(realGate);
+    const orchestrator = buildOrchestrator(realService(), new FakePullRequestCreationPort(), [scriptedAgent]);
+    scriptedAgent.setCommitRef('rev-impact-low');
 
-    const callsBefore = fakeAgent.getCallCount();
-    await initiate(orchestrator, lowWi.id);
+    const callsBefore = scriptedAgent.calls.length;
+    await initiate(orchestrator, lowWi.id, 'scripted');
     // The agent DID run (readiness/work_order skipped for LOW impact)…
-    expect(fakeAgent.getCallCount()).toBe(callsBefore + 1);
+    expect(scriptedAgent.calls.length).toBe(callsBefore + 1);
     // …but the PR checkpoint ran WITH full severity and BLOCKED on the violation.
     expect(await state(lowWi.id)).toBe('implementing');
 
@@ -375,39 +707,24 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     expect(blocked[0]!.summary.status).toBe('blocked');
   });
 
-  // --- the end-to-end correction loop with the REAL service --------------------
+  // --- the end-to-end correction loop with the REAL service ----------------------
 
-  it('end-to-end (real service) — a violation blocks PR_OPEN, the corrected tree unblocks it (drift caught before PR creation; evidence is revision-bound)', async () => {
-    const root = makeTempTree();
-    writeViolatingTree(root);
-    // The assertion is scoped to the PR conformance checkpoint via the
-    // appliesToCheckpoints pre-filter (a pre-implementation tree scan is not
-    // meaningful before the implementation exists).
-    const v = await frozenVersionWithAssertion({
-      rootDir: root,
-      appliesToCheckpoints: ['pr_conformance'],
-    });
+  it('end-to-end (real service) — a violation blocks PR creation; the corrected REVISION unblocks it (both results durable + revision-bound)', async () => {
+    seedTree('rev-e2e-bad', violatingTree());
+    seedTree('rev-e2e-good', cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
 
-    const wi = await stack.workItemRepository.create({
-      architectureVersionId: v.id, workItemId: `WI-${generateExecutionId()}`, title: 'e2e correction',
-    });
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
 
-    const realGate = new DefaultArchitectureCheckpointService({
-      workItemReader: stack.workItemRepository,
-      architectureVersionReader: stack.architectureVersionRepository,
-      architectureReader: stack.architectureRepository,
-      assertionReader: assertionRepo,
-      verificationService,
-      detectors: createDefaultDetectorRegistry(),
-      logger: createLogger({ level: 'silent' }),
-    });
-    const orchestrator = buildOrchestrator(realGate);
-
-    // First attempt: the tree carries the violation → the PR checkpoint
-    // blocks before PR_OPEN (drift caught BEFORE the PR exists).
-    await initiate(orchestrator, wi.id);
+    // First attempt: the implementation revision carries the violation →
+    // the gate blocks; ZERO PR-creation side effects.
+    scriptedAgent.setCommitRef('rev-e2e-bad');
+    await initiate(orchestrator, wi.id, 'scripted');
     expect(await state(wi.id)).toBe('implementing');
-    expect(fakeAgent.getCallCount()).toBeGreaterThanOrEqual(1);
+    expect(prPort.calls).toHaveLength(0);
 
     // The blocked evidence is durable + revision-bound.
     const afterBlock = await verificationService.listRunsForWorkItem(wi.id);
@@ -416,25 +733,26 @@ describe('WORK-051 — orchestrator architecture checkpoint gates', () => {
     );
     expect(blockedRuns.length).toBeGreaterThanOrEqual(1);
     expect(blockedRuns[0]!.summary.status).toBe('blocked');
+    expect(blockedRuns[0]!.metadata.implementationRevision).toBe('rev-e2e-bad');
 
-    // Correct the tree (the SAME frozen version + assertion set now passes).
-    rmSync(join(root, 'src', 'modules', 'alpha', 'internal', 'leak.ts'), { force: true });
+    // The correction: the work item cycles through review (the same legal
+    // transition path the orchestrator drives) and re-enters the correction
+    // implementation path with a NEW revision.
+    scriptedAgent.setCommitRef('rev-e2e-good');
+    await workflowEngine.transition({ workItemId: wi.id, toState: 'pr_open' }); // test setup (the engine's own authority)
+    await workflowEngine.transition({ workItemId: wi.id, toState: 'verifying' });
+    await workflowEngine.transition({ workItemId: wi.id, toState: 'architect_review' });
+    await workflowEngine.transition({ workItemId: wi.id, toState: 'changes_requested' });
 
-    // Re-drive via a trusted agent_run_completed signal for the fake run.
-    const run = (await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id))[0];
-    expect(run).toBeTruthy();
-    const signal = await orchestrator.submitAgentRunCompleted({
-      workItemId: wi.id,
-      agentRunId: run!.id,
-      executionId: generateExecutionId(),
-    });
-    await orchestrator.processSignal(signal.id);
-
-    // The corrected implementation now clears the PR conformance checkpoint.
+    // Re-initiate the convergence: changes_requested → implementing → agent
+    // run at the corrected revision → gate PASSES → exactly ONE PR creation.
+    await initiate(orchestrator, wi.id, 'scripted');
+    expect(prPort.calls).toHaveLength(1);
+    expect(prPort.calls[0]!.headRevision).toBe('rev-e2e-good');
     expect(await state(wi.id)).toBe('pr_open');
 
-    // Both checkpoint results persist (blocked first, then passed) —
-    // the correction is fully auditable.
+    // Both checkpoint results persist (blocked first, then passed) — the
+    // correction is fully auditable.
     const afterFix = await verificationService.listRunsForWorkItem(wi.id);
     const statuses = afterFix
       .filter((r) => r.source === CHECKPOINT_RUN_SOURCE && r.status === 'completed')

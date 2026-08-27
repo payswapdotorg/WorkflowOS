@@ -39,6 +39,7 @@ import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger, generate
 import { CaptureStream } from '../helpers/capture-stream.js';
 import { DefaultWorkflowEngine } from '../../src/modules/workflows/internal/workflow-engine.js';
 import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from '../../src/modules/workflows/internal/workflow-orchestrator.js';
+import { FakePullRequestCreationPort } from '../helpers/fake-pr-creation-port.js';
 import { DefaultWorkItemDependencyService } from '../../src/modules/work-items/internal/work-item-dependency-service.js';
 import { DefaultAgentGateway, FakeAgentAdapter } from '../../src/modules/agents/internal/agent-gateway.js';
 import { PgAgentRunRepository } from '../../src/modules/agents/internal/pg-agent-repository.js';
@@ -124,6 +125,7 @@ test.beforeAll(async () => {
     architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
     stack.architectureVersionRepository, stack.architectureRepository,
     stack.projectRepository, new AllowAllCheckpointGate(), generateExecutionId,
+      new FakePullRequestCreationPort(),
   );
   const handlers = buildHandlerRegistry([
     createConvergenceJobHandler(orchestrator, logger),
@@ -148,6 +150,7 @@ test.beforeAll(async () => {
       architectureVersionRepository: stack.architectureVersionRepository,
       architectureDecisionRepository: stack.architectureDecisionRepository,
       architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+      architectureAssertionRepository: stack.architectureAssertionRepository,
       architectureService: stack.architectureService,
     },
     workItems: {
@@ -313,10 +316,12 @@ test.describe('WORKFLOWOS — Complete A→Z Browser E2E', () => {
     // ---------------------------------------------------------------
     // 5. Freeze Architecture
     // ---------------------------------------------------------------
+    // WORK-051 round 1: the governed no-assertions declaration.
     const freezeRes = await server.inject({
       method: 'POST',
       url: `/architecture-versions/${versionId}/freeze`,
       headers: { 'x-api-key': API_KEY },
+      payload: { allowEmptyAssertionSet: true },
     });
     expect(freezeRes.statusCode).toBe(200);
     expect((freezeRes.json() as { state: string }).state).toBe('frozen');

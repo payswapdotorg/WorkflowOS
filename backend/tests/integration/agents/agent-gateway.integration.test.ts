@@ -75,7 +75,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
-        architectureService: stack.architectureService,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
+      architectureService: stack.architectureService,
       },
       workItems: {
         authorizationService: stack.authorizationService,

@@ -88,6 +88,75 @@ export interface WorkItemReader {
 }
 
 // ---------------------------------------------------------------------------
+// Revision-bound repository snapshots (PR #52 round 1, BLOCKER 1)
+// ---------------------------------------------------------------------------
+
+/** One entry of a snapshot directory listing at the bound revision. */
+export interface SnapshotDirEntry {
+  readonly name: string;
+  readonly type: 'file' | 'dir';
+}
+
+/**
+ * Typed failure at the snapshot read boundary. ALWAYS fail-closed: a detector
+ * that cannot inspect its required input returns 'inconclusive', never a
+ * vacuous pass.
+ */
+export class SnapshotReadError extends Error {
+  readonly code = 'snapshot-read-failed';
+  /** What kind of failure: an unreadable path, a missing scan root, or an inconsistent tree. */
+  readonly reason: 'unreadable' | 'root-missing' | 'inconsistent';
+
+  constructor(reason: SnapshotReadError['reason'], message: string) {
+    super(message);
+    this.name = 'SnapshotReadError';
+    this.reason = reason;
+  }
+}
+
+/**
+ * An EXACT-REVISION, read-only view of a governed repository — the ONLY
+ * source repository-backed detectors may read (PR #52 round 1, BLOCKER 1).
+ *
+ * The bytes returned by this interface are bound to `revision` and come from
+ * the existing /github authority's exact-revision content reads
+ * (getFileContent/listDir at the resolved ref). Detectors NEVER read the
+ * current working tree: a checkpoint that claims to have evaluated revision A
+ * evaluates the snapshot opened at revision A — mutating the checkout on disk
+ * cannot change a bound result.
+ *
+ * Read semantics (fail closed):
+ * - `readFile` → the file's content at the revision, or null when the path
+ *   does not exist at that revision. A read FAILURE throws
+ *   {@link SnapshotReadError}.
+ * - `listDir` → the directory entries at the revision ([] when the directory
+ *   does not exist). A read FAILURE throws {@link SnapshotReadError}.
+ * - `dirExists` → parent-chain-verified existence. A read FAILURE throws.
+ */
+export interface RepositorySnapshot {
+  /** The exact implementation revision this snapshot is bound to. */
+  readonly revision: string;
+  /** The repository coordinates ('owner/name') — server-resolved. */
+  readonly repository: string;
+  listDir(path: string): Promise<readonly SnapshotDirEntry[]>;
+  readFile(path: string): Promise<string | null>;
+  dirExists(path: string): Promise<boolean>;
+}
+
+/**
+ * The snapshot source authority: opens the EXACT-revision snapshot for a
+ * project's repository. Repository coordinates are resolved SERVER-SIDE from
+ * the project's /github link — callers never supply them.
+ *
+ * Returns null when the project has no linked repository (fail closed: no
+ * snapshot ⇒ repository-backed assertions evaluate inconclusive). Throws on
+ * resolution failure.
+ */
+export interface RepositorySnapshotReader {
+  openSnapshot(projectId: string, revision: string): Promise<RepositorySnapshot | null>;
+}
+
+// ---------------------------------------------------------------------------
 // Impact profile (design §6)
 // ---------------------------------------------------------------------------
 
@@ -103,9 +172,14 @@ export interface WorkItemReader {
  *                                                   implementation + PR +
  *                                                   verification entry
  *
- * Derivation: WorkItem.metadata.architectureImpact when explicitly one of
- * 'low' | 'medium' | 'high'; otherwise the FAIL-CLOSED default 'high' (the
- * strictest checkpoint frequency — never weaker).
+ * Derivation (PR #52 round 1, HIGH — protected impact): the Work Item's
+ * GOVERNED, persistence-enforced MONOTONIC declaration
+ * (`WorkItem.architectureImpact` — declared at creation, updatable only in
+ * the STRICTENING direction by the migration-0054 trigger, invisible to the
+ * mutable-metadata update contract). Mutable `WorkItem.metadata` is NOT a
+ * governance input: changing it can never downgrade a HIGH-impact item into
+ * a lighter checkpoint frequency. Unset (NULL) derives the FAIL-CLOSED
+ * default 'high' (the strictest frequency — never weaker).
  */
 export type ArchitectureImpactLevel = 'low' | 'medium' | 'high';
 
@@ -194,6 +268,15 @@ export interface ArchitectureCheckpointResult {
 export interface DetectorInput {
   assertion: ArchitectureAssertion;
   checkpointKind: ArchitectureCheckpointKind;
+  /**
+   * The EXACT-REVISION repository snapshot (PR #52 round 1, BLOCKER 1) — the
+   * ONLY repository source a detector may read. Present for revision-bound
+   * checkpoints whose snapshot opened successfully. Null at checkpoints with
+   * no revision binding (readiness / work_order) — repository-backed
+   * assertions are then 'not_applicable' (nothing is bound yet); they can
+   * never silently read the current working tree instead.
+   */
+  snapshot: RepositorySnapshot | null;
   /** Server-resolved authoritative context (never caller-supplied identity). */
   context: {
     projectId: string;
