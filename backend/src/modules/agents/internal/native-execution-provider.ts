@@ -44,9 +44,10 @@
  * UNKEYED tasks (the mainline one-shot dispatch) keep the exact pre-round-7
  * behavior.
  *
- * PR #46 round 8 (the EXPLICIT DEFINITION the round-8 review requires):
- * `wfos_agent_runs` (migration 0011) IS the DURABLE NATIVE PROVIDER-OPERATION
- * LEDGER:
+ * PR #46 round 8 (the EXPLICIT DEFINITION the round-8 review requires) +
+ * round 9 (the review's exact wording): AgentRun is the durable native
+ * operation ledger — `wfos_agent_runs` (migration 0011) IS the DURABLE NATIVE
+ * PROVIDER-OPERATION LEDGER:
  *   - the run row IS the native provider operation (the run creation + the
  *     adapter execution);
  *   - `execution_id TEXT NOT NULL UNIQUE` IS the operation-key uniqueness —
@@ -68,6 +69,12 @@
  *         submit converges on it (ZERO further gateway calls / adapter
  *         invocations; the run row is the operation record whether the
  *         crashed actor's adapter invocation ever ran).
+ *   The native ledger's mechanics are deliberately DIFFERENT from the
+ *   external ledger's (PR #46 round 9): the native convergence authority is
+ *   the UNIQUE constraint on the durable execution identity +
+ *   converge-on-the-existing-run, NOT the external ledger's generation
+ *   fencing + resolution CAS + operation-identity protocol. Both arms have
+ *   a durable operation ledger; they do not share one mechanism.
  *
  * This file is private to /agents (PLAT-AC-02).
  */

@@ -11169,17 +11169,18 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0048 (PR #46 round 8 — the DURABLE
-    // PROVIDER-OPERATION LEDGER; 0047 is the cross-mode-handoff durable
+    // The highest migration is 0049 (PR #46 round 9 — the GENERATION-FENCED,
+    // IDENTITY-RECOVERABLE provider-operation ledger; 0048 is the durable
+    // provider-operation ledger; 0047 is the cross-mode-handoff durable
     // dispatch idempotency key; 0046 is the fenced dispatch gate;
     // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
     // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
-    // handoff log). WORK-040 added none (0042-0048 belong to WORK-042, not
+    // handoff log). WORK-040 added none (0042-0049 belong to WORK-042, not
     // WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-8 durable provider-operation ledger migration, NOT a planner-owned table)').toMatch(/^0048_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-9 generation-fenced provider-operation ledger migration, NOT a planner-owned table)').toMatch(/^0049_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -13296,53 +13297,61 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(appSrc, 'app.ts constructs the ExternalExecutionProvider WITH the durable store').toMatch(/new ExternalExecutionProvider\(\{\s*operationStore: new PgExecutionProviderOperationRepository\(database\),/);
   });
 
-  // R8-D (round 8): the ledger state machine is CAS-only (single conditional
-  // statements — no read-check-write): register opens-or-re-arms exactly one
-  // row, the completion is a single resolution CAS whose loser converges to
-  // the winner, and the failure is the symmetric CAS.
-  it('R8-D. the durable ledger state machine — open-or-re-arm register + the single resolution CAS + the symmetric failure CAS', () => {
+  // R8-D (round 8, rewritten by round 9): the ledger state machine is
+  // CAS-only (single conditional statements — no read-check-write) and (the
+  // round-9 correction) GENERATION-FENCED: register opens exactly one row
+  // (and NEVER re-arms a terminal row — the key is immutable), the
+  // completion/failure are the generation-fenced resolution CASes, the
+  // operation identity has its own attach CAS, and takeOver RETURNS the new
+  // generation token.
+  it('R8-D. the durable ledger state machine — the INSERT-only register (NO re-arm — the key is immutable) + the GENERATION-FENCED resolution CASes + the operation-identity attach CAS + the takeOver-returns-the-token recovery', () => {
     const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
     // register: the FRESH open is an INSERT ... ON CONFLICT DO NOTHING.
     expect(repoSrc, 'the fresh open is INSERT ... ON CONFLICT DO NOTHING (ONE row per key)').toMatch(/ON CONFLICT \(idempotency_key\) DO NOTHING/);
-    // register: a TERMINALLY FAILED row is re-armed on the SAME row (the
-    // retry-liveness arm — generation + 1, never a second row).
-    expect(repoSrc, 'the re-arm is a conditional UPDATE on state = failed (the SAME row)').toMatch(/AND state = 'failed'/);
-    expect(repoSrc, 'the re-arm increments the generation (the SAME row is re-driven)').toMatch(/generation = generation \+ 1/);
-    // complete: the single resolution CAS ('pending' → 'completed') —
-    // concurrent drivers and a late dead driver all funnel through it; the
-    // loser replays the winner's stored result.
-    expect(repoSrc, 'the completion is the resolution CAS (pending → completed)').toMatch(/AND state = 'pending'[\s\S]*?state = 'completed'|state = 'completed',[\s\S]*?AND state = 'pending'/);
-    expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$2::jsonb/);
-    // fail: the symmetric CAS (a CAS loss is a benign no-op — the row's
-    // recorded resolution stands).
-    expect(repoSrc, 'the failure is the symmetric resolution CAS').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'/);
+    // register: NO re-arm — a terminally FAILED row is returned AS-IS (round 9
+    // removed the round-8 `AND state = 'failed'` conditional re-arm).
+    expect(repoSrc, 'NO re-arm: register NEVER conditionally updates a failed row back to pending (the key identifies ONE operation with ONE terminal result)').not.toMatch(/AND state = 'failed'/);
+    // complete: the GENERATION-FENCED resolution CAS ('pending' @ THIS
+    // generation → 'completed') — concurrent drivers and a late dead driver
+    // all funnel through it; only the ACTIVE generation can resolve.
+    expect(repoSrc, 'the completion is the generation-fenced resolution CAS (pending @ generation → completed)').toMatch(/state = 'completed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$3::jsonb/);
+    // fail: the symmetric GENERATION-FENCED CAS (a stale generation's
+    // failure is structurally discarded — it can never defeat the active
+    // recovery generation).
+    expect(repoSrc, 'the failure is the symmetric generation-fenced CAS').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    // attachOperation: the operation-identity CAS (migration 0049's column).
+    expect(repoSrc, 'the operation-identity attach CAS exists (the handle is durably recorded BEFORE the body)').toMatch(/AND provider_operation_handle IS NULL/);
     // takeOver: the process-loss recovery — the recovery drive of the SAME
-    // row (generation + 1, state stays 'pending'); the CAS rejects a row
-    // that resolved in the interim (converge instead of driving).
-    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'/);
-    expect(repoSrc, 'the take-over port is declared (the process-loss recovery contract)').toMatch(/takeOver\(\s*idempotencyKey: string,\s*\): Promise<\{ tookOver: boolean; existing: ProviderOperationRecord \| null \}>/);
+    // row, RETURNING the NEW GENERATION TOKEN (the fencing token).
+    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1) + RETURNS the token').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+    expect(repoSrc, 'the takeOver port returns the NEW GENERATION TOKEN').toMatch(/tookOver: boolean;\s*generation: number \| null;/);
   });
 
   // R8-E (round 8 — the EXPLICIT native definition the review requires): the
   // AgentRun table IS the durable native provider-operation ledger — declared
   // in the provider contract (execution.types.ts) + the native provider, with
   // the process-loss recovery defined as converge-on-the-existing-run.
-  it('R8-E. the EXPLICIT definition — wfos_agent_runs IS the durable native provider-operation ledger (the contract + the provider declare it)', () => {
+  it('R8-E. the EXPLICIT definition — AgentRun is the durable native operation ledger (the contract + the provider declare it, updated to the round-9 exact wording)', () => {
     const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
-    expect(typesSrc, 'the contract defines the durable native provider-operation ledger').toMatch(/the durable native provider-operation ledger is[\s\S]{0,200}wfos_agent_runs/);
+    expect(typesSrc, 'the contract defines the durable native operation ledger (the round-9 exact wording)').toMatch(/AgentRun is the durable native operation ledger[\s\S]{0,120}wfos_agent_runs/);
     expect(typesSrc, 'the contract declares the execution_id UNIQUE as the operation-key uniqueness').toMatch(/execution_id TEXT NOT NULL\s*\*?\s*UNIQUE/);
     const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
-    expect(nativeSrc, 'the native provider declares the durable ledger definition').toMatch(/IS the DURABLE NATIVE PROVIDER-OPERATION/);
+    expect(nativeSrc, 'the native provider declares the durable ledger definition').toMatch(/IS the DURABLE NATIVE[\s\S]{0,8}PROVIDER-OPERATION/);
     expect(nativeSrc, 'the native provider declares the converge-on-the-existing-run process-loss recovery').toMatch(/process-loss recovery is CONVERGE-ON-THE-EXISTING-RUN/);
   });
 
-  // R8-F (round 8 — the await-then-take-over recovery): a PENDING row whose
-  // driver died is resolved THROUGH THE SAME ROW by the recovering actor —
-  // the await (converge while in flight) followed by the take-over drive
-  // after the resolution window (process loss), with the single resolution
-  // CAS arbitrating concurrent/late drivers. Same key always resolves to the
-  // same operation — across provider instances, processes, and actors.
-  it('R8-F. the await-then-take-over recovery — a pending ledger row is resolved through the SAME row (the await converges; the window-elapsed take-over re-drives the ONE row)', () => {
+  // R8-F (round 8, rewritten by round 9): the await-then-take-over recovery —
+  // a PENDING row whose driver died is resolved THROUGH THE SAME ROW by the
+  // recovering actor: the await (converge while in flight) followed by the
+  // take-over (which RETURNS the new generation token) after the resolution
+  // window (process loss). The recovery driver either RESOLVES BY IDENTITY
+  // (the handle is recorded — never a body re-run) or drives the FIRST
+  // execution (the handle is absent — the body never started); the
+  // generation-fenced resolution CAS arbitrates drivers; the loser converges
+  // to the winner. Same key always resolves to the same operation — across
+  // provider instances, processes, and actors.
+  it('R8-F. the await-then-take-over recovery — a pending ledger row is resolved through the SAME row (the await converges; the window-elapsed take-over drives the recovery under the NEW GENERATION TOKEN)', () => {
     const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
     // The in-flight convergence: a PENDING row is awaited (the original
     // submitter's liveness is irrelevant — the operation lives in the ledger).
@@ -13356,6 +13365,164 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(externalSrc, 'a failed drive re-checks the row — a COMPLETED result still resolves the same key').toMatch(/provider-operation-converged-after-failure/);
     const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
     expect(repoSrc, 'the store port declares the durable provider-operation ledger contract').toMatch(/export interface ExecutionProviderOperationStore/);
-    expect(repoSrc, 'the register contract documents the opened/converge semantics').toMatch(/exactly one concurrent re-arm wins/);
+    expect(repoSrc, 'the register contract documents the key-immutability semantics (terminal rows are returned as-is — NEVER re-armed)').toMatch(/there is NO re-arm/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 9 — the GENERATION-FENCED, IDENTITY-RECOVERABLE takeover
+  // protocol (the round-8 review's three blocking corrections). The durable
+  // ledger was real, but its takeover protocol (1) re-ran the operation body,
+  // (2) resolved without a generation fence (a stale FAIL could defeat the
+  // recovery generation; a stale SUCCESS could win merely by racing), and
+  // (3) re-armed terminally FAILED keys (one key, two terminal outcomes). The
+  // corrected design (the review's freeze — the ledger behaves like the
+  // existing handoff lease):
+  //
+  //     operation key
+  //        ↓
+  //     one durable operation row
+  //        ↓
+  //     generation / fencing token          ← takeOver() RETURNS the token
+  //        ↓
+  //     one active driver
+  //        ↓
+  //     operation-specific durable/provider idempotency identity
+  //        ↓                                    ← migration 0049: the handle
+  //     one terminal result
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0049 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0049_execution_provider_operation_generation_fence.sql',
+  );
+
+  // R9-A (round 9 — migration 0049): the operation-identity layer + the
+  // generation fence's durable columns — provider_operation_handle (the
+  // durable provider-side identity of the ONE operation, recorded BEFORE
+  // the operation body runs) + operation_attached_at.
+  it('R9-A. migration 0049 exists — the provider-operation IDENTITY columns (provider_operation_handle + operation_attached_at) + the generation-fence/key-immutability header', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0049), '0049_execution_provider_operation_generation_fence.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0049, 'utf8');
+    expect(src, 'the migration adds the provider operation handle').toMatch(/ADD COLUMN IF NOT EXISTS provider_operation_handle TEXT/);
+    expect(src, 'the migration adds the attach timestamp').toMatch(/ADD COLUMN IF NOT EXISTS operation_attached_at TIMESTAMPTZ/);
+    expect(src, 'the header documents the generation-fenced resolution CAS').toMatch(/GENERATION-FENCED RESOLUTION/);
+    expect(src, 'the header documents the key immutability (FAILED is terminal — no re-arm)').toMatch(/KEY IMMUTABILITY/);
+    expect(src, 'the header documents the resolve-by-identity recovery (takeover NEVER re-runs the operation body)').toMatch(/NEVER re-runs the operation body/);
+    expect(src, 'the header applies the review\'s exact native wording').toMatch(/AgentRun[\s\S]{0,12}is the durable native operation ledger/);
+  });
+
+  // R9-B (round 9 — the provider protocol): the ATTACH-BEFORE-BODY ordering
+  // + the RESOLVE-BY-IDENTITY recovery. The operation identity is derived
+  // WITHOUT side effects + durably attached BEFORE the operation body runs,
+  // so a recorded handle PROVES the operation started (a recovery driver
+  // resolves it by identity — it NEVER re-runs the body) and an absent handle
+  // PROVES the body never started (driving it is the FIRST execution). The
+  // generic takeover primitive is therefore no longer "run the operation
+  // again".
+  it('R9-B. the attach-before-body operation-identity protocol + the resolve-by-identity recovery — takeover NEVER re-runs a started operation\'s body', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // The identity seams exist with their contracts.
+    expect(externalSrc, 'the openOperation seam derives the durable operation identity WITHOUT side effects').toMatch(/protected async openOperation\(/);
+    expect(externalSrc, 'the resolveOperation seam resolves a STARTED operation by identity (a status fetch for a platform provider; re-derivation ONLY because the default operations are PURE)').toMatch(/protected async resolveOperation\(/);
+    // THE ORDERING: in attemptDrive, the attach CAS precedes the body call.
+    const driveMatch = externalSrc.match(/private async attemptDrive\([\s\S]*?\n  \}/);
+    expect(driveMatch, 'attemptDrive is defined').toBeTruthy();
+    const driveSrc = driveMatch![0];
+    const handleCheckIdx = driveSrc.indexOf('row.providerOperationHandle != null');
+    const attachIdx = driveSrc.indexOf('store.attachOperation(');
+    const bodyIdx = driveSrc.indexOf('this.generate(task)');
+    expect(handleCheckIdx, 'the drive checks the recorded identity FIRST').toBeGreaterThan(-1);
+    expect(attachIdx, 'the attach CAS is in the drive').toBeGreaterThan(-1);
+    expect(bodyIdx, 'the body call is in the drive').toBeGreaterThan(-1);
+    expect(attachIdx, 'the identity is ATTACHED BEFORE the operation body runs (a recorded handle proves the operation started; an absent handle proves the body never started)').toBeLessThan(bodyIdx);
+    // The resolve-by-identity routing: a recorded handle resolves through the
+    // resolveOperation seam — never the body.
+    const resolveMatch = externalSrc.match(/private async resolveByIdentity\([\s\S]*?\n  \}/);
+    expect(resolveMatch, 'resolveByIdentity is defined').toBeTruthy();
+    expect(resolveMatch![0], 'the recovery resolves through the contract-bound resolveOperation seam').toContain('this.resolveOperation(');
+    expect(resolveMatch![0], 'the recovery NEVER calls the operation body').not.toContain('this.generate(');
+    expect(externalSrc, 'the resolve-by-identity observability log exists').toMatch(/provider-operation-resolve-by-identity/);
+    // The provider-side convergence contract (the justification for the
+    // residual window — the default provider declares its operations PURE).
+    expect(externalSrc, 'the resolve seam documents the per-provider justification (purity for the default provider; a platform status fetch otherwise)').toMatch(/RE-DERIVATION of the same value from the same task/);
+  });
+
+  // R9-C (round 9 — the generation-fenced resolution in the provider): every
+  // resolution the provider issues carries the DRIVER GENERATION, and a CAS
+  // loss with a still-pending row NEVER returns the driver's own lookalike
+  // result — it yields to the ACTIVE driver's outcome.
+  it('R9-C. the provider issues ONLY generation-fenced resolutions + never returns its own result on a CAS loss (the active driver owns the row)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // settle + failDrive pass the generation to the CASes.
+    const settleMatch = externalSrc.match(/private async settle\([\s\S]*?\n  \}/);
+    expect(settleMatch, 'settle is defined').toBeTruthy();
+    expect(settleMatch![0], 'the completion CAS carries the driver generation').toMatch(/store\.complete\(\s*key,\s*generation,/);
+    const failMatch = externalSrc.match(/private async failDrive\([\s\S]*?\n  \}/);
+    expect(failMatch, 'failDrive is defined').toBeTruthy();
+    expect(failMatch![0], 'the failure CAS carries the driver generation').toMatch(/store\.fail\(key, generation,/);
+    expect(externalSrc, 'a stale driver\'s failure is structurally DISCARDED (the active recovery driver owns the resolution)').toMatch(/structurally DISCARDED/);
+    // The CAS-loss-with-pending outcome yields (the RECOVERY_CONTINUE
+    // sentinel) — the stale driver never returns its own lookalike.
+    expect(externalSrc, 'the recovery-continue sentinel exists (a stale driver yields to the active driver)').toMatch(/RECOVERY_CONTINUE/);
+    expect(settleMatch![0], 'a CAS loss on a still-pending row yields to the ACTIVE recovery driver (never the loser\'s own result)').toMatch(/RECOVERY_CONTINUE/);
+    // The takeOver call consumes the RETURNED token.
+    const submitMatch = externalSrc.match(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmission> \{[\s\S]*?\n  \}/);
+    expect(submitMatch, 'the external submit is defined').toBeTruthy();
+    expect(submitMatch![0], 'the recovery drive runs under the takeOver-RETURNED generation token').toMatch(/attemptDrive\(store, key, task, takeover\.generation!/);
+  });
+
+  // R9-D (round 9 — KEY IMMUTABILITY at the provider level): a terminally
+  // FAILED operation is a KNOWN outcome — a later same-key submit surfaces
+  // the stored failure; it never re-arms, never opens a second operation
+  // under the same key.
+  it('R9-D. the key is immutable at the provider level — COMPLETED and FAILED are BOTH terminal (convergeFrom surfaces the stored terminal failure; register NEVER re-arms)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const convergeMatch = externalSrc.match(/private convergeFrom\([\s\S]*?\n  \}/);
+    expect(convergeMatch, 'convergeFrom is defined').toBeTruthy();
+    expect(convergeMatch![0], 'a FAILED row surfaces the STORED terminal failure').toMatch(/record\.errorMessage/);
+    expect(externalSrc, 'the round-9 no-re-arm doc (the key identifies ONE logical operation invocation)').toMatch(/register NEVER re-arms/);
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the store\'s register declares the key-immutability contract (a terminally failed row is returned AS-IS)').toMatch(/NEVER re-arms/);
+    // And the recovery window itself never flips a terminal row: takeOver is
+    // the ONLY generation mutation, and it requires state = 'pending'.
+    expect(repoSrc, 'takeOver requires state = pending (a terminal row is never taken over)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+  });
+
+  // R9-E (round 9 — the review's exact native wording): "AgentRun is the
+  // durable native operation ledger" — applied explicitly in the contract +
+  // the native provider, WITH the mechanics distinction (the two ledgers do
+  // NOT share one mechanism).
+  it('R9-E. the exact wording — AgentRun is the durable native operation ledger (the contract + the provider + the mechanics distinction)', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the contract applies the review\'s exact wording on the task field').toMatch(/AgentRun is the durable native operation ledger/);
+    expect(typesSrc, 'the contract applies the wording on the provider interface').toMatch(/native — AgentRun is the durable native operation ledger/);
+    expect(typesSrc, 'the contract states the mechanics DISTINCTION (the ledgers do not share one mechanism)').toMatch(/they do not share one mechanism/);
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider applies the exact wording').toMatch(/AgentRun is the durable native[\s\S]{0,8}operation ledger/);
+    expect(nativeSrc, 'the native provider states the mechanics distinction').toMatch(/they do not share one mechanism/);
+  });
+
+  // R9-F (round 9 — the regression suite proves the adversarial
+  // interleavings): the two review-required races (stale FAIL after takeover;
+  // stale SUCCESS after takeover) + the key-immutability semantics + the
+  // non-pure provider's exactly-once body + the identity-absent FIRST
+  // execution — all on REAL PostgreSQL with provider-instance separation.
+  it('R9-F. the concurrency regression suite covers the round-9 adversarial interleavings (stale fail / stale success / key immutability / the side-effecting provider / the identity-absent first execution)', () => {
+    const suitePath = join(
+      BACKEND_ROOT, 'tests', 'integration', 'agents',
+      'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
+    );
+    const suiteSrc = readFileSync(suitePath, 'utf8');
+    expect(suiteSrc, 'R9-#1 — the stale-generation FAIL interleaving is asserted').toMatch(/R9-#1\. takeover → stale-generation FAIL → new-generation SUCCESS/);
+    expect(suiteSrc, 'R9-#2 — the old-generation SUCCESS interleaving is asserted').toMatch(/R9-#2\. takeover → old-generation SUCCESS → new-generation SUCCESS/);
+    expect(suiteSrc, 'R9-#3 — the key-immutability semantics are asserted').toMatch(/R9-#3\. KEY IMMUTABILITY/);
+    expect(suiteSrc, 'R9-#4 — the genuinely side-effecting provider proof').toMatch(/R9-#4\. the genuinely SIDE-EFFECTING provider/);
+    expect(suiteSrc, 'R9-#5 — the identity-absent FIRST-execution proof').toMatch(/R9-#5\. the identity-ABSENT takeover is the FIRST execution/);
+    // The side-effecting provider double resolves by a STATUS FETCH (never
+    // the body) + the park seams for the adversarial interleavings exist.
+    expect(suiteSrc, 'the SideEffectingExternalProvider double (the platform status fetch recovery)').toMatch(/class SideEffectingExternalProvider/);
+    expect(suiteSrc, 'the parkAtResolve seam (the mid-recovery stall point)').toMatch(/parkAtResolve/);
+    expect(suiteSrc, 'the parkAtOpen seam (the pre-identity death point)').toMatch(/parkAtOpen/);
+    expect(suiteSrc, 'the resolution marker (proves WHICH generation\'s result was stored)').toMatch(/resolutionMarker/);
   });
 });

@@ -180,6 +180,77 @@
  *      convergence authority is the DURABLE RUN ROW, not any provider
  *      instance's memory.
  *
+ * PR #46 ROUND 9 (the generation-fenced, identity-recoverable takeover —
+ * this session's correction). The round-8 review confirmed the durable
+ * ledger is real but found its TAKEOVER PROTOCOL deficient: (1) takeover
+ * re-ran the operation body (single-row arbitration, plural operation body —
+ * benign only by determinism accident); (2) complete()/fail() were NOT
+ * generation-fenced (a stale FAIL could DEFEAT the recovery generation; a
+ * stale SUCCESS could win merely by racing); (3) register() re-armed
+ * terminally FAILED rows (one key could resolve to two different terminal
+ * outcomes). The round-9 protocol (migration 0049): the operation identity
+ * (provider_operation_handle) is ATTACHED BEFORE the body (a recorded
+ * identity PROVES the operation started — the recovery RESOLVES BY IDENTITY,
+ * never a body re-run; an absent identity PROVES the body never started —
+ * driving it is the FIRST execution); takeOver() RETURNS the new generation
+ * token; complete/fail are CAS-fenced against it (a stale generation is
+ * STRUCTURALLY INCAPABLE of resolving); COMPLETED and FAILED are BOTH
+ * terminal (the key is immutable — register NEVER re-arms):
+ *
+ *   R9-#1 (new — the review's adversarial interleaving #1): takeover → stale
+ *      generation FAIL → new generation SUCCESS. T1's generation-1 drive
+ *      stalls mid-body (identity attached) → T2 takes over (generation 2 —
+ *      the fencing token) + parks INSIDE its resolve-by-identity recovery →
+ *      T1's dead drive FAILS: its generation-fenced fail CAS hits 0 rows
+ *      (the row is STILL pending — the stale failure cannot defeat the
+ *      recovery generation) → T2's recovery SUCCEEDS: the generation-2 CAS
+ *      stores the ONE result. Final: ONE row, COMPLETED, generation 2, the
+ *      stored error NEVER written (error_message NULL), T1's stale failure
+ *      structurally discarded.
+ *
+ *   R9-#2 (new — the review's adversarial interleaving #2): takeover → old
+ *      generation SUCCESS → new generation SUCCESS. Same setup; T1's parked
+ *      drive COMPLETES after the take-over: its complete(key, generation 1)
+ *      CAS hits 0 rows (the old generation cannot win merely by racing) →
+ *      T2's generation-2 resolution is stored. Final: ONE row, COMPLETED,
+ *      generation 2, the STORED result is T2's (the marked recovery
+ *      resolution) — T1's result was never stored. Exactly one generation
+ *      resolves authoritatively; stale generations cannot alter the winner.
+ *
+ *   R9-#3 (new — KEY IMMUTABILITY, the ledger semantics): COMPLETED and
+ *      FAILED are BOTH terminal. register NEVER re-arms a failed row (the
+ *      generation stays, the stored failure stays — the round-8 re-arm is
+ *      gone); takeOver REJECTS a terminal row; a later same-key submit
+ *      through a fresh provider instance surfaces the STORED failure (ZERO
+ *      drives — a terminally failed operation is a KNOWN outcome, never a new
+ *      operation under the same key); the COMPLETED arm is symmetric (pure
+ *      replay, generation unchanged); the CAS-level fencing proof (a wrong
+ *      generation resolves NOTHING; the takeOver-returned token is the ONLY
+ *      generation that can resolve a pending row).
+ *
+ *   R9-#4 (new — the review's "genuinely side-effecting provider" proof):
+ *      a SideEffectingExternalProvider double whose operation body performs a
+ *      REAL once-only side effect (a platform operation whose outcome lands
+ *      on the shared "platform" state — the external system, surviving the
+ *      driver's process death). T1 attaches the identity + runs the body
+ *      (the side effect happens ONCE) + dies before the ledger completion →
+ *      T2 (a fresh instance sharing ONLY the platform) takes over + RESOLVES
+ *      BY IDENTITY (a status fetch on the recorded handle) → the body ran
+ *      EXACTLY ONCE across the whole interleaving (driveCount 1 + effectCount
+ *      1 FOREVER) — the takeover primitive is no longer "run the operation
+ *      again", so the architecture's provider-independence claim is proven,
+ *      not assumed.
+ *
+ *   R9-#5 (new — the identity-ABSENT takeover is the FIRST execution): T1
+ *      dies BETWEEN the register and the identity attach (parks inside
+ *      openOperation — the body NEVER started; the handle is NULL) → T2
+ *      takes over (generation 2) → the absent identity PROVES the body never
+ *      ran → T2's drive is the FIRST execution (attach + body + complete) —
+ *      ONE body run across the whole interleaving, T1's driveCount 0. T1's
+ *      late pre-identity failure aborts its own dispatch
+ *      (handoff-dispatch-failed — it never reached the fenced completion)
+ *      without touching the ONE operation.
+ *
  * A fake / single-connection test is INSUFFICIENT for these invariants (the
  * architect's round-4 words): the problem is specifically database
  * transaction serialization, so the regression must use REAL PostgreSQL
@@ -372,8 +443,8 @@ class ParkableAgentAdapter implements AgentProviderAdapter {
 }
 
 /**
- * PR #46 round 8: an InstrumentedExternalProvider — the REAL
- * (ledger-backed) ExternalExecutionProvider instrumented at the two provider
+ * PR #46 round 8 + round 9: an InstrumentedExternalProvider — the REAL
+ * (ledger-backed) ExternalExecutionProvider instrumented at the provider
  * boundaries, as a SEPARATE INSTANCE per actor. The round-8 review rejected
  * the round-7 harness precisely because it SHARED one provider instance (and
  * therefore the in-memory Map) between T1 and T2 — the registry under test is
@@ -381,16 +452,32 @@ class ParkableAgentAdapter implements AgentProviderAdapter {
  * pg client), and the counters prove the invariants across instances:
  *
  *   - `submitCount` — the number of submit ATTEMPTS on THIS instance;
- *   - `generationCount` — the number of operation-body DRIVES on THIS
- *     instance (the generation is the operation body — a converged submit
- *     that replays/awaits performs ZERO drives);
+ *   - `openCount` — the number of operation-IDENTITY derivations
+ *     (openOperation entries) on THIS instance — round 9's
+ *     attach-before-body seam;
+ *   - `driveCount` — the number of operation-BODY runs (generate entries) on
+ *     THIS instance — a converged submit that replays/awaits performs ZERO
+ *     drives, and (round 9) a recovery driver that resolves a RECORDED
+ *     identity performs ZERO drives too;
+ *   - `resolveCount` — the number of RESOLVE-BY-IDENTITY recoveries
+ *     (resolveOperation entries) on THIS instance — round 9's recovery seam
+ *     (a status fetch for a platform provider; pure re-derivation for the
+ *     default provider);
  *   - `submitKeys()` — every attempt's dispatch key;
- *   - `inFlight` + `parkFirstGeneration` — TRUE once the FIRST drive has
- *     reached the park point (the ledger row is OPEN + the operation body is
- *     in flight): the round-8 crash simulations (a stall INSIDE the operation
- *     body, and a process DEATH inside the operation body — the park gate is
- *     only released at the end of the test, proving the dead driver's late
- *     completion converges instead of duplicating).
+ *   - `inFlight` + `parkFirstGeneration` — TRUE once the FIRST body drive
+ *     has reached the park point (the ledger row is OPEN + the operation
+ *     identity is ATTACHED + the operation body is in flight): the
+ *     crash simulations (a stall/death INSIDE the operation body);
+ *   - `inOpen` + `parkAtOpen` (round 9) — TRUE once the drive parked INSIDE
+ *     openOperation — BETWEEN the register and the identity attach (the
+ *     pre-identity death: the operation body NEVER started);
+ *   - `inResolve` + `parkAtResolve` (round 9) — TRUE once the recovery driver
+ *     parked INSIDE resolveOperation — between the take-over and the
+ *     generation-fenced completion (the mid-recovery stall point for the
+ *     stale-generation interleavings);
+ *   - `resolutionMarker` (round 9) — resolveOperation returns the derived
+ *     submission with `externalSessionRef` set to the marker, so a test can
+ *     prove WHICH driver's resolution was stored by the winner CAS.
  *
  * The durable-ledger row count (queried directly from
  * wfos_execution_provider_operations) is THE provider-operation count: ONE
@@ -398,26 +485,53 @@ class ParkableAgentAdapter implements AgentProviderAdapter {
  */
 class InstrumentedExternalProvider extends ExternalExecutionProvider {
   private _submitCount = 0;
-  private _generationCount = 0;
+  private _driveCount = 0;
+  private _openCount = 0;
+  private _resolveCount = 0;
   private readonly _submitKeys: string[] = [];
-  private readonly parkGate: Promise<void> | undefined;
-  private parked = false;
-  private parkedOnce = false;
+  private readonly bodyParkGate: Promise<unknown> | undefined;
+  private readonly openParkGate: Promise<unknown> | undefined;
+  private readonly resolveParkGate: Promise<void> | undefined;
+  private readonly resolutionMarker: string | undefined;
+  private parkedInBody = false;
+  private parkedOnceInBody = false;
+  private parkedInOpen = false;
+  private parkedInResolve = false;
   constructor(
     options: ExternalExecutionProviderOptions & {
-      parkFirstGeneration?: Promise<void>;
+      parkFirstGeneration?: Promise<unknown>;
+      parkAtOpen?: Promise<unknown>;
+      parkAtResolve?: Promise<void>;
+      resolutionMarker?: string;
     } = {},
   ) {
-    const { parkFirstGeneration, ...providerOptions } = options;
+    const {
+      parkFirstGeneration,
+      parkAtOpen,
+      parkAtResolve,
+      resolutionMarker,
+      ...providerOptions
+    } = options;
     super(providerOptions);
-    this.parkGate = parkFirstGeneration;
+    this.bodyParkGate = parkFirstGeneration;
+    this.openParkGate = parkAtOpen;
+    this.resolveParkGate = parkAtResolve;
+    this.resolutionMarker = resolutionMarker;
   }
   /** TRUE once the FIRST drive reached the park point (the operation body in flight). */
-  get inFlight(): boolean { return this.parked; }
+  get inFlight(): boolean { return this.parkedInBody; }
+  /** TRUE once the drive parked INSIDE openOperation (the pre-identity death point). */
+  get inOpen(): boolean { return this.parkedInOpen; }
+  /** TRUE once the recovery driver parked INSIDE resolveOperation (the mid-recovery stall point). */
+  get inResolve(): boolean { return this.parkedInResolve; }
   /** The number of `submit` calls on THIS instance (the submit attempts). */
   get submitCount(): number { return this._submitCount; }
-  /** The number of operation-body DRIVES on THIS instance. */
-  get generationCount(): number { return this._generationCount; }
+  /** The number of operation-BODY runs (generate entries) on THIS instance. */
+  get driveCount(): number { return this._driveCount; }
+  /** The number of operation-identity derivations (openOperation entries) on THIS instance. */
+  get openCount(): number { return this._openCount; }
+  /** The number of RESOLVE-BY-IDENTITY recoveries (resolveOperation entries) on THIS instance. */
+  get resolveCount(): number { return this._resolveCount; }
   /** EVERY submit attempt's key on THIS instance, in order. */
   submitKeys(): string[] { return [...this._submitKeys]; }
   override async submit(task: ExecutionTask): Promise<ExecutionSubmission> {
@@ -425,17 +539,124 @@ class InstrumentedExternalProvider extends ExternalExecutionProvider {
     this._submitKeys.push(task.dispatchIdempotencyKey ?? task.executionId);
     return super.submit(task);
   }
+  protected override async openOperation(
+    idempotencyKey: string,
+  ): Promise<string> {
+    this._openCount++;
+    if (this.openParkGate) {
+      // The round-9 pre-identity death point: the drive parked between the
+      // register and the identity attach — the operation body NEVER started.
+      this.parkedInOpen = true;
+      await this.openParkGate;
+      this.parkedInOpen = false;
+    }
+    return super.openOperation(idempotencyKey);
+  }
   protected override async generate(
     task: ExecutionTask,
   ): Promise<ExecutionSubmission> {
-    this._generationCount++;
-    if (this.parkGate && !this.parkedOnce) {
-      this.parkedOnce = true;
-      this.parked = true;
-      await this.parkGate;
-      this.parked = false;
+    this._driveCount++;
+    if (this.bodyParkGate && !this.parkedOnceInBody) {
+      this.parkedOnceInBody = true;
+      this.parkedInBody = true;
+      await this.bodyParkGate;
+      this.parkedInBody = false;
     }
     return super.generate(task);
+  }
+  protected override async resolveOperation(
+    providerOperationHandle: string,
+    task: ExecutionTask,
+  ): Promise<ExecutionSubmission> {
+    this._resolveCount++;
+    if (this.resolveParkGate) {
+      // The round-9 mid-recovery stall point: the take-over already happened
+      // (the generation moved); the recovery driver parked between the
+      // resolve-by-identity + the generation-fenced completion.
+      this.parkedInResolve = true;
+      await this.resolveParkGate;
+      this.parkedInResolve = false;
+    }
+    const submission = await super.resolveOperation(providerOperationHandle, task);
+    return this.resolutionMarker
+      ? { ...submission, externalSessionRef: this.resolutionMarker }
+      : submission;
+  }
+}
+
+/**
+ * PR #46 round 9 (R9-#4): a SIDE-EFFECTING external provider double — the
+ * architect's "genuinely side-effecting provider" proof. The operation body
+ * (generate) performs a REAL, ONCE-ONLY side effect: it starts + completes a
+ * "platform operation" whose outcome lands on the shared PLATFORM map (the
+ * external system's durable state — it survives the driver's process death,
+ * exactly like a real platform). The recovery seam (resolveOperation) is a
+ * STATUS FETCH on that map — it NEVER re-runs the body. The park gate models
+ * the process death AFTER the platform operation completed but BEFORE the
+ * ledger completion: the deepest exactly-once point for a non-pure provider.
+ */
+class SideEffectingExternalProvider extends ExternalExecutionProvider {
+  private _driveCount = 0;
+  private _effectCount = 0;
+  private _resolveCount = 0;
+  constructor(
+    options: ExternalExecutionProviderOptions,
+    private readonly deathGate: Promise<never> | undefined,
+    /** The shared "platform" state (the external system — survives process death). */
+    private readonly platform: Map<string, ExecutionSubmission>,
+  ) {
+    super(options);
+  }
+  /** The number of operation-BODY runs (the side-effect executions). */
+  get driveCount(): number { return this._driveCount; }
+  /** The number of SIDE EFFECTS performed (platform operations started+completed). */
+  get effectCount(): number { return this._effectCount; }
+  /** The number of STATUS FETCH recoveries (resolve-by-identity). */
+  get resolveCount(): number { return this._resolveCount; }
+  protected override async openOperation(
+    idempotencyKey: string,
+  ): Promise<string> {
+    // The platform's own operation-identity space (locally derivable — the
+    // idempotency key the platform would dedupe on).
+    return `platform-operation:${idempotencyKey}`;
+  }
+  protected override async generate(
+    task: ExecutionTask,
+  ): Promise<ExecutionSubmission> {
+    this._driveCount++;
+    const submission = {
+      ...(await super.generate(task)),
+      externalSessionRef: 'platform-operation-outcome' as string | null,
+    };
+    // THE SIDE EFFECT: the platform operation starts + completes — the
+    // outcome lands on the (shared, durable) platform. Exactly once per
+    // body run, by construction of this double.
+    const handle = await this.openOperation(task.dispatchIdempotencyKey!);
+    this.platform.set(handle, submission);
+    this._effectCount++;
+    if (this.deathGate) {
+      // The driver DIES here — after the platform operation completed,
+      // before the ledger completion (the outcome exists ONLY at the
+      // platform; the ledger row is still pending at generation 1).
+      await this.deathGate;
+    }
+    return submission;
+  }
+  protected override async resolveOperation(
+    providerOperationHandle: string,
+    _task: ExecutionTask,
+  ): Promise<ExecutionSubmission> {
+    this._resolveCount++;
+    // THE STATUS FETCH: resolve the STARTED operation by its durable
+    // identity — NEVER a body re-run (the architect's requirement for a
+    // non-pure provider's takeover recovery).
+    const outcome = this.platform.get(providerOperationHandle);
+    if (!outcome) {
+      throw new Error(
+        `platform-operation-not-found: ${providerOperationHandle} (the operation was never started under this identity)`,
+      );
+    }
+    return outcome;
   }
 }
 
@@ -725,7 +946,7 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
   }
 }
 
-describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round 8 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, the KEYED provider-dispatch exactly-once boundary, + the DURABLE provider-operation ledger (real PostgreSQL two-actor concurrency with provider-instance separation)', () => {
+describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round 8 + round 9 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, the KEYED provider-dispatch exactly-once boundary, the DURABLE provider-operation ledger, + the GENERATION-FENCED IDENTITY-RECOVERABLE takeover protocol (real PostgreSQL two-actor concurrency with provider-instance separation)', () => {
   let stack: TestAuthStack;
   let second: { client: DatabaseClient; close: () => Promise<void> } | undefined;
 
@@ -1020,18 +1241,24 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     return Number(res.rows[0]?.c ?? 0);
   }
 
-  /** PR #46 round 8: read the DURABLE PROVIDER-OPERATION LEDGER rows for an
-   *  execution (wfos_execution_provider_operations) — THE provider-operation
+  /** PR #46 round 8 + round 9: read the DURABLE PROVIDER-OPERATION LEDGER rows
+   *  for an execution (wfos_execution_provider_operations) — THE provider-operation
    *  count across ALL provider instances (ONE row per key — the row IS the
-   *  operation). */
+   *  operation). Round 9 also reads the OPERATION IDENTITY
+   *  (provider_operation_handle) + the stored failure (error_message). */
   async function readProviderOperations(
     executionId: string,
-  ): Promise<Array<{ idempotencyKey: string; state: string; generation: number; submissionJson: string | null }>> {
+  ): Promise<Array<{
+    idempotencyKey: string; state: string; generation: number;
+    submissionJson: string | null; handle: string | null; errorMessage: string | null;
+  }>> {
     const res = await stack.db.client.query<{
       idempotency_key: string; state: string; generation: number;
-      submission_json: string | null;
+      submission_json: string | null; provider_operation_handle: string | null;
+      error_message: string | null;
     }>(
-      `SELECT idempotency_key, state, generation, submission_json::text AS submission_json
+      `SELECT idempotency_key, state, generation, submission_json::text AS submission_json,
+              provider_operation_handle, error_message
        FROM wfos_execution_provider_operations WHERE execution_id = $1`,
       [executionId],
     );
@@ -1040,6 +1267,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
       state: r.state,
       generation: Number(r.generation),
       submissionJson: r.submission_json,
+      handle: r.provider_operation_handle,
+      errorMessage: r.error_message,
     }));
   }
 
@@ -1092,7 +1321,7 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     heartbeatMs?: number;
     stats?: DispatchGateStats;
     nativeProvider?: NativeExecutionProvider;
-    externalProvider?: InstrumentedExternalProvider;
+    externalProvider?: ExternalExecutionProvider;
   } = {}): DefaultCrossModeHandoffService {
     const hasHooks =
       opts.willMutate || opts.onFirstRenew ||
@@ -1148,7 +1377,7 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
    *  process-loss take-over simulation). */
   function buildT2Service(opts: {
     stats?: DispatchGateStats;
-    externalProvider?: InstrumentedExternalProvider;
+    externalProvider?: ExternalExecutionProvider;
   } = {}): DefaultCrossModeHandoffService {
     if (!second) throw new Error('T2 second client is not open (isRealPg=false?)');
     const t2RecordRepo = new PgExecutionRecordRepository(second.client);
@@ -2029,7 +2258,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     const rowsAtStall = await readProviderOperations(executionId);
     expect(rowsAtStall.length, 'T1 OPENED exactly ONE durable provider-operation ledger row').toBe(1);
     expect(rowsAtStall[0]!.state, 'the operation is IN FLIGHT (the ledger row is PENDING — the outcome is not yet known)').toBe('pending');
-    expect(t1Provider.generationCount, 'T1 started exactly ONE operation drive').toBe(1);
+    expect(rowsAtStall[0]!.handle, 'PR #46 round 9: the OPERATION IDENTITY was durably ATTACHED before the body parked (attach precedes the body — a recovery driver will RESOLVE BY IDENTITY, never re-run the body)').not.toBeNull();
+    expect(t1Provider.driveCount, 'T1 started exactly ONE operation drive').toBe(1);
     await delay(300);
 
     // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
@@ -2061,8 +2291,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     // exactly ONE operation drive (T1's — T2's converged submit performed
     // ZERO drives), and BOTH attempts carried the SAME handoff-derived key.
     expect(t1Provider.submitCount + t2Provider.submitCount, 'both actors\' submit ATTEMPTS ran (across DISTINCT provider instances — the reclaiming owner re-dispatched mid-flight)').toBe(2);
-    expect(t1Provider.generationCount + t2Provider.generationCount, 'exactly ONE operation drive — T2\'s same-key submit CONVERGED through the DURABLE LEDGER onto the in-flight row (NO second drive started)').toBe(1);
-    expect(t2Provider.generationCount, 'T2\'s fresh instance performed ZERO drives (it awaits the in-flight operation through the ledger)').toBe(0);
+    expect(t1Provider.driveCount + t2Provider.driveCount, 'exactly ONE operation drive — T2\'s same-key submit CONVERGED through the DURABLE LEDGER onto the in-flight row (NO second drive started)').toBe(1);
+    expect(t2Provider.driveCount, 'T2\'s fresh instance performed ZERO drives (it awaits the in-flight operation through the ledger)').toBe(0);
     const t1Keys = t1Provider.submitKeys();
     const t2Keys = t2Provider.submitKeys();
     expect(t1Keys.length + t2Keys.length, 'two submit attempts recorded').toBe(2);
@@ -2087,7 +2317,7 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(rowsAfter.length, 'still exactly ONE durable provider operation for the whole interleaving').toBe(1);
     expect(rowsAfter[0]!.state, 'the ONE operation COMPLETED (the resolution CAS stored the ONE result)').toBe('completed');
     expect(rowsAfter[0]!.submissionJson, 'the operation result is durably stored (replayed by every later same-key submit)').not.toBeNull();
-    expect(t1Provider.generationCount + t2Provider.generationCount, 'still exactly ONE operation drive for the whole interleaving (T2 replayed; it never drove)').toBe(1);
+    expect(t1Provider.driveCount + t2Provider.driveCount, 'still exactly ONE operation drive for the whole interleaving (T2 replayed; it never drove)').toBe(1);
 
     // Capture T2's authoritative outcome (the record state after T2's
     // completion) — T1's resumed dispatch must NOT disturb it.
@@ -2386,40 +2616,47 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
   });
 
   // =========================================================================
-  // R8-#1 (round 8 — the architect's EXACT required regression, the external
-  // arm): PROVIDER-INSTANCE + PROCESS LOSS around the keyed provider
-  // operation. The round-8 review's blocking scenario:
+  // R8-#1 (round 8, updated by round 9 — the architect's EXACT required
+  // regression, the external arm): PROVIDER-INSTANCE + PROCESS LOSS around
+  // the keyed provider operation. The round-8 review's blocking scenario:
   //
   //     T1    submit(K) → provider operation starts → provider process dies
   //     T2    reclaim handoff → new provider instance → submit(K) →
   //           [round 7: the Map is empty → SECOND provider operation]
   //
-  // The round-8 correction makes the registry the DURABLE PROVIDER-OPERATION
-  // LEDGER, so the interleaving now runs as:
+  // The round-8 correction made the registry the DURABLE PROVIDER-OPERATION
+  // LEDGER; the ROUND-9 correction completes the takeover protocol (the
+  // operation identity is ATTACHED BEFORE the body, so the recovery RESOLVES
+  // BY IDENTITY — never a body re-run):
   //
   //   T1 claims (epoch N) → T1 crosses the dispatch gate → T1's submit OPENED
-  //   the ONE ledger row under the handoff-derived key (PENDING) → T1's
+  //   the ONE ledger row under the handoff-derived key (PENDING, generation 1)
+  //   → T1 ATTACHED the operation identity (provider_operation_handle) → T1's
   //   process DIES inside the operation body (the drive never returns — the
   //   gate stays in_flight at T1's epoch, heartbeat dead) → the lease expires
   //   → T2 reclaims (epoch N+1) + takes over the in-flight gate + re-dispatches
   //   through a FRESH provider instance (T2's, on the SECOND client) → T2's
-  //   same-key submit finds the PENDING row (the durable registry — the row K
-  //   ALREADY OWNS) → its resolution window elapses (the dead driver will
-  //   never resolve it) → T2 TAKES OVER the drive of the SAME row (the
-  //   recovery drive — generation 2 on the ONE row) → the resolution CAS
-  //   stores the ONE result → T2's completeFencedDispatch commits the ONE
-  //   authoritative outcome → the obligation discharges → a THIRD fresh
-  //   instance's same-key submit REPLAYS the stored result (ZERO drives) →
-  //   the DEAD driver's late completion (released at the end) hits the
-  //   resolution CAS → 0 rows → it REPLAYS the winner's stored result → its
+  //   same-key submit finds the PENDING row → its resolution window elapses
+  //   (the dead driver will never resolve it) → T2 TAKES OVER the drive of the
+  //   SAME row (generation 2 — the NEW FENCING TOKEN; T1's generation 1 is
+  //   now structurally incapable of resolving the operation) → the RECORDED
+  //   identity means the operation was STARTED: B RESOLVES IT BY IDENTITY
+  //   (resolveOperation — ZERO body re-runs) → the generation-fenced
+  //   resolution CAS stores the ONE result → T2's completeFencedDispatch
+  //   commits the ONE authoritative outcome → the obligation discharges → a
+  //   THIRD fresh instance's same-key submit REPLAYS the stored result (ZERO
+  //   drives, ZERO resolves) → the DEAD driver's late completion (released at
+  //   the end) hits the GENERATION-FENCED resolution CAS → 0 rows (its
+  //   generation 1 is STALE) → it REPLAYS the winner's stored result → its
   //   completeFencedDispatch is fenced out (0 rows).
   //
-  // THE ROUND-8 INVARIANT: ONE durable provider operation (ONE ledger row —
-  // the row T1 OPENED, resolved through by T2's recovery drive) for the whole
-  // interleaving, ONE stored result, ONE authoritative outcome write; the
-  // same key resolves to the SAME operation through every instance.
+  // THE ROUND-8/9 INVARIANT: ONE durable provider operation (ONE ledger row —
+  // the row T1 OPENED, resolved BY IDENTITY by T2's recovery) for the whole
+  // interleaving, ONE stored result, ONE body run (T1's — the recovery NEVER
+  // re-runs the operation body), ONE authoritative outcome write; the same
+  // key resolves to the SAME operation through every instance.
   // =========================================================================
-  it('R8-#1. PROVIDER-INSTANCE + PROCESS LOSS — instance A opens operation K + dies mid-operation; instance B (T2, second client) resolves THE SAME durable ledger operation (the take-over drive of the SAME row); instance C replays the stored result with ZERO drives; the dead driver\'s late completion replays + is fenced out', async () => {
+  it('R8-#1 (round 9). PROVIDER-INSTANCE + PROCESS LOSS — instance A opens operation K (identity attached) + dies mid-body; instance B (T2, second client) TAKES OVER (generation 2 — the fencing token) + RESOLVES THE SAME OPERATION BY ITS RECORDED IDENTITY (ZERO body re-runs); instance C replays the stored result with ZERO drives; the dead driver\'s late completion hits the generation-fenced CAS (0 rows) + is fenced out', async () => {
     const { executionId, recordId } = await createNativeRecord('failed');
     const { sessionId } = await createRunningSession(executionId);
     const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
@@ -2457,25 +2694,30 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     })();
 
     // Wait until T1 is DEAD-inside-the-operation (the ledger row is OPEN +
-    // PENDING, the operation body parked forever), then let the 150ms lease
-    // expire (no heartbeat renews).
+    // PENDING, the operation IDENTITY attached, the operation body parked
+    // forever), then let the 150ms lease expire (no heartbeat renews).
     await waitFor(() => providerA.inFlight, 5000);
     await delay(300);
     const rowsAtDeath = await readProviderOperations(executionId);
     expect(rowsAtDeath.length, 'instance A OPENED exactly ONE durable provider-operation ledger row before dying').toBe(1);
     expect(rowsAtDeath[0]!.state, 'the operation A opened is IN FLIGHT (PENDING — the outcome is UNCERTAIN at A\'s death)').toBe('pending');
     expect(rowsAtDeath[0]!.generation, 'the row is at generation 1 (A\'s original drive)').toBe(1);
-    expect(providerA.generationCount, 'A drove the operation exactly once (the drive is parked/dead)').toBe(1);
+    expect(rowsAtDeath[0]!.handle, 'PR #46 round 9: A ATTACHED the OPERATION IDENTITY before the body — a recorded identity PROVES the operation was started (the recovery will RESOLVE BY IDENTITY, never re-run the body)').not.toBeNull();
+    expect(providerA.driveCount, 'A drove the operation body exactly once (the drive is parked/dead)').toBe(1);
+    expect(providerA.openCount, 'A derived the identity exactly once (the attach preceded the body)').toBe(1);
 
     // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
     // window #2 → T2's re-dispatch takes over the in-flight gate + submits
     // through a FRESH provider instance (B) on the SECOND client with a SHORT
     // resolution window (150ms — the dead driver will never resolve the row).
-    // B's same-key submit finds the PENDING row (the DURABLE registry — K
-    // already owns an operation), the window elapses, and B TAKES OVER the
-    // drive of the SAME row: the recovery generation runs + the resolution
-    // CAS stores the ONE result. T2 then completes the ONE authoritative
-    // outcome through the fence + the obligation discharges.
+    // B's same-key submit finds the PENDING row, the window elapses, and B
+    // TAKES OVER the drive of the SAME row (generation 2 — the NEW FENCING
+    // TOKEN: A's generation 1 is now structurally incapable of resolving the
+    // operation). The RECORDED identity means the operation was STARTED, so
+    // B's recovery RESOLVES IT BY IDENTITY (resolveOperation — the round-9
+    // protocol: ZERO body re-runs) + the generation-fenced CAS stores the ONE
+    // result. T2 then completes the ONE authoritative outcome through the
+    // fence + the obligation discharges.
     const providerB = new InstrumentedExternalProvider({
       operationStore: new PgExecutionProviderOperationRepository(second!.client),
       logger: stack.db.logger,
@@ -2486,18 +2728,20 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
     expect(t2Result.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, resolved THE SAME durable operation (the recovery drive), + completed the handoff').toBe('complete');
 
-    // THE ROUND-8 INVARIANT: still ONE durable provider operation (ONE ledger
-    // row — the row instance A OPENED; B's recovery resolved THE SAME row,
-    // generation 2: the original drive + the recovery drive of ONE operation,
-    // never a second operation record). B's submit observed the row's stored
-    // result.
+    // THE ROUND-8/9 INVARIANT: still ONE durable provider operation (ONE
+    // ledger row — the row instance A OPENED; B's recovery resolved THE SAME
+    // row BY ITS RECORDED IDENTITY, generation 2: the take-over's fencing
+    // token, never a second operation record). B's submit observed the row's
+    // stored result.
     const rowsAfterRecovery = await readProviderOperations(executionId);
     expect(rowsAfterRecovery.length, 'ONE durable provider operation (ONE ledger row) — instance B resolved THE SAME operation instance A opened (NO second operation)').toBe(1);
-    expect(rowsAfterRecovery[0]!.state, 'the ONE operation COMPLETED (B\'s recovery drive resolved it through the CAS)').toBe('completed');
-    expect(rowsAfterRecovery[0]!.generation, 'generation 2 — the SAME row was re-driven by the recovery take-over (A\'s original drive + B\'s recovery drive of ONE operation)').toBe(2);
+    expect(rowsAfterRecovery[0]!.state, 'the ONE operation COMPLETED (B\'s recovery resolved it by identity through the generation-fenced CAS)').toBe('completed');
+    expect(rowsAfterRecovery[0]!.generation, 'generation 2 — the take-over\'s fencing token on the SAME row (A\'s original drive + B\'s resolve-by-identity recovery of ONE operation)').toBe(2);
+    expect(rowsAfterRecovery[0]!.handle, 'the operation identity is UNCHANGED (A\'s attach — the ONE operation\'s durable provider-side identity)').toBe(rowsAtDeath[0]!.handle);
     expect(rowsAfterRecovery[0]!.submissionJson, 'the ONE operation\'s result is durably stored').not.toBeNull();
-    expect(providerB.generationCount, 'B drove the recovery generation exactly once').toBe(1);
-    expect(providerA.generationCount, 'A\'s dead drive is STILL parked (it never resolved on its own)').toBe(1);
+    expect(providerB.driveCount, 'B performed ZERO body runs — the recovery RESOLVED BY IDENTITY (the round-9 protocol: a started operation is NEVER re-run)').toBe(0);
+    expect(providerB.resolveCount, 'B resolved the STARTED operation by its recorded identity exactly once').toBe(1);
+    expect(providerA.driveCount, 'A\'s dead drive is STILL parked (it never resolved on its own)').toBe(1);
     expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s — through the fenced completion)').toBe(1);
 
     // T2's authoritative outcome + the discharged obligation.
@@ -2535,7 +2779,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
       dispatchIdempotencyKey: gateAfter.dispatchKey!,
     });
     expect(providerC.submitCount, 'instance C submitted once').toBe(1);
-    expect(providerC.generationCount, 'instance C performed ZERO drives — the same key REPLAYED the SAME stored operation (convergence through the DURABLE ledger, not any instance\'s memory)').toBe(0);
+    expect(providerC.driveCount, 'instance C performed ZERO drives — the same key REPLAYED the SAME stored operation (convergence through the DURABLE ledger, not any instance\'s memory)').toBe(0);
+    expect(providerC.resolveCount, 'instance C performed ZERO resolves — a terminal row is a pure REPLAY').toBe(0);
     const storedSubmission = JSON.parse(rowsAfterRecovery[0]!.submissionJson!) as {
       package: Record<string, unknown>;
       expiresAt: string;
@@ -2544,10 +2789,12 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(replaySubmission.expiresAt?.toISOString(), 'the replayed expiry is the STORED operation result\'s expiry').toBe(storedSubmission.expiresAt);
 
     // The DEAD driver's LATE completion (A's parked drive finally fails — the
-    // dead process's in-flight call): A's drive threw, but the row already
-    // holds the ONE COMPLETED result — the provider's convergence check
-    // returns the STORED result (the row is the authority — A's local failure
-    // is irrelevant to the operation's recorded outcome) → A's
+    // dead process's in-flight call): A's drive threw, and its GENERATION-FENCED
+    // failure CAS hit 0 rows (A's generation 1 is STALE — the take-over moved
+    // the row to generation 2, so A's failure is STRUCTURALLY INCAPABLE of
+    // resolving the operation) — the provider's convergence check then returns
+    // the STORED result (the row is the authority — A's local failure is
+    // irrelevant to the operation's recorded outcome) → A's
     // completeFencedDispatch evaluates the fence → 0 rows (the lease is T2's
     // + the obligation is discharged) → ROLLBACK — NO outcome write → T1
     // aborts 'claim-fence-lost'. NO second result, NO second operation.
@@ -2556,7 +2803,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(t1Error, 'T1 (the dead driver, late) FAILED with the fence-lost error (its converged completion was discarded)').toBeInstanceOf(CrossModeHandoffError);
     expect((t1Error as CrossModeHandoffError).code, 'the dead driver\'s late completion was fenced out (NO second authoritative write)').toBe('claim-fence-lost');
     expect(stats.completeFalseCount, 'the dead driver\'s late completion affected 0 rows + was DISCARDED').toBe(1);
-    expect(providerA.generationCount, 'still exactly ONE drive on instance A (the operation was NOT re-issued)').toBe(1);
+    expect(providerA.driveCount, 'still exactly ONE body run on instance A (the operation was NOT re-issued)').toBe(1);
+    expect(providerA.resolveCount, 'the dead driver NEVER resolved by identity (only the recovery driver resolves)').toBe(0);
 
     // FINAL: still ONE ledger row, COMPLETED, with the ONE stored result —
     // byte-identical to before the dead driver's late completion (the late
@@ -2742,5 +2990,685 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(afterT1!.status, 'T1\'s late completion wrote NOTHING (no clobber — the fence discarded it; the run row IS the authoritative native outcome)').toBe('running');
     const gateAfter = await readDispatchGate(executionId);
     expect(gateAfter.dispatchKey, 'the DURABLE dispatch idempotency key is recorded on the obligation row (migration 0047)').toMatch(/^cross-mode-dispatch-/);
+  });
+
+  // =========================================================================
+  // R9-#1 (round 9 — the review's adversarial interleaving #1): takeover →
+  // STALE-GENERATION FAIL → NEW-GENERATION SUCCESS. The round-8 blocking
+  // race: fail() was NOT fenced by generation, so a stale driver's failure
+  // could resolve the row after a take-over and DEFEAT the recovery
+  // generation's success:
+  //
+  //     T1 generation 1 = pending (T1 still running)
+  //     T2 takes over                → generation 2, T2 drives
+  //     T1 fails    [round 8]        → fail(K) won on state='pending'
+  //                                   → generation 2 / failed  ← T1 DEFEATED T2
+  //     T2 succeeds  [round 8]       → complete(K) lost the CAS → result LOST
+  //
+  // The round-9 generation fence makes the stale failure STRUCTURALLY
+  // INCAPABLE of resolving the operation:
+  //
+  //   T1 claims (epoch N) → T1's submit OPENED the ONE ledger row (generation
+  //   1) + ATTACHED the operation identity + parks mid-body → the lease
+  //   expires → T2 reclaims + re-dispatches through a FRESH provider instance
+  //   (B, second client) → B's await window elapses → B TAKES OVER
+  //   (generation 2 — the fencing token) → the RECORDED identity means the
+  //   operation started: B parks INSIDE its resolve-by-identity recovery →
+  //   T1's dead drive FAILS: fail(key, generation 1) hits the generation
+  //   fence → 0 ROWS (the row is STILL pending — the stale failure was
+  //   discarded) → B's recovery SUCCEEDS: complete(key, generation 2, result)
+  //   stores the ONE result → T2 commits the ONE authoritative outcome →
+  //   T1's late convergence replays the winner's stored result → fenced out.
+  //
+  // THE ROUND-9 INVARIANT: exactly ONE generation resolves authoritatively —
+  // the stale generation's FAILURE can never defeat the recovery generation's
+  // SUCCESS (error_message stays NULL; the row completes with T2's result).
+  // =========================================================================
+  it('R9-#1. takeover → stale-generation FAIL → new-generation SUCCESS — the stale driver\'s generation-fenced fail CAS hits 0 rows (the row STAYS pending; the stored error is NEVER written) + the recovery generation\'s success resolves authoritatively', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat. Its provider instance
+    // (A) parks INSIDE the operation body (the identity is ATTACHED — the
+    // operation started) and holds a LONG resolution window (10s) so A, after
+    // its stale CAS rejections, stays in the AWAIT convergence loop (it must
+    // NOT take over again during the test — the recovery generation owns the
+    // row).
+    let killDeadDriver!: (reason: Error) => void;
+    const deathGate = new Promise<void>((_, reject) => { killDeadDriver = reject; });
+    const providerA = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkFirstGeneration: deathGate,
+      operationResolutionWindowMs: 10_000,
+      operationPollIntervalMs: 10,
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r9-stale-fail-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is parked mid-body (generation 1 pending, the identity
+    // attached), then let the 150ms lease expire.
+    await waitFor(() => providerA.inFlight, 5000);
+    await delay(300);
+    const rowsAtStall = await readProviderOperations(executionId);
+    expect(rowsAtStall.length).toBe(1);
+    expect(rowsAtStall[0]!.state).toBe('pending');
+    expect(rowsAtStall[0]!.generation).toBe(1);
+    expect(rowsAtStall[0]!.handle, 'the identity is RECORDED — the operation started (the recovery will resolve by identity)').not.toBeNull();
+    expect(providerA.driveCount).toBe(1);
+
+    // T2: a FRESH provider instance (B, second client) with a SHORT window
+    // (150ms — the dead driver will never resolve). B's recovery parks INSIDE
+    // resolveOperation (the parkAtResolve seam): B has TAKEN OVER (generation
+    // 2 — the fencing token) and is mid-resolution when T1's stale failure
+    // lands.
+    let releaseResolve!: () => void;
+    const resolveGate = new Promise<void>((r) => { releaseResolve = r; });
+    const providerB = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 150,
+      operationPollIntervalMs: 10,
+      parkAtResolve: resolveGate,
+      resolutionMarker: 'resolved-by-generation-2',
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    let t2Result: { stage?: string } | undefined;
+    const t2Promise = (async () => {
+      t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    })();
+    await waitFor(() => providerB.inResolve, 5000);
+
+    // MID-TAKEOVER: B owns generation 2 (the fencing token); B NEVER re-ran
+    // the body — it is INSIDE the resolve-by-identity recovery.
+    const rowsMidTakeover = await readProviderOperations(executionId);
+    expect(rowsMidTakeover.length).toBe(1);
+    expect(rowsMidTakeover[0]!.state, 'the operation is still unresolved (B is mid-recovery)').toBe('pending');
+    expect(rowsMidTakeover[0]!.generation, 'generation 2 — B\'s take-over fencing token (T1\'s generation 1 is now structurally incapable of resolving the operation)').toBe(2);
+    expect(providerB.driveCount, 'B performed ZERO body runs — the recovery RESOLVES BY IDENTITY (a started operation is NEVER re-run)').toBe(0);
+    expect(providerB.resolveCount, 'B is INSIDE its one resolve-by-identity recovery').toBe(1);
+
+    // THE STALE FAIL — the review's exact interleaving: T1's dead drive fails
+    // while generation 2 owns the row. The GENERATION-FENCED fail CAS
+    // (state='pending' AND generation=1) hits 0 rows: the stale failure is
+    // STRUCTURALLY DISCARDED (round 8 would have flipped the row to failed
+    // and DEFEATED the recovery generation).
+    killDeadDriver(new Error('simulated process death — the stale generation 1 driver failed'));
+    await delay(200);
+    const rowsAfterStaleFail = await readProviderOperations(executionId);
+    expect(rowsAfterStaleFail.length).toBe(1);
+    expect(rowsAfterStaleFail[0]!.state, 'THE ROUND-9 FENCE: the stale generation\'s failure hit 0 rows — the row is STILL pending (the stale failure cannot defeat the recovery generation)').toBe('pending');
+    expect(rowsAfterStaleFail[0]!.generation).toBe(2);
+    expect(rowsAfterStaleFail[0]!.errorMessage, 'the stale failure was NEVER stored (round 8 would have written it and destroyed the recovery)').toBeNull();
+
+    // THE RECOVERY SUCCESS: B's resolve-by-identity returns the outcome + the
+    // generation-2 CAS stores the ONE result.
+    releaseResolve();
+    await t2Promise;
+    expect(t2Result!.stage, 'T2 reclaimed, took over (generation 2), resolved by identity, + completed the handoff').toBe('complete');
+    expect(providerB.driveCount, 'still ZERO body runs on B (the recovery never re-ran the operation)').toBe(0);
+    expect(providerB.resolveCount).toBe(1);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s)').toBe(1);
+
+    // T1's late tail: its stale fail was discarded; its convergence loop
+    // awaits the row's resolution + REPLAYS the winner's stored result → its
+    // completeFencedDispatch is fenced out.
+    await t1Promise;
+    expect(t1Error, 'T1 (the stale driver, late) aborted with the fence-lost error').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code).toBe('claim-fence-lost');
+    expect(stats.completeFalseCount, 'the stale driver\'s late completion was fenced out').toBe(1);
+
+    // FINAL: ONE row, COMPLETED at generation 2 with the recovery
+    // generation's result — the stale failure never touched the outcome.
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length).toBe(1);
+    expect(rowsFinal[0]!.state, 'the ONE operation COMPLETED (the recovery generation resolved it)').toBe('completed');
+    expect(rowsFinal[0]!.generation).toBe(2);
+    expect(rowsFinal[0]!.errorMessage, 'FINAL: the stored error was NEVER written — the stale failure was structurally discarded for the whole interleaving').toBeNull();
+    expect(rowsFinal[0]!.submissionJson, 'the stored result is the RECOVERY generation\'s resolution (the marker)').toContain('resolved-by-generation-2');
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+  });
+
+  // =========================================================================
+  // R9-#2 (round 9 — the review's adversarial interleaving #2): takeover →
+  // OLD-GENERATION SUCCESS → NEW-GENERATION SUCCESS. The round-8 inverse
+  // race: complete() had no generation fence, so the OLD driver's success
+  // could win merely because it happened to win the CAS race after a
+  // take-over — the database accepted the superseded driver's result.
+  //
+  //   T1 generation 1 pending mid-body → T2 TAKES OVER (generation 2) →
+  //   T1's body SUCCEEDS: complete(key, generation 1, resultA) → the
+  //   GENERATION FENCE rejects it (0 rows — the old generation cannot alter
+  //   the winner) → T2's recovery resolves: complete(key, generation 2,
+  //   resultB) → stored. FINAL: the ONE stored result is resultB (the
+  //   marked recovery resolution); resultA was NEVER stored.
+  //
+  // THE ROUND-9 INVARIANT: exactly one generation may resolve authoritatively
+  // — stale generations cannot alter the winner, for a success AND for a
+  // failure alike.
+  // =========================================================================
+  it('R9-#2. takeover → old-generation SUCCESS → new-generation SUCCESS — the stale driver\'s generation-fenced complete CAS hits 0 rows (its result is NEVER stored) + the recovery generation\'s result is the ONE authoritative outcome', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // T1: parked mid-body (identity attached, generation 1); a LONG
+    // resolution window so its post-rejection convergence loop stays AWAITING.
+    let resolveA!: () => void;
+    const aParkGate = new Promise<void>((r) => { resolveA = r; });
+    const providerA = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkFirstGeneration: aParkGate,
+      operationResolutionWindowMs: 10_000,
+      operationPollIntervalMs: 10,
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r9-stale-success-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    await waitFor(() => providerA.inFlight, 5000);
+    await delay(300);
+
+    // T2: takes over (generation 2) + parks INSIDE its resolve-by-identity
+    // recovery (the marked resolution — the proof of WHICH generation's
+    // result was stored).
+    let releaseResolve!: () => void;
+    const resolveGate = new Promise<void>((r) => { releaseResolve = r; });
+    const providerB = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 150,
+      operationPollIntervalMs: 10,
+      parkAtResolve: resolveGate,
+      resolutionMarker: 'resolved-by-generation-2',
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    let t2Result: { stage?: string } | undefined;
+    const t2Promise = (async () => {
+      t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    })();
+    await waitFor(() => providerB.inResolve, 5000);
+    const rowsMidTakeover = await readProviderOperations(executionId);
+    expect(rowsMidTakeover.length).toBe(1);
+    expect(rowsMidTakeover[0]!.state).toBe('pending');
+    expect(rowsMidTakeover[0]!.generation).toBe(2);
+
+    // THE STALE SUCCESS — the review's exact inverse interleaving: T1's
+    // parked body COMPLETES after the take-over. Its generation-fenced
+    // complete CAS (state='pending' AND generation=1) hits 0 rows: the old
+    // generation's result is structurally DISCARDED (round 8 would have
+    // accepted it merely because it won the race to the unfenced CAS).
+    resolveA();
+    await delay(200);
+    const rowsAfterStaleSuccess = await readProviderOperations(executionId);
+    expect(rowsAfterStaleSuccess.length).toBe(1);
+    expect(rowsAfterStaleSuccess[0]!.state, 'THE ROUND-9 FENCE: the old generation\'s success hit 0 rows — the row is STILL pending (the old result was not stored)').toBe('pending');
+    expect(rowsAfterStaleSuccess[0]!.generation).toBe(2);
+    expect(rowsAfterStaleSuccess[0]!.submissionJson, 'the old generation\'s result was NEVER stored').toBeNull();
+    expect(providerA.driveCount, 'T1\'s body ran exactly once (its result was discarded at the CAS)').toBe(1);
+
+    // THE RECOVERY SUCCESS: B's generation-2 resolution is stored.
+    releaseResolve();
+    await t2Promise;
+    expect(t2Result!.stage).toBe('complete');
+    expect(stats.completeTrueCount).toBe(1);
+
+    // T1's late tail: its stale success was discarded; the convergence loop
+    // replays the winner's stored result → fenced out.
+    await t1Promise;
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code).toBe('claim-fence-lost');
+    expect(stats.completeFalseCount).toBe(1);
+
+    // FINAL: ONE row, COMPLETED at generation 2 — the stored result is the
+    // RECOVERY generation's (the marker); the old generation's result never
+    // touched the outcome.
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length).toBe(1);
+    expect(rowsFinal[0]!.state).toBe('completed');
+    expect(rowsFinal[0]!.generation).toBe(2);
+    expect(rowsFinal[0]!.submissionJson, 'the ONE stored result is the RECOVERY generation\'s resolution (the marker — the old generation\'s racing success was structurally discarded)').toContain('resolved-by-generation-2');
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+  });
+
+  // =========================================================================
+  // R9-#3 (round 9 — KEY IMMUTABILITY, the ledger semantics). The round-8
+  // register conditionally RE-ARMED a terminally FAILED row (generation + 1,
+  // back to pending), so ONE key could resolve to FAILED/result-A and later
+  // COMPLETED/result-B — the key did not identify one immutable operation.
+  // The round-9 semantics: a true idempotency key identifies the LOGICAL
+  // OPERATION INVOCATION — COMPLETED and FAILED are BOTH terminal, register
+  // NEVER re-arms, and retryability is the driver mechanics' concern (the
+  // await → take-over → resolve-by-identity recovery), never a second
+  // operation under the same key.
+  //
+  // Also the CAS-level fencing proof: a WRONG generation resolves NOTHING;
+  // the takeOver-RETURNED token is the ONLY generation that can resolve a
+  // pending row.
+  // =========================================================================
+  it('R9-#3. KEY IMMUTABILITY — COMPLETED and FAILED are BOTH terminal: register NEVER re-arms a failed row (generation + stored failure unchanged), takeOver rejects terminal rows, a later same-key submit surfaces the STORED failure with ZERO drives, + the CAS-level generation fencing (only the takeOver-returned token resolves)', async () => {
+    const { executionId } = await createNativeRecord('failed');
+    const store = new PgExecutionProviderOperationRepository(second!.client);
+
+    // ---------------- THE FAILED ARM ----------------
+    const failedKey = `r9-immutability-failed-${executionId}`;
+    const opened = await store.register({
+      idempotencyKey: failedKey, provider: 'external', executionId, mode: 'external',
+    });
+    expect(opened.opened, 'a FRESH key OPENS the ONE row (generation 1)').toBe(true);
+    await store.fail(failedKey, 1, 'terminal provider failure — the operation failed');
+    const failedRow = await store.get(failedKey);
+    expect(failedRow!.state).toBe('failed');
+    expect(failedRow!.generation).toBe(1);
+    expect(failedRow!.errorMessage).toBe('terminal provider failure — the operation failed');
+
+    // The re-register: NO re-arm (round 8 silently flipped the row back to
+    // pending at generation 2 — round 9 returns the TERMINAL row as-is).
+    const reRegistered = await store.register({
+      idempotencyKey: failedKey, provider: 'external', executionId, mode: 'external',
+    });
+    expect(reRegistered.opened, 'an EXISTING key NEVER opens (no re-arm)').toBe(false);
+    expect(reRegistered.existing!.state, 'the TERMINAL failure is a KNOWN outcome — returned as-is').toBe('failed');
+    expect(reRegistered.existing!.generation, 'the generation is UNCHANGED (round 8 bumped it on re-arm)').toBe(1);
+    expect(reRegistered.existing!.errorMessage, 'the ONE terminal result is preserved').toBe('terminal provider failure — the operation failed');
+
+    // takeOver REJECTS a terminal row (no recovery of a resolved operation).
+    const rejectedTakeover = await store.takeOver(failedKey);
+    expect(rejectedTakeover.tookOver, 'a terminally failed row is never taken over').toBe(false);
+    expect(rejectedTakeover.generation).toBeNull();
+
+    // Even the CORRECT generation cannot re-resolve a terminal row (the CAS
+    // requires state='pending').
+    await store.fail(failedKey, 1, 'a second failure attempt on a terminal row');
+    expect((await store.get(failedKey))!.errorMessage, 'the terminal result is IMMUTABLE').toBe('terminal provider failure — the operation failed');
+
+    // The provider-level replay: a same-key submit through a FRESH instance
+    // surfaces the STORED failure — ZERO drives, ZERO opens, ZERO resolves
+    // (a terminally failed operation is a KNOWN outcome, never a new
+    // operation under the same key).
+    const recordForTask = await executionRecordRepo.findByExecutionId(executionId);
+    const builtTask = await executionTaskService.build({
+      workItemId: recordForTask!.workItemId,
+      mode: 'external',
+      provider: recordForTask!.provider,
+      model: recordForTask!.model,
+      executionId,
+      implementationContextId: recordForTask!.implementationContextId,
+    });
+    const replayProvider = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+    });
+    await expect(
+      replayProvider.submit({ ...builtTask.task, dispatchIdempotencyKey: failedKey }),
+      'a same-key submit against a terminally failed operation surfaces the STORED failure',
+    ).rejects.toThrow(/terminal provider failure — the operation failed/);
+    expect(replayProvider.driveCount, 'ZERO body runs — the failed key never starts a new operation').toBe(0);
+    expect(replayProvider.openCount, 'ZERO identity derivations').toBe(0);
+    expect(replayProvider.resolveCount, 'ZERO resolves').toBe(0);
+
+    // ---------------- THE COMPLETED ARM (the symmetric immutability) ----------------
+    const completedKey = `r9-immutability-completed-${executionId}`;
+    const openedCompleted = await store.register({
+      idempotencyKey: completedKey, provider: 'external', executionId, mode: 'external',
+    });
+    expect(openedCompleted.opened).toBe(true);
+    expect(
+      await store.attachOperation(completedKey, 1, `external-package:${completedKey}`),
+      'the identity attach CAS wins on the fresh row',
+    ).toBe(true);
+    const submission: ExecutionSubmission = {
+      executionId, provider: 'external', mode: 'external', status: 'handoff_ready',
+      externalSessionRef: null,
+    };
+    expect((await store.complete(completedKey, 1, submission)).completed).toBe(true);
+    const reRegisteredCompleted = await store.register({
+      idempotencyKey: completedKey, provider: 'external', executionId, mode: 'external',
+    });
+    expect(reRegisteredCompleted.opened, 'a COMPLETED key never opens either').toBe(false);
+    expect(reRegisteredCompleted.existing!.state).toBe('completed');
+    expect(reRegisteredCompleted.existing!.generation, 'the generation is UNCHANGED').toBe(1);
+    expect(reRegisteredCompleted.existing!.submission!.status).toBe('handoff_ready');
+    expect((await store.takeOver(completedKey)).tookOver, 'a completed row is never taken over').toBe(false);
+    expect(
+      (await store.complete(completedKey, 1, { ...submission, externalSessionRef: 'stale-never-stored' })).completed,
+      'even the SAME generation cannot re-resolve a terminal row',
+    ).toBe(false);
+    expect((await store.get(completedKey))!.submission!.externalSessionRef, 'the ONE terminal result is IMMUTABLE').toBeNull();
+
+    // ---------------- THE CAS-LEVEL GENERATION FENCING ----------------
+    const pendingKey = `r9-fencing-${executionId}`;
+    await store.register({
+      idempotencyKey: pendingKey, provider: 'external', executionId, mode: 'external',
+    });
+    await store.fail(pendingKey, 7, 'a wrong generation can NEVER resolve');
+    expect((await store.get(pendingKey))!.state, 'a WRONG generation resolved NOTHING (the row stays pending)').toBe('pending');
+    const takeover = await store.takeOver(pendingKey);
+    expect(takeover.tookOver, 'the pending row is taken over').toBe(true);
+    expect(takeover.generation, 'takeOver RETURNS the NEW GENERATION TOKEN (the fencing token)').toBe(2);
+    await store.fail(pendingKey, 1, 'stale generation fail');
+    expect((await store.get(pendingKey))!.state, 'the STALE generation\'s failure hit 0 rows (structurally discarded)').toBe('pending');
+    expect((await store.get(pendingKey))!.errorMessage).toBeNull();
+    expect((await store.complete(pendingKey, 1, submission)).completed, 'the STALE generation\'s success hit 0 rows').toBe(false);
+    expect((await store.get(pendingKey))!.state).toBe('pending');
+    expect(
+      (await store.complete(pendingKey, takeover.generation!, submission)).completed,
+      'the takeOver-RETURNED token resolves the row — the ONLY generation that can',
+    ).toBe(true);
+    expect((await store.get(pendingKey))!.state).toBe('completed');
+  });
+
+  // =========================================================================
+  // R9-#4 (round 9 — the review's "genuinely side-effecting provider"
+  // proof). The round-8 takeover primitive was "run the operation body
+  // again" — benign for the current deterministic provider, but the
+  // architecture claims provider-independence. This regression proves the
+  // round-9 primitive with a NON-PURE provider double whose operation body
+  // performs a REAL once-only side effect:
+  //
+  //   T1 attaches the identity + runs the body (the platform operation
+  //   starts + completes — the outcome lands on the shared "platform" state,
+  //   which survives T1's process death exactly like a real external system)
+  //   → T1 DIES before the ledger completion (the row is pending @
+  //   generation 1 with the identity recorded) → T2 (a FRESH provider
+  //   instance on the SECOND client, sharing ONLY the platform) takes over
+  //   (generation 2) → the RECORDED identity means the operation started:
+  //   T2 RESOLVES BY IDENTITY (a status fetch on the handle — NEVER the
+  //   body) → the generation-2 CAS stores the ONE result.
+  //
+  // THE ROUND-9 INVARIANT: the side-effecting body ran EXACTLY ONCE across
+  // the WHOLE interleaving (driveCount 1 + effectCount 1 FOREVER) — takeover
+  // no longer means "execute the operation again", so the
+  // provider-independence claim is PROVEN, not assumed.
+  // =========================================================================
+  it('R9-#4. the genuinely SIDE-EFFECTING provider — takeover resolves the started operation BY ITS RECORDED IDENTITY (a status fetch): the operation body + its side effect run EXACTLY ONCE across the whole process-loss + takeover + late-failure interleaving', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // The shared "platform" (the external system's durable state — the ONLY
+    // thing that survives a driver's process death, exactly like a real
+    // provider platform).
+    const platform = new Map<string, ExecutionSubmission>();
+
+    // T1: its provider instance (A) runs the side-effecting body — the
+    // platform operation completes — then DIES before the ledger completion
+    // (the death gate is only released at the very end).
+    let killDeadDriver!: (reason: Error) => void;
+    const deathGate = new Promise<never>((_, reject) => { killDeadDriver = reject; });
+    const providerA = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 10_000,
+        operationPollIntervalMs: 10,
+      },
+      deathGate,
+      platform,
+    );
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r9-side-effecting-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until the SIDE EFFECT happened (the platform operation completed)
+    // + T1 died before the ledger completion, then let the lease expire.
+    await waitFor(() => providerA.effectCount === 1, 5000);
+    await delay(300);
+    const rowsAtDeath = await readProviderOperations(executionId);
+    expect(rowsAtDeath.length).toBe(1);
+    expect(rowsAtDeath[0]!.state, 'the row is pending (T1 died before the ledger completion)').toBe('pending');
+    expect(rowsAtDeath[0]!.generation).toBe(1);
+    expect(rowsAtDeath[0]!.handle, 'the PLATFORM operation identity is RECORDED (the operation started — its outcome lives at the platform)').toMatch(/^platform-operation:/);
+    expect(providerA.driveCount, 'the side-effecting body ran ONCE').toBe(1);
+    expect(providerA.effectCount, 'the SIDE EFFECT happened exactly once').toBe(1);
+
+    // T2: a FRESH SIDE-EFFECTING instance on the SECOND client, sharing ONLY
+    // the platform (the external system). Its recovery MUST NOT re-run the
+    // body — the identity is recorded, so it resolves by a STATUS FETCH.
+    const providerB = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(second!.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 150,
+        operationPollIntervalMs: 10,
+      },
+      undefined,
+      platform,
+    );
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed, took over (generation 2), + resolved the started operation BY IDENTITY').toBe('complete');
+
+    // THE ROUND-9 SIDE-EFFECT INVARIANT: the body ran EXACTLY ONCE across
+    // the whole interleaving — T2 NEVER re-ran it (a status fetch only).
+    expect(providerA.driveCount).toBe(1);
+    expect(providerB.driveCount, 'B NEVER re-ran the operation body — the takeover resolved by identity (the round-9 primitive, NOT "run the operation again")').toBe(0);
+    expect(providerB.resolveCount, 'B recovered by exactly ONE status fetch on the recorded identity').toBe(1);
+    expect(providerA.effectCount, 'the SIDE EFFECT happened exactly ONCE (A\'s original run — the only one FOREVER)').toBe(1);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write').toBe(1);
+
+    const rowsAfterRecovery = await readProviderOperations(executionId);
+    expect(rowsAfterRecovery.length).toBe(1);
+    expect(rowsAfterRecovery[0]!.state).toBe('completed');
+    expect(rowsAfterRecovery[0]!.generation).toBe(2);
+    expect(rowsAfterRecovery[0]!.handle, 'the operation identity is UNCHANGED (A\'s platform identity)').toBe(rowsAtDeath[0]!.handle);
+    expect(rowsAfterRecovery[0]!.submissionJson, 'the stored result is the PLATFORM outcome — the ONE the body produced (never a re-computed lookalike)').toContain('platform-operation-outcome');
+
+    // T2's authoritative outcome + the discharged obligation.
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+
+    // The DEAD driver's LATE failure (released at the end): its
+    // generation-fenced fail CAS hits 0 rows (generation 1 is stale) → the
+    // convergence check replays the winner's stored result → fenced out.
+    // STILL exactly ONE side effect — nothing re-ran the body.
+    killDeadDriver(new Error('simulated process death after the platform operation completed'));
+    await t1Promise;
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code).toBe('claim-fence-lost');
+    expect(stats.completeFalseCount).toBe(1);
+    expect(providerA.effectCount, 'FINAL: the side effect STILL happened exactly ONCE — across the process loss, the takeover, the recovery, AND the dead driver\'s late failure').toBe(1);
+    expect(providerA.driveCount).toBe(1);
+    expect(providerB.driveCount).toBe(0);
+
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length).toBe(1);
+    expect(rowsFinal[0]!.state).toBe('completed');
+    expect(rowsFinal[0]!.generation).toBe(2);
+    expect(rowsFinal[0]!.submissionJson).toContain('platform-operation-outcome');
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.packageValue, 'T2\'s authoritative package is INTACT').toEqual(afterT2!.packageValue);
+    expect(afterT1!.status).toBe('handoff_ready');
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+  });
+
+  // =========================================================================
+  // R9-#5 (round 9 — the identity-ABSENT takeover is the FIRST execution).
+  // The attach-before-body ordering closes the "was the operation started?"
+  // question STRUCTURALLY: T1 dies BETWEEN the register and the identity
+  // attach (parks inside openOperation — the body NEVER started; the handle
+  // is NULL) → T2 takes over (generation 2) → the ABSENT identity proves the
+  // body never ran → T2's drive (attach + body + complete) is the FIRST
+  // execution, not a re-execution. T1's late pre-identity failure aborts its
+  // own dispatch (handoff-dispatch-failed — it never reached the fenced
+  // completion) without touching the ONE operation.
+  // =========================================================================
+  it('R9-#5. the identity-ABSENT takeover is the FIRST execution — T1 dies between the register + the attach (the body NEVER started; handle NULL); T2\'s take-over drive (attach + body + complete) is the ONE FIRST execution (ONE body run across the whole interleaving); T1\'s late pre-identity failure aborts its own dispatch without touching the operation', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // T1: its provider instance (A) parks INSIDE openOperation — BETWEEN the
+    // register and the identity attach. The row is pending @ generation 1
+    // with NO identity: the operation body NEVER started.
+    let killDeadDriver!: (reason: Error) => void;
+    const deathGate = new Promise<never>((_, reject) => { killDeadDriver = reject; });
+    const providerA = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkAtOpen: deathGate,
+      operationResolutionWindowMs: 10_000,
+      operationPollIntervalMs: 10,
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r9-pre-identity-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    await waitFor(() => providerA.inOpen, 5000);
+    await delay(300);
+    const rowsAtDeath = await readProviderOperations(executionId);
+    expect(rowsAtDeath.length).toBe(1);
+    expect(rowsAtDeath[0]!.state).toBe('pending');
+    expect(rowsAtDeath[0]!.generation).toBe(1);
+    expect(rowsAtDeath[0]!.handle, 'the identity is ABSENT — T1 died BETWEEN the register + the attach (the body NEVER started)').toBeNull();
+    expect(providerA.driveCount, 'T1 NEVER reached the operation body').toBe(0);
+    expect(providerA.resolveCount).toBe(0);
+
+    // T2: a FRESH provider instance (B, second client) with a SHORT window.
+    // The absent identity proves the body never started, so B's take-over
+    // drive (derive + attach + body + complete) is the FIRST execution.
+    const providerB = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 150,
+      operationPollIntervalMs: 10,
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed, took over (generation 2), + drove the FIRST execution of the operation').toBe('complete');
+
+    // THE ROUND-9 FIRST-EXECUTION INVARIANT: the body ran EXACTLY ONCE —
+    // B's FIRST execution (A never started it). There was no recorded
+    // identity to resolve by (resolveCount 0).
+    expect(providerB.driveCount, 'B ran the body exactly once — the FIRST execution (the identity was absent: the body never started)').toBe(1);
+    expect(providerB.openCount, 'B derived + attached the identity exactly once').toBe(1);
+    expect(providerB.resolveCount, 'B resolved NOTHING by identity (there was no recorded identity)').toBe(0);
+    expect(providerA.driveCount, 'A NEVER reached the body').toBe(0);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s)').toBe(1);
+
+    const rowsAfterRecovery = await readProviderOperations(executionId);
+    expect(rowsAfterRecovery.length).toBe(1);
+    expect(rowsAfterRecovery[0]!.state).toBe('completed');
+    expect(rowsAfterRecovery[0]!.generation, 'generation 2 — the take-over fencing token').toBe(2);
+    expect(rowsAfterRecovery[0]!.handle, 'B\'s attach recorded the identity (external-package:<key> — the deterministic derivation)').toMatch(/^external-package:cross-mode-dispatch-/);
+    expect(rowsAfterRecovery[0]!.submissionJson).not.toBeNull();
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+
+    // T1's late tail: the pre-identity death — A's openOperation rejects →
+    // its drive aborts with a LOCAL error (no provider operation was ever
+    // started by A; there is nothing of A's at the provider to resolve) →
+    // the service surfaces handoff-dispatch-failed (NOT claim-fence-lost: A
+    // never reached the fenced completion). The ONE operation is untouched.
+    killDeadDriver(new Error('simulated process death before the operation identity was recorded'));
+    await t1Promise;
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'A\'s dispatch FAILED before the operation existed (a pre-identity local failure — not a fence loss)').toBe('handoff-dispatch-failed');
+    expect((t1Error as CrossModeHandoffError).message).toContain('simulated process death before the operation identity was recorded');
+    expect(stats.completeFalseCount, 'A NEVER reached the fenced completion (no discarded outcome write)').toBe(0);
+
+    // FINAL: ONE row, COMPLETED at generation 2 (B's first-execution result),
+    // the record intact.
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length).toBe(1);
+    expect(rowsFinal[0]!.state).toBe('completed');
+    expect(rowsFinal[0]!.generation).toBe(2);
+    expect(providerA.driveCount, 'FINAL: A NEVER ran the body').toBe(0);
+    expect(providerB.driveCount, 'FINAL: the body ran EXACTLY ONCE (B\'s first execution)').toBe(1);
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.packageValue, 'T2\'s authoritative package is INTACT').toEqual(afterT2!.packageValue);
+    expect(afterT1!.status).toBe('handoff_ready');
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
   });
 });

@@ -1,0 +1,96 @@
+-- WORK-042 (PR #46 round 9): the GENERATION-FENCED, IDENTITY-RECOVERABLE
+-- provider-operation ledger — the correction of the round-8 takeover protocol.
+--
+-- The round-8 review confirmed the durable ledger itself is real and correctly
+-- persisted in PostgreSQL, but found its TAKEOVER PROTOCOL does not satisfy
+-- the stronger exactly-once contract. Three blocking issues:
+--
+--   ISSUE 1 (takeover re-executes the operation body): takeOver() bumped the
+--   generation and left the row pending, and the recovering driver then ran
+--   generate() AGAIN. The durable ROW was singular, but the OPERATION BODY was
+--   not. For the current provider (deterministic package construction) the
+--   duplicate execution is benign — but the architecture claims to be
+--   independent of provider determinism and suitable for a future non-pure
+--   external provider. It cannot make that claim while its generic takeover
+--   primitive is "run the operation again".
+--
+--   ISSUE 2 (resolution is not fenced by generation): complete()/fail() only
+--   checked state = 'pending'. A STALE generation could resolve the row after
+--   a take-over:
+--
+--       T1 generation 1 = pending (T1 still running)
+--       T2 takes over            → generation 2, T2 drives
+--       T1 fails                 → fail(K) succeeded on state='pending'
+--                                  → generation 2 / failed  ← T1 DEFEATED T2
+--       T2 succeeds              → complete(K) lost the CAS → T2's result LOST
+--
+--   (and the inverse: T1's late complete() could win the race merely because
+--   it happened to arrive first). The handoff claim/epoch machinery already
+--   solved precisely this stale-owner problem for the obligation; the provider
+--   ledger needs the same structure.
+--
+--   ISSUE 3 (the key is not immutable): register() re-armed TERMINALLY FAILED
+--   rows (generation + 1, back to pending), so one key could resolve to
+--   FAILED/result-A then COMPLETED/result-B. A true idempotency key identifies
+--   the LOGICAL OPERATION INVOCATION — one key, one operation, one terminal
+--   result. Retryability belongs to the operation's lifecycle/driver mechanics
+--   (the await → take-over → resolve recovery), never to silently turning the
+--   same key into a new operation after a terminal failure.
+--
+-- THE CORRECTED DESIGN (the round-8 review's freeze — the ledger behaves like
+-- the existing handoff lease):
+--
+--     operation key
+--        ↓
+--     one durable operation row
+--        ↓
+--     generation / fencing token          ← takeOver() RETURNS the new token
+--        ↓
+--     one active driver
+--        ↓
+--     operation-specific durable/provider idempotency identity
+--        ↓                                    ← THIS MIGRATION: the handle
+--     one terminal result
+--
+--   - GENERATION-FENCED RESOLUTION: complete(key, generation, result) and
+--     fail(key, generation, error) are CAS-fenced against the driver's
+--     generation. A stale generation is STRUCTURALLY INCAPABLE of resolving
+--     the operation — after a take-over, the old driver's success AND its
+--     failure both affect 0 rows.
+--   - THE PROVIDER OPERATION IDENTITY (this migration's columns):
+--     provider_operation_handle is the durable, provider-side identity of the
+--     ONE operation. The drive records it (attachOperation — a CAS) BEFORE
+--     the operation body runs, so:
+--       * handle recorded  ⇒ the operation was STARTED (possibly by a driver
+--         that died mid-flight): a recovery driver RESOLVES THE OPERATION BY
+--         ITS IDENTITY — it NEVER re-runs the operation body;
+--       * handle absent    ⇒ the body NEVER STARTED (attach strictly precedes
+--         the body): the recovery drive is the FIRST execution, not a
+--         re-execution.
+--     For the current pure provider, resolution is re-derivation (valid
+--     BECAUSE the operation has no side effects). A future side-effecting
+--     provider (WORK-028/029) resolves by a platform status fetch on the
+--     handle — the provider-side same-key convergence contract (round 7)
+--     remains the boundary guarantee for the unknowable in-flight window.
+--   - KEY IMMUTABILITY: COMPLETED and FAILED are BOTH terminal. register()
+--     opens a fresh row or returns the existing one — it NEVER re-arms. One
+--     key always resolves to the same operation and the same terminal result.
+--
+-- THE NATIVE ARM (the explicit wording the round-9 review applies): AgentRun
+-- is the durable native operation ledger — wfos_agent_runs (migration 0011),
+-- with `execution_id TEXT NOT NULL UNIQUE` as the operation-key uniqueness
+-- and converge-on-the-existing-run as the process-loss recovery. Its
+-- mechanics are deliberately DIFFERENT from this external ledger (the native
+-- convergence authority is the UNIQUE constraint on the durable execution
+-- identity; the external ledger's is the generation-fenced resolution CAS +
+-- the operation-identity protocol) — both arms have a durable operation
+-- ledger; they do not share one mechanism.
+--
+-- The rows are durable EXECUTION STATE (like the 0044 claim columns, the
+-- 0045 epoch, the 0046 gate, the 0047 key, the 0048 ledger): freely mutable
+-- through the ledger state machine. NO immutability trigger applies (0043's
+-- trigger guards only the handoff log's recorded intent).
+
+ALTER TABLE wfos_execution_provider_operations
+  ADD COLUMN IF NOT EXISTS provider_operation_handle TEXT,
+  ADD COLUMN IF NOT EXISTS operation_attached_at TIMESTAMPTZ;

@@ -131,16 +131,44 @@ export interface ExecutionTask {
    * original instance opened:
    *
    *   - EXTERNAL mode: the durable provider-operation ledger is
-   *     `wfos_execution_provider_operations` (migration 0048). The ledger ROW
-   *     IS the operation (idempotency_key PRIMARY KEY — ONE row per key);
-   *     its states are PENDING / COMPLETED / FAILED + the stored
+   *     `wfos_execution_provider_operations` (migrations 0048 + 0049). The
+   *     ledger ROW is the operation (idempotency_key PRIMARY KEY — ONE row
+   *     per key); its states are PENDING / COMPLETED / FAILED + the stored
    *     operation/result (submission_json — replayed by every later same-key
    *     submit). A PENDING row whose driver died is resolved THROUGH THE SAME
-   *     ROW by the recovering actor (the await-then-take-over): the single
-   *     resolution CAS stores exactly one result, and a dead driver's late
-   *     completion affects 0 rows and replays the winner's stored result.
+   *     ROW by the recovering actor (the await-then-take-over).
    *
-   *   - NATIVE mode: the durable native provider-operation ledger is
+   *   PR #46 round 9 (the GENERATION-FENCED, IDENTITY-RECOVERABLE boundary —
+   *   the three round-8 takeover-protocol corrections):
+   *
+   *   - GENERATION FENCING: the ledger row carries a generation/fencing
+   *     token. takeOver() returns the NEW token, and the resolution
+   *     transitions — complete(key, generation, result) /
+   *     fail(key, generation, error) — are CAS-fenced against it. A stale
+   *     generation is STRUCTURALLY INCAPABLE of resolving the operation:
+   *     after a take-over, the old driver's success AND its failure both
+   *     affect 0 rows; exactly one generation (the ACTIVE driver) resolves
+   *     authoritatively.
+   *   - THE OPERATION IDENTITY: the row records the durable provider-side
+   *     identity of the ONE operation (provider_operation_handle — migration
+   *     0049) BEFORE the operation body runs. A recovery driver that finds a
+   *     recorded identity RESOLVES THE OPERATION BY ITS IDENTITY — it never
+   *     re-runs the operation body; an absent identity PROVES the body never
+   *     started (driving it is the FIRST execution, not a re-execution).
+   *     Take-over therefore no longer MEANS "execute the operation again":
+   *     the recovery primitive is resolve-by-identity, justified per
+   *     provider (the default provider's operations are PURE — resolution is
+   *     re-derivation; a future side-effecting provider resolves by a
+   *     platform status fetch on the identity), never by an architecture-
+   *     wide determinism assumption.
+   *   - KEY IMMUTABILITY: COMPLETED and FAILED are BOTH terminal. The key
+   *     identifies the LOGICAL OPERATION INVOCATION — one key, one operation,
+   *     one terminal result. A terminally failed operation is NEVER re-armed
+   *     under the same key; retryability is the driver mechanics' concern
+   *     (await → take-over → resolve-by-identity), never a second operation
+   *     silently opened under the same key.
+   *
+   *   - NATIVE mode: AgentRun is the durable native operation ledger —
    *     `wfos_agent_runs` (migration 0011 — `execution_id TEXT NOT NULL
    *     UNIQUE`). The run row IS the native provider operation (the run
    *     creation + the adapter execution the gateway performs only AFTER its
@@ -152,7 +180,12 @@ export interface ExecutionTask {
    *     run already exists NEVER reaches the gateway (no second run
    *     creation, no second adapter invocation) — around run creation /
    *     adapter invocation, the run row is the durable record whether the
-   *     crashed actor's adapter invocation ever ran.
+   *     crashed actor's adapter invocation ever ran. The native ledger's
+   *     mechanics are deliberately DIFFERENT from the external ledger's (the
+   *     native convergence authority is the UNIQUE constraint on the durable
+   *     execution identity; the external ledger's is the generation-fenced
+   *     resolution CAS + the operation-identity protocol): both arms have a
+   *     durable operation ledger — they do not share one mechanism.
    *
    * Absent/null (the mainline one-shot dispatch): the provider's pre-WORK-042
    * behavior applies unchanged (a direct generation/dispatch, no registry).
@@ -209,16 +242,28 @@ export interface ExecutionSubmission {
  * instances, processes, and actors:
  *
  *   - external — the DURABLE PROVIDER-OPERATION LEDGER
- *     (`wfos_execution_provider_operations`, migration 0048): the ROW is the
- *     operation (ONE per key — PRIMARY KEY), PENDING / COMPLETED / FAILED +
- *     the stored result; same key always resolves to the same operation.
- *     An in-process Map registry is FORBIDDEN (it dies with the instance).
+ *     (`wfos_execution_provider_operations`, migrations 0048 + 0049): the
+ *     ROW is the operation (ONE per key — PRIMARY KEY), PENDING / COMPLETED /
+ *     FAILED + the stored result; same key always resolves to the same
+ *     operation. An in-process Map registry is FORBIDDEN (it dies with the
+ *     instance).
  *
- *   - native — `wfos_agent_runs` (migration 0011) IS the durable native
- *     provider-operation ledger: `execution_id` UNIQUE is the operation-key
- *     uniqueness, the run row is the operation + its result, and a keyed
- *     submit whose run exists converges (never a second gateway/adapter
- *     call).
+ *   - native — AgentRun is the durable native operation ledger:
+ *     `wfos_agent_runs` (migration 0011) — `execution_id` UNIQUE is the
+ *     operation-key uniqueness, the run row is the operation + its result,
+ *     and a keyed submit whose run exists converges (never a second
+ *     gateway/adapter call). Its mechanics deliberately differ from the
+ *     external ledger's (see {@link ExecutionTask.dispatchIdempotencyKey}).
+ *
+ * PR #46 round 9 (the GENERATION-FENCED, IDENTITY-RECOVERABLE boundary): the
+ * external ledger's takeover protocol no longer re-runs the operation body.
+ * takeOver() returns a NEW GENERATION TOKEN; complete/fail are CAS-fenced
+ * against it (a stale generation is structurally incapable of resolving the
+ * operation — for a success AND for a failure); the row records the
+ * operation's durable provider-side identity BEFORE the body runs, so a
+ * recovery driver RESOLVES BY IDENTITY and never re-executes a started
+ * operation; and COMPLETED/FAILED are BOTH terminal (the key identifies ONE
+ * logical operation invocation with ONE terminal result).
  */
 export interface ExecutionProvider {
   readonly name: string;
