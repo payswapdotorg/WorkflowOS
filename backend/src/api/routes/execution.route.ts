@@ -52,6 +52,7 @@ import type {
   ExecutionHandoffService,
   ExecutionCallbackService,
   ExecutionRecordRepository,
+  CrossModeHandoffService,
   IngestExecutionEventInput,
 } from '@modules/agents/index.js';
 import {
@@ -72,6 +73,15 @@ export interface ExecutionRouteDeps {
   executionCallbackService: ExecutionCallbackService;
   /** WORK-027: external result ingestion boundary. Required. */
   executionEventIngestionService: ExecutionEventIngestionService;
+  /**
+   * WORK-042: cross-mode handoff boundary (native <-> external for the SAME
+   * logical execution — ONE ExecutionRecord preserved). OPTIONAL — the
+   * existing execution routes (list/handoff/package/events) keep working
+   * without it; the cross-mode-handoff route returns 503 when it is absent
+   * (the service is wired only when DB + agent-policy + execution-policy +
+   * agent-provider-registry are all configured).
+   */
+  crossModeHandoffService?: CrossModeHandoffService;
 }
 
 interface CodedError {
@@ -79,7 +89,7 @@ interface CodedError {
   message?: string;
 }
 
-/** Map an ingestion/handoff/callback service error code to an HTTP status + body. */
+/** Map an ingestion/handoff/callback/cross-mode-handoff service error code to an HTTP status + body. */
 function codedErrorBody(err: unknown): { status: number; body: Record<string, unknown> } {
   const coded = err as CodedError;
   const message = (err as Error).message;
@@ -112,6 +122,34 @@ function codedErrorBody(err: unknown): { status: number; body: Record<string, un
       return { status: 409, body: { error: 'native-execution-events-not-allowed', message } };
     case 'invalid-event-type':
       return { status: 400, body: { error: 'invalid-event-type', message } };
+    // WORK-042: cross-mode handoff error codes.
+    case 'already-handed-off':
+      // ONE handoff per execution (UNIQUE(execution_record_id)); a second
+      // handoff with a different idempotency_key is a 409 conflict.
+      return { status: 409, body: { error: 'already-handed-off', message } };
+    case 'invalid-target-mode':
+      return { status: 400, body: { error: 'invalid-target-mode', message } };
+    case 'handoff-ineligible-state':
+      // The execution is in a state that does not admit a cross-mode handoff
+      // (e.g. native/completed -> external, or external/cancelled -> native).
+      return { status: 409, body: { error: 'handoff-ineligible-state', message } };
+    case 'native-provider-unavailable':
+      // No platform-native provider is configured (fail-closed). 503 (the
+      // service is unavailable, not a client error).
+      return { status: 503, body: { error: 'native-provider-unavailable', message } };
+    case 'handoff-dispatch-failed':
+      return { status: 500, body: { error: 'handoff-dispatch-failed', message } };
+    case 'claim-fence-lost':
+      // WORK-042 PR #46 round 5: the claim/lease fence was lost
+      // mid-critical-section (the lease expired + another actor reclaimed it
+      // while this request was stalled). The stale request aborted BEFORE
+      // further side effects; the new owner completes the handoff. 409: a
+      // concurrent actor owns the obligation — the client retries + converges
+      // on the owner's completed state (the same idempotencyKey converges).
+      return { status: 409, body: { error: 'claim-fence-lost', message } };
+    case 'cross-mode-handoff-not-external':
+      // Reserved: a non-external record on the external-handoff token path.
+      return { status: 409, body: { error: 'cross-mode-handoff-not-external', message } };
     default:
       return { status: 500, body: { error: 'execution-service-error', message } };
   }
@@ -170,6 +208,47 @@ function toSafeExecution(record: {
     expiresAt: record.expiresAt,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * WORK-042: safe (secret-free, package-snapshot-free) cross-mode handoff
+ * summary for API responses. The `previousPackageValue` (the prior phase's
+ * ExternalExecutionPackage snapshot — which itself contains NO secrets per
+ * WORK-027) is deliberately NOT returned to the route caller; the
+ * correction-chain evidence stays internal (the audit + the handoff log row
+ * are the authoritative record). The route returns only the safe transition
+ * metadata.
+ */
+function toSafeHandoff(handoff: {
+  id: string;
+  executionId: string;
+  fromMode: string;
+  toMode: string;
+  reason: string | null;
+  actor: string | null;
+  source: string | null;
+  previousStatus: string;
+  resultingStatus: string;
+  authorized: boolean;
+  policyDecision: string | null;
+  idempotencyKey: string;
+  createdAt: Date;
+}) {
+  return {
+    id: handoff.id,
+    executionId: handoff.executionId,
+    fromMode: handoff.fromMode,
+    toMode: handoff.toMode,
+    reason: handoff.reason,
+    actor: handoff.actor,
+    source: handoff.source,
+    previousStatus: handoff.previousStatus,
+    resultingStatus: handoff.resultingStatus,
+    authorized: handoff.authorized,
+    policyDecision: handoff.policyDecision,
+    idempotencyKey: handoff.idempotencyKey,
+    createdAt: handoff.createdAt,
   };
 }
 
@@ -397,6 +476,129 @@ export async function executionRoutes(
           duplicate: ingested.duplicate,
           executionId: ingested.executionId,
           status: ingested.status,
+        });
+      } catch (err) {
+        const { status, body: errorBody } = codedErrorBody(err);
+        return reply.code(status).send(errorBody);
+      }
+    });
+  });
+
+  // POST /execution/:executionId/cross-mode-handoff — transition the SAME
+  // logical ExecutionRecord from native -> external or external -> native.
+  //
+  // ONE logical execution is preserved (ONE ExecutionRecord, ONE
+  // ExecutionSession, ONE AgentWorkspace). The handoff is a SUBORDINATE
+  // state transition + an append-only history log row; the route accepts NO
+  // authoritative fields (executionId from path; projectId resolved server-
+  // side; policy decision server-side; audit identity server-side).
+  //
+  // The cross-project guard runs BEFORE any mutation: record.projectId is
+  // resolved server-side + requireProjectAuthorization(project.write) gates
+  // the caller; the service re-resolves + validates record.projectId for
+  // defense-in-depth. NO GET mutation (POST-only). NO workflow/verification/
+  // review mutation. NO secrets persisted (the handoff log's
+  // previous_package_json is the ExternalExecutionPackage — NO secrets per
+  // WORK-027).
+  app.post('/execution/:executionId/cross-mode-handoff', async (req, reply) => {
+    return runAuthed(req, async () => {
+      // 503 when the cross-mode handoff service is not wired (the execution
+      // module is configured but the cross-mode service is absent — e.g.
+      // agent-policy / execution-policy / agent-provider-registry not all
+      // configured). The existing execution routes (list/handoff/package/
+      // events) are unaffected. Capture the non-null reference into a local
+      // const so TS narrowing survives the awaits below.
+      const crossModeHandoffService = deps.crossModeHandoffService;
+      if (!crossModeHandoffService) {
+        return reply.code(503).send({
+          error: 'cross-mode-handoff-unavailable',
+          message: 'the cross-mode handoff service is not configured',
+        });
+      }
+      const { executionId } = req.params as { executionId: string };
+      // Authorize against the execution's project BEFORE touching the
+      // cross-mode service — cross-project callers get 403 regardless of any
+      // executionId knowledge. The 404 (record not found) is returned FIRST
+      // only when the record genuinely does not exist (requireProjectAuthorization
+      // below gates the caller against record.projectId; a missing record is
+      // 404 before any auth decision, mirroring the other execution routes).
+      const record = await deps.executionRecordRepository.findByExecutionId(executionId);
+      if (!record) {
+        return reply.code(404).send({ error: 'execution-not-found' });
+      }
+      const user = await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.write',
+        projectId: record.projectId,
+      });
+
+      const body = req.body as {
+        targetMode?: string;
+        reason?: string;
+        userInstruction?: string;
+        idempotencyKey?: string;
+        provider?: string;
+        model?: string | null;
+      } | null;
+      if (!body || (body.targetMode !== 'native' && body.targetMode !== 'external')) {
+        return reply.code(400).send({
+          error: 'invalid-target-mode',
+          message: 'targetMode must be one of native|external',
+        });
+      }
+      // Validate the optional advisory fields are well-typed (defense-in-depth;
+      // the service re-validates the cross-mode invariants).
+      if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
+        return reply.code(400).send({ error: 'invalid-handoff-payload', field: 'reason' });
+      }
+      if (
+        body.userInstruction !== undefined &&
+        body.userInstruction !== null &&
+        typeof body.userInstruction !== 'string'
+      ) {
+        return reply.code(400).send({ error: 'invalid-handoff-payload', field: 'userInstruction' });
+      }
+      if (
+        body.idempotencyKey !== undefined &&
+        body.idempotencyKey !== null &&
+        typeof body.idempotencyKey !== 'string'
+      ) {
+        return reply.code(400).send({ error: 'invalid-handoff-payload', field: 'idempotencyKey' });
+      }
+      if (
+        body.provider !== undefined &&
+        body.provider !== null &&
+        typeof body.provider !== 'string'
+      ) {
+        return reply.code(400).send({ error: 'invalid-handoff-payload', field: 'provider' });
+      }
+      if (
+        body.model !== undefined &&
+        body.model !== null &&
+        typeof body.model !== 'string'
+      ) {
+        return reply.code(400).send({ error: 'invalid-handoff-payload', field: 'model' });
+      }
+
+      try {
+        const result = await crossModeHandoffService.handoff(
+          executionId,
+          {
+            targetMode: body.targetMode as 'native' | 'external',
+            reason: body.reason ?? undefined,
+            userInstruction: body.userInstruction ?? undefined,
+            idempotencyKey: body.idempotencyKey ?? undefined,
+            provider: body.provider ?? undefined,
+            // Preserve an explicit null model (meaningful for external mode;
+            // for native, the service fails closed with 'native-provider-
+            // unavailable' when the model resolves to null).
+            model: body.model,
+          },
+          { userId: user.id, source: 'execution-cross-mode-handoff-route' },
+        );
+        return reply.code(200).send({
+          executionId: result.executionId,
+          handoff: toSafeHandoff(result.handoff),
+          record: toSafeExecution(result.record),
         });
       } catch (err) {
         const { status, body: errorBody } = codedErrorBody(err);

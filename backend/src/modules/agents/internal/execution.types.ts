@@ -107,6 +107,90 @@ export interface ExecutionTask {
   readonly contextPayload: string;
   /** Structured agent instructions (DEFAULT_AGENT_INSTRUCTIONS). */
   readonly instructions: readonly string[];
+  /**
+   * PR #46 round 7 (the provider-operation exactly-once boundary): the
+   * DURABLE idempotency key for THIS provider dispatch — derived from the
+   * LOGICAL HANDOFF IDENTITY (`cross-mode-dispatch-<handoffId>`), NEVER from
+   * the volatile lease owner/epoch, so every actor that dispatches the same
+   * logical handoff (the original owner, a reclaiming owner, a crash-recovery
+   * re-dispatch) derives the SAME key.
+   *
+   * THE PROVIDER CONTRACT (the architect's round-7 option 1 — the exactly-once
+   * side-effect boundary): when a task carries this key, `submit()` MUST NOT
+   * start a SECOND provider operation for the same key — a same-key submit
+   * CONVERGES to the operation the first submit already started (it returns
+   * that operation's submission — awaiting it when still in flight — exactly
+   * like a Stripe-style `Idempotency-Key`). The correctness of a keyed
+   * dispatch may never depend on provider determinism/purity: the provider
+   * must return the REGISTERED operation, not a re-computed lookalike.
+   *
+   * PR #46 round 8 (the DURABLE idempotency boundary): the keyed operation
+   * registry is DURABLE — it survives provider-instance loss, process loss,
+   * and reclaim-driven re-dispatch by any other actor. A same-key submit
+   * through a FRESH provider instance resolves to the SAME operation the
+   * original instance opened:
+   *
+   *   - EXTERNAL mode: the durable provider-operation ledger is
+   *     `wfos_execution_provider_operations` (migrations 0048 + 0049). The
+   *     ledger ROW is the operation (idempotency_key PRIMARY KEY — ONE row
+   *     per key); its states are PENDING / COMPLETED / FAILED + the stored
+   *     operation/result (submission_json — replayed by every later same-key
+   *     submit). A PENDING row whose driver died is resolved THROUGH THE SAME
+   *     ROW by the recovering actor (the await-then-take-over).
+   *
+   *   PR #46 round 9 (the GENERATION-FENCED, IDENTITY-RECOVERABLE boundary —
+   *   the three round-8 takeover-protocol corrections):
+   *
+   *   - GENERATION FENCING: the ledger row carries a generation/fencing
+   *     token. takeOver() returns the NEW token, and the resolution
+   *     transitions — complete(key, generation, result) /
+   *     fail(key, generation, error) — are CAS-fenced against it. A stale
+   *     generation is STRUCTURALLY INCAPABLE of resolving the operation:
+   *     after a take-over, the old driver's success AND its failure both
+   *     affect 0 rows; exactly one generation (the ACTIVE driver) resolves
+   *     authoritatively.
+   *   - THE OPERATION IDENTITY: the row records the durable provider-side
+   *     identity of the ONE operation (provider_operation_handle — migration
+   *     0049) BEFORE the operation body runs. A recovery driver that finds a
+   *     recorded identity RESOLVES THE OPERATION BY ITS IDENTITY — it never
+   *     re-runs the operation body; an absent identity PROVES the body never
+   *     started (driving it is the FIRST execution, not a re-execution).
+   *     Take-over therefore no longer MEANS "execute the operation again":
+   *     the recovery primitive is resolve-by-identity, justified per
+   *     provider (the default provider's operations are PURE — resolution is
+   *     re-derivation; a future side-effecting provider resolves by a
+   *     platform status fetch on the identity), never by an architecture-
+   *     wide determinism assumption.
+   *   - KEY IMMUTABILITY: COMPLETED and FAILED are BOTH terminal. The key
+   *     identifies the LOGICAL OPERATION INVOCATION — one key, one operation,
+   *     one terminal result. A terminally failed operation is NEVER re-armed
+   *     under the same key; retryability is the driver mechanics' concern
+   *     (await → take-over → resolve-by-identity), never a second operation
+   *     silently opened under the same key.
+   *
+   *   - NATIVE mode: AgentRun is the durable native operation ledger —
+   *     `wfos_agent_runs` (migration 0011 — `execution_id TEXT NOT NULL
+   *     UNIQUE`). The run row IS the native provider operation (the run
+   *     creation + the adapter execution the gateway performs only AFTER its
+   *     own run-creation succeeded); the execution_id UNIQUE IS the
+   *     operation-key uniqueness (the keyed native dispatch derives its
+   *     operation identity from the durable execution identity), and the
+   *     run's status/refs ARE the operation result. Process-loss recovery on
+   *     the native path is CONVERGE-ON-THE-EXISTING-RUN: a keyed submit whose
+   *     run already exists NEVER reaches the gateway (no second run
+   *     creation, no second adapter invocation) — around run creation /
+   *     adapter invocation, the run row is the durable record whether the
+   *     crashed actor's adapter invocation ever ran. The native ledger's
+   *     mechanics are deliberately DIFFERENT from the external ledger's (the
+   *     native convergence authority is the UNIQUE constraint on the durable
+   *     execution identity; the external ledger's is the generation-fenced
+   *     resolution CAS + the operation-identity protocol): both arms have a
+   *     durable operation ledger — they do not share one mechanism.
+   *
+   * Absent/null (the mainline one-shot dispatch): the provider's pre-WORK-042
+   * behavior applies unchanged (a direct generation/dispatch, no registry).
+   */
+  readonly dispatchIdempotencyKey?: string | null;
 }
 
 /** What an ExecutionProvider returns after accepting a task. */
@@ -139,6 +223,47 @@ export interface ExecutionSubmission {
  *     ExternalExecutionPackage and returns 'handoff_ready'. It does NOT
  *     execute anything and contains NO provider-specific (Z.ai/ChatGPT/Claude)
  *     DOM automation or URLs — that belongs to WORK-028/029.
+ *
+ * PR #46 round 7 (the provider-operation exactly-once boundary): when the
+ * submitted {@link ExecutionTask} carries a `dispatchIdempotencyKey`, `submit`
+ * is IDEMPOTENT BY THAT KEY — a retried or reclaimed dispatch with the same
+ * key MUST CONVERGE to the SAME provider operation (the first submit's
+ * operation — its stored submission, awaited when still in flight), NEVER a
+ * second independent operation. The cross-mode handoff dispatch ALWAYS keys
+ * its submissions (the WORK-042 service derives the key from the handoff
+ * identity); the mainline one-shot dispatch is unkeyed (behavior unchanged).
+ * A future non-pure provider (WORK-028/029 real external platforms) MUST
+ * implement the key through the platform's own idempotency mechanism — the
+ * architecture does NOT rely on provider determinism.
+ *
+ * PR #46 round 8 (the DURABLE idempotency boundary): the keyed operation
+ * registry is DURABLE — it lives in PostgreSQL, NOT in provider-instance
+ * memory. The same key resolves to the same operation across provider
+ * instances, processes, and actors:
+ *
+ *   - external — the DURABLE PROVIDER-OPERATION LEDGER
+ *     (`wfos_execution_provider_operations`, migrations 0048 + 0049): the
+ *     ROW is the operation (ONE per key — PRIMARY KEY), PENDING / COMPLETED /
+ *     FAILED + the stored result; same key always resolves to the same
+ *     operation. An in-process Map registry is FORBIDDEN (it dies with the
+ *     instance).
+ *
+ *   - native — AgentRun is the durable native operation ledger:
+ *     `wfos_agent_runs` (migration 0011) — `execution_id` UNIQUE is the
+ *     operation-key uniqueness, the run row is the operation + its result,
+ *     and a keyed submit whose run exists converges (never a second
+ *     gateway/adapter call). Its mechanics deliberately differ from the
+ *     external ledger's (see {@link ExecutionTask.dispatchIdempotencyKey}).
+ *
+ * PR #46 round 9 (the GENERATION-FENCED, IDENTITY-RECOVERABLE boundary): the
+ * external ledger's takeover protocol no longer re-runs the operation body.
+ * takeOver() returns a NEW GENERATION TOKEN; complete/fail are CAS-fenced
+ * against it (a stale generation is structurally incapable of resolving the
+ * operation — for a success AND for a failure); the row records the
+ * operation's durable provider-side identity BEFORE the body runs, so a
+ * recovery driver RESOLVES BY IDENTITY and never re-executes a started
+ * operation; and COMPLETED/FAILED are BOTH terminal (the key identifies ONE
+ * logical operation invocation with ONE terminal result).
  */
 export interface ExecutionProvider {
   readonly name: string;
@@ -250,12 +375,46 @@ export interface UpdateExecutionStatusInput {
   readonly expiresAt?: Date | null;
 }
 
+/**
+ * WORK-042: input for a cross-mode mode transition
+ * ({@link ExecutionRecordRepository.transitionMode}). Unlike
+ * {@link UpdateExecutionStatusInput}, this ALSO updates the `mode` (and may
+ * update `provider`/`model`). Used ONLY by the cross-mode handoff service to
+ * transition an existing ExecutionRecord from native <-> external while
+ * preserving its identity (the same row). Unspecified fields keep their
+ * current value (COALESCE) so a native->external transition can set the
+ * package + expires_at without clearing agent_run_id, and an external->native
+ * transition can set agent_run_id without clearing package_json.
+ *
+ * This method does NOT touch workflow/verification/review state, and the
+ * handoff log table's UNIQUE(execution_record_id) is the concurrency fence (no
+ * CAS on version is needed here — the handoff row is the reserve step).
+ */
+export interface TransitionModeInput {
+  readonly mode: ExecutionMode;
+  readonly status: ExecutionState;
+  readonly provider?: string;
+  readonly model?: string | null;
+  readonly packageValue?: ExternalExecutionPackage | null;
+  readonly agentRunId?: string | null;
+  readonly externalSessionRef?: string | null;
+  readonly expiresAt?: Date | null;
+  readonly benchmarkMetadata?: Record<string, unknown>;
+}
+
 export interface ExecutionRecordRepository {
   create(input: CreateExecutionRecordInput): Promise<ExecutionRecord>;
   findById(id: string): Promise<ExecutionRecord | null>;
   findByExecutionId(executionId: string): Promise<ExecutionRecord | null>;
   listForWorkItem(workItemId: string): Promise<ExecutionRecord[]>;
   updateStatus(id: string, input: UpdateExecutionStatusInput): Promise<ExecutionRecord | null>;
+  /**
+   * WORK-042: transition an existing execution record's mode + status (+ the
+   * mode-specific authoritative fields). The cross-mode handoff log table's
+   * UNIQUE(execution_record_id) is the concurrency fence. Returns null when
+   * the record does not exist.
+   */
+  transitionMode(id: string, input: TransitionModeInput): Promise<ExecutionRecord | null>;
 }
 
 /** One ingested external execution event (audit trail for the boundary). */

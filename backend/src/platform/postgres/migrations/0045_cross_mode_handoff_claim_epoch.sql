@@ -1,0 +1,68 @@
+-- WORK-042 (PR #46 round 5): the fencing epoch for the cross-mode-handoff
+-- claim/lease — the lease-ownership/expiry correctness fix.
+--
+-- The round-4 claim/lease (migration 0044) introduced the serialization
+-- boundary but had two correctness holes the round-5 review identified:
+--
+--   1. The claim owner was a FIXED per-role string
+--      (`cross-mode-handoff-caller` / `cross-mode-handoff-relay`), so EVERY
+--      invocation of a role shared ONE owner identity. Because the lease is
+--      reclaimable, an old invocation could outlive its expired lease, a new
+--      invocation could reclaim under the SAME owner string, and the old
+--      invocation's `finally` release (guarded only by the owner string)
+--      would then clear the NEW owner's live claim — the serialization
+--      boundary was gone.
+--
+--   2. The lease was a fixed 30s timeout with NO renewal and NO fencing: a
+--      critical section legitimately longer than the lease let a second
+--      actor reclaim while the first was STILL EXECUTING, after which BOTH
+--      performed the provider dispatch + session transitions.
+--
+-- The round-5 fix:
+--
+--   * The claim owner becomes UNIQUE PER INVOCATION
+--     (`<role-prefix>:<uuid>` — generated once at critical-section entry and
+--     reused for the claim, the fence checks, and the `finally` release), so
+--     a stale invocation's release can never clear a newer owner's claim.
+--     (Application-level: see newCrossModeHandoffClaimOwner in
+--     cross-mode-handoff.types.ts — no schema change needed for identity.)
+--
+--   * THIS MIGRATION adds `claim_epoch BIGINT NOT NULL DEFAULT 0`: a
+--     monotonically increasing FENCING TOKEN. Every successful claim —
+--     fresh OR reclaim — increments the epoch (`claim_epoch = claim_epoch +
+--     1`) and the claimant learns its epoch from RETURNING. The epoch
+--     identifies the individual LEASE (not merely the invocation's role):
+--
+--       - the heartbeat renewal (renewHandoffObligationClaim) is a
+--         conditional UPDATE guarded by `claim_owner = $owner AND
+--         claim_epoch = $epoch` — it fails (0 rows) the moment another
+--         actor reclaimed, so a stale owner learns it lost the fence;
+--       - the discharge is FENCED at the DB level
+--         (`dischargeHandoffObligation` carries the owner + epoch in its
+--         WHERE clause) — a stale owner's discharge UPDATE affects 0 rows,
+--         so an expired-then-reclaimed owner CANNOT complete the
+--         authoritative obligation transition even if its phase-boundary
+--         fence check raced;
+--       - the epoch is NEVER reset on release, so tokens are never reused
+--         across leases (classic fencing-token discipline).
+--
+--   Together with the application-level heartbeat (the service renews the
+--   lease every lease/3 while the critical section runs — a live owner's
+--   lease CANNOT expire mid-flight; only a stalled/crashed owner stops
+--   renewing) + the phase-boundary fence checks (before the record mutate,
+--   the session transition, the dispatch, and the discharge), this gives:
+--
+--     live owner   → heartbeat keeps the lease → NO reclaim while executing
+--     stalled owner→ lease expires → reclaim bumps the epoch → the stale
+--                    owner's next renew/discharge is REJECTED at the DB →
+--                    it aborts before further side effects
+--     crashed owner→ lease expires → the boot sweep reclaims + recovers
+--                    (round-4 semantics preserved)
+--
+-- The new column is FREE TO MUTATE: the 0043 immutability trigger only
+-- guards handoff_id/execution_id/created_at (the recorded intent). The
+-- claim columns (0044) + the epoch (0045) are the durable execution state
+-- (mutable, like discharged_at). NO trigger extension is needed.
+
+ALTER TABLE wfos_cross_mode_handoff_obligations
+  ADD COLUMN IF NOT EXISTS claim_epoch BIGINT NOT NULL DEFAULT 0;

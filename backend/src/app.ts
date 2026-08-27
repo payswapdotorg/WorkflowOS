@@ -209,6 +209,7 @@ import type { AgentProviderConfigRepository } from '@modules/agents/index.js';
 import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository, PgExecutionCallbackRepository } from './modules/agents/internal/pg-execution-repository.js';
 import { NativeExecutionProvider } from './modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from './modules/agents/internal/external-execution-provider.js';
+import { PgExecutionProviderOperationRepository } from './modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { DefaultExecutionService } from './modules/agents/internal/execution-service.js';
 import { PgExecutionSessionRepository } from './modules/agents/internal/pg-execution-session-repository.js';
 import { DefaultExecutionSessionService } from './modules/agents/internal/execution-session-service.js';
@@ -233,6 +234,14 @@ import {
   createWorkspaceReleaseRelayJobHandler,
 } from './modules/agents/internal/workspace-release-relay.js';
 import { DefaultExecutionHandoffService } from './modules/agents/internal/execution-handoff-service.js';
+import { DefaultCrossModeHandoffService } from './modules/agents/internal/default-cross-mode-handoff-service.js';
+import { PgCrossModeHandoffRepository } from './modules/agents/internal/pg-cross-mode-handoff-repository.js';
+// PR #46 review #2: the cross-mode-handoff durable relay (mirrors the
+// WORK-034 session-terminal relay + the WORK-035 workspace-release relay).
+import {
+  CrossModeHandoffOutboxRelay,
+  createCrossModeHandoffRelayJobHandler,
+} from './modules/agents/internal/cross-mode-handoff-relay.js';
 import { DefaultExecutionEventIngestionService } from './modules/agents/internal/execution-event-ingestion-service.js';
 import { DefaultExecutionCallbackService } from './modules/agents/internal/execution-callback-service.js';
 // WORK-032: Native vs External Execution Benchmark — application-layer
@@ -277,6 +286,7 @@ import type {
   ExecutionHandoffService,
   ExecutionCallbackService,
   ExecutionEventIngestionService,
+  CrossModeHandoffService,
   ToolRuntime,
 } from '@modules/agents/index.js';
 import type { ExecutionTaskService } from '@modules/work-items/index.js';
@@ -432,6 +442,16 @@ export interface AppDeps {
   executionCallbackService?: ExecutionCallbackService;
   /** WORK-027: provider-independent external result ingestion boundary. */
   executionEventIngestionService?: ExecutionEventIngestionService;
+  /**
+   * WORK-042: cross-mode handoff boundary (native <-> external for the SAME
+   * logical execution — ONE ExecutionRecord preserved). Present when DB +
+   * execution + agent-policy + execution-policy + agent-provider-registry are
+   * configured. NOT an ExecutionService — it transitions the existing record
+   * + writes an append-only history log; it NEVER creates a second
+   * ExecutionRecord, NEVER touches workflow/verification/review state, and
+   * NEVER persists secrets.
+   */
+  crossModeHandoffService?: CrossModeHandoffService;
   /** WORK-036: the governed Tool Runtime. Present when DB + agents are
    *  configured. Capabilities, never authorities — tool outcomes are
    *  observations (session events + audit) and never mutate workflow,
@@ -676,6 +696,15 @@ export async function buildApp(
   // scope; constructed inside the agents block).
   let workspaceReleaseRelay: OutboxRelay | undefined;
   let agentWorkspaceServiceRef: { reconcilePendingReleases(): Promise<number> } | undefined;
+  // PR #46 review #2: the cross-mode-handoff outbox relay (declared at
+  // function scope; constructed inside the agents block, consumed by the
+  // WorkerHost boot sweep below — mirrors the WORK-034/035 relays).
+  let crossModeHandoffRelay: OutboxRelay | undefined;
+  // The cross-mode handoff reconciler reference (typed narrowly for the
+  // handler registry — mirrors executionSessionServiceRef).
+  let crossModeHandoffReconcilerRef:
+    | { reconcileCrossModeHandoffForExecution(executionId: string): Promise<unknown> }
+    | undefined;
   // WORK-036: the governed tool runtime (declared at function scope; the
   // agents block constructs it — exposed for the future native-execution
   // path that drives governed tools inside the workspace).
@@ -690,6 +719,10 @@ export async function buildApp(
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
+  // WORK-042: the cross-mode handoff service (native <-> external for the
+  // SAME logical execution — ONE ExecutionRecord preserved). Declared at
+  // function scope; constructed inside the agents/execution-policy block.
+  let crossModeHandoffService: CrossModeHandoffService | undefined;
   // WORK-038: the onboarding orchestrator + the /projects baseline storage
   // repository (declared at function scope; constructed inside the agents
   // block — exposed for the onboarding route surface).
@@ -1034,6 +1067,13 @@ export async function buildApp(
     // EXISTING AgentGateway (there is no second gateway); EXTERNAL generates
     // a deterministic, secret-free handoff package (no Z.ai/ChatGPT/Claude
     // adapters yet — WORK-028/029).
+    //
+    // PR #46 round 8: the EXTERNAL provider's keyed operation registry is the
+    // DURABLE PROVIDER-OPERATION LEDGER (wfos_execution_provider_operations,
+    // migration 0048) — wired HERE at the composition root so the key →
+    // operation mapping + result survive provider-instance/process loss (the
+    // round-7 in-memory Map died with its instance; a reclaiming actor's
+    // fresh instance MUST resolve the SAME operation).
     executionRecordRepository = new PgExecutionRecordRepository(database);
     const executionEventRepository = new PgExecutionEventRepository(database);
     const executionHandoffRepository = new PgExecutionHandoffRepository(database);
@@ -1042,7 +1082,10 @@ export async function buildApp(
       agentRunRepository: agentRunRepository!,
       logger,
     });
-    const externalExecutionProvider = new ExternalExecutionProvider();
+    const externalExecutionProvider = new ExternalExecutionProvider({
+      operationStore: new PgExecutionProviderOperationRepository(database),
+      logger,
+    });
     // WORK-034: the persistent session lifecycle boundary. The execution
     // service becomes session-aware (exactly one session per execution
     // record, CAS start + turn_started, session outcomes mirror execution
@@ -1515,6 +1558,65 @@ export async function buildApp(
       benchmarkEvidenceProvider: executionEvidenceProvider,
     });
 
+    // --- WORK-042: Cross-Mode Execution Handoff. ---
+    // Constructed AFTER the execution-policy service (the native target gate
+    // consumes getProjectPolicy().nativeExecutionAllowed) + the agent-provider-
+    // registry service (native provider availability — getPlatformDefaultProvider
+    // / getPlatformDefaultModel / isProviderConfigured). Composes the EXISTING
+    // NativeExecutionProvider + ExternalExecutionProvider + ExecutionTaskService
+    // + AgentPolicyEngine (evaluateExternalHandoff for the external target) +
+    // AgentRunRepository (the crash-retry guard for external->native — skips a
+    // second AgentRun on wfos_agent_runs.execution_id UNIQUE). NOT an
+    // ExecutionService — it transitions the SAME ExecutionRecord + writes an
+    // append-only history log row (migration 0042). NEVER creates a second
+    // ExecutionRecord, NEVER touches workflow/verification/review state, NEVER
+    // persists secrets.
+    //
+    // PR #46 review corrections:
+    //   #1 — the WORK-035 AgentWorkspace port: the service resolves the
+    //     workspace + defends the physical-worktree continuity (rejects a
+    //     terminal workspace whose working-tree state is gone). The worktree
+    //     is PRESERVED across the handoff (the workspace-release trigger
+    //     fires ONLY on an execution terminal; a handoff → handoff_ready/
+    //     running does NOT terminalize; the NativeExecutionProvider delegates
+    //     to the AgentGateway which does NOT touch the workspace).
+    //   #2 — the durable queue: the reserve step enqueues the reconcile relay
+    //     job (the claim-time durable delivery). The obligation row itself
+    //     (migration 0043) is written by the AFTER INSERT trigger ATOMICALLY
+    //     with the reserve; the relay job + the WorkerHost boot sweep are the
+    //     liveness backstop.
+    //   #3 — the WORK-034 ExecutionSession port: the service resolves the
+    //     session + rejects a terminal session (WORK-034 immutability —
+    //     cannot continue a terminalized session across a mode handoff) +
+    //     drives the session through the EXISTING non-terminal `interrupted`
+    //     path (interrupt on native→external; resume/start on external→native).
+    const crossModeHandoffRepository = new PgCrossModeHandoffRepository(database);
+    crossModeHandoffService = new DefaultCrossModeHandoffService({
+      executionRecordRepository,
+      crossModeHandoffRepository,
+      executionTaskService: executionTaskService!,
+      nativeExecutionProvider,
+      externalExecutionProvider,
+      agentRunRepository: agentRunRepository!,
+      agentPolicyEvaluator: agentPolicyEngine,
+      executionPolicyService,
+      agentProviderRegistryService,
+      executionSessionService,
+      agentWorkspaceService,
+      auditService,
+      logger,
+      queue,
+    });
+    // PR #46 review #2: the cross-mode-handoff outbox relay (the generic
+    // OutboxRelay — the boot sweep re-enqueues reconcile jobs for every
+    // pending obligation, mirroring the WORK-034/035 relays).
+    crossModeHandoffRelay = new CrossModeHandoffOutboxRelay({
+      handoffRepository: crossModeHandoffRepository,
+      queue,
+      logger,
+    });
+    crossModeHandoffReconcilerRef = crossModeHandoffService;
+
     // --- /runtime module: DefaultRuntimeStatusService (SUB-B). ---
     // Aggregates GitHub + Vercel + Architect + Agent status for a project.
     // The resolvers are closures over existing services; each catches its own
@@ -1616,6 +1718,12 @@ export async function buildApp(
   if (agentWorkspaceServiceRef) {
     handlerList.push(createWorkspaceReleaseRelayJobHandler(agentWorkspaceServiceRef, logger));
   }
+  // PR #46 review #2: the cross-mode-handoff reconcile relay job handler
+  // (the durable recovery for an interrupted handoff — mirrors the
+  // WORK-034/035 relay handlers). Idempotent + redeliveryPolicy.
+  if (crossModeHandoffReconcilerRef) {
+    handlerList.push(createCrossModeHandoffRelayJobHandler(crossModeHandoffReconcilerRef, logger));
+  }
   // WORK-040: the durable planning.evaluate job handler — reuses the EXISTING
   // WorkerHost registry (NO new scheduler). Idempotent + redeliveryPolicy.
   if (planningEvaluateJobHandlerRef) {
@@ -1636,6 +1744,10 @@ export async function buildApp(
       ...(sessionTerminalRelay ? [sessionTerminalRelay] : []),
       // WORK-035: the workspace-release obligation boot sweep.
       ...(workspaceReleaseRelay ? [workspaceReleaseRelay] : []),
+      // PR #46 review #2: the cross-mode-handoff obligation boot sweep
+      // (the durable recovery for an interrupted handoff — mirrors the
+      // WORK-034/035 sweeps).
+      ...(crossModeHandoffRelay ? [crossModeHandoffRelay] : []),
     ],
   });
 
@@ -1710,6 +1822,9 @@ export async function buildApp(
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,
+      // WORK-042: cross-mode handoff service (native <-> external for the SAME
+      // logical execution — ONE ExecutionRecord preserved).
+      crossModeHandoffService,
       // WORK-036: the governed tool runtime (present when DB + agents
       // configured). Capabilities, never authorities — observations only.
       toolRuntime: toolRuntimeRef,

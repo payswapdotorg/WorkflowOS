@@ -19,6 +19,7 @@ import type {
   ExecutionRecordRepository,
   CreateExecutionRecordInput,
   UpdateExecutionStatusInput,
+  TransitionModeInput,
   ExecutionEventRecord,
   ExecutionEventRepository,
   AppendExecutionEventInput,
@@ -182,6 +183,62 @@ export class PgExecutionRecordRepository implements ExecutionRecordRepository {
         input.startedAt ?? null,
         input.completedAt ?? null,
         input.expiresAt ?? null,
+      ],
+    );
+    return result.rows[0] ? rowToRecord(result.rows[0]) : null;
+  }
+
+  /**
+   * WORK-042: transition an existing execution record's `mode` + `status` +
+   * the mode-specific authoritative fields (provider/model/package/agent_run/
+   * external_session/expires_at/benchmark_metadata). Used ONLY by the cross-
+   * mode handoff service to preserve the SAME execution identity across a
+   * native <-> external transition. Unspecified fields keep their current
+   * value (COALESCE) so native->external can set package_json + expires_at
+   * without clearing agent_run_id, and external->native can set agent_run_id
+   * without clearing package_json. The benchmark_metadata is MERGED with the
+   * current row (mirrors {@link updateStatus}).
+   */
+  async transitionMode(
+    id: string,
+    input: TransitionModeInput,
+  ): Promise<ExecutionRecord | null> {
+    const current = await this.findById(id);
+    if (!current) return null;
+    // benchmark_metadata: MERGE with the current row (mirrors updateStatus —
+    // a transition never wipes the prior benchmark metadata; the cross-mode
+    // handoff enriches it with the new phase's metadata).
+    const mergedBenchmark = JSON.stringify({
+      ...current.benchmarkMetadata,
+      ...(input.benchmarkMetadata ?? {}),
+    });
+    const result = await this.db.query<ExecutionRow>(
+      `UPDATE wfos_executions SET
+         mode = $2,
+         status = $3,
+         provider = COALESCE($4, provider),
+         model = COALESCE($5, model),
+         package_json = COALESCE($6::jsonb, package_json),
+         agent_run_id = COALESCE($7, agent_run_id),
+         external_session_ref = COALESCE($8, external_session_ref),
+         expires_at = COALESCE($9, expires_at),
+         benchmark_metadata = $10::jsonb,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING ${RECORD_COLUMNS}`,
+      [
+        id,
+        input.mode,
+        input.status,
+        input.provider ?? null,
+        input.model ?? null,
+        input.packageValue !== undefined && input.packageValue !== null
+          ? JSON.stringify(input.packageValue)
+          : null,
+        input.agentRunId ?? null,
+        input.externalSessionRef ?? null,
+        input.expiresAt ?? null,
+        mergedBenchmark,
       ],
     );
     return result.rows[0] ? rowToRecord(result.rows[0]) : null;

@@ -922,6 +922,15 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       // the same sanctioned-exception rule.
       'RepositoryIntelligenceError',            // @modules/projects — the typed domain error
       'REPOSITORY_INTELLIGENCE_ERROR_CODES',    // @modules/projects — the stable code list
+      // WORK-042: the cross-mode-handoff typed error (the same sanctioned
+      // exception + reasoning — a discriminated error CLASS consumers
+      // instanceof-check; it wires nothing, constructs nothing, holds only
+      // (code, message)) + the frozen pure-data error-code list + the frozen
+      // pure-data relay job-type constant (a string literal — no wiring, no
+      // credentials).
+      'CrossModeHandoffError',                  // @modules/agents — the typed domain error
+      'CROSS_MODE_HANDOFF_ERROR_CODES',         // @modules/agents — the stable code list
+      'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE',      // @modules/agents — the frozen pure-data relay job-type
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -11160,9 +11169,18 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0041 (WORK-039) — WORK-040 adds none.
+    // The highest migration is 0049 (PR #46 round 9 — the GENERATION-FENCED,
+    // IDENTITY-RECOVERABLE provider-operation ledger; 0048 is the durable
+    // provider-operation ledger; 0047 is the cross-mode-handoff durable
+    // dispatch idempotency key; 0046 is the fenced dispatch gate;
+    // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
+    // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
+    // handoff log). WORK-040 added none (0042-0049 belong to WORK-042, not
+    // WORK-040).
+    // The planner evidence lives in the existing Work Item metadata.planner
+    // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (no new table)').toMatch(/^0041_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-9 generation-fenced provider-operation ledger migration, NOT a planner-owned table)').toMatch(/^0049_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -11832,5 +11850,1679 @@ describe('WORK-041 invariants — Maintenance baseline cross-tenant guard (PR #4
     //    drops the count to 1).
     const guardCallSites = (route.match(/assertBaselineInProject\(deps, projectId, body\.baselineId\)/g) ?? []).length;
     expect(guardCallSites, 'both scan + scan-async call assertBaselineInProject (the gate is wired into both routes)').toBe(2);
+  });
+});
+
+// =============================================================================
+// WORK-042 invariants — Cross-Mode Execution Handoff (the append-only mode-
+// transition log for the SAME logical ExecutionRecord). ONE ExecutionRecord
+// preserved; the handoff is a SUBORDINATE state transition + an append-only
+// history log row. The service composes the EXISTING NativeExecutionProvider +
+// ExternalExecutionProvider + ExecutionTaskService + AgentPolicyEngine +
+// ExecutionPolicyService + AgentProviderRegistryService — it is NOT an
+// ExecutionService, it NEVER creates a second ExecutionRecord, NEVER touches
+// workflow/verification/review state, NEVER persists secrets. The route
+// accepts NO authoritative fields (executionId from path; projectId resolved
+// server-side; policy decision server-side; audit identity server-side). The
+// cross-project guard (record.projectId validation) runs BEFORE any mutation.
+// =============================================================================
+describe('WORK-042 — Cross-Mode Execution Handoff', () => {
+  const AGENTS_INTERNAL = join(MODULES_DIR, 'agents', 'internal');
+  const CROSS_MODE_TYPES = join(AGENTS_INTERNAL, 'cross-mode-handoff.types.ts');
+  const CROSS_MODE_REPO = join(AGENTS_INTERNAL, 'pg-cross-mode-handoff-repository.ts');
+  const CROSS_MODE_SERVICE = join(AGENTS_INTERNAL, 'default-cross-mode-handoff-service.ts');
+  const MIGRATION_0042 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0042_cross_mode_execution_handoff.sql',
+  );
+  const CROSS_MODE_MIGRATION_0044 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0044_cross_mode_handoff_claim_lease.sql',
+  );
+  const CROSS_MODE_MIGRATION_0045 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0045_cross_mode_handoff_claim_epoch.sql',
+  );
+  const CROSS_MODE_MIGRATION_0046 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0046_cross_mode_handoff_dispatch_gate.sql',
+  );
+  const AGENTS_BARREL = join(MODULES_DIR, 'agents', 'index.ts');
+  const PG_EXECUTION_REPO = join(AGENTS_INTERNAL, 'pg-execution-repository.ts');
+  const EXECUTION_ROUTE = join(SRC_ROOT, 'api', 'routes', 'execution.route.ts');
+
+  /** Strip line + block comments (TypeScript + SQL) so doc-only mentions of
+   *  sensitive tokens do not trip the secret-persistence invariant. */
+  function strip(src: string): string {
+    return src
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*--.*$/gm, '');
+  }
+
+  // -------------------------------------------------------------------------
+  // A1: Migration 0042 exists + the correct schema.
+  // -------------------------------------------------------------------------
+  it('A1. migration 0042 exists with the cross-mode handoff log schema (UNIQUE execution + mode-change CHECK + idempotency UNIQUE + append-only trigger + prior-phase snapshot)', () => {
+    expect(existsSync(MIGRATION_0042), '0042_cross_mode_execution_handoff.sql must exist').toBe(true);
+    const src = readFileSync(MIGRATION_0042, 'utf8');
+    // The append-only mode-transition log table.
+    expect(src).toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_mode_handoffs/);
+    // ONE handoff per execution (the hard fence against a second handoff).
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_execution_unique UNIQUE \(execution_record_id\)/);
+    // A handoff MUST change the mode.
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_mode_change CHECK \(from_mode <> to_mode\)/);
+    // Idempotency key (convergent retry).
+    expect(src).toMatch(/idempotency_key TEXT NOT NULL/);
+    expect(src).toMatch(/CONSTRAINT wfos_execution_mode_handoffs_idempotency_unique UNIQUE \(idempotency_key\)/);
+    // The prior-phase authoritative evidence snapshot (preserves the correction chain).
+    expect(src).toMatch(/previous_agent_run_id UUID/);
+    expect(src).toMatch(/previous_external_session_ref TEXT/);
+    expect(src).toMatch(/previous_package_json JSONB/);
+    // Append-only immutability trigger (no UPDATE/DELETE — the history is permanent).
+    expect(src).toMatch(/wfos_execution_mode_handoff_immutable/);
+    expect(src).toMatch(/BEFORE UPDATE OR DELETE ON wfos_execution_mode_handoffs/);
+  });
+
+  it('A1b. the migration stores NO credentials (stripped of comments, the schema mentions no secret/token/cookie/api_key/password)', () => {
+    const src = readFileSync(MIGRATION_0042, 'utf8');
+    const stripped = strip(src);
+    expect(stripped, 'the handoff log table stores no secrets').not.toMatch(/secret|token|cookie|api_key|password/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // A2: NO second ExecutionService / NO second AgentGateway / NO second
+  // session/workspace engine (the CrossModeHandoffService is a SEPARATE
+  // boundary that composes the existing ones; it never constructs a parallel
+  // engine).
+  // -------------------------------------------------------------------------
+  it('A2. the cross-mode handoff boundary creates NO second ExecutionService / AgentGateway / SessionService / WorkspaceService', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      // No second ExecutionService (the CrossModeHandoffService is a SEPARATE
+      // interface — it transitions the SAME ExecutionRecord; it never
+      // constructs, implements, or declares an ExecutionService).
+      expect(src, `${name}: no second ExecutionService`).not.toMatch(/new\s+\w*ExecutionService\b|implements\s+ExecutionService\b|class\s+\w*ExecutionService\b/);
+      // No second AgentGateway (the service calls the EXISTING
+      // NativeExecutionProvider which delegates to the existing gateway).
+      expect(src, `${name}: no second DefaultAgentGateway`).not.toMatch(/new\s+DefaultAgentGateway/);
+      // No second session engine (the existing DefaultExecutionSessionService
+      // is the ONE; the cross-mode service must NOT create another).
+      expect(src, `${name}: no second SessionService`).not.toMatch(/class\s+\w*SessionService\b|implements\s+ExecutionSessionService\b/);
+      // No second workspace engine (the existing DefaultAgentWorkspaceService
+      // is the ONE; the cross-mode service must NOT create another).
+      expect(src, `${name}: no second WorkspaceService`).not.toMatch(/class\s+\w*WorkspaceService\b|implements\s+AgentWorkspaceService\b/);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // A3: NO workflow / verification / review mutation (the cross-mode handoff
+  // is a subordinate state transition — it never touches the workflow /
+  // verification / review authority).
+  // -------------------------------------------------------------------------
+  it('A3. the cross-mode handoff NEVER mutates workflow / verification / review state (SQL-level + state-machine-level)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no workflow mutation`).not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow|DELETE FROM wfos_workflow/);
+      expect(src, `${name}: no verification mutation`).not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification|DELETE FROM wfos_verification/);
+      expect(src, `${name}: no review mutation`).not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews|DELETE FROM wfos_reviews/);
+      // No workflow state-machine transition (the toState: 'approved'/
+      // 'merged'/'verified' shape would be a workflow authority claim).
+      expect(src, `${name}: no workflow state-machine mutation`).not.toMatch(/toState:\s*'(approved|merged|verified)'/);
+    }
+    // The service does NOT import the workflow / verification / review
+    // modules (the one-way dependency — agents → execution-policy → tool
+    // runtime, never agents → workflow authority).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the cross-mode service does not import @modules/workflows').not.toContain("from '@modules/workflows");
+    expect(serviceSrc, 'the cross-mode service does not import @modules/verification').not.toContain("from '@modules/verification");
+    expect(serviceSrc, 'the cross-mode service does not import @modules/reviews').not.toContain("from '@modules/reviews");
+  });
+
+  // -------------------------------------------------------------------------
+  // A4: The cross-mode handoff reuses the EXISTING providers + task service +
+  // policy engine (NO parallel model).
+  // -------------------------------------------------------------------------
+  it('A4. the cross-mode handoff reuses the EXISTING NativeExecutionProvider + ExternalExecutionProvider + ExecutionTaskService + agent-policy evaluateExternalHandoff (no parallel model)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The service depends on the existing native + external providers (typed
+    // as the provider-independent ExecutionProvider interface — not new ones).
+    expect(serviceSrc, 'the service depends on nativeExecutionProvider').toMatch(/nativeExecutionProvider\s*[:.]/);
+    expect(serviceSrc, 'the service depends on externalExecutionProvider').toMatch(/externalExecutionProvider\s*[:.]/);
+    // The service reuses the EXISTING ExecutionTaskService.build (the same
+    // path the ExecutionService uses to build a task).
+    expect(serviceSrc, 'the service depends on executionTaskService').toMatch(/executionTaskService\s*[:.]/);
+    // For targetMode='external', the service calls the EXISTING
+    // agent-policy evaluateExternalHandoff hook (no second policy engine).
+    expect(serviceSrc, 'the service calls evaluateExternalHandoff').toMatch(/evaluateExternalHandoff\s*\(/);
+    // The service does NOT construct a DefaultAgentGateway (it dispatches
+    // through NativeExecutionProvider, which delegates to the existing
+    // gateway — never a parallel gateway).
+    expect(serviceSrc, 'the service never constructs a second DefaultAgentGateway').not.toMatch(/new\s+DefaultAgentGateway/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A5: POST-only mutation (NO GET mutation on the cross-mode-handoff route).
+  // -------------------------------------------------------------------------
+  it('A5. the cross-mode-handoff route is POST-only (NO GET mutation)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    expect(routeSrc, 'the route registers a POST handler').toMatch(/app\.post\('\/execution\/:executionId\/cross-mode-handoff'/);
+    // No GET handler on the cross-mode-handoff path (no read-as-mutation).
+    expect(routeSrc, 'no GET mutation on the cross-mode-handoff path').not.toMatch(/app\.get\('\/execution\/:executionId\/cross-mode-handoff'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A6: Server-side authority (no caller-supplied authoritative fields).
+  // The route body destructuring reads ONLY caller-controlled INTENT
+  // (targetMode/reason/userInstruction/idempotencyKey/provider/model). The
+  // projectId / executionRecordId / policyDecision / audit identity are
+  // resolved server-side.
+  // -------------------------------------------------------------------------
+  it('A6. the cross-mode-handoff route accepts NO authoritative fields (executionId from path; projectId/policyDecision/audit identity resolved server-side)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    // Extract the cross-mode-handoff route handler (from app.post to the end
+    // of the file — it is the LAST route).
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    expect(sectionStart, 'the cross-mode-handoff route section must be present').toBeGreaterThan(-1);
+    const section = routeSrc.slice(sectionStart);
+    // The body destructuring must NOT read authoritative fields.
+    expect(section, 'no body.projectId').not.toMatch(/body\??\.(projectId|executionRecordId|policyDecision|auditId|workspaceId|evidenceId)/i);
+    // The route resolves record.projectId server-side + calls
+    // requireProjectAuthorization (the projectId is NEVER from the body).
+    expect(section, 'the route resolves record.projectId server-side').toMatch(/record\.projectId/);
+    expect(section, 'the route calls requireProjectAuthorization').toMatch(/requireProjectAuthorization\(/);
+  });
+
+  it('A6b. ORDERING — the route calls requireProjectAuthorization BEFORE crossModeHandoffService.handoff (authorize BEFORE mutate)', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    const section = routeSrc.slice(sectionStart);
+    const authIdx = section.indexOf('requireProjectAuthorization(req, reply');
+    const mutateIdx = section.indexOf('crossModeHandoffService.handoff(');
+    expect(authIdx, 'the route calls requireProjectAuthorization').toBeGreaterThan(-1);
+    expect(mutateIdx, 'the route calls crossModeHandoffService.handoff').toBeGreaterThan(-1);
+    expect(authIdx, 'the route authorizes BEFORE mutating').toBeLessThan(mutateIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A9: Tenant-ownership guard BEFORE mutation (the WORK-041 mutation-proof
+  // pattern). The route's requireProjectAuthorization (which validates the
+  // caller's project membership) runs BEFORE crossModeHandoffService.handoff.
+  // PLUS the service re-resolves the record (record.projectId) BEFORE any
+  // createHandoff call (defense-in-depth).
+  //
+  // Count + MUTATION-PROOF: count the requireProjectAuthorization CALL sites
+  // (await requireProjectAuthorization() dotted call) in the cross-mode-
+  // handoff route section (>= 1) + synthesize a mutated route section WITHOUT
+  // the authorize call → the count check catches the violation.
+  // -------------------------------------------------------------------------
+  it('A9. tenant-ownership guard BEFORE mutation — requireProjectAuthorization runs BEFORE crossModeHandoffService.handoff; a synthesized unguarded mutation is caught by the count check', () => {
+    const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
+    const sectionStart = routeSrc.indexOf("app.post('/execution/:executionId/cross-mode-handoff'");
+    const section = routeSrc.slice(sectionStart);
+    // Count actual CALL sites (the await + parenthesised call — NOT JSDoc
+    // mentions of the helper name).
+    const gateCallSitePattern = /await\s+requireProjectAuthorization\(/g;
+    const gateCallSiteCount = (section.match(gateCallSitePattern) ?? []).length;
+    expect(gateCallSiteCount, 'the cross-mode-handoff route calls requireProjectAuthorization (the project-ownership gate)').toBeGreaterThanOrEqual(1);
+
+    // MUTATION PROOF — synthesize a mutated route section WITHOUT the
+    // authorize call (the exact regression the invariant must prevent) +
+    // assert the count check detects the violation (gate call sites == 0).
+    const mutatedSection = section.replace(/await\s+requireProjectAuthorization\([^)]*\)/g, '/* MUTATION: authorize call removed */');
+    const mutatedGateCallSites = (mutatedSection.match(gateCallSitePattern) ?? []).length;
+    expect(mutatedGateCallSites, 'the mutated section has 0 authorize call sites (the mutation stripped the gate)').toBe(0);
+    expect(
+      mutatedGateCallSites,
+      'the count check CATCHES the unguarded mutation — gate < 1 in the mutated section',
+    ).toBeLessThan(1);
+
+    // SERVICE-LEVEL defense-in-depth: the service re-resolves the record
+    // (record.projectId is known) BEFORE the createHandoffAndClaim INSERT
+    // (PR #46 round 4: the reserve + claim are atomic in ONE transaction —
+    // the reserve step is now `createHandoffAndClaim`, NOT the round-1
+    // `createHandoff`). The FIRST occurrence of record.projectId must
+    // precede the FIRST createHandoffAndClaim call site (the reserve+claim
+    // step).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const recordProjectIdIdx = serviceSrc.indexOf('record.projectId');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoffAndClaim(');
+    expect(recordProjectIdIdx, 'the service resolves record.projectId').toBeGreaterThan(-1);
+    expect(createHandoffIdx, 'the service calls createHandoffAndClaim (the round-4 atomic reserve+claim)').toBeGreaterThan(-1);
+    expect(recordProjectIdIdx, 'the service resolves record.projectId BEFORE the createHandoffAndClaim INSERT (defense-in-depth)').toBeLessThan(createHandoffIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A10: ONE handoff per execution (the UNIQUE fence). The migration has
+  // UNIQUE(execution_record_id) (A1 covers); the service has EXACTLY ONE
+  // createHandoffAndClaim call site (PR #46 round 4: the reserve + claim
+  // are atomic in ONE transaction — the reserve step is now
+  // `createHandoffAndClaim`, NOT the round-1 `createHandoff`). A mutated
+  // service with a second createHandoffAndClaim site → the count check
+  // catches it.
+  // -------------------------------------------------------------------------
+  it('A10. ONE handoff per execution — the service has EXACTLY ONE createHandoffAndClaim call site (the UNIQUE(execution_record_id) fence)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const createHandoffCallSites = (serviceSrc.match(/\.createHandoffAndClaim\(/g) ?? []).length;
+    expect(createHandoffCallSites, 'the service has exactly ONE createHandoffAndClaim call site (the round-4 atomic reserve+claim)').toBe(1);
+    // MUTATION PROOF — synthesize a mutated service with a second
+    // createHandoffAndClaim site → the count check catches it.
+    const mutatedService = serviceSrc + [
+      '',
+      '// MUTATION (for the static-arch test only — NOT in the real file):',
+      'async function futureUnguardedCreate(ctx) {',
+      '  // A second createHandoffAndClaim site — this is the regression the',
+      '  // invariant must catch (would bypass the UNIQUE fence on a',
+      '  // different idempotency_key).',
+      '  return ctx.deps.crossModeHandoffRepository.createHandoffAndClaim({} as never, \'x\', 1);',
+      '}',
+      '',
+    ].join('\n');
+    const mutatedCallSites = (mutatedService.match(/\.createHandoffAndClaim\(/g) ?? []).length;
+    expect(mutatedCallSites, 'the mutated service has 2 createHandoffAndClaim call sites').toBe(createHandoffCallSites + 1);
+    expect(
+      mutatedCallSites,
+      'the count check CATCHES the second createHandoffAndClaim site — count > 1 in the mutated service',
+    ).toBeGreaterThan(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // A11: Idempotent convergence (findByIdempotencyKey BEFORE
+  // createHandoffAndClaim — a retry with the same key converges to the
+  // existing result).
+  // -------------------------------------------------------------------------
+  it('A11. idempotent convergence — the service calls findByIdempotencyKey (the convergence lookup) BEFORE createHandoffAndClaim', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service calls findByIdempotencyKey (convergence check)').toMatch(/findByIdempotencyKey/);
+    // ORDERING — the findByIdempotencyKey lookup precedes the
+    // createHandoffAndClaim INSERT (the convergence check is evaluated
+    // BEFORE the reserve+claim). PR #46 round 4: the reserve step is now
+    // `createHandoffAndClaim` (the atomic reserve + claim).
+    const idempotencyLookupIdx = serviceSrc.indexOf('findByIdempotencyKey');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoffAndClaim(');
+    expect(idempotencyLookupIdx, 'findByIdempotencyKey must be present').toBeGreaterThan(-1);
+    expect(createHandoffIdx, 'createHandoffAndClaim must be present').toBeGreaterThan(-1);
+    expect(idempotencyLookupIdx, 'findByIdempotencyKey precedes createHandoffAndClaim (converge before reserve+claim)').toBeLessThan(createHandoffIdx);
+  });
+
+  // -------------------------------------------------------------------------
+  // A12: Durable relay constant (IMPL-1 added CROSS_MODE_HANDOFF_RELAY_JOB_TYPE
+  // + the idempotent reconcileCrossModeHandoffForExecution entry point). PR #46
+  // review #2: the relay is NO LONGER OPTIONAL — R1-A proves it is WIRED into
+  // the WorkerHost (the job handler + the boot-sweep outbox relay).
+  // -------------------------------------------------------------------------
+  it('A12. the durable relay constant is exported (the cross-mode-handoff reconciliation relay job type — WIRED, not optional)', () => {
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE is defined in the types').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    expect(barrelSrc, 'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE is exported from the barrel').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
+    // The service defines the idempotent reconciliation entry point (the
+    // relay calls this on retry; a complete handoff is a no-op).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service implements reconcileCrossModeHandoffForExecution').toMatch(/reconcileCrossModeHandoffForExecution/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A13: Barrel exports (the public contract; concrete impls stay internal).
+  // -------------------------------------------------------------------------
+  it('A13. the /agents barrel exports the cross-mode handoff public contract (no concrete impls)', () => {
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    // The public contract names.
+    expect(barrelSrc).toMatch(/CrossModeHandoffService/);
+    expect(barrelSrc).toMatch(/CrossModeHandoffRecord/);
+    expect(barrelSrc).toMatch(/CrossModeHandoffError/);
+    expect(barrelSrc).toMatch(/CROSS_MODE_HANDOFF_ERROR_CODES/);
+    expect(barrelSrc).toMatch(/TransitionModeInput/);
+    // The concrete implementations stay internal (wired only by app.ts).
+    expect(barrelSrc, 'PgCrossModeHandoffRepository stays internal').not.toMatch(/PgCrossModeHandoffRepository/);
+    expect(barrelSrc, 'DefaultCrossModeHandoffService stays internal').not.toMatch(/DefaultCrossModeHandoffService/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A14: transitionMode repo method exists + does NOT touch
+  // workflow/verification/review (it ONLY touches wfos_executions — the
+  // SAME ExecutionRecord's mode/status/provider columns).
+  // -------------------------------------------------------------------------
+  it('A14. PgExecutionRecordRepository.transitionMode exists + uses an UPDATE on wfos_executions (NOT a new table) + does NOT touch workflow/verification/review', () => {
+    const repoSrc = readFileSync(PG_EXECUTION_REPO, 'utf8');
+    expect(repoSrc, 'transitionMode method exists').toMatch(/transitionMode\s*\(/);
+    expect(repoSrc, 'transitionMode uses UPDATE wfos_executions SET (the SAME record — no new table)').toMatch(/UPDATE wfos_executions SET/);
+    // Extract the transitionMode method body + assert it touches ONLY
+    // wfos_executions (no workflow/verification/review SQL).
+    const methodStart = repoSrc.indexOf('async transitionMode(');
+    expect(methodStart, 'transitionMode method body must be present').toBeGreaterThan(-1);
+    // Find the method's closing brace (the next '\n  }' at column 2).
+    const methodEnd = repoSrc.indexOf('\n  }', methodStart);
+    const methodBody = repoSrc.slice(methodStart, methodEnd);
+    expect(methodBody, 'transitionMode does NOT insert/update workflow state').not.toMatch(/INSERT INTO wfos_workflow|UPDATE wfos_workflow/);
+    expect(methodBody, 'transitionMode does NOT insert/update verification state').not.toMatch(/INSERT INTO wfos_verification|UPDATE wfos_verification/);
+    expect(methodBody, 'transitionMode does NOT insert/update review state').not.toMatch(/INSERT INTO wfos_reviews|UPDATE wfos_reviews/);
+  });
+
+  // -------------------------------------------------------------------------
+  // A7 + A8 (combined for clarity): NO token/credential persistence + NO
+  // direct provider SDK coupling.
+  // -------------------------------------------------------------------------
+  it('A7. the cross-mode handoff log + service persist NO secrets (no raw_token / api_key / secret / password / cookie); the service does NOT issue tokens (token issuance is the EXISTING ExecutionHandoffService job via POST /execution/:id/handoff)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = strip(readFileSync(path, 'utf8'));
+      expect(src, `${name}: no raw_token / api_key / secret / password / cookie`).not.toMatch(/raw_token|rawToken|api_key|apiKey|secret|password|cookie/i);
+    }
+    // The service does NOT call createHash or generate tokens (token
+    // issuance for native->external is the EXISTING ExecutionHandoffService's
+    // job — the cross-mode handoff generates the package + sets
+    // status=handoff_ready; the user then calls POST /execution/:id/handoff
+    // to issue the token, which goes through the existing policy-gated
+    // decorator).
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service does NOT call createHash').not.toMatch(/createHash\(/);
+    expect(serviceSrc, 'the service does NOT issue handoff tokens (the existing ExecutionHandoffService owns that)').not.toMatch(/executionHandoffService\s*\./);
+  });
+
+  it('A8. the cross-mode handoff has NO direct provider SDK coupling (no @octokit / openai / anthropic / zai-sdk imports)', () => {
+    for (const [name, path] of [
+      ['types', CROSS_MODE_TYPES],
+      ['repository', CROSS_MODE_REPO],
+      ['service', CROSS_MODE_SERVICE],
+    ] as const) {
+      const src = readFileSync(path, 'utf8');
+      expect(src, `${name}: no @octokit/openai/anthropic/zai-sdk imports`).not.toMatch(/from ['"]@octokit|from ['"]openai|from ['"]anthropic|zai-sdk/);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // The cross-mode-handoff regression test file must exist (the 20 frozen
+  // regressions + the two-project tenant-ownership regression). This is the
+  // dynamic proof that mirrors these static invariants.
+  // -------------------------------------------------------------------------
+  it('the cross-mode-handoff regression test file exists with the frozen identity + concurrency + crash + tenant-ownership scenarios', () => {
+    const testPath = join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff.regression.test.ts');
+    expect(existsSync(testPath), 'cross-mode-handoff.regression.test.ts must exist').toBe(true);
+    const src = readFileSync(testPath, 'utf8');
+    // The six describe blocks (the frozen test matrix shape).
+    expect(src).toMatch(/describe\('identity preservation'/);
+    expect(src).toMatch(/describe\('evidence \+ audit'/);
+    expect(src).toMatch(/describe\('concurrency \+ idempotency'/);
+    expect(src).toMatch(/describe\('crash recovery'/);
+    expect(src).toMatch(/describe\('tenant isolation \(two-project\)'/);
+    expect(src).toMatch(/describe\('policy integration'/);
+    // The two-project tenant-ownership regression is present (the route
+    // 403 + the service-level defense-in-depth rejection).
+    expect(src).toMatch(/403/);
+    expect(src).toMatch(/tenant/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 1 — the three blocking fixes' static invariants.
+  // These PREVENT reintroduction of the forbidden patterns (not merely
+  // assert current correctness): a future change that drops the continuity
+  // gates or the durable relay wiring fails the architecture suite.
+  // -------------------------------------------------------------------------
+
+  // R1-A (finding #2): the durable relay is WIRED into the WorkerHost — the
+  // job handler is registered in the handler registry AND the boot-sweep
+  // outbox relay is registered in WorkerHostOptions.outboxRelays. The relay
+  // being merely DEFINED is insufficient (the review found it was declared
+  // "optional" and not wired — a process crash left a stranded handoff).
+  it('R1-A. the cross-mode-handoff durable relay is WIRED into the WorkerHost (the job handler in the registry + the boot-sweep outbox relay) — not merely defined', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    const barrelSrc = readFileSync(AGENTS_BARREL, 'utf8');
+    // The relay module is imported by app.ts DIRECTLY from the internal path
+    // (mirrors the WORK-034/035 relay pattern — the barrel exposes only the
+    // contract types; the concrete impls stay internal).
+    expect(appSrc, 'app.ts imports the CrossModeHandoffOutboxRelay').toMatch(/CrossModeHandoffOutboxRelay/);
+    expect(appSrc, 'app.ts imports the createCrossModeHandoffRelayJobHandler').toMatch(/createCrossModeHandoffRelayJobHandler/);
+    expect(appSrc, 'app.ts imports from the internal relay path (NOT the barrel)').toMatch(/from '\.\/modules\/agents\/internal\/cross-mode-handoff-relay\.js'/);
+    // The relay job handler is registered in the handler registry.
+    expect(appSrc, 'the relay job handler is pushed into the handlerList').toMatch(/handlerList\.push\(createCrossModeHandoffRelayJobHandler/);
+    // The boot-sweep outbox relay is registered in outboxRelays.
+    expect(appSrc, 'the cross-mode-handoff outbox relay is in outboxRelays (the boot sweep)').toMatch(/crossModeHandoffRelay \? \[crossModeHandoffRelay\]/);
+    // The barrel exposes ONLY the contract types (the concrete relay impls
+    // stay internal — the module-boundary invariant holds). The barrel
+    // references the relay types (the contract surface) but NOT the concrete
+    // class/function.
+    expect(barrelSrc, 'the barrel exposes the CrossModeHandoffReconciler contract type').toMatch(/CrossModeHandoffReconciler/);
+    expect(barrelSrc, 'the barrel does NOT value-export the concrete CrossModeHandoffOutboxRelay class (module-boundary invariant)').not.toMatch(/export \{[^}]*CrossModeHandoffOutboxRelay/);
+    expect(barrelSrc, 'the barrel does NOT value-export the concrete createCrossModeHandoffRelayJobHandler (module-boundary invariant)').not.toMatch(/export \{[^}]*createCrossModeHandoffRelayJobHandler/);
+  });
+
+  // R1-B (finding #2): the durable obligation table + the AFTER INSERT
+  // trigger exist (migration 0043 — the transactional-outbox row written
+  // ATOMICALLY with the reserve). Without this, the relay has nothing to
+  // sweep + the crash window #1 (reserve → process dies) is unrecoverable.
+  it('R1-B. migration 0043 creates the cross-mode-handoff obligation table + the AFTER INSERT trigger (the durable obligation written ATOMICALLY with the reserve)', () => {
+    const migrationPath = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations', '0043_cross_mode_handoff_obligations.sql');
+    expect(existsSync(migrationPath), 'migration 0043 must exist').toBe(true);
+    const src = readFileSync(migrationPath, 'utf8');
+    expect(src, 'the obligation table is created').toMatch(/CREATE TABLE IF NOT EXISTS wfos_cross_mode_handoff_obligations/);
+    expect(src, 'UNIQUE(handoff_id) — one obligation per handoff').toMatch(/UNIQUE \(handoff_id\)/);
+    expect(src, 'the discharged_at column (the durable state)').toMatch(/discharged_at TIMESTAMPTZ/);
+    expect(src, 'the pending index (the boot-sweep work list)').toMatch(/wfos_cross_mode_handoff_obligations_pending_idx/);
+    // The AFTER INSERT trigger writes the obligation ATOMICALLY with the reserve.
+    expect(src, 'the AFTER INSERT trigger function').toMatch(/wfos_cross_mode_handoff_obligation_on_reserve/);
+    expect(src, 'the trigger is AFTER INSERT on the handoff log').toMatch(/AFTER INSERT ON wfos_execution_mode_handoffs/);
+    // The append-only immutability (only the discharge column may change).
+    expect(src, 'the immutability trigger').toMatch(/wfos_cross_mode_handoff_obligation_immutable/);
+  });
+
+  // R1-C (finding #1 + #3): the service COMPOSES the WORK-035 workspace
+  // port + the WORK-034 session port (the continuity gates). A future
+  // change that drops these deps fails the architecture suite — the
+  // physical-worktree continuity + the WORK-034 session-terminal
+  // compatibility are NOT silently removable.
+  it('R1-C. the cross-mode handoff service composes the WORK-035 workspace port + the WORK-034 session port (the continuity gates are NOT optional)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The workspace port (finding #1: physical-worktree continuity).
+    expect(serviceSrc, 'the CrossModeAgentWorkspacePort is declared').toMatch(/CrossModeAgentWorkspacePort/);
+    expect(serviceSrc, 'the agentWorkspaceService dep is required').toMatch(/readonly agentWorkspaceService:/);
+    expect(serviceSrc, 'the workspace continuity gate is called').toMatch(/assertWorkspaceContinuityEligible/);
+    expect(serviceSrc, 'a terminal workspace is REJECTED (handoff-ineligible-state)').toMatch(/terminalAt !== null/);
+    // The session port (finding #3: WORK-034 terminal-session compatibility).
+    expect(serviceSrc, 'the CrossModeExecutionSessionPort is declared').toMatch(/CrossModeExecutionSessionPort/);
+    expect(serviceSrc, 'the executionSessionService dep is required').toMatch(/readonly executionSessionService:/);
+    expect(serviceSrc, 'the session continuity gate is called').toMatch(/assertSessionContinuityEligible/);
+    expect(serviceSrc, 'a terminal session is REJECTED (handoff-ineligible-state)').toMatch(/session\.status === 'completed'/);
+    // The session is driven through the EXISTING non-terminal path
+    // (interrupt on native→external; resume/start on external→native).
+    expect(serviceSrc, 'transitionSessionForHandoff is implemented').toMatch(/transitionSessionForHandoff/);
+    expect(serviceSrc, 'native→external interrupts a running session').toMatch(/interruptSession/);
+    expect(serviceSrc, 'external→native resumes an interrupted session').toMatch(/resumeSession/);
+    // NEVER silently continues a terminal session — the gate rejects it
+    // BEFORE the mutate.
+    const mutateIdx = serviceSrc.indexOf('async mutateAndDispatch(');
+    // The gate is CALLED in the handoff flow (not just defined). Find the
+    // handoff() method body's call to the gate.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const gateCallInHandoff = serviceSrc.indexOf('assertSessionContinuityEligible(', handoffStart);
+    expect(gateCallInHandoff, 'the session continuity gate is called inside handoff()').toBeGreaterThan(handoffStart);
+    expect(gateCallInHandoff, 'the gate call in handoff() precedes the mutateAndDispatch definition').toBeGreaterThan(-1);
+    expect(mutateIdx, 'mutateAndDispatch is defined').toBeGreaterThan(-1);
+  });
+
+  // R1-D (finding #2): the repository implements the obligation surface
+  // (listPendingHandoffObligations + dischargeHandoffObligation) — the relay
+  // + the boot sweep need these to sweep + drain. Without them the relay is
+  // inert.
+  it('R1-D. the cross-mode-handoff repository implements the obligation surface (listPendingHandoffObligations + dischargeHandoffObligation)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'listPendingHandoffObligations is implemented').toMatch(/async listPendingHandoffObligations\(/);
+    expect(repoSrc, 'the pending query filters discharged_at IS NULL').toMatch(/WHERE o\.discharged_at IS NULL/);
+    expect(repoSrc, 'dischargeHandoffObligation is implemented').toMatch(/async dischargeHandoffObligation\(/);
+    expect(repoSrc, 'the discharge UPDATE sets discharged_at').toMatch(/SET discharged_at = NOW\(\)/);
+    // The service discharges the obligation when the reconcile confirms
+    // completion (the boot-sweep work list drains). PR #46 round 5: the
+    // discharge call carries the EXACT lease identity (the unique
+    // per-invocation owner + the fencing epoch) — the epoch-fenced discharge.
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service discharges the obligation on completion (epoch-fenced by the lease identity)').toMatch(/dischargeHandoffObligation\(\s*handoff\.id,\s*lease\.owner,\s*lease\.claimEpoch,?\s*\)/);
+  });
+
+  // R1-E (finding #2 + round 3): the service enqueues the durable relay job
+  // (the live-worker delivery — a live worker drains the job without any
+  // restart; the boot sweep is the backstop). PR #46 round 3 (the concurrency
+  // fix): the enqueue now happens AFTER the mutation+dispatch+session
+  // convergence (NOT at reserve — see R3-A for the ordering invariant). Without
+  // this enqueue, the only delivery path is the boot sweep (requires a
+  // restart).
+  it('R1-E. the service enqueues the durable relay job (the live-worker delivery path — PR #46 round 3: AFTER the mutation, not at reserve)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'enqueueRelayJob is defined').toMatch(/private async enqueueRelayJob/);
+    expect(serviceSrc, 'the handoff calls enqueueRelayJob').toMatch(/await this\.enqueueRelayJob\(executionId\)/);
+    expect(serviceSrc, 'the enqueue uses CROSS_MODE_HANDOFF_RELAY_JOB_TYPE').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 2 — the two REFINED blocking findings. These
+  // PREVENT reintroduction of the forbidden patterns: a future change that
+  // makes the queue optional, swallows enqueue failures, swallows session
+  // transition failures, OR discharges the obligation before the session has
+  // converged fails the architecture suite.
+  // -------------------------------------------------------------------------
+
+  // R2-A (Finding #1): the queue dep is REQUIRED (not optional). The round-1
+  // type contract declared `queue?: Queue` (optional) — the production
+  // durability guarantee depended on a later boot sweep. Now the queue is
+  // REQUIRED: `readonly queue: Queue;` (no `?`). A future change that
+  // re-optionalizes the queue fails this invariant.
+  it('R2-A. the cross-mode handoff service queue dep is REQUIRED (not optional — Finding #1 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The queue dep is declared as REQUIRED (no `?`).
+    expect(serviceSrc, 'the queue dep is declared').toMatch(/readonly queue: Queue;/);
+    // The OPTIONAL declaration is GONE (the round-1 `queue?: Queue` is
+    // forbidden). A negative lookahead on the optional form.
+    expect(serviceSrc, 'the queue dep is NOT optional (no `?`)').not.toMatch(/readonly queue\?: Queue/);
+  });
+
+  // R2-B (Finding #1): the enqueueRelayJob method does NOT swallow enqueue
+  // failures. The round-1 impl wrapped the enqueue in a try/catch that
+  // logged + swallowed (the durability guarantee depended on the boot sweep).
+  // Now an enqueue failure PROPAGATES (the handoff fails fast; the obligation
+  // is durable; the boot sweep reconciles). The method MAY log before the
+  // throw (operator visibility), but the `throw err` MUST be present.
+  it('R2-B. enqueueRelayJob does NOT swallow enqueue failures (the failure propagates — Finding #1 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The enqueueRelayJob method is defined.
+    const methodStart = serviceSrc.indexOf('private async enqueueRelayJob(');
+    expect(methodStart, 'enqueueRelayJob is defined').toBeGreaterThan(-1);
+    // Extract the method body (up to the next method's JSDoc or the closing
+    // brace at the same indentation).
+    const methodBody = serviceSrc.slice(methodStart, methodStart + 800);
+    // The `throw err` (or `throw`) MUST be present — the failure propagates.
+    expect(methodBody, 'enqueueRelayJob re-throws on failure (not swallowed)').toMatch(/throw err/);
+    // The early-return guard for `!this.deps.queue` is GONE (the round-1
+    // `if (!this.deps.queue) return;` is forbidden — the queue is REQUIRED).
+    expect(methodBody, 'no queueless-construction early return (the queue is REQUIRED)').not.toMatch(/if \(!this\.deps\.queue\) return/);
+  });
+
+  // R2-C (Finding #2): the transitionSessionForHandoff method does NOT
+  // swallow session-transition failures. The round-1 impl wrapped the
+  // transition in a try/catch that logged + swallowed (the crash gap — a
+  // crash after the record mutate but before the session transition left
+  // the session mismatched indefinitely). Now a session-transition failure
+  // PROPAGATES (the handoff fails fast; the obligation stays pending; the
+  // reconcile re-attempts). The method MAY log on success (the interrupt/
+  // resume/start log lines), but the catch-and-swallow pattern is GONE.
+  it('R2-C. transitionSessionForHandoff does NOT swallow session-transition failures (the failure propagates — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const methodStart = serviceSrc.indexOf('private async transitionSessionForHandoff(');
+    expect(methodStart, 'transitionSessionForHandoff is defined').toBeGreaterThan(-1);
+    // Extract the method body (up to the next method's JSDoc).
+    const methodEnd = serviceSrc.indexOf('private ', methodStart + 10);
+    const methodBody = serviceSrc.slice(methodStart, methodEnd > methodStart ? methodEnd : methodStart + 1200);
+    // The catch-and-swallow pattern is GONE. The round-1 impl had a
+    // `} catch (err) { ... this.deps.logger.warn(...); }` that swallowed the
+    // error. Now the method has NO try/catch around the transition (a CAS
+    // loss / null result is handled inline — NOT via a catch).
+    expect(methodBody, 'no catch-and-swallow around the session transition').not.toMatch(/catch \(err\) \{[\s\S]*session-transition-failed/);
+    // The session-transition-failed warn log (the round-1 swallow path) is
+    // GONE.
+    expect(methodBody, 'the session-transition-failed swallow log is gone').not.toMatch(/session-transition-failed/);
+  });
+
+  // R2-D (Finding #2): the handoffComplete check INCLUDES session
+  // convergence. The round-1 impl only checked record.mode === toMode + the
+  // dispatch outcome — a crash after the record mutate but before the
+  // session transition discharged the obligation prematurely. Now the
+  // complete-check calls sessionConverged + returns false when the session
+  // has not converged. The obligation stays pending until the session
+  // converges.
+  it('R2-D. handoffComplete includes session convergence (the obligation stays pending until the session converges — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The sessionConverged method is defined.
+    expect(serviceSrc, 'sessionConverged is defined').toMatch(/private sessionConverged\(/);
+    // The handoffComplete method calls sessionConverged.
+    const completeStart = serviceSrc.indexOf('private async handoffComplete(');
+    expect(completeStart, 'handoffComplete is defined').toBeGreaterThan(-1);
+    const completeEnd = serviceSrc.indexOf('private ', completeStart + 10);
+    const completeBody = serviceSrc.slice(completeStart, completeEnd > completeStart ? completeEnd : completeStart + 800);
+    expect(completeBody, 'handoffComplete resolves the session').toMatch(/getSessionForExecution/);
+    expect(completeBody, 'handoffComplete calls sessionConverged').toMatch(/sessionConverged\(session, record, handoff\)/);
+    // The convergence check returns false when not converged (the obligation
+    // stays pending).
+    expect(completeBody, 'handoffComplete returns false when not converged').toMatch(/if \(!this\.sessionConverged\(session, record, handoff\)\) return false/);
+  });
+
+  // R2-E (Finding #2): the reconcile re-attempts the session transition
+  // when the session has NOT converged (crash window #3). The round-1 impl
+  // only revisited the session inside crash window #1 (record.mode !== toMode
+  // — the re-mutate path). A crash after the record mutate but before the
+  // session transition left the session mismatched indefinitely (the
+  // reconcile skipped the session transition when record.mode === toMode).
+  // Now the reconcile resolves the session + re-attempts the transition when
+  // not converged, REGARDLESS of the crash window.
+  it('R2-E. the reconcile re-attempts the session transition when not converged (crash window #3 — Finding #2 round 2)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcileCrossModeHandoffForExecution is defined').toBeGreaterThan(-1);
+    // The reconcile body extends to the next method.
+    const reconcileEnd = serviceSrc.indexOf('private async handoffComplete(', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 4000);
+    // The crash window #3: the reconcile resolves the session AFTER the
+    // re-dispatch (crash window #2) + re-attempts the transition when not
+    // converged.
+    expect(reconcileBody, 'the reconcile resolves the session for convergence').toMatch(/getSessionForExecution/);
+    expect(reconcileBody, 'the reconcile uses the sessionForConvergence binding (crash window #3)').toMatch(/sessionForConvergence/);
+    expect(reconcileBody, 'the reconcile calls sessionConverged').toMatch(/sessionConverged\(sessionForConvergence, record, handoff\)/);
+    expect(reconcileBody, 'the reconcile re-attempts the session transition (crash window #3)').toMatch(/transitionSessionForHandoff\(\s*sessionForConvergence/);
+    // The stage type includes the new 'session-convergence' value.
+    expect(reconcileBody, 'the stage type includes session-convergence').toMatch(/'session-convergence'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 3 — the concurrency blocker. These PREVENT
+  // reintroduction of the forbidden patterns: a future change that enqueues
+  // the relay job BEFORE the mutation (re-introducing the live-worker race)
+  // OR treats a terminal session as converged for external→native
+  // (re-introducing the accidental-discharge path) fails the architecture
+  // suite.
+  // -------------------------------------------------------------------------
+
+  // R3-A (round 3 BLOCKER — the concurrency race): the relay job is enqueued
+  // AFTER the mutation+session convergence+dispatch (NOT before). Round 2
+  // enqueued at reserve (BEFORE the mutation) — a live WorkerHost could
+  // consume the relay BETWEEN the reserve and the caller's transitionMode,
+  // after which BOTH the worker and the caller performed the same
+  // mutation+dispatch (duplicate provider submission / conflicting session
+  // transitions). The handoff-row UNIQUE constraint did NOT serialize these
+  // two executions (both operated on the same already-reserved handoff row).
+  // Now the relay job is enqueued ONLY AFTER the caller's synchronous state
+  // transition is safely committed: a live worker that picks up the job sees
+  // a COMPLETE (or near-complete) handoff + the reconcile is a no-op
+  // discharge (NOT a competing mutation). This invariant checks the SOURCE
+  // ORDERING: the `enqueueRelayJob` call MUST appear AFTER the
+  // `mutateAndDispatch` call in the `handoff()` method body.
+  it('R3-A. the relay job is enqueued AFTER the mutation+dispatch+session (NOT before — the round 3 concurrency fix)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // Locate the handoff() method body (from `async handoff(` to the next
+    // method `async reconcileCrossModeHandoffForExecution(`).
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd > handoffStart ? handoffEnd : handoffStart + 6000);
+    // The mutateAndDispatch call MUST appear in the handoff body.
+    const mutateIdx = handoffBody.indexOf('await this.mutateAndDispatch(');
+    expect(mutateIdx, 'mutateAndDispatch is called in handoff').toBeGreaterThan(-1);
+    // The enqueueRelayJob call MUST appear in the handoff body.
+    const enqueueIdx = handoffBody.indexOf('await this.enqueueRelayJob(');
+    expect(enqueueIdx, 'enqueueRelayJob is called in handoff').toBeGreaterThan(-1);
+    // The enqueue MUST appear AFTER the mutate (the round 3 ordering — a live
+    // worker that picks up the job sees a COMPLETE handoff, not a half-mutated
+    // one). A future change that moves the enqueue BEFORE the mutate
+    // (re-introducing the round 2 race) fails this invariant.
+    expect(enqueueIdx, 'enqueueRelayJob is called AFTER mutateAndDispatch (round 3: no live-relay race)').toBeGreaterThan(mutateIdx);
+  });
+
+  // R3-B (round 3 secondary — the terminal-session accidental discharge):
+  // sessionConverged does NOT treat a terminal session as converged for
+  // external→native by itself. The round 2 impl had an unconditional
+  // `if (session.status === 'completed' || session.status === 'failed' ||
+  // session.status === 'cancelled') return true;` branch BEFORE the
+  // record-terminal check — a terminal session that arose mid-handoff
+  // (concurrent terminalization) would discharge the obligation
+  // accidentally. Now the terminal-session-as-converged branch is GONE for
+  // external→native: a terminal session falls through to the record-terminal
+  // check (the authoritative signal that the execution finished). The
+  // obligation stays pending until the record reaches a terminal state or an
+  // operator resolves it. This invariant checks that the OLD terminal-session-
+  // as-converged pattern (a `return true` guarded by a session.status check
+  // for a terminal state, appearing BEFORE the record.status check) is GONE
+  // from the sessionConverged method body.
+  it('R3-B. sessionConverged does NOT treat a terminal session as converged for external→native (round 3 secondary — terminalization cannot accidentally discharge a handoff)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const methodStart = serviceSrc.indexOf('private sessionConverged(');
+    expect(methodStart, 'sessionConverged is defined').toBeGreaterThan(-1);
+    // The method body extends to the next `private` method.
+    const methodEnd = serviceSrc.indexOf('private ', methodStart + 10);
+    const methodBody = serviceSrc.slice(methodStart, methodEnd > methodStart ? methodEnd : methodStart + 1500);
+    // The OLD terminal-session-as-converged branch is GONE. The pattern: a
+    // session.status check for a terminal state (completed/failed/cancelled),
+    // followed by `return true;`, appearing BEFORE the record.status check.
+    // This is the round 3 secondary defect — a terminal session that arose
+    // mid-handoff would discharge the obligation. Now this pattern is GONE.
+    expect(methodBody, 'no terminal-session-as-converged branch before the record check (the session.status===cancelled guard is gone)').not.toMatch(
+      /session\.status === '(?:completed|failed|cancelled)'[\s\S]*?return true;[\s\S]*?record\.status/,
+    );
+    // The record-terminal check IS present (the authoritative signal that the
+    // execution finished — the ONLY way a terminal session discharges a
+    // handoff).
+    expect(methodBody, 'the record-terminal check is present').toMatch(/record\.status === 'completed' \|\| record\.status === 'failed'/);
+  });
+
+  // =========================================================================
+  // PR #46 round 4 (the durable claim/lease — the concurrency-serialization
+  // fix the architect required): the round-3 reorder (enqueue AFTER mutation)
+  // closed the live-relay race but NOT the boot-sweep race — the synchronous
+  // caller + the boot sweep / the relay reconcile could BOTH drive the same
+  // pending obligation between the reserve and the caller's mutation (TWO
+  // concurrent handoff drivers → duplicate provider dispatches + conflicting
+  // session transitions). The round-4 fix introduces a durable execution
+  // claim/lease on the obligation row (migration 0044): the caller acquires
+  // the claim ATOMICALLY with the reserve (one transaction), and the relay
+  // reconcile acquires the claim at entry. A failed claim returns early (NO
+  // re-mutate, NO re-dispatch). A crashed owner's lease auto-expires (the
+  // reclaim predicate `claimed_at IS NULL OR claim_expires_at < NOW()`) so
+  // the boot sweep reclaims + recovers. The 5 invariants below prevent
+  // regression of these structural properties at the source level.
+  // =========================================================================
+
+  // R4-A (round 4 — the claim primitive is on BOTH paths): the synchronous
+  // caller path (`handoff`) calls `createHandoffAndClaim` (the atomic
+  // reserve + claim in ONE transaction — closes the boot-sweep race between
+  // the reserve commit and a separate claim commit), AND the relay reconcile
+  // path (`reconcileCrossModeHandoffForExecution`) calls
+  // `claimHandoffObligation` at entry (the same serialization primitive).
+  // Both paths MUST acquire the claim BEFORE mutating — removing the claim
+  // from either path reintroduces the race on that path.
+  it('R4-A. the service uses the claim primitive on BOTH paths (handoff calls createHandoffAndClaim + reconcile calls claimHandoffObligation)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The caller path: createHandoffAndClaim is called in handoff() (the
+    // reserveAndClaim helper invokes it — the claim is the caller's
+    // serialization boundary). Removing it from the caller path
+    // reintroduces the boot-sweep race between reserve and mutation.
+    expect(serviceSrc, 'handoff() exercises createHandoffAndClaim (the caller-path claim)').toMatch(/createHandoffAndClaim\(/);
+    // The relay path: claimHandoffObligation is called in
+    // reconcileCrossModeHandoffForExecution (the reconcile's entry-point
+    // claim — a failed claim returns early before any mutate). Removing it
+    // from the relay path reintroduces the race on the relay path.
+    expect(serviceSrc, 'reconcileCrossModeHandoffForExecution() exercises claimHandoffObligation (the relay-path claim)').toMatch(/claimHandoffObligation\(/);
+  });
+
+  // R4-B (round 4 — the claim is released in a `finally` on BOTH paths):
+  // the claim is the serialization boundary; if the caller / the reconcile
+  // crashes mid-critical-section (mutate/dispatch/session throws), the claim
+  // MUST be released so the boot sweep / relay can reclaim immediately (no
+  // lease wait). A bare `releaseHandoffObligationClaim` call after the
+  // critical section (NOT in a `finally`) would leak the claim on failure
+  // (the lease would auto-expire, but that delays recovery by `claimLeaseMs`).
+  // The release is wrapped in `releaseClaimSafely` (a non-throwing wrapper
+  // so a release failure does not mask the original error) + invoked in a
+  // `finally` block. This invariant checks the `finally { ... releaseClaimSafely(
+  // }` pattern is present in BOTH method bodies.
+  it('R4-B. the claim is released in a `finally` block on BOTH paths (no leaked claim on failure)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The handoff() body: from `async handoff(` to the next method
+    // `async reconcileCrossModeHandoffForExecution(`.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    expect(handoffEnd, 'reconcile is defined after handoff').toBeGreaterThan(-1);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    // The caller-path release: a `finally` block containing a
+    // `releaseClaimSafely(` call. The pattern is `finally {` (with optional
+    // whitespace/newline) followed by ANY text up to `releaseClaimSafely(`.
+    expect(handoffBody, 'handoff() releases the claim in a `finally` block').toMatch(/finally\s*\{[\s\S]*?releaseClaimSafely\(/);
+    // There is NO bare `releaseHandoffObligationClaim(` call OUTSIDE a
+    // finally — the service routes releases through `releaseClaimSafely`
+    // (the non-throwing wrapper). A direct call would bypass the safety
+    // wrapper + could throw out of a `finally`, masking the original error.
+    expect(handoffBody, 'handoff() does NOT call releaseHandoffObligationClaim directly (always through releaseClaimSafely)').not.toMatch(/releaseHandoffObligationClaim\(/);
+
+    // The reconcile() body: from `async reconcileCrossModeHandoffForExecution(`
+    // to the next `private` method (the reconcile is followed by private
+    // helpers — `handoffComplete` is the first private method after it).
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcile is defined').toBeGreaterThan(-1);
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The relay-path release: same `finally { ... releaseClaimSafely( }`
+    // pattern.
+    expect(reconcileBody, 'reconcile() releases the claim in a `finally` block').toMatch(/finally\s*\{[\s\S]*?releaseClaimSafely\(/);
+    expect(reconcileBody, 'reconcile() does NOT call releaseHandoffObligationClaim directly').not.toMatch(/releaseHandoffObligationClaim\(/);
+  });
+
+  // R4-C (round 4 — the migration 0044 + the claim/lease columns exist):
+  // the durable claim/lease lives on the obligation row (migration 0043's
+  // `wfos_cross_mode_handoff_obligations`). Migration 0044 adds the three
+  // new columns (`claimed_at`, `claim_expires_at`, `claim_owner`) + an
+  // index on `claim_expires_at` (the reclaimable-claim work-list probe).
+  // The 0043 immutability trigger only guards `handoff_id`/`execution_id`/
+  // `created_at` (the recorded intent) — the new claim columns are FREE to
+  // mutate (like `discharged_at` — the durable execution state). NO trigger
+  // extension is needed. Dropping the migration OR removing any column
+  // breaks the claim UPDATE predicate (the conditional UPDATE would no
+  // longer fire).
+  it('R4-C. migration 0044 exists + adds the claim/lease columns (claimed_at, claim_expires_at, claim_owner)', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0044), '0044_cross_mode_handoff_claim_lease.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0044, 'utf8');
+    // ALTERs the obligations table (NOT a CREATE TABLE — the table is from
+    // migration 0043; 0044 extends it with the claim columns).
+    expect(src).toMatch(/ALTER TABLE wfos_cross_mode_handoff_obligations/);
+    // The three new claim/lease columns.
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ/);
+    expect(src).toMatch(/claim_expires_at TIMESTAMPTZ/);
+    expect(src).toMatch(/claim_owner TEXT/);
+  });
+
+  // R4-D (round 4 — the claim UPDATE uses the reclaim predicate): a crashed
+  // owner's lease auto-expires — the conditional UPDATE's WHERE clause
+  // includes the reclaim predicate `claimed_at IS NULL OR claim_expires_at <
+  // NOW()` so an expired lease is reclaimable by the next sweep. Replacing
+  // the conditional UPDATE with an unconditional one (or removing the
+  // `claim_expires_at < NOW()` arm) would NEVER reclaim a crashed owner
+  // (the boot sweep would see a permanently-claimed obligation + skip it).
+  // The repository source must contain this predicate verbatim.
+  it('R4-D. the claim UPDATE uses the reclaim predicate (a crashed owner\'s expired lease is reclaimable)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    // The reclaim predicate: `claimed_at IS NULL OR claim_expires_at < NOW()`.
+    // The `claimed_at IS NULL` arm lets the FIRST claim match; the
+    // `claim_expires_at < NOW()` arm lets an EXPIRED claim be reclaimed
+    // (the crash-reclaim semantic). Both arms MUST be present.
+    expect(repoSrc, 'the claim UPDATE predicate includes the reclaimable-expired-lease arm').toMatch(/claimed_at IS NULL OR claim_expires_at < NOW\(\)/);
+  });
+
+  // R4-E (round 4 — the reconcile returns early on a failed claim): the
+  // relay reconcile acquires the claim at entry + returns BEFORE any
+  // mutate/dispatch when another actor owns the obligation (the caller OR
+  // another concurrent reconcile). This is the structural prevention of two
+  // concurrent handoff drivers — the architect's round-4 required correction.
+  // The claim call MUST appear BEFORE the first `mutateAndDispatch` call in
+  // the reconcile body (reordering it after the mutate would reintroduce the
+  // race), AND there MUST be a `!claim.claimed` early-return that emits the
+  // `stage: 'claim-held'` result (NO mutate, NO dispatch). Removing the
+  // early-return OR reordering the claim after the mutate would reintroduce
+  // the race the architect identified.
+  it('R4-E. the reconcile returns early on a failed claim (NO mutate, NO dispatch when another actor owns the obligation)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The reconcile() body: from `async reconcileCrossModeHandoffForExecution(`
+    // to the next `private` method.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcile is defined').toBeGreaterThan(-1);
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The claim call appears BEFORE the first mutateAndDispatch call. A
+    // future change that reorders the claim AFTER the mutate (re-introducing
+    // the race) fails this inequality.
+    const claimIdx = reconcileBody.indexOf('claimHandoffObligation(');
+    expect(claimIdx, 'reconcile calls claimHandoffObligation').toBeGreaterThan(-1);
+    const mutateIdx = reconcileBody.indexOf('mutateAndDispatch(');
+    expect(mutateIdx, 'reconcile calls mutateAndDispatch').toBeGreaterThan(-1);
+    expect(claimIdx, 'the claim is acquired BEFORE the first mutate (no race)').toBeLessThan(mutateIdx);
+    // The `!claim.claimed` early-return emits `stage: 'claim-held'` BEFORE
+    // the mutate — the structural prevention of two concurrent handoff
+    // drivers. A future change that removes the early-return (letting the
+    // reconcile proceed to the mutate even on a failed claim) fails this
+    // match.
+    expect(reconcileBody, 'the !claim.claimed branch returns { stage: \'claim-held\' } before the mutate').toMatch(/if\s*\(!claim\.claimed\)[\s\S]*?return\s*\{[\s\S]*?stage:\s*'claim-held'/);
+  });
+
+  // =========================================================================
+  // PR #46 round 5 (the lease-ownership + lease-expiry fixes). The round-5
+  // review found two lease-correctness holes in the round-4 claim/lease:
+  //
+  //   1. the claim owner was a FIXED per-role string shared by EVERY
+  //      invocation of that role — with a reclaimable lease, an old
+  //      invocation could outlive its expired lease, a new invocation of the
+  //      same role could reclaim under the SAME owner string, and the old
+  //      invocation's `finally` release would then clear the NEW owner's
+  //      live claim (the serialization boundary was gone);
+  //   2. the fixed 30s lease had NO renewal + NO fencing — a critical
+  //      section legitimately longer than the lease let a second actor
+  //      reclaim while the first was STILL EXECUTING (both then performed
+  //      the provider dispatch + session transitions).
+  //
+  // The fix: unique per-invocation owners (`<role-prefix>:<uuid>`), the
+  // claim_epoch fencing token (migration 0045), the heartbeat renewal
+  // covering the whole critical section, phase-boundary fence checks, and
+  // the epoch-fenced discharge. The 7 invariants below prevent regression of
+  // these structural properties at the source level.
+  // =========================================================================
+
+  // R5-A (round 5 — the claim owner is a UNIQUE per-invocation identity):
+  // both critical-section entry points compose their owner from the role
+  // PREFIX + a random UUID via newCrossModeHandoffClaimOwner — NEVER the
+  // bare role constant (two invocations of the same role must NEVER share
+  // an owner, or a stale invocation's owner-guarded release could clear a
+  // newer owner's live claim).
+  it('R5-A. the claim owner is a unique per-invocation identity on BOTH paths (role prefix + UUID via newCrossModeHandoffClaimOwner)', () => {
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    // The generator: composes the role prefix + a random UUID.
+    expect(typesSrc, 'newCrossModeHandoffClaimOwner is defined').toMatch(/export function newCrossModeHandoffClaimOwner\(rolePrefix: string\): string \{/);
+    expect(typesSrc, 'the owner generator composes a random UUID (unique per invocation)').toMatch(/export function newCrossModeHandoffClaimOwner\(rolePrefix: string\): string \{[\s\S]*?randomUUID\(\)/);
+    // The role constants are documented as PREFIXES.
+    expect(typesSrc, 'the caller role prefix constant exists').toMatch(/CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-caller'/);
+    expect(typesSrc, 'the relay role prefix constant exists').toMatch(/CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-relay'/);
+
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    // The caller path composes its owner from the prefix + UUID.
+    expect(handoffBody, 'handoff() composes a unique per-invocation caller owner').toMatch(/newCrossModeHandoffClaimOwner\(\s*CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX/);
+    // The caller NEVER passes a bare role constant as the claim owner.
+    expect(handoffBody, 'handoff() does NOT pass a bare role constant to the claim').not.toMatch(/createHandoffAndClaim\(\s*createInput,\s*CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX\s*,/);
+
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The relay path composes its owner from the prefix + UUID.
+    expect(reconcileBody, 'reconcile() composes a unique per-invocation relay owner').toMatch(/newCrossModeHandoffClaimOwner\(\s*CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX/);
+    // The relay NEVER passes a bare role constant as the claim owner.
+    expect(reconcileBody, 'reconcile() does NOT pass a bare role constant to the claim').not.toMatch(/claimHandoffObligation\(\s*handoff\.id,\s*CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX\s*,/);
+  });
+
+  // R5-B (round 5 — the heartbeat renewal covers the ENTIRE critical
+  // section): a live owner's lease cannot expire mid-flight. The service
+  // starts a lease guard (startClaimLease — a heartbeat timer renewing every
+  // claimLeaseMs/3) after a successful claim on BOTH paths + stops it in the
+  // `finally` (before the release, so no renewal can race the release).
+  it('R5-B. the heartbeat lease guard covers the whole critical section on BOTH paths (started after the claim, stopped in the finally)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The heartbeat interval default: claimLeaseMs / 3.
+    expect(serviceSrc, 'the heartbeat interval derives from the lease (claimLeaseMs / 3)').toMatch(/Math\.max\(1, Math\.floor\(this\.claimLeaseMs \/ 3\)\)/);
+    expect(serviceSrc, 'the handoffClaimHeartbeatMs dep exists (tests can suppress the heartbeat to simulate a stalled owner)').toMatch(/readonly handoffClaimHeartbeatMs\?: number/);
+    // The guard renews through the repository primitive.
+    expect(serviceSrc, 'the lease guard renews via renewHandoffObligationClaim').toMatch(/renewHandoffObligationClaim\(/);
+
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    expect(handoffBody, 'handoff() starts the lease guard after the claim').toMatch(/startClaimLease\(/);
+    expect(handoffBody, 'handoff() stops the heartbeat in the finally (before the release)').toMatch(/finally\s*\{[\s\S]*?lease\.stop\(\)[\s\S]*?releaseClaimSafely\(/);
+
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'reconcile() starts the lease guard after the claim').toMatch(/startClaimLease\(/);
+    expect(reconcileBody, 'reconcile() stops the heartbeat in the finally (before the release)').toMatch(/finally\s*\{[\s\S]*?lease\.stop\(\)[\s\S]*?releaseClaimSafely\(/);
+  });
+
+  // R5-C (round 5 — the fencing-token column exists): migration 0045 adds
+  // claim_epoch BIGINT NOT NULL DEFAULT 0 to the obligation table. Every
+  // claim increments it; the renewal + the discharge + the release are all
+  // guarded by it. Dropping the migration breaks the fence predicates.
+  it('R5-C. migration 0045 exists + adds the claim_epoch fencing token', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0045), '0045_cross_mode_handoff_claim_epoch.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0045, 'utf8');
+    expect(src, 'the migration ALTERs the obligations table').toMatch(/ALTER TABLE wfos_cross_mode_handoff_obligations/);
+    expect(src, 'the migration adds the claim_epoch fencing column').toMatch(/ADD COLUMN IF NOT EXISTS claim_epoch BIGINT NOT NULL DEFAULT 0/);
+  });
+
+  // R5-D (round 5 — the renewal is lease-identity-guarded): the heartbeat
+  // renewal is a conditional UPDATE guarded by the EXACT lease identity
+  // (claim_owner + claim_epoch). A stale owner's renewal returns 0 rows →
+  // the fence check fails → it aborts. An unconditional renewal would let a
+  // stale owner keep "renewing" a lease that was reclaimed under a new
+  // owner.
+  it('R5-D. the renewal UPDATE is guarded by the exact lease identity (claim_owner + claim_epoch)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'renewHandoffObligationClaim is implemented').toMatch(/async renewHandoffObligationClaim\(/);
+    // The renewal predicate: owner + epoch + not-yet-discharged.
+    expect(repoSrc, 'the renewal is guarded by claim_owner + claim_epoch (the fencing check)').toMatch(/async renewHandoffObligationClaim\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3[\s\S]*?AND discharged_at IS NULL/);
+    // The release is guarded by the SAME lease identity (a stale invocation
+    // can never clear a newer owner's claim).
+    expect(repoSrc, 'the release is guarded by claim_owner + claim_epoch').toMatch(/async releaseHandoffObligationClaim\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+  });
+
+  // R5-E (round 5 — every claim increments the fencing epoch): both claim
+  // sites (the atomic reserve+claim + the standalone reclaim) increment
+  // claim_epoch, so each successive lease gets a strictly greater token.
+  // Without the increment, a reclaimed lease would keep the stale owner's
+  // epoch + the fence predicates could not distinguish the leases.
+  it('R5-E. every claim increments the claim_epoch fencing token (monotonic per lease)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const increments = repoSrc.match(/claim_epoch = COALESCE\(claim_epoch, 0\) \+ 1/g) ?? [];
+    expect(increments.length, 'BOTH claim sites increment the epoch (createHandoffAndClaim + claimHandoffObligation)').toBe(2);
+    // The claim RETURNs the epoch (the claimant learns its fencing token).
+    expect(repoSrc, 'the claim RETURNs claim_epoch (the claimant learns its fencing token)').toMatch(/RETURNING id, claim_epoch/);
+  });
+
+  // R5-F (round 5 — the discharge is epoch-fenced): the discharge UPDATE is
+  // guarded by the claim owner + epoch — only the LIVE lease holder can
+  // complete the authoritative obligation transition. A stale owner's
+  // discharge affects 0 rows, so an expired-then-reclaimed owner can never
+  // discharge even if its phase-boundary fence check raced.
+  it('R5-F. the discharge is epoch-fenced at the DB (only the live lease holder can discharge)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'the discharge is implemented').toMatch(/async dischargeHandoffObligation\(/);
+    expect(repoSrc, 'the discharge UPDATE is guarded by claim_owner + claim_epoch').toMatch(/async dischargeHandoffObligation\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+    // The service passes the EXACT lease identity to the discharge.
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service discharges under its own lease identity (lease.owner + lease.claimEpoch)').toMatch(/dischargeHandoffObligation\(\s*handoff\.id,\s*lease\.owner,\s*lease\.claimEpoch,?\s*\)/);
+    // A fenced-out discharge is NOT treated as completion (fence-lost return).
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'a fenced-out discharge returns stage fence-lost (NOT complete)').toMatch(/if\s*\(!discharged\)[\s\S]*?stage:\s*'fence-lost'/);
+  });
+
+  // R5-G (round 5 — the fence check precedes EVERY side-effect phase): the
+  // phase-boundary ensureFence calls run BEFORE the record mutate, the
+  // session transition, the provider dispatch, and the relay enqueue. A
+  // stalled owner whose lease was reclaimed aborts at the NEXT boundary —
+  // BEFORE any further side effect (zero duplicate dispatch / session
+  // transitions). Reordering any fence check after its phase (or removing
+  // it) fails these orderings.
+  it('R5-G. the fence check precedes every side-effect phase (mutate, session, dispatch, enqueue) on BOTH paths', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // mutateAndDispatch body: 3 fence checks (record-mutate, session-
+    // transition, dispatch), each BEFORE its phase.
+    const mdStart = serviceSrc.indexOf('private async mutateAndDispatch(');
+    expect(mdStart, 'mutateAndDispatch is defined').toBeGreaterThan(-1);
+    const mdEnd = serviceSrc.indexOf('private ', mdStart + 10);
+    const mdBody = serviceSrc.slice(mdStart, mdEnd > mdStart ? mdEnd : mdStart + 3000);
+    const fenceCalls = mdBody.match(/ensureFence\(lease,/g) ?? [];
+    expect(fenceCalls.length, 'mutateAndDispatch has a fence check per side-effect phase (record-mutate, session-transition, dispatch)').toBe(3);
+    expect(mdBody.indexOf("ensureFence(lease, 'record-mutate')"), 'the record-mutate fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'record-mutate')"), 'the fence precedes the transitionMode mutate').toBeLessThan(mdBody.indexOf('transitionMode('));
+    expect(mdBody.indexOf("ensureFence(lease, 'session-transition')"), 'the session-transition fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'session-transition')"), 'the fence precedes the session transition').toBeLessThan(mdBody.indexOf('transitionSessionForHandoff('));
+    expect(mdBody.indexOf("ensureFence(lease, 'dispatch')"), 'the dispatch fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'dispatch')"), 'the fence precedes the provider dispatch').toBeLessThan(mdBody.indexOf('dispatchExternal('));
+
+    // The caller path: the fence precedes the relay enqueue.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    expect(handoffBody.indexOf("ensureFence(lease, 'relay-enqueue')"), 'the relay-enqueue fence check exists in handoff()').toBeGreaterThan(-1);
+    expect(handoffBody.indexOf("ensureFence(lease, 'relay-enqueue')"), 'the fence precedes the relay enqueue').toBeLessThan(handoffBody.indexOf('enqueueRelayJob('));
+
+    // The relay path: fence checks before the re-mutate, each re-dispatch,
+    // and the session convergence.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    const reconcileFences = reconcileBody.match(/ensureFence\(lease,/g) ?? [];
+    expect(reconcileFences.length, 'the reconcile has a fence check per recovery phase (re-mutate, re-dispatch-external, re-dispatch-native, session-convergence)').toBeGreaterThanOrEqual(4);
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-mutate')"), 'the re-mutate fence check exists').toBeLessThan(reconcileBody.indexOf('mutateAndDispatch('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-dispatch-external')"), 'the re-dispatch-external fence precedes dispatchExternal').toBeLessThan(reconcileBody.indexOf('dispatchExternal('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-dispatch-native')"), 'the re-dispatch-native fence precedes dispatchNative').toBeLessThan(reconcileBody.indexOf('dispatchNative('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 'session-convergence')"), 'the session-convergence fence precedes the session transition').toBeLessThan(reconcileBody.indexOf('transitionSessionForHandoff('));
+    // A fence loss inside the reconcile body is caught + converted to a
+    // fence-lost return (NOT an error — the new owner completes the handoff).
+    expect(reconcileBody, 'the reconcile catches claim-fence-lost + returns stage fence-lost').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?stage:\s*'fence-lost'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 round 6 (the side-effect-boundary fencing fix): the round-5
+  // phase-boundary ensureFence() runs BEFORE the side-effecting provider
+  // call, NOT ATOMICALLY with it — an owner that passed the pre-call check
+  // and then stalled could resume after a reclaim and complete its
+  // ALREADY-STARTED dispatch (a second authoritative provider operation).
+  // The dispatch side-effect boundary itself is now fenced:
+  // beginFencedDispatch (the lease fence evaluated ATOMICALLY with the
+  // durable dispatch intent, BEFORE the provider submit) +
+  // completeFencedDispatch (the gate CAS AND the authoritative outcome write
+  // in ONE transaction — a fenced-out completion rolls back with NO write).
+  // -------------------------------------------------------------------------
+
+  // R6-A (round 6 — migration 0046 + the dispatch-gate columns): the
+  // obligation carries the durable dispatch intent.
+  it('R6-A. migration 0046 exists + adds the dispatch-gate columns (dispatch_state, dispatch_epoch) with a state CHECK', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0046), '0046_cross_mode_handoff_dispatch_gate.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0046, 'utf8');
+    expect(src, 'the migration adds dispatch_state').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_state TEXT/);
+    expect(src, 'the migration adds dispatch_epoch').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_epoch BIGINT/);
+    expect(src, 'the dispatch_state CHECK constrains the gate to in_flight|completed').toMatch(/dispatch_state IN \('in_flight', 'completed'\)/);
+  });
+
+  // R6-B (round 6 — the repo exposes the fenced dispatch boundary): BOTH
+  // gate primitives exist on the repository + the interface.
+  it('R6-B. the repository + the interface expose beginFencedDispatch + completeFencedDispatch (the fenced dispatch boundary)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'beginFencedDispatch is implemented').toMatch(/async beginFencedDispatch\(/);
+    expect(repoSrc, 'completeFencedDispatch is implemented').toMatch(/async completeFencedDispatch\(/);
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'the interface declares beginFencedDispatch').toMatch(/beginFencedDispatch\(/);
+    expect(typesSrc, 'the interface declares completeFencedDispatch').toMatch(/completeFencedDispatch\(/);
+    expect(typesSrc, 'the fenced-dispatch OUTCOME type exists (the authoritative write payload)').toMatch(/interface CrossModeHandoffFencedDispatchOutcome/);
+  });
+
+  // R6-C (round 6 — the gate BEGIN is lease-fenced ATOMICALLY with the
+  // intent): ONE conditional UPDATE carrying claim_owner + claim_epoch in
+  // the WHERE clause (NOT a read-check-write), with the fresh + stale
+  // in-flight take-over arms + the never-re-enter-completed guard.
+  it('R6-C. the gate BEGIN is ONE lease-fenced conditional UPDATE (owner + epoch in the WHERE; fresh OR stale-take-over arms; completed never re-entered)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const beginMatch = repoSrc.match(/async beginFencedDispatch\([\s\S]*?\n  \}/);
+    expect(beginMatch, 'beginFencedDispatch is defined').toBeTruthy();
+    const beginSrc = beginMatch![0];
+    expect(beginSrc, 'the gate BEGIN is a single conditional UPDATE').toMatch(/UPDATE wfos_cross_mode_handoff_obligations/);
+    expect(beginSrc, 'the gate BEGIN carries the lease owner in the WHERE clause').toMatch(/AND claim_owner = \$2/);
+    expect(beginSrc, 'the gate BEGIN carries the fencing epoch in the WHERE clause').toMatch(/AND claim_epoch = \$3/);
+    expect(beginSrc, 'a fresh gate (dispatch_state IS NULL) opens').toMatch(/dispatch_state IS NULL/);
+    expect(beginSrc, 'a STALE in-flight gate is TAKEN OVER by the newer (monotonic) epoch').toMatch(/dispatch_state = 'in_flight' AND dispatch_epoch < \$3/);
+    expect(beginSrc, 'the gate opens at the claimant\'s epoch').toMatch(/SET dispatch_state = 'in_flight',\s*dispatch_epoch = \$3/);
+  });
+
+  // R6-D (round 6 — the gate COMPLETION is the atomic side-effect boundary):
+  // ONE TRANSACTION = the gate CAS (owner + epoch + in_flight@epoch) AND the
+  // authoritative outcome write on wfos_executions; a fenced-out completion
+  // returns FALSE with NO write (the rollback guarantee).
+  it('R6-D. the gate COMPLETION is ONE transaction — the gate CAS AND the authoritative wfos_executions outcome write (rollback on fence loss)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const completeMatch = repoSrc.match(/async completeFencedDispatch\([\s\S]*?\n  \}/);
+    expect(completeMatch, 'completeFencedDispatch is defined').toBeTruthy();
+    const completeSrc = completeMatch![0];
+    expect(completeSrc, 'the completion runs in a transaction').toMatch(/this\.db\.transaction\(/);
+    expect(completeSrc, 'the gate CAS requires the exact lease identity').toMatch(/AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+    expect(completeSrc, 'the gate CAS requires in_flight at THIS epoch').toMatch(/AND dispatch_state = 'in_flight'[\s\S]*?AND dispatch_epoch = \$3/);
+    expect(completeSrc, 'the authoritative outcome write targets wfos_executions').toMatch(/UPDATE wfos_executions SET/);
+    expect(completeSrc, 'the outcome write sets the status').toMatch(/status = \$2/);
+    expect(completeSrc, 'the outcome write COALESCEs agent_run_id + package_json + timestamps').toMatch(/agent_run_id = COALESCE\(\$3, agent_run_id\)/);
+    expect(completeSrc, 'the outcome write merges benchmark_metadata atomically (jsonb ||)').toMatch(/benchmark_metadata = COALESCE\(benchmark_metadata, '\{\}'::jsonb\)\s*\|\|\s*COALESCE\(\$8::jsonb, '\{\}'::jsonb\)/);
+    // The rollback guarantee: 0 rows on the gate CAS → NO outcome write.
+    const gateZeroIdx = completeSrc.indexOf('rows.length === 0');
+    const outcomeWriteIdx = completeSrc.indexOf('UPDATE wfos_executions');
+    expect(gateZeroIdx, 'the 0-rows fence-loss branch exists').toBeGreaterThan(-1);
+    expect(outcomeWriteIdx, 'the outcome write exists').toBeGreaterThan(-1);
+    expect(gateZeroIdx, 'the gate CAS is evaluated BEFORE the outcome write (0 rows → return false BEFORE any write)').toBeLessThan(outcomeWriteIdx);
+    expect(completeSrc, 'the 0-rows branch returns false WITHOUT writing').toMatch(/return false;/);
+  });
+
+  // R6-E (round 6 — BOTH dispatch sub-methods cross the fenced boundary on
+  // EVERY call site): dispatchExternal + dispatchNative call
+  // beginFencedDispatch BEFORE their provider submit + commit their outcome
+  // through completeFencedDispatch; the re-dispatch call sites in the
+  // reconcile pass the lease too (NO unfenced dispatch path remains).
+  it('R6-E. BOTH dispatch sub-methods cross the fenced dispatch boundary (begin before the submit; complete as the atomic outcome write; NO unfenced dispatch path)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // dispatchExternal: gated begin BEFORE the external submit; the outcome
+    // write goes THROUGH completeFencedDispatch (no direct updateStatus).
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 4000);
+    expect(deBody.indexOf('beginFencedDispatch('), 'dispatchExternal crosses the gate').toBeGreaterThan(-1);
+    expect(deBody.indexOf('beginFencedDispatch('), 'the gate crossing precedes the external provider submit').toBeLessThan(deBody.indexOf('externalExecutionProvider.submit('));
+    expect(deBody, 'the external outcome commits through the fenced completion').toMatch(/completeFencedDispatch\(/);
+    expect(deBody, 'dispatchExternal performs NO direct updateStatus write (the fenced completion is the ONLY outcome write)').not.toMatch(/executionRecordRepository\.updateStatus\(/);
+    // dispatchNative: gated begin BEFORE the gateway submit; the outcome
+    // write goes THROUGH completeFencedDispatch on EVERY path (success,
+    // existing-run converge, conflict recovery, AND run-less failure).
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 5000);
+    expect(dnBody.indexOf('beginFencedDispatch('), 'dispatchNative crosses the gate').toBeGreaterThan(-1);
+    expect(dnBody.indexOf('beginFencedDispatch('), 'the gate crossing precedes the gateway submit').toBeLessThan(dnBody.indexOf('nativeExecutionProvider.submit('));
+    const dnCompletions = dnBody.match(/completeFencedDispatch\(/g) ?? [];
+    expect(dnCompletions.length, 'dispatchNative commits EVERY outcome through the fenced completion (success + converge + conflict-recovery/failure)').toBeGreaterThanOrEqual(3);
+    expect(dnBody, 'dispatchNative performs NO direct updateStatus write (the fenced completion is the ONLY outcome write)').not.toMatch(/executionRecordRepository\.updateStatus\(/);
+    // The reconcile's re-dispatch call sites pass the lease (both
+    // directions) — no unfenced dispatch call remains.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'the external re-dispatch passes the lease (fenced)').toMatch(/dispatchExternal\(record, executionId, lease\)/);
+    expect(reconcileBody, 'the native re-dispatch passes the lease (fenced)').toMatch(/dispatchNative\(record, executionId, record\.model, lease\)/);
+  });
+
+  // R6-F (round 6 — a fenced-out dispatch aborts with 'claim-fence-lost' and
+  // the failure-clobber is GONE): every FALSE outcome throws the typed fence
+  // error (propagated as-is on the caller path / converted to stage
+  // fence-lost on the reconcile path); the legacy unconditional
+  // updateStatus-to-failed clobber no longer exists.
+  it('R6-F. a fenced-out dispatch aborts claim-fence-lost (the stale actor writes NOTHING — no failure clobber)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 4000);
+    expect(deBody, 'a failed gate BEGIN aborts BEFORE the submit (claim-fence-lost)').toMatch(/if \(!began\)[\s\S]*?'claim-fence-lost'/);
+    expect(deBody, 'a fenced-out completion aborts (claim-fence-lost)').toMatch(/if \(!completed\)[\s\S]*?'claim-fence-lost'/);
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 5000);
+    expect(dnBody, 'a failed gate BEGIN aborts BEFORE the gateway submit (claim-fence-lost)').toMatch(/if \(!began\)[\s\S]*?'claim-fence-lost'/);
+    expect(dnBody, 'every fenced-out completion aborts (claim-fence-lost — including the failure-handler path: NO failure clobber from a stale actor)').toMatch(/if \(!completed\)[\s\S]*?'claim-fence-lost'/);
+    // Fence errors propagate as-is (never swallowed into handoff-dispatch-failed).
+    expect(deBody, 'fence losses propagate as-is in dispatchExternal').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?throw err/);
+    expect(dnBody, 'fence losses propagate as-is in dispatchNative').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?throw err/);
+    // The conflict-recovery converge exists (a UNIQUE-colliding submit
+    // converges to the existing run instead of clobbering a stale failure).
+    expect(dnBody, 'the native conflict recovery converges to an existing AgentRun through the fence').toMatch(/CONFLICT RECOVERY[\s\S]*?completeFencedDispatch\(/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 ROUND 7 — the KEYED PROVIDER-DISPATCH BOUNDARY (the provider-
+  // operation exactly-once contract). The round-7 review established that the
+  // round-6 dispatch gate protects the AUTHORITATIVE DB OUTCOME but NOT the
+  // provider operation itself: the submit runs OUTSIDE the DB transaction, so
+  // a lease reclaimed while the first submit is in flight let the reclaiming
+  // owner's take-over re-dispatch start a SECOND provider operation. The
+  // round-7 correction adopts the architect's contract option 1 — the
+  // exactly-once side-effect boundary via a DURABLE IDEMPOTENCY KEY derived
+  // from the LOGICAL HANDOFF IDENTITY: the provider boundary CONVERGES
+  // same-key submits onto ONE operation (never a second).
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0047 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0047_cross_mode_handoff_dispatch_key.sql',
+  );
+  const R7_NATIVE_PROVIDER = join(AGENTS_INTERNAL, 'native-execution-provider.ts');
+  const R7_EXTERNAL_PROVIDER = join(AGENTS_INTERNAL, 'external-execution-provider.ts');
+
+  // R7-A (round 7 — migration 0047): the durable dispatch idempotency key is
+  // a column on the obligation row (recorded atomically with the gate-open).
+  it('R7-A. migration 0047 exists + adds the durable dispatch_idempotency_key column', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0047), '0047_cross_mode_handoff_dispatch_key.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0047, 'utf8');
+    expect(src, 'the migration adds dispatch_idempotency_key').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_idempotency_key TEXT/);
+  });
+
+  // R7-B (round 7, updated by round 8): the keyed provider-dispatch contract
+  // is DECLARED at the task level + implemented at BOTH provider boundaries.
+  // PR #46 round 8: the external provider's registry is the DURABLE
+  // PROVIDER-OPERATION LEDGER (no in-memory Map) — the keyed contract now
+  // routes through the durable store (see R8-B/R8-F).
+  it('R7-B. the keyed provider-dispatch contract: the ExecutionTask declares dispatchIdempotencyKey + BOTH providers implement keyed convergence', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the ExecutionTask declares the dispatch idempotency key').toMatch(/readonly dispatchIdempotencyKey\?: string \| null/);
+    expect(typesSrc, 'the ExecutionProvider contract documents the keyed-convergence requirement').toMatch(/MUST CONVERGE to the SAME provider operation/);
+    // The external provider: the keyed submit resolves through the DURABLE
+    // provider-operation ledger store (round 8) — a keyed task without a
+    // store is a wiring error; an unkeyed (mainline) task bypasses the
+    // registry entirely (the pre-WORK-042 behavior).
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    expect(externalSrc, 'the external provider keys its registry on the dispatch key').toMatch(/const key = task\.dispatchIdempotencyKey/);
+    expect(externalSrc, 'a keyed submit resolves through the DURABLE store (the ledger row is the operation)').toMatch(/store\.register\(/);
+    // The native provider: the keyed convergence on the durable execution
+    // identity — a keyed dispatch whose run exists NEVER reaches the gateway.
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider implements the keyed pre-check convergence').toMatch(/if \(task\.dispatchIdempotencyKey\) \{/);
+    expect(nativeSrc, 'the native provider implements the collision-recovery convergence').toMatch(/collision-recovery/);
+  });
+
+  // R7-C (round 7 — the key derivation is LOGICAL, not volatile): the service
+  // derives the key from the HANDOFF IDENTITY ONLY (the handoff row id —
+  // stable across owners, epochs, and reclaims) and stamps it on BOTH
+  // dispatch sub-methods' provider submits + the gate-open. A key derived
+  // from the lease owner/epoch would CHANGE on reclaim and could never
+  // converge two actors onto one operation.
+  it('R7-C. the service derives the dispatch key from the LOGICAL HANDOFF IDENTITY (never owner/epoch) + stamps it on BOTH dispatch sub-methods', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const deriveMatch = serviceSrc.match(/private dispatchIdempotencyKey\(lease: ClaimLeaseGuard\): string \{\s*return (`[^`]+`);/);
+    expect(deriveMatch, 'the dispatch-key derivation helper exists').toBeTruthy();
+    expect(deriveMatch![1], 'the key is derived from the handoff identity').toContain('${lease.handoffId}');
+    // The derivation must NOT reference the volatile lease identity.
+    const deriveBody = deriveMatch![1];
+    expect(deriveBody, 'the key derivation NEVER references the lease owner (volatile — changes on reclaim)').not.toContain('owner');
+    expect(deriveBody, 'the key derivation NEVER references the claim epoch (volatile — changes on reclaim)').not.toContain('Epoch');
+    // BOTH dispatch sub-methods stamp the key on the submitted task + pass it
+    // to the gate-open.
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 5000);
+    expect(deBody, 'dispatchExternal derives the dispatch key').toMatch(/const dispatchKey = this\.dispatchIdempotencyKey\(lease\)/);
+    expect(deBody, 'dispatchExternal records the key with the gate-open').toMatch(/beginFencedDispatch\(\s*lease\.handoffId,\s*lease\.owner,\s*lease\.claimEpoch,\s*dispatchKey,/);
+    expect(deBody, 'dispatchExternal stamps the key on the submitted task (the KEYED submit)').toMatch(/externalExecutionProvider\.submit\(\{\s*\.\.\.built\.task,\s*dispatchIdempotencyKey: dispatchKey,/);
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 6000);
+    expect(dnBody, 'dispatchNative derives the dispatch key').toMatch(/const dispatchKey = this\.dispatchIdempotencyKey\(lease\)/);
+    expect(dnBody, 'dispatchNative records the key with the gate-open').toMatch(/beginFencedDispatch\(\s*lease\.handoffId,\s*lease\.owner,\s*lease\.claimEpoch,\s*dispatchKey,/);
+    expect(dnBody, 'dispatchNative stamps the key on the submitted task (the KEYED submit)').toMatch(/nativeExecutionProvider\.submit\(\{\s*\.\.\.built\.task,\s*dispatchIdempotencyKey: dispatchKey,/);
+  });
+
+  // R7-D (round 7 — the key is recorded DURABLY, atomically with the
+  // gate-open): beginFencedDispatch's single conditional UPDATE also sets
+  // dispatch_idempotency_key — the durable record of the dispatch operation
+  // identity, in the SAME statement that evaluates the lease fence + opens
+  // the dispatch intent (no check-then-act window).
+  it('R7-D. the gate-open records dispatch_idempotency_key ATOMICALLY (the same conditional UPDATE as the fence + intent)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const beginMatch = repoSrc.match(/async beginFencedDispatch\([\s\S]*?\n  \}/);
+    expect(beginMatch, 'beginFencedDispatch is defined').toBeTruthy();
+    const beginSrc = beginMatch![0];
+    expect(beginSrc, 'the gate-open SETs the durable dispatch idempotency key').toMatch(/dispatch_idempotency_key = \$4/);
+    const setStateIdx = beginSrc.indexOf("SET dispatch_state = 'in_flight'");
+    const setKeyIdx = beginSrc.indexOf('dispatch_idempotency_key = $4');
+    const whereIdx = beginSrc.indexOf('WHERE handoff_id = $1');
+    expect(setStateIdx, 'the gate-open sets dispatch_state').toBeGreaterThan(-1);
+    expect(setKeyIdx, 'the gate-open sets the key').toBeGreaterThan(-1);
+    expect(whereIdx, 'the WHERE clause exists').toBeGreaterThan(-1);
+    expect(setKeyIdx, 'the key is set in the SAME UPDATE (one atomic statement with the intent)').toBeGreaterThan(setStateIdx);
+    expect(setKeyIdx, 'the key is set in the SAME UPDATE (not after the WHERE)').toBeLessThan(whereIdx);
+    // The interface declares the 4-arg signature.
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'the repository interface passes the dispatch key to beginFencedDispatch').toMatch(/beginFencedDispatch\(\s*handoffId: string,\s*owner: string,\s*claimEpoch: number,\s*dispatchIdempotencyKey: string,/);
+  });
+
+  // R7-E (round 7 — the native provider boundary is AT-MOST-ONCE): a KEYED
+  // dispatch whose run already exists CONVERGES BEFORE the gateway call (no
+  // gateway call, no second adapter invocation); the gateway invokes the
+  // adapter only AFTER its own run-creation succeeded (the adapter execution
+  // is therefore structurally at-most-once per execution identity).
+  it('R7-E. the native provider NEVER reaches the gateway when the keyed operation identity already exists (converge BEFORE the gateway submit)', () => {
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    const preCheckIdx = nativeSrc.indexOf('if (task.dispatchIdempotencyKey) {');
+    const convergeIdx = nativeSrc.indexOf("return this.convergeToRun(task, existing, 'pre-check');");
+    const gatewayIdx = nativeSrc.indexOf('this.deps.agentGateway.execute(');
+    expect(preCheckIdx, 'the keyed pre-check exists').toBeGreaterThan(-1);
+    expect(convergeIdx, 'the pre-check convergence return exists').toBeGreaterThan(-1);
+    expect(gatewayIdx, 'the gateway submit exists').toBeGreaterThan(-1);
+    expect(preCheckIdx, 'the keyed pre-check runs BEFORE the gateway submit').toBeLessThan(gatewayIdx);
+    expect(convergeIdx, 'the convergence return precedes the gateway submit (a converged dispatch NEVER invokes the gateway/adapter)').toBeLessThan(gatewayIdx);
+    // The gateway invokes the adapter only AFTER its own run-creation
+    // succeeded (the adapter execution is inside the post-create section).
+    const gatewaySrc = readFileSync(join(AGENTS_INTERNAL, 'agent-gateway.ts'), 'utf8');
+    const createIdx = gatewaySrc.indexOf('await this.runRepo.create(');
+    const adapterIdx = gatewaySrc.indexOf('await adapter.execute(request)');
+    expect(createIdx, 'the gateway creates the AgentRun').toBeGreaterThan(-1);
+    expect(adapterIdx, 'the gateway invokes the adapter').toBeGreaterThan(-1);
+    expect(createIdx, 'the gateway creates the run BEFORE invoking the adapter (the adapter only runs for the ONE create-winner)').toBeLessThan(adapterIdx);
+  });
+
+  // R7-F (round 7, rewritten by round 8): the external convergence does NOT
+  // depend on determinism — and (the round-8 correction) it does NOT depend
+  // on provider-instance memory either. A same-key submit returns the
+  // REGISTERED operation's STORED submission (the durable ledger row's
+  // submission_json) — it never re-invokes the generation for a same-key
+  // replay. The architect's round-7 words: "the cross-mode architecture
+  // cannot make its correctness depend on that implementation detail
+  // [determinism]"; the round-8 words: the registry must be durable, never an
+  // in-memory Map (see R8-F).
+  it('R7-F. the external provider returns the REGISTERED operation on a same-key submit (convergence independent of provider determinism)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const submitMatch = externalSrc.match(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmission> \{[\s\S]*?\n  \}/);
+    expect(submitMatch, 'the external submit is defined').toBeTruthy();
+    const submitSrc = submitMatch![0];
+    // The keyed branch resolves through the durable ledger store (register →
+    // converge/await/take-over → drive) — there is NO in-memory registry.
+    const registerIdx = submitSrc.indexOf('await store.register(');
+    const generateIdx = submitSrc.indexOf('this.generate(task)');
+    expect(registerIdx, 'the keyed submit registers through the DURABLE store first').toBeGreaterThan(-1);
+    expect(generateIdx, 'the generation call exists (the operation body — only on the OPENED/take-over path)').toBeGreaterThan(-1);
+    // The unkeyed (mainline) branch generates directly — the pre-WORK-042
+    // behavior, no registry.
+    const unkeyedIdx = submitSrc.indexOf('return this.generate(task);');
+    expect(unkeyedIdx, 'the unkeyed mainline branch generates directly (no registry)').toBeGreaterThan(-1);
+    // The replay path returns the STORED submission (the ledger row's
+    // recorded result), never a re-computed lookalike — the convergence is a
+    // CONTRACT, not a determinism accident.
+    expect(externalSrc, 'the convergence returns the STORED submission from the ledger row (the registered operation\'s result)').toMatch(/return record\.submission;/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 8 — the DURABLE PROVIDER-OPERATION LEDGER (the round-8
+  // review's blocking correction). The round-7 registry was an in-memory
+  // Map inside the ExternalExecutionProvider: convergence existed only for
+  // the lifetime of that provider instance, so a process loss between
+  // submit(K) and the outcome left nothing durable remembering that K
+  // already owned an operation — a fresh instance's submit(K) started a
+  // SECOND provider operation. The round-8 correction implements the
+  // architect's acceptable architecture:
+  //
+  //     stable dispatch key
+  //            ↓
+  //     durable provider-operation ledger
+  //            ↓
+  //     PENDING / COMPLETED / FAILED + provider operation/result
+  //            ↓
+  //     same key always resolves to the same operation
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0048 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0048_execution_provider_operation_ledger.sql',
+  );
+  const R8_OPERATION_REPO = join(
+    AGENTS_INTERNAL, 'pg-execution-provider-operation-repository.ts',
+  );
+
+  // R8-A (round 8 — migration 0048): the durable provider-operation ledger
+  // table — idempotency_key is the PRIMARY KEY (ONE row per key — the ROW is
+  // the operation; there is structurally no second operation record), the
+  // state CHECK is the PENDING/COMPLETED/FAILED lifecycle, and
+  // submission_json is the stored operation/result.
+  it('R8-A. migration 0048 exists — the durable provider-operation ledger (PRIMARY KEY idempotency_key + PENDING/COMPLETED/FAILED CHECK + the stored result)', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0048), '0048_execution_provider_operation_ledger.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0048, 'utf8');
+    expect(src, 'the ledger table is created').toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_provider_operations/);
+    expect(src, 'the idempotency key is the PRIMARY KEY (ONE row per key — the ROW is the operation)').toMatch(/idempotency_key\s+TEXT PRIMARY KEY/);
+    expect(src, 'the state lifecycle is PENDING / COMPLETED / FAILED').toMatch(/CHECK \(state IN \('pending', 'completed', 'failed'\)\)/);
+    expect(src, 'the operation/result is stored (submission_json)').toMatch(/submission_json\s+JSONB/);
+    expect(src, 'the failure is stored (error_message)').toMatch(/error_message\s+TEXT/);
+    // The native arm's EXPLICIT DEFINITION is declared in the migration
+    // header (the run table IS the durable native ledger).
+    expect(src, 'the native durable provider-operation ledger (wfos_agent_runs) is explicitly defined').toMatch(/durable NATIVE provider-operation ledger is wfos_agent_runs/);
+  });
+
+  // R8-B (round 8): the ExternalExecutionProvider has NO in-memory operation
+  // registry — the keyed registry is the DURABLE LEDGER (the round-8 review
+  // explicitly forbade promoting the Map to a global/static cache: "the
+  // idempotency boundary must be durable").
+  it('R8-B. the external provider has NO in-memory operation registry — the keyed registry is the durable ledger store', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    expect(
+      externalSrc,
+      'NO in-memory operation Map (the round-7 registry died with its instance)',
+    ).not.toMatch(/new Map<[^>]*Promise<ExecutionSubmission>/);
+    expect(
+      externalSrc,
+      'no private operations field at all',
+    ).not.toMatch(/private readonly operations/);
+    expect(externalSrc, 'the durable ledger store is a constructor dependency').toMatch(/readonly operationStore\?: ExecutionProviderOperationStore/);
+    expect(externalSrc, 'a keyed submit WITHOUT a store fails loudly (a wiring error)').toMatch(/external-execution-operation-store-required/);
+    expect(externalSrc, 'the store dependency is imported from the durable-ledger repository module').toMatch(/pg-execution-provider-operation-repository\.js/);
+  });
+
+  // R8-C (round 8): the composition root (app.ts) wires the
+  // ExternalExecutionProvider with the durable ledger store — the production
+  // wiring can never fall into the store-less (keyed-submit-rejected) arm.
+  it('R8-C. app.ts wires the ExternalExecutionProvider with the durable provider-operation ledger store', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts imports the durable ledger repository').toMatch(/PgExecutionProviderOperationRepository/);
+    expect(appSrc, 'app.ts constructs the ExternalExecutionProvider WITH the durable store').toMatch(/new ExternalExecutionProvider\(\{\s*operationStore: new PgExecutionProviderOperationRepository\(database\),/);
+  });
+
+  // R8-D (round 8, rewritten by round 9): the ledger state machine is
+  // CAS-only (single conditional statements — no read-check-write) and (the
+  // round-9 correction) GENERATION-FENCED: register opens exactly one row
+  // (and NEVER re-arms a terminal row — the key is immutable), the
+  // completion/failure are the generation-fenced resolution CASes, the
+  // operation identity has its own attach CAS, and takeOver RETURNS the new
+  // generation token.
+  it('R8-D. the durable ledger state machine — the INSERT-only register (NO re-arm — the key is immutable) + the GENERATION-FENCED resolution CASes + the operation-identity attach CAS + the takeOver-returns-the-token recovery', () => {
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    // register: the FRESH open is an INSERT ... ON CONFLICT DO NOTHING.
+    expect(repoSrc, 'the fresh open is INSERT ... ON CONFLICT DO NOTHING (ONE row per key)').toMatch(/ON CONFLICT \(idempotency_key\) DO NOTHING/);
+    // register: NO re-arm — a terminally FAILED row is returned AS-IS (round 9
+    // removed the round-8 `AND state = 'failed'` conditional re-arm).
+    expect(repoSrc, 'NO re-arm: register NEVER conditionally updates a failed row back to pending (the key identifies ONE operation with ONE terminal result)').not.toMatch(/AND state = 'failed'/);
+    // complete: the GENERATION-FENCED resolution CAS ('pending' @ THIS
+    // generation → 'completed') — concurrent drivers and a late dead driver
+    // all funnel through it; only the ACTIVE generation can resolve.
+    expect(repoSrc, 'the completion is the generation-fenced resolution CAS (pending @ generation → completed)').toMatch(/state = 'completed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$3::jsonb/);
+    // fail: the symmetric GENERATION-FENCED CAS (a stale generation's
+    // failure is structurally discarded — it can never defeat the active
+    // recovery generation).
+    expect(repoSrc, 'the failure is the symmetric generation-fenced CAS').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    // attachOperation: the operation-identity CAS (migration 0049's column).
+    expect(repoSrc, 'the operation-identity attach CAS exists (the handle is durably recorded BEFORE the body)').toMatch(/AND provider_operation_handle IS NULL/);
+    // takeOver: the process-loss recovery — the recovery drive of the SAME
+    // row, RETURNING the NEW GENERATION TOKEN (the fencing token).
+    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1) + RETURNS the token').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+    expect(repoSrc, 'the takeOver port returns the NEW GENERATION TOKEN').toMatch(/tookOver: boolean;\s*generation: number \| null;/);
+  });
+
+  // R8-E (round 8 — the EXPLICIT native definition the review requires): the
+  // AgentRun table IS the durable native provider-operation ledger — declared
+  // in the provider contract (execution.types.ts) + the native provider, with
+  // the process-loss recovery defined as converge-on-the-existing-run.
+  it('R8-E. the EXPLICIT definition — AgentRun is the durable native operation ledger (the contract + the provider declare it, updated to the round-9 exact wording)', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the contract defines the durable native operation ledger (the round-9 exact wording)').toMatch(/AgentRun is the durable native operation ledger[\s\S]{0,120}wfos_agent_runs/);
+    expect(typesSrc, 'the contract declares the execution_id UNIQUE as the operation-key uniqueness').toMatch(/execution_id TEXT NOT NULL\s*\*?\s*UNIQUE/);
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider declares the durable ledger definition').toMatch(/IS the DURABLE NATIVE[\s\S]{0,8}PROVIDER-OPERATION/);
+    expect(nativeSrc, 'the native provider declares the converge-on-the-existing-run process-loss recovery').toMatch(/process-loss recovery is CONVERGE-ON-THE-EXISTING-RUN/);
+  });
+
+  // R8-F (round 8, rewritten by round 9): the await-then-take-over recovery —
+  // a PENDING row whose driver died is resolved THROUGH THE SAME ROW by the
+  // recovering actor: the await (converge while in flight) followed by the
+  // take-over (which RETURNS the new generation token) after the resolution
+  // window (process loss). The recovery driver either RESOLVES BY IDENTITY
+  // (the handle is recorded — never a body re-run) or drives the FIRST
+  // execution (the handle is absent — the body never started); the
+  // generation-fenced resolution CAS arbitrates drivers; the loser converges
+  // to the winner. Same key always resolves to the same operation — across
+  // provider instances, processes, and actors.
+  it('R8-F. the await-then-take-over recovery — a pending ledger row is resolved through the SAME row (the await converges; the window-elapsed take-over drives the recovery under the NEW GENERATION TOKEN)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // The in-flight convergence: a PENDING row is awaited (the original
+    // submitter's liveness is irrelevant — the operation lives in the ledger).
+    expect(externalSrc, 'the PENDING row is awaited (the in-flight convergence)').toMatch(/awaitResolution/);
+    // The process-loss recovery: after the resolution window elapses, the
+    // submitter TAKES OVER the drive of the SAME row (never a second row).
+    expect(externalSrc, 'the take-over (the process-loss recovery drive of the SAME row)').toMatch(/provider-operation-takeover/);
+    // The resolution-CAS loser converges to the winner's stored result (a
+    // dead driver's late completion replays it — it never stores a second).
+    expect(externalSrc, "the CAS loser replays the winner's stored result (the late-driver convergence)").toMatch(/provider-operation-converged-late-driver/);
+    expect(externalSrc, 'a failed drive re-checks the row — a COMPLETED result still resolves the same key').toMatch(/provider-operation-converged-after-failure/);
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the store port declares the durable provider-operation ledger contract').toMatch(/export interface ExecutionProviderOperationStore/);
+    expect(repoSrc, 'the register contract documents the key-immutability semantics (terminal rows are returned as-is — NEVER re-armed)').toMatch(/there is NO re-arm/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 9 — the GENERATION-FENCED, IDENTITY-RECOVERABLE takeover
+  // protocol (the round-8 review's three blocking corrections). The durable
+  // ledger was real, but its takeover protocol (1) re-ran the operation body,
+  // (2) resolved without a generation fence (a stale FAIL could defeat the
+  // recovery generation; a stale SUCCESS could win merely by racing), and
+  // (3) re-armed terminally FAILED keys (one key, two terminal outcomes). The
+  // corrected design (the review's freeze — the ledger behaves like the
+  // existing handoff lease):
+  //
+  //     operation key
+  //        ↓
+  //     one durable operation row
+  //        ↓
+  //     generation / fencing token          ← takeOver() RETURNS the token
+  //        ↓
+  //     one active driver
+  //        ↓
+  //     operation-specific durable/provider idempotency identity
+  //        ↓                                    ← migration 0049: the handle
+  //     one terminal result
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0049 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0049_execution_provider_operation_generation_fence.sql',
+  );
+
+  // R9-A (round 9 — migration 0049): the operation-identity layer + the
+  // generation fence's durable columns — provider_operation_handle (the
+  // durable provider-side identity of the ONE operation, recorded BEFORE
+  // the operation body runs) + operation_attached_at.
+  it('R9-A. migration 0049 exists — the provider-operation IDENTITY columns (provider_operation_handle + operation_attached_at) + the generation-fence/key-immutability header', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0049), '0049_execution_provider_operation_generation_fence.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0049, 'utf8');
+    expect(src, 'the migration adds the provider operation handle').toMatch(/ADD COLUMN IF NOT EXISTS provider_operation_handle TEXT/);
+    expect(src, 'the migration adds the attach timestamp').toMatch(/ADD COLUMN IF NOT EXISTS operation_attached_at TIMESTAMPTZ/);
+    expect(src, 'the header documents the generation-fenced resolution CAS').toMatch(/GENERATION-FENCED RESOLUTION/);
+    expect(src, 'the header documents the key immutability (FAILED is terminal — no re-arm)').toMatch(/KEY IMMUTABILITY/);
+    expect(src, 'the header documents the resolve-by-identity recovery (takeover NEVER re-runs the operation body)').toMatch(/NEVER re-runs the operation body/);
+    expect(src, 'the header applies the review\'s exact native wording').toMatch(/AgentRun[\s\S]{0,12}is the durable native operation ledger/);
+  });
+
+  // R9-B (round 9 — the provider protocol): the ATTACH-BEFORE-BODY ordering
+  // + the RESOLVE-BY-IDENTITY recovery. The operation identity is derived
+  // WITHOUT side effects + durably attached BEFORE the operation body runs,
+  // so a recorded handle PROVES the operation started (a recovery driver
+  // resolves it by identity — it NEVER re-runs the body) and an absent handle
+  // PROVES the body never started (driving it is the FIRST execution). The
+  // generic takeover primitive is therefore no longer "run the operation
+  // again".
+  it('R9-B. the attach-before-body operation-identity protocol + the resolve-by-identity recovery — takeover NEVER re-runs a started operation\'s body', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // The identity seams exist with their contracts.
+    expect(externalSrc, 'the openOperation seam derives the durable operation identity WITHOUT side effects').toMatch(/protected async openOperation\(/);
+    expect(externalSrc, 'the resolveOperation seam resolves a STARTED operation by identity (a status fetch for a platform provider; re-derivation ONLY because the default operations are PURE)').toMatch(/protected async resolveOperation\(/);
+    // THE ORDERING: in attemptDrive, the attach CAS precedes the body call.
+    const driveMatch = externalSrc.match(/private async attemptDrive\([\s\S]*?\n  \}/);
+    expect(driveMatch, 'attemptDrive is defined').toBeTruthy();
+    const driveSrc = driveMatch![0];
+    const handleCheckIdx = driveSrc.indexOf('row.providerOperationHandle != null');
+    const attachIdx = driveSrc.indexOf('store.attachOperation(');
+    const bodyIdx = driveSrc.indexOf('this.generate(task)');
+    expect(handleCheckIdx, 'the drive checks the recorded identity FIRST').toBeGreaterThan(-1);
+    expect(attachIdx, 'the attach CAS is in the drive').toBeGreaterThan(-1);
+    expect(bodyIdx, 'the body call is in the drive').toBeGreaterThan(-1);
+    expect(attachIdx, 'the identity is ATTACHED BEFORE the operation body runs (a recorded handle proves the operation started; an absent handle proves the body never started)').toBeLessThan(bodyIdx);
+    // The resolve-by-identity routing: a recorded handle resolves through the
+    // resolveOperation seam — never the body.
+    const resolveMatch = externalSrc.match(/private async resolveByIdentity\([\s\S]*?\n  \}/);
+    expect(resolveMatch, 'resolveByIdentity is defined').toBeTruthy();
+    expect(resolveMatch![0], 'the recovery resolves through the contract-bound resolveOperation seam').toContain('this.resolveOperation(');
+    expect(resolveMatch![0], 'the recovery NEVER calls the operation body').not.toContain('this.generate(');
+    expect(externalSrc, 'the resolve-by-identity observability log exists').toMatch(/provider-operation-resolve-by-identity/);
+    // The provider-side convergence contract (the justification for the
+    // residual window — the default provider declares its operations PURE).
+    expect(externalSrc, 'the resolve seam documents the per-provider justification (purity for the default provider; a platform status fetch otherwise)').toMatch(/RE-DERIVATION of the same value from the same task/);
+  });
+
+  // R9-C (round 9 — the generation-fenced resolution in the provider): every
+  // resolution the provider issues carries the DRIVER GENERATION, and a CAS
+  // loss with a still-pending row NEVER returns the driver's own lookalike
+  // result — it yields to the ACTIVE driver's outcome.
+  it('R9-C. the provider issues ONLY generation-fenced resolutions + never returns its own result on a CAS loss (the active driver owns the row)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // settle + failDrive pass the generation to the CASes.
+    const settleMatch = externalSrc.match(/private async settle\([\s\S]*?\n  \}/);
+    expect(settleMatch, 'settle is defined').toBeTruthy();
+    expect(settleMatch![0], 'the completion CAS carries the driver generation').toMatch(/store\.complete\(\s*key,\s*generation,/);
+    const failMatch = externalSrc.match(/private async failDrive\([\s\S]*?\n  \}/);
+    expect(failMatch, 'failDrive is defined').toBeTruthy();
+    expect(failMatch![0], 'the failure CAS carries the driver generation').toMatch(/store\.fail\(key, generation,/);
+    expect(externalSrc, 'a stale driver\'s failure is structurally DISCARDED (the active recovery driver owns the resolution)').toMatch(/structurally DISCARDED/);
+    // The CAS-loss-with-pending outcome yields (the RECOVERY_CONTINUE
+    // sentinel) — the stale driver never returns its own lookalike.
+    expect(externalSrc, 'the recovery-continue sentinel exists (a stale driver yields to the active driver)').toMatch(/RECOVERY_CONTINUE/);
+    expect(settleMatch![0], 'a CAS loss on a still-pending row yields to the ACTIVE recovery driver (never the loser\'s own result)').toMatch(/RECOVERY_CONTINUE/);
+    // The takeOver call consumes the RETURNED token.
+    const submitMatch = externalSrc.match(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmission> \{[\s\S]*?\n  \}/);
+    expect(submitMatch, 'the external submit is defined').toBeTruthy();
+    expect(submitMatch![0], 'the recovery drive runs under the takeOver-RETURNED generation token').toMatch(/attemptDrive\(store, key, task, takeover\.generation!/);
+  });
+
+  // R9-D (round 9 — KEY IMMUTABILITY at the provider level): a terminally
+  // FAILED operation is a KNOWN outcome — a later same-key submit surfaces
+  // the stored failure; it never re-arms, never opens a second operation
+  // under the same key.
+  it('R9-D. the key is immutable at the provider level — COMPLETED and FAILED are BOTH terminal (convergeFrom surfaces the stored terminal failure; register NEVER re-arms)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const convergeMatch = externalSrc.match(/private convergeFrom\([\s\S]*?\n  \}/);
+    expect(convergeMatch, 'convergeFrom is defined').toBeTruthy();
+    expect(convergeMatch![0], 'a FAILED row surfaces the STORED terminal failure').toMatch(/record\.errorMessage/);
+    expect(externalSrc, 'the round-9 no-re-arm doc (the key identifies ONE logical operation invocation)').toMatch(/register NEVER re-arms/);
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the store\'s register declares the key-immutability contract (a terminally failed row is returned AS-IS)').toMatch(/NEVER re-arms/);
+    // And the recovery window itself never flips a terminal row: takeOver is
+    // the ONLY generation mutation, and it requires state = 'pending'.
+    expect(repoSrc, 'takeOver requires state = pending (a terminal row is never taken over)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+  });
+
+  // R9-E (round 9 — the review's exact native wording): "AgentRun is the
+  // durable native operation ledger" — applied explicitly in the contract +
+  // the native provider, WITH the mechanics distinction (the two ledgers do
+  // NOT share one mechanism).
+  it('R9-E. the exact wording — AgentRun is the durable native operation ledger (the contract + the provider + the mechanics distinction)', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the contract applies the review\'s exact wording on the task field').toMatch(/AgentRun is the durable native operation ledger/);
+    expect(typesSrc, 'the contract applies the wording on the provider interface').toMatch(/native — AgentRun is the durable native operation ledger/);
+    expect(typesSrc, 'the contract states the mechanics DISTINCTION (the ledgers do not share one mechanism)').toMatch(/they do not share one mechanism/);
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider applies the exact wording').toMatch(/AgentRun is the durable native[\s\S]{0,8}operation ledger/);
+    expect(nativeSrc, 'the native provider states the mechanics distinction').toMatch(/they do not share one mechanism/);
+  });
+
+  // R9-F (round 9 — the regression suite proves the adversarial
+  // interleavings): the two review-required races (stale FAIL after takeover;
+  // stale SUCCESS after takeover) + the key-immutability semantics + the
+  // non-pure provider's exactly-once body + the identity-absent FIRST
+  // execution — all on REAL PostgreSQL with provider-instance separation.
+  it('R9-F. the concurrency regression suite covers the round-9 adversarial interleavings (stale fail / stale success / key immutability / the side-effecting provider / the identity-absent first execution)', () => {
+    const suitePath = join(
+      BACKEND_ROOT, 'tests', 'integration', 'agents',
+      'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
+    );
+    const suiteSrc = readFileSync(suitePath, 'utf8');
+    expect(suiteSrc, 'R9-#1 — the stale-generation FAIL interleaving is asserted').toMatch(/R9-#1\. takeover → stale-generation FAIL → new-generation SUCCESS/);
+    expect(suiteSrc, 'R9-#2 — the old-generation SUCCESS interleaving is asserted').toMatch(/R9-#2\. takeover → old-generation SUCCESS → new-generation SUCCESS/);
+    expect(suiteSrc, 'R9-#3 — the key-immutability semantics are asserted').toMatch(/R9-#3\. KEY IMMUTABILITY/);
+    expect(suiteSrc, 'R9-#4 — the genuinely side-effecting provider proof').toMatch(/R9-#4\. the genuinely SIDE-EFFECTING provider/);
+    expect(suiteSrc, 'R9-#5 — the identity-absent FIRST-execution proof').toMatch(/R9-#5\. the identity-ABSENT takeover is the FIRST execution/);
+    // The side-effecting provider double resolves by a STATUS FETCH (never
+    // the body) + the park seams for the adversarial interleavings exist.
+    expect(suiteSrc, 'the SideEffectingExternalProvider double (the platform status fetch recovery)').toMatch(/class SideEffectingExternalProvider/);
+    expect(suiteSrc, 'the parkAtResolve seam (the mid-recovery stall point)').toMatch(/parkAtResolve/);
+    expect(suiteSrc, 'the parkAtOpen seam (the pre-identity death point)').toMatch(/parkAtOpen/);
+    expect(suiteSrc, 'the resolution marker (proves WHICH generation\'s result was stored)').toMatch(/resolutionMarker/);
   });
 });
