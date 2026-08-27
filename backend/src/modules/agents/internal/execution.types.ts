@@ -149,24 +149,32 @@ export interface ExecutionTask {
    *     after a take-over, the old driver's success AND its failure both
    *     affect 0 rows; exactly one generation (the ACTIVE driver) resolves
    *     authoritatively.
-   *   - THE OPERATION IDENTITY: the row records the durable provider-side
-   *     identity of the ONE operation (provider_operation_handle — migration
-   *     0049) BEFORE the operation body runs. A recovery driver that finds a
-   *     recorded identity RESOLVES THE OPERATION BY ITS IDENTITY — it never
-   *     re-runs the operation body; an absent identity PROVES the body never
-   *     started (driving it is the FIRST execution, not a re-execution).
-   *     Take-over therefore no longer MEANS "execute the operation again":
-   *     the recovery primitive is resolve-by-identity, justified per
-   *     provider (the default provider's operations are PURE — resolution is
-   *     re-derivation; a future side-effecting provider resolves by a
-   *     platform status fetch on the identity), never by an architecture-
-   *     wide determinism assumption.
+   *   - THE OPERATION IDENTITY (round 10 — migration 0050's EXPLICIT
+   *     LIFECYCLE): the row records the durable provider-side identity of the
+   *     ONE operation (provider_operation_handle — migration 0049) ONLY AFTER
+   *     the provider CONFIRMED the operation (the IDEMPOTENT-BY-KEY
+   *     startOperation submission returned that identity — the state CAS
+   *     'pending' → 'started'). The database NEVER infers that a provider
+   *     operation happened merely because WorkflowOS persisted an intended
+   *     identity. A recovery driver that finds a 'started' row RESOLVES THE
+   *     CONFIRMED OPERATION BY ITS IDENTITY — it never re-submits; a 'pending'
+   *     row (submission unconfirmed, NO handle — the row claims NOTHING about
+   *     the provider) is RE-SUBMITTED under the idempotent-by-key contract,
+   *     which is safe whether or not a previous attempt started the
+   *     operation (the provider's key→operation mapping is the authority,
+   *     never the ledger row). Take-over therefore no longer MEANS "execute
+   *     the operation again": the recovery primitive is re-submission-that-
+   *     converges (unconfirmed) or resolve-by-identity (confirmed), justified
+   *     per provider (the default provider's operations are PURE — resolution
+   *     is re-derivation; a future side-effecting provider submits through
+   *     the platform's idempotency-key mechanism and resolves by a platform
+   *     status fetch), never by an architecture-wide determinism assumption.
    *   - KEY IMMUTABILITY: COMPLETED and FAILED are BOTH terminal. The key
    *     identifies the LOGICAL OPERATION INVOCATION — one key, one operation,
    *     one terminal result. A terminally failed operation is NEVER re-armed
    *     under the same key; retryability is the driver mechanics' concern
-   *     (await → take-over → resolve-by-identity), never a second operation
-   *     silently opened under the same key.
+   *     (await → take-over → re-submit/resolve-by-identity), never a second
+   *     operation silently opened under the same key.
    *
    *   - NATIVE mode: AgentRun is the durable native operation ledger —
    *     `wfos_agent_runs` (migration 0011 — `execution_id TEXT NOT NULL
@@ -180,12 +188,21 @@ export interface ExecutionTask {
    *     run already exists NEVER reaches the gateway (no second run
    *     creation, no second adapter invocation) — around run creation /
    *     adapter invocation, the run row is the durable record whether the
-   *     crashed actor's adapter invocation ever ran. The native ledger's
-   *     mechanics are deliberately DIFFERENT from the external ledger's (the
-   *     native convergence authority is the UNIQUE constraint on the durable
-   *     execution identity; the external ledger's is the generation-fenced
-   *     resolution CAS + the operation-identity protocol): both arms have a
-   *     durable operation ledger — they do not share one mechanism.
+   *     crashed actor's adapter invocation ever ran. PR #46 round 10 —
+   *     EXISTING ≠ COMPLETED: the run's status is a LIFECYCLE (pending |
+   *     in_progress | success | failed | cancelled), and the convergence
+   *     PRESERVES it — a TERMINAL run maps to its terminal submission
+   *     (success → completed; failed/cancelled → failed); a NON-TERMINAL run
+   *     (pending/in_progress) is AWAITED until terminal (never reported as
+   *     completed while still executing); a stuck run fails CLOSED (a keyed
+   *     submit never manufactures a completed outcome from a non-terminal run
+   *     — nor from the mere existence of the ledger row — and never starts a
+   *     second run). The
+   *     native ledger's mechanics are deliberately DIFFERENT from the
+   *     external ledger's (the native convergence authority is the UNIQUE
+   *     constraint on the durable execution identity; the external ledger's
+   *     is the generation-fenced resolution CAS + the idempotent-submission
+   *     protocol): both arms have a durable operation ledger — they do not share one mechanism.
    *
    * Absent/null (the mainline one-shot dispatch): the provider's pre-WORK-042
    * behavior applies unchanged (a direct generation/dispatch, no registry).
@@ -242,11 +259,12 @@ export interface ExecutionSubmission {
  * instances, processes, and actors:
  *
  *   - external — the DURABLE PROVIDER-OPERATION LEDGER
- *     (`wfos_execution_provider_operations`, migrations 0048 + 0049): the
- *     ROW is the operation (ONE per key — PRIMARY KEY), PENDING / COMPLETED /
- *     FAILED + the stored result; same key always resolves to the same
- *     operation. An in-process Map registry is FORBIDDEN (it dies with the
- *     instance).
+ *     (`wfos_execution_provider_operations`, migrations 0048 + 0049 + 0050):
+ *     the ROW is the operation (ONE per key — PRIMARY KEY), the EXPLICIT
+ *     LIFECYCLE is PENDING → STARTED → COMPLETED/FAILED (a terminal success
+ *     is only recordable for a provider-CONFIRMED operation) + the stored
+ *     result; same key always resolves to the same operation. An in-process
+ *     Map registry is FORBIDDEN (it dies with the instance).
  *
  *   - native — AgentRun is the durable native operation ledger:
  *     `wfos_agent_runs` (migration 0011) — `execution_id` UNIQUE is the
@@ -255,20 +273,70 @@ export interface ExecutionSubmission {
  *     gateway/adapter call). Its mechanics deliberately differ from the
  *     external ledger's (see {@link ExecutionTask.dispatchIdempotencyKey}).
  *
- * PR #46 round 9 (the GENERATION-FENCED, IDENTITY-RECOVERABLE boundary): the
- * external ledger's takeover protocol no longer re-runs the operation body.
+ * PR #46 round 9 (the GENERATION-FENCED boundary) + round 10 (the
+ * IDEMPOTENT-SUBMISSION + LIFECYCLE-EXPLICIT boundary): the external
+ * ledger's takeover protocol no longer re-runs the operation body.
  * takeOver() returns a NEW GENERATION TOKEN; complete/fail are CAS-fenced
  * against it (a stale generation is structurally incapable of resolving the
- * operation — for a success AND for a failure); the row records the
- * operation's durable provider-side identity BEFORE the body runs, so a
- * recovery driver RESOLVES BY IDENTITY and never re-executes a started
- * operation; and COMPLETED/FAILED are BOTH terminal (the key identifies ONE
- * logical operation invocation with ONE terminal result).
+ * operation — for a success AND for a failure); the row's EXPLICIT LIFECYCLE
+ * (migration 0050 — pending → started → completed/failed) records the
+ * provider-CONFIRMED identity ONLY after the IDEMPOTENT-BY-KEY submission
+ * returned it (the database never infers a start from a persisted intended
+ * identity — a 'pending' row claims nothing and is safely re-submitted; a
+ * 'started' row is resolved by its confirmed identity); and COMPLETED/FAILED
+ * are BOTH terminal (the key identifies ONE logical operation invocation
+ * with ONE terminal result). On the native arm, the convergence PRESERVES
+ * the AgentRun lifecycle: EXISTING ≠ COMPLETED — a non-terminal run is
+ * awaited until terminal; a stuck run fails closed; a keyed submit never
+ * manufactures a completed submission from a non-terminal run and never
+ * starts a second run.
+ *
+ * PR #46 round 11 (the SUBMISSION-ERROR TAXONOMY — DEFINITIVE REJECT vs
+ * ACCEPTANCE UNKNOWN): a submission error proves NOTHING about whether the
+ * provider accepted the operation unless the provider says so. A submission
+ * failure may terminally fail the ledger key ONLY when the provider
+ * PROVABLY refused the operation — the typed
+ * {@link ProviderOperationRejectedError} (the provider guarantees NO
+ * operation exists for the key, so no side effect can ever occur). EVERY
+ * other submission error (a timeout, a connection reset, a lost response,
+ * process death...) is ACCEPTANCE-UNKNOWN: the provider may have accepted
+ * the operation (and it may exist and succeed remotely) — the ledger row
+ * stays 'pending' (recoverable), the same-key retry re-submits and CONVERGES
+ * through the provider's idempotency-by-key dedup, the returned identity is
+ * attached, and the ONE operation is resolved. THE DATABASE NEVER CLOSES A
+ * KEY ON AN AMBIGUOUS SUBMISSION ERROR: terminalizing it would replay a
+ * failure the provider never reported while the real operation may still
+ * succeed — the provider's idempotency-by-key guarantee could never again be
+ * used to converge, because WorkflowOS itself closed the key.
  */
 export interface ExecutionProvider {
   readonly name: string;
   readonly mode: ExecutionMode;
   submit(task: ExecutionTask): Promise<ExecutionSubmission>;
+}
+
+/**
+ * PR #46 round 11 (the DEFINITIVE-REJECT submission error): thrown by a
+ * provider's submission seam (`startOperation`) ONLY when the provider
+ * PROVABLY refused the operation — the provider guarantees NO operation
+ * exists for the key, so no side effect can ever occur. This is the ONLY
+ * submission error that may terminally fail a 'pending' provider-operation
+ * ledger row (through the ledger's definitive-reject transition).
+ *
+ * Every OTHER submission error is ACCEPTANCE-UNKNOWN (the provider may have
+ * accepted the operation; the response was lost to a timeout, a connection
+ * reset, or process death): the ledger row MUST remain 'pending' and
+ * recoverable — the same-key retry re-submits and CONVERGES through the
+ * provider's idempotency-by-key dedup. An ambiguous error MUST NEVER be
+ * thrown as this type: NEVER throw the typed reject for an ambiguous failure
+ * (that would close the key while the provider operation may exist and
+ * succeed).
+ */
+export class ProviderOperationRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderOperationRejectedError';
+  }
 }
 
 /**

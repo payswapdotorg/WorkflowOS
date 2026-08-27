@@ -1899,12 +1899,18 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     model: string | null,
     lease: ClaimLeaseGuard,
   ): Promise<void> {
-    // Crash-retry guard: if a native AgentRun already exists for this
-    // execution, skip dispatch + use it (a second submit would hit the
-    // wfos_agent_runs.execution_id UNIQUE).
-    const existingRun = await this.deps.agentRunRepository.findByExecutionId(
-      executionId,
-    );
+    // PR #46 round 10: the service-level existing-run pre-check/guard is
+    // REMOVED. The guard wrote `status: 'completed'` for ANY existing run —
+    // including a NON-TERMINAL one (pending/in_progress — premature
+    // convergence while the run was still executing, and could still later
+    // fail) and even a FAILED one. ALL existing-run convergence now flows
+    // through the PROVIDER boundary (the keyed submit below), which preserves
+    // the AgentRun lifecycle: a terminal run maps to its terminal submission
+    // (success → completed; failed/cancelled → failed), a non-terminal run is
+    // AWAITED until terminal, and a stuck run fails closed. The crash-retry
+    // guard's original concern ("a second submit would hit the
+    // wfos_agent_runs.execution_id UNIQUE") is structurally handled by the
+    // provider's keyed pre-check (converge-on-the-existing-run, round 7).
     // PR #46 round 7: the DURABLE dispatch idempotency key — derived from
     // the LOGICAL HANDOFF IDENTITY (stable across owners/epochs/reclaims);
     // recorded atomically with the gate-open + stamped on the submitted task
@@ -1913,8 +1919,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     const dispatchKey = this.dispatchIdempotencyKey(lease);
     // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence
     // evaluated ATOMICALLY with the durable dispatch intent, BEFORE any
-    // provider call (including the existing-run converge path below, whose
-    // outcome write must be just as fenced as a fresh dispatch's).
+    // provider call.
     const began =
       await this.deps.crossModeHandoffRepository.beginFencedDispatch(
         lease.handoffId,
@@ -1927,35 +1932,6 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed before the native dispatch boundary (owner ${lease.owner}, epoch ${lease.claimEpoch}) — aborting BEFORE the provider submit to prevent a second concurrent handoff driver`,
         'claim-fence-lost',
       );
-    }
-    if (existingRun) {
-      this.deps.logger.info('cross-mode-handoff.dispatch-native-existing-run', {
-        executionId,
-        agentRunId: existingRun.id,
-      });
-      // PR #46 round 6: the converge outcome commits through the FENCED
-      // completion (0 rows → fenced out → NO write — a stale actor cannot
-      // overwrite the new owner's authoritative outcome).
-      const completed =
-        await this.deps.crossModeHandoffRepository.completeFencedDispatch(
-          lease.handoffId,
-          lease.owner,
-          lease.claimEpoch,
-          record.id,
-          {
-            status: 'completed',
-            agentRunId: existingRun.id,
-            startedAt: existingRun.startedAt,
-            completedAt: existingRun.completedAt,
-          },
-        );
-      if (!completed) {
-        throw new CrossModeHandoffError(
-          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed while the native dispatch converge was in flight (owner ${lease.owner}, epoch ${lease.claimEpoch}) — the already-started dispatch's outcome was DISCARDED (no second authoritative provider operation)`,
-          'claim-fence-lost',
-        );
-      }
-      return;
     }
 
     const built = await this.deps.executionTaskService.build({
@@ -2006,22 +1982,53 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       if (err instanceof CrossModeHandoffError && err.code === 'claim-fence-lost') {
         throw err;
       }
-      // PR #46 round 6 CONFLICT RECOVERY: the submit failed. An AgentRun may
-      // nevertheless EXIST — either this invocation's own run (the gateway
-      // persists the run BEFORE executing the adapter, so a failed adapter
-      // leaves a 'failed' run) or a concurrent/taken-over dispatch's run
-      // (this submit collided on the wfos_agent_runs.execution_id UNIQUE).
-      // The authoritative native provider operation is the RUN — converge to
-      // it through the FENCED completion when it exists and is not failed;
-      // only a genuinely run-less (or failed-run) dispatch writes the
-      // authoritative failure record. Either way the write goes THROUGH the
-      // fence: a fenced-out actor performs NO write at all.
+      // PR #46 round 6 CONFLICT RECOVERY + round 10 (the LIFECYCLE
+      // correction): the submit failed. An AgentRun may nevertheless EXIST —
+      // either this invocation's own run (the gateway persists the run BEFORE
+      // executing the adapter, so a failed adapter leaves a 'failed' run) or
+      // a concurrent/taken-over dispatch's run (this submit collided on the
+      // wfos_agent_runs.execution_id UNIQUE). The authoritative native
+      // provider operation is the RUN — converge to it through the FENCED
+      // completion when its outcome is KNOWABLE (a TERMINAL run):
+      //   - 'success'        → the completed converge outcome;
+      //   - failed/cancelled → the authoritative failure record.
+      // PR #46 round 10 — EXISTING ≠ COMPLETED: a NON-TERMINAL run
+      // (pending/in_progress — the winner's adapter still executing, or an
+      // orphaned run whose driver died) has NO knowable outcome: the handler
+      // performs NO write of EITHER polarity (a 'completed' write would be a
+      // manufactured success while the run may still fail; a 'failed' write
+      // would clobber a run that may still succeed) — it rethrows, the
+      // obligation stays pending, and a later reconcile retries the
+      // convergence once the run is terminal (the handoffComplete
+      // existing-run rule discharges when the handoff goal is achieved).
+      // Only a genuinely run-less dispatch writes the authoritative failure
+      // record (still through the fence).
       const run = await this.deps.agentRunRepository.findByExecutionId(
         executionId,
       );
+      if (run && run.status !== 'success' && run.status !== 'failed' && run.status !== 'cancelled') {
+        // A NON-TERMINAL existing run: no outcome is knowable — fail closed
+        // WITHOUT any authoritative write.
+        this.deps.logger.warn('cross-mode-handoff.dispatch-native-existing-run-non-terminal', {
+          executionId,
+          agentRunId: run.id,
+          runStatus: run.status,
+          error: (err as Error).message,
+        });
+        throw new CrossModeHandoffError(
+          `handoff-dispatch-failed: the external->native dispatch for execution ${executionId} failed (${(err as Error).message}) and the existing AgentRun ${run.id} is still non-terminal ('${run.status}') — EXISTING ≠ COMPLETED: no authoritative outcome is written for a non-terminal run (the obligation stays pending; the convergence retries when the run reaches a terminal state)`,
+          'handoff-dispatch-failed',
+        );
+      }
       const outcome = run
-        ? run.status === 'failed'
+        ? run.status === 'success'
           ? {
+              status: 'completed' as const,
+              agentRunId: run.id,
+              startedAt: run.startedAt,
+              completedAt: run.completedAt,
+            }
+          : {
               status: 'failed' as const,
               agentRunId: run.id,
               completedAt: run.completedAt ?? this.now(),
@@ -2029,12 +2036,6 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
                 failureStage: 'cross-mode-native-dispatch',
                 errorMessage: (err as Error).message,
               },
-            }
-          : {
-              status: 'completed' as const,
-              agentRunId: run.id,
-              startedAt: run.startedAt,
-              completedAt: run.completedAt,
             }
         : {
             status: 'failed' as const,

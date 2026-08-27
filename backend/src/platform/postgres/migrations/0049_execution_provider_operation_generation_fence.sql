@@ -59,14 +59,27 @@
 --     failure both affect 0 rows.
 --   - THE PROVIDER OPERATION IDENTITY (this migration's columns):
 --     provider_operation_handle is the durable, provider-side identity of the
---     ONE operation. The drive records it (attachOperation — a CAS) BEFORE
---     the operation body runs, so:
---       * handle recorded  ⇒ the operation was STARTED (possibly by a driver
---         that died mid-flight): a recovery driver RESOLVES THE OPERATION BY
---         ITS IDENTITY — it NEVER re-runs the operation body;
---       * handle absent    ⇒ the body NEVER STARTED (attach strictly precedes
---         the body): the recovery drive is the FIRST execution, not a
---         re-execution.
+--     ONE operation.
+--
+--     ROUND-10 CORRECTION (the round-9 review found this premise INVALID —
+--     see migration 0050): the paragraph below recorded the handle
+--     attachOperation BEFORE the operation body ran and claimed that a
+--     recorded handle PROVED the operation started. It does not — there is
+--     an unavoidable crash window between the durable attach and the body
+--     (attach, DIE, the body never runs; every later driver resolves by an
+--     identity whose operation never existed). The database must never
+--     infer that an irreversible provider operation happened merely because
+--     WorkflowOS persisted an intended identity. Under the corrected
+--     protocol (0050) the handle is recorded ONLY AFTER the provider
+--     confirmed the operation (the IDEMPOTENT-BY-KEY startOperation
+--     submission returned its identity), and 'started' — not the handle's
+--     presence — is the durable fact that the ONE operation exists:
+--       * state 'started'   ⇒ the provider CONFIRMED the operation: a
+--         recovery driver RESOLVES IT BY IDENTITY — never a re-submission;
+--       * state 'pending'   ⇒ the submission is NOT durably confirmed: a
+--         recovery driver RE-SUBMITS under the idempotent-by-key contract
+--         (safe whether or not a previous attempt started it — the
+--         provider's key→operation mapping is the authority, never the row).
 --     For the current pure provider, resolution is re-derivation (valid
 --     BECAUSE the operation has no side effects). A future side-effecting
 --     provider (WORK-028/029) resolves by a platform status fetch on the
