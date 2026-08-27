@@ -73,6 +73,33 @@
  *   - a CRASHED owner's lease still auto-expires + the boot sweep reclaims
  *     + recovers (the round-4 semantics are preserved).
  *
+ * PR #46 round 6 (the side-effect-boundary fencing fix): the round-5
+ * phase-boundary `ensureFence()` runs BEFORE the side-effecting provider
+ * call, not ATOMICALLY with it — an owner that passed the pre-call check
+ * and then stalled (heartbeat dead) could resume after a reclaim and
+ * complete its ALREADY-STARTED dispatch (a second authoritative provider
+ * operation). The DISPATCH SIDE-EFFECT BOUNDARY itself is now fenced
+ * (migration 0046's dispatch gate on the obligation row):
+ *   - beginFencedDispatch: the lease fence (owner + epoch) evaluated
+ *     ATOMICALLY with the durable dispatch intent, BEFORE the provider
+ *     submit — a fenced-out actor never reaches the provider;
+ *   - completeFencedDispatch: the gate CAS AND the authoritative outcome
+ *     write on wfos_executions in ONE transaction — a stale actor's
+ *     resumed, already-started dispatch CANNOT commit its outcome (0 rows →
+ *     rollback → NO write: neither a duplicate success NOR a failure
+ *     clobber);
+ *   - the provider call itself may still be duplicated across a stall (a
+ *     non-transactional submit cannot be un-sent), but it converges to ONE
+ *     authoritative operation: the external provider is a deterministic
+ *     pure function (the outcome write is the authoritative operation —
+ *     fence-gated); the native gateway's wfos_agent_runs.execution_id
+ *     UNIQUE makes the run structurally singular + the colliding submit
+ *     CONVERGES to the existing run (conflict recovery) instead of writing
+ *     a stale failure;
+ *   - an interrupted in-flight gate (a crashed/stalled owner that crossed
+ *     but never completed) is TAKEN OVER by the next (monotonic) lease —
+ *     liveness: an interrupted dispatch can never deadlock the gate.
+ *
  * This file is private to /agents (PLAT-AC-02). It composes the EXISTING
  * boundaries — it is NOT an ExecutionService, it NEVER creates a second
  * ExecutionRecord, and it NEVER touches wfos_workflow_*, wfos_verification_*,
@@ -784,7 +811,12 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
             targetMode,
           });
           await this.ensureFence(lease, 're-dispatch-external');
-          await this.dispatchExternal(record, executionId);
+          // PR #46 round 6: the re-dispatch goes through the FENCED dispatch
+          // boundary (beginFencedDispatch BEFORE the submit + the atomic
+          // completeFencedDispatch outcome write) — a stalled delivery whose
+          // lease was reclaimed mid-dispatch cannot complete a second
+          // authoritative provider operation after the reclaim.
+          await this.dispatchExternal(record, executionId, lease);
           stage = stage === 'complete' ? 'dispatch-external' : stage;
           record = await this.deps.executionRecordRepository.findByExecutionId(
             executionId,
@@ -804,7 +836,12 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
             targetMode,
           });
           await this.ensureFence(lease, 're-dispatch-native');
-          await this.dispatchNative(record, executionId, record.model);
+          // PR #46 round 6: the re-dispatch goes through the FENCED dispatch
+          // boundary (see dispatchNative — the gateway submit is gated by
+          // beginFencedDispatch + the outcome write is the atomic
+          // completeFencedDispatch; a UNIQUE-colliding duplicate submit
+          // CONVERGES to the existing run instead of clobbering).
+          await this.dispatchNative(record, executionId, record.model, lease);
           stage = stage === 'complete' ? 'dispatch-native' : stage;
         }
       }
@@ -1616,25 +1653,63 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     //    use the POST-MUTATE record (provider/model already set) + the
     //    caller-resolved model for native (the NativeExecutionProvider
     //    requires a non-null model). PR #46 round 5: the fence check BEFORE
-    //    the provider dispatch (the external side effect).
+    //    the provider dispatch (the eager pre-check — a fast abort). PR #46
+    //    round 6: the pre-call check is NO LONGER the whole protection — the
+    //    dispatch sub-methods cross the FENCED DISPATCH GATE
+    //    (beginFencedDispatch — the lease fence evaluated ATOMICALLY with
+    //    the durable dispatch intent, BEFORE the provider submit) and
+    //    commit their authoritative outcome write THROUGH
+    //    completeFencedDispatch (the gate CAS + the outcome write in ONE
+    //    transaction). A stalled owner that passes THIS check but loses the
+    //    lease mid-dispatch can no longer complete its already-started
+    //    dispatch (see dispatchExternal / dispatchNative).
     await this.ensureFence(lease, 'dispatch');
     if (input.targetMode === 'external') {
-      await this.dispatchExternal(mutated, executionId);
+      await this.dispatchExternal(mutated, executionId, lease);
     } else {
-      await this.dispatchNative(mutated, executionId, model);
+      await this.dispatchNative(mutated, executionId, model, lease);
     }
   }
 
   /**
    * native -> external dispatch: rebuild the task (mode=external, reuse the
    * ImplementationContext), submit through the ExternalExecutionProvider
-   * (deterministic package), then updateStatus with the package + expires_at.
-   * The ExternalExecutionProvider is idempotent (regenerates the package) —
-   * a retry re-dispatch is safe.
+   * (deterministic package), then commit the authoritative outcome (the
+   * package + expires_at) THROUGH the fenced dispatch boundary.
+   *
+   * PR #46 round 6 (the side-effect-boundary fencing fix): the round-5
+   * `ensureFence('dispatch')` was a PRE-CALL check — an owner that passed it
+   * and then stalled (heartbeat dead) could resume after a reclaim and
+   * complete its ALREADY-STARTED dispatch (a second authoritative provider
+   * operation: a duplicate package/expires_at write clobbering the new
+   * owner's outcome). The boundary itself is now fenced:
+   *
+   *   1. {@link CrossModeHandoffRepository.beginFencedDispatch} — the lease
+   *      fence (owner + epoch) evaluated ATOMICALLY with the durable
+   *      dispatch intent (migration 0046). 0 rows → this actor no longer
+   *      owns the lease → abort BEFORE the provider submit (zero provider
+   *      operations from a fenced-out actor).
+   *   2. the provider submit — the ExternalExecutionProvider is a pure
+   *      deterministic function (no side effect); a duplicated submit is
+   *      harmless BY VALUE, but the authoritative operation is the outcome
+   *      write, which only the fence owner can commit.
+   *   3. {@link CrossModeHandoffRepository.completeFencedDispatch} — the
+   *      gate CAS + the authoritative outcome write in ONE transaction. 0
+   *      rows → ROLLBACK — NO write happened: a stale actor's
+   *      already-computed package is discarded (it aborts
+   *      'claim-fence-lost'; the reclaiming owner owns the outcome).
+   *
+   * A submit failure leaves the gate in_flight at THIS actor's epoch with NO
+   * outcome write — the obligation stays pending; the next claim (a strictly
+   * greater epoch) TAKES OVER the stale in-flight gate and retries (the
+   * take-over arm of beginFencedDispatch). The typed
+   * 'handoff-dispatch-failed' error propagates (the route returns 500; the
+   * boot sweep reconciles).
    */
   private async dispatchExternal(
     record: ExecutionRecord,
     executionId: string,
+    lease: ClaimLeaseGuard,
   ): Promise<void> {
     try {
       const built = await this.deps.executionTaskService.build({
@@ -1645,6 +1720,23 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         executionId,
         implementationContextId: record.implementationContextId,
       });
+      // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence is
+      // evaluated ATOMICALLY with the durable dispatch intent, immediately
+      // BEFORE the provider submit (no check-then-act window). A FALSE here
+      // means the lease was reclaimed between the pre-call fence check and
+      // this boundary: abort BEFORE the submit.
+      const began =
+        await this.deps.crossModeHandoffRepository.beginFencedDispatch(
+          lease.handoffId,
+          lease.owner,
+          lease.claimEpoch,
+        );
+      if (!began) {
+        throw new CrossModeHandoffError(
+          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed before the external dispatch boundary (owner ${lease.owner}, epoch ${lease.claimEpoch}) — aborting BEFORE the provider submit to prevent a second concurrent handoff driver`,
+          'claim-fence-lost',
+        );
+      }
       const submission = await this.deps.externalExecutionProvider.submit(
         built.task,
       );
@@ -1655,16 +1747,43 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           `cross-mode-handoff-external-package-missing: the ExternalExecutionProvider returned no package for execution ${executionId}`,
         );
       }
-      await this.deps.executionRecordRepository.updateStatus(record.id, {
-        status: 'handoff_ready',
-        packageValue: pkg,
-        expiresAt,
-      });
+      // PR #46 round 6: the atomic completion — the gate CAS AND the
+      // authoritative outcome write (status + package + expires_at) in ONE
+      // transaction. FALSE means fenced out mid-dispatch (the lease was
+      // reclaimed while this submit ran): the transaction rolled back — NO
+      // outcome write happened. This is the architect's round-6 invariant:
+      // a resumed stale dispatch MUST NOT create a second authoritative
+      // provider operation.
+      const completed =
+        await this.deps.crossModeHandoffRepository.completeFencedDispatch(
+          lease.handoffId,
+          lease.owner,
+          lease.claimEpoch,
+          record.id,
+          {
+            status: 'handoff_ready',
+            packageValue: pkg,
+            expiresAt,
+          },
+        );
+      if (!completed) {
+        throw new CrossModeHandoffError(
+          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed while the external dispatch was in flight (owner ${lease.owner}, epoch ${lease.claimEpoch}) — the already-started dispatch's outcome was DISCARDED (no second authoritative provider operation); the reclaiming owner owns the dispatch`,
+          'claim-fence-lost',
+        );
+      }
     } catch (err) {
+      // Fence losses propagate as-is (the caller path maps them to 409; the
+      // reconcile path converts them to stage 'fence-lost').
+      if (err instanceof CrossModeHandoffError && err.code === 'claim-fence-lost') {
+        throw err;
+      }
       // The dispatch failed — the record stays at mode=external/status=
-      // handoff_ready (the mutated intermediate state). Surface a typed
-      // 'handoff-dispatch-failed' so the route returns 500. The handoff LOG
-      // row preserves the intent (the correction chain is visible).
+      // handoff_ready (the mutated intermediate state); the gate stays
+      // in_flight at this actor's epoch (the next claim takes it over).
+      // Surface a typed 'handoff-dispatch-failed' so the route returns 500.
+      // The handoff LOG row preserves the intent (the correction chain is
+      // visible).
       this.deps.logger.error('cross-mode-handoff.dispatch-external-failed', {
         executionId,
         error: (err as Error).message,
@@ -1681,14 +1800,39 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
    * ImplementationContext), check whether an AgentRun already exists (crash-
    * retry guard — wfos_agent_runs.execution_id is UNIQUE), else submit
    * through the NativeExecutionProvider (which delegates to the existing
-   * AgentGateway — NO second gateway). On success, updateStatus with the
-   * agentRunId + completed; on failure, updateStatus to failed + propagate
-   * 'handoff-dispatch-failed'.
+   * AgentGateway — NO second gateway). The authoritative outcome (the
+   * agentRunId + status, or the failure record) commits THROUGH the fenced
+   * dispatch boundary.
+   *
+   * PR #46 round 6 (the side-effect-boundary fencing fix): identical shape
+   * to {@link dispatchExternal} —
+   *   1. {@link CrossModeHandoffRepository.beginFencedDispatch} BEFORE the
+   *      gateway submit (the lease fence evaluated ATOMICALLY with the
+   *      durable dispatch intent; a fenced-out actor never reaches the
+   *      provider);
+   *   2. the provider submit — `wfos_agent_runs.execution_id` is UNIQUE, so
+   *      a duplicate submit (a stale actor's resumed dispatch racing a taken-
+   *      over dispatch) COLLIDES instead of creating a second AgentRun;
+   *   3. {@link CrossModeHandoffRepository.completeFencedDispatch} — the
+   *      gate CAS + the authoritative outcome write in ONE transaction. A
+   *      stale actor's already-started dispatch is fenced out (0 rows → NO
+   *      write — neither a duplicate success write NOR the legacy failure
+   *      clobber).
+   *
+   * CONFLICT RECOVERY (round 6): when the submit throws AND an AgentRun now
+   * exists, the authoritative native provider operation ALREADY happened
+   * (this submit collided with a concurrent/taken-over dispatch on the
+   * UNIQUE, or the gateway persisted the run before failing) — the handler
+   * CONVERGES to the existing run through the fenced completion instead of
+   * writing a stale 'failed' record over the new owner's outcome. Only a
+   * genuinely run-less failure writes the authoritative failure record
+   * (still through the fence).
    */
   private async dispatchNative(
     record: ExecutionRecord,
     executionId: string,
     model: string | null,
+    lease: ClaimLeaseGuard,
   ): Promise<void> {
     // Crash-retry guard: if a native AgentRun already exists for this
     // execution, skip dispatch + use it (a second submit would hit the
@@ -1696,17 +1840,49 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     const existingRun = await this.deps.agentRunRepository.findByExecutionId(
       executionId,
     );
+    // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence
+    // evaluated ATOMICALLY with the durable dispatch intent, BEFORE any
+    // provider call (including the existing-run converge path below, whose
+    // outcome write must be just as fenced as a fresh dispatch's).
+    const began =
+      await this.deps.crossModeHandoffRepository.beginFencedDispatch(
+        lease.handoffId,
+        lease.owner,
+        lease.claimEpoch,
+      );
+    if (!began) {
+      throw new CrossModeHandoffError(
+        `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed before the native dispatch boundary (owner ${lease.owner}, epoch ${lease.claimEpoch}) — aborting BEFORE the provider submit to prevent a second concurrent handoff driver`,
+        'claim-fence-lost',
+      );
+    }
     if (existingRun) {
       this.deps.logger.info('cross-mode-handoff.dispatch-native-existing-run', {
         executionId,
         agentRunId: existingRun.id,
       });
-      await this.deps.executionRecordRepository.updateStatus(record.id, {
-        status: 'completed',
-        agentRunId: existingRun.id,
-        startedAt: existingRun.startedAt,
-        completedAt: existingRun.completedAt,
-      });
+      // PR #46 round 6: the converge outcome commits through the FENCED
+      // completion (0 rows → fenced out → NO write — a stale actor cannot
+      // overwrite the new owner's authoritative outcome).
+      const completed =
+        await this.deps.crossModeHandoffRepository.completeFencedDispatch(
+          lease.handoffId,
+          lease.owner,
+          lease.claimEpoch,
+          record.id,
+          {
+            status: 'completed',
+            agentRunId: existingRun.id,
+            startedAt: existingRun.startedAt,
+            completedAt: existingRun.completedAt,
+          },
+        );
+      if (!completed) {
+        throw new CrossModeHandoffError(
+          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed while the native dispatch converge was in flight (owner ${lease.owner}, epoch ${lease.claimEpoch}) — the already-started dispatch's outcome was DISCARDED (no second authoritative provider operation)`,
+          'claim-fence-lost',
+        );
+      }
       return;
     }
 
@@ -1724,28 +1900,97 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       const submission = await this.deps.nativeExecutionProvider.submit(
         built.task,
       );
-      await this.deps.executionRecordRepository.updateStatus(record.id, {
-        status: submission.status === 'completed' ? 'completed' : submission.status,
-        agentRunId: submission.agentRunId ?? null,
-        startedAt: submission.startedAt ?? null,
-        completedAt: submission.completedAt ?? null,
-      });
+      // PR #46 round 6: the atomic completion — the gate CAS AND the
+      // authoritative outcome write in ONE transaction. FALSE → fenced out
+      // mid-dispatch → NO write happened (the stale dispatch's outcome is
+      // discarded; the reclaiming owner owns the dispatch).
+      const completed =
+        await this.deps.crossModeHandoffRepository.completeFencedDispatch(
+          lease.handoffId,
+          lease.owner,
+          lease.claimEpoch,
+          record.id,
+          {
+            status: submission.status === 'completed' ? 'completed' : submission.status,
+            agentRunId: submission.agentRunId ?? null,
+            startedAt: submission.startedAt ?? null,
+            completedAt: submission.completedAt ?? null,
+          },
+        );
+      if (!completed) {
+        throw new CrossModeHandoffError(
+          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed while the native dispatch was in flight (owner ${lease.owner}, epoch ${lease.claimEpoch}) — the already-started dispatch's outcome was DISCARDED (no second authoritative provider operation); the reclaiming owner owns the dispatch`,
+          'claim-fence-lost',
+        );
+      }
     } catch (err) {
-      // Native dispatch failed — persist the failure (the record is the
-      // authoritative failure record), then propagate 'handoff-dispatch-
-      // failed'. The handoff LOG row preserves the intent.
-      const now = this.now();
-      await this.deps.executionRecordRepository.updateStatus(record.id, {
-        status: 'failed',
-        completedAt: now,
-        benchmarkMetadata: {
-          failureStage: 'cross-mode-native-dispatch',
-          errorMessage: (err as Error).message,
-        },
-      });
+      // Fence losses propagate as-is (the caller path maps them to 409; the
+      // reconcile path converts them to stage 'fence-lost').
+      if (err instanceof CrossModeHandoffError && err.code === 'claim-fence-lost') {
+        throw err;
+      }
+      // PR #46 round 6 CONFLICT RECOVERY: the submit failed. An AgentRun may
+      // nevertheless EXIST — either this invocation's own run (the gateway
+      // persists the run BEFORE executing the adapter, so a failed adapter
+      // leaves a 'failed' run) or a concurrent/taken-over dispatch's run
+      // (this submit collided on the wfos_agent_runs.execution_id UNIQUE).
+      // The authoritative native provider operation is the RUN — converge to
+      // it through the FENCED completion when it exists and is not failed;
+      // only a genuinely run-less (or failed-run) dispatch writes the
+      // authoritative failure record. Either way the write goes THROUGH the
+      // fence: a fenced-out actor performs NO write at all.
+      const run = await this.deps.agentRunRepository.findByExecutionId(
+        executionId,
+      );
+      const outcome = run
+        ? run.status === 'failed'
+          ? {
+              status: 'failed' as const,
+              agentRunId: run.id,
+              completedAt: run.completedAt ?? this.now(),
+              benchmarkMetadata: {
+                failureStage: 'cross-mode-native-dispatch',
+                errorMessage: (err as Error).message,
+              },
+            }
+          : {
+              status: 'completed' as const,
+              agentRunId: run.id,
+              startedAt: run.startedAt,
+              completedAt: run.completedAt,
+            }
+        : {
+            status: 'failed' as const,
+            completedAt: this.now(),
+            benchmarkMetadata: {
+              failureStage: 'cross-mode-native-dispatch',
+              errorMessage: (err as Error).message,
+            },
+          };
+      const completed =
+        await this.deps.crossModeHandoffRepository.completeFencedDispatch(
+          lease.handoffId,
+          lease.owner,
+          lease.claimEpoch,
+          record.id,
+          outcome,
+        );
+      if (!completed) {
+        // Fenced out mid-failure-handling: NO failure write happened either
+        // (the transaction rolled back) — the new owner owns the record.
+        throw new CrossModeHandoffError(
+          `claim-fence-lost: the cross-mode-handoff claim for handoff ${lease.handoffId} was reclaimed while the native dispatch failure was being recorded (owner ${lease.owner}, epoch ${lease.claimEpoch}) — NO outcome write happened; the reclaiming owner owns the record`,
+          'claim-fence-lost',
+        );
+      }
+      // Native dispatch failed — the fenced failure outcome is now the
+      // authoritative record (terminal; the reconcile converges + discharges
+      // on the terminal native state). The handoff LOG row preserves the
+      // intent. Propagate 'handoff-dispatch-failed'.
       this.deps.logger.error('cross-mode-handoff.dispatch-native-failed', {
         executionId,
         error: (err as Error).message,
+        convergedToExistingRun: run != null && run.status !== 'failed',
       });
       throw new CrossModeHandoffError(
         `handoff-dispatch-failed: the external->native dispatch for execution ${executionId} failed (${(err as Error).message})`,

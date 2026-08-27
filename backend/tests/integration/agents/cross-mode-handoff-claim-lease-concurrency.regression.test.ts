@@ -119,6 +119,7 @@ import { InMemoryQueue } from '@platform/index.js';
 import type { DatabaseClient } from '@platform/postgres/database-client.js';
 import type {
   CreateCrossModeHandoffInput,
+  CrossModeHandoffFencedDispatchOutcome,
   CrossModeHandoffRecord,
   CrossModeHandoffRepository,
 } from '../../../src/modules/agents/internal/cross-mode-handoff.types.js';
@@ -228,14 +229,28 @@ class FakeWorktreeMaterializer implements WorktreeMaterializer {
  * T2 services so both paths' dispatches are visible through ONE counter
  * (the architect's invariant: ZERO duplicate dispatches — exactly one
  * submit per handoff, regardless of which actor drove it).
+ *
+ * PR #46 round 6: `parkFirstSubmit` lets a test STALL T1 INSIDE its provider
+ * submit (after the fenced dispatch gate was crossed, before the outcome
+ * write) — the architect's stall-DURING-the-dispatch interleaving. The
+ * first submit awaits the supplied gate BEFORE delegating to the real
+ * (pure, deterministic) provider; subsequent submits are unaffected.
  */
 class CountingExternalProvider implements ExecutionProvider {
   readonly name = 'external';
   readonly mode = 'external' as const;
   private _submitCount = 0;
+  private firstSubmitGate: Promise<void> | null = null;
   constructor(private readonly real: ExternalExecutionProvider) {}
+  /** Park the FIRST submit on the supplied gate (round 6 — the mid-dispatch stall). */
+  parkFirstSubmit(gate: Promise<void>): void {
+    this.firstSubmitGate = gate;
+  }
   async submit(task: ExecutionTask): Promise<ExecutionSubmission> {
     this._submitCount++;
+    if (this.firstSubmitGate && this._submitCount === 1) {
+      await this.firstSubmitGate;
+    }
     return this.real.submit(task);
   }
   /** The number of `submit` calls so far (proves exactly-one dispatch). */
@@ -279,8 +294,8 @@ class CountingSessionService implements CrossModeExecutionSessionPort {
 }
 
 /**
- * PR #46 round 4 + round 5: a HookedHandoffRepository that wraps T1's
- * PgCrossModeHandoffRepository + fires hooks for the two-actor tests:
+ * PR #46 round 4 + round 5 + round 6: a HookedHandoffRepository that wraps a
+ * real CrossModeHandoffRepository + fires hooks for the two-actor tests:
  *
  *   - `willMutate`: fires AFTER `createHandoffAndClaim` succeeds with
  *     `claimed:true` + a caller-role owner (the unique round-5 owner string
@@ -293,16 +308,51 @@ class CountingSessionService implements CrossModeExecutionSessionPort {
  *     i.e. T1 is INSIDE the critical section with its heartbeat alive).
  *     Used by R5-#2 (the heartbeat liveness: T1 parks mid-section; the
  *     heartbeat keeps renewing; T2's reclaim fails).
+ *   - `willEnterDispatchGate` (round 6): fires ONCE BEFORE forwarding
+ *     `beginFencedDispatch` — i.e. AFTER the pre-call `ensureFence('dispatch')`
+ *     PASSED but BEFORE the atomic gate crossing (T1 has NOT crossed). Used
+ *     by R6-#1 (the architect's stall-immediately-BEFORE-the-dispatch
+ *     interleaving: T1's resumed begin is fenced out → ZERO provider calls
+ *     from T1).
+ *   - `onDispatchGateEntered` (round 6): fires ONCE AFTER
+ *     `beginFencedDispatch` returns TRUE — i.e. the durable dispatch intent
+ *     is crossed at T1's epoch but the provider submit has NOT started. Used
+ *     by R6-#3 (the native stall between the gate + the gateway submit: T2
+ *     takes over the in-flight gate + completes; T1's resumed submit COLLIDES
+ *     on the wfos_agent_runs UNIQUE + conflict-recovers + its outcome write
+ *     is fenced out).
+ *
+ * `stats` (round 6): a SHARED mutable counter object (the SAME object is
+ * wired into BOTH T1's + T2's wrappers) counting the dispatch-gate
+ * operations across ALL actors — `beginCount` (gate crossings) +
+ * `completeTrueCount` (authoritative outcome writes COMMITTED — the count of
+ * authoritative provider operations) + `completeFalseCount` (fenced-out
+ * completions — discarded outcomes). R6-#2 asserts `completeTrueCount === 1`
+ * while BOTH actors submitted: exactly ONE authoritative provider operation
+ * under the stall-then-reclaim interleaving.
  *
  * All other calls (including the round-5 `renewHandoffObligationClaim`
  * heartbeat renewals) forward to the real repository.
  */
+interface DispatchGateStats {
+  beginCount: number;
+  completeTrueCount: number;
+  completeFalseCount: number;
+}
+
 class HookedHandoffRepository implements CrossModeHandoffRepository {
   private renewHookFired = false;
+  private willEnterGateHookFired = false;
+  private gateEnteredHookFired = false;
   constructor(
     private readonly real: CrossModeHandoffRepository,
-    private readonly willMutate?: () => Promise<void>,
-    private readonly onFirstRenew?: () => Promise<void>,
+    private readonly opts: {
+      willMutate?: () => Promise<void>;
+      onFirstRenew?: () => Promise<void>;
+      willEnterDispatchGate?: () => Promise<void>;
+      onDispatchGateEntered?: () => Promise<void>;
+      stats?: DispatchGateStats;
+    } = {},
   ) {}
   async createHandoff(input: CreateCrossModeHandoffInput): Promise<CrossModeHandoffRecord> {
     return this.real.createHandoff(input);
@@ -323,7 +373,7 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
       result.claimed &&
       owner.startsWith(`${CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX}:`)
     ) {
-      if (this.willMutate) await this.willMutate();
+      if (this.opts.willMutate) await this.opts.willMutate();
     }
     return result;
   }
@@ -355,7 +405,7 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
     // beat) — the `renewHookFired` guard makes it a one-shot.
     if (renewed && !this.renewHookFired) {
       this.renewHookFired = true;
-      if (this.onFirstRenew) await this.onFirstRenew();
+      if (this.opts.onFirstRenew) await this.opts.onFirstRenew();
     }
     return renewed;
   }
@@ -382,9 +432,55 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
   ): Promise<boolean> {
     return this.real.dischargeHandoffObligation(handoffId, owner, claimEpoch);
   }
+  async beginFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean> {
+    // Round 6: the willEnterDispatchGate hook fires BEFORE the atomic gate
+    // crossing — the pre-call ensureFence('dispatch') has ALREADY passed (a
+    // false-positive pass, exactly the architect's round-6 residual window)
+    // but the durable dispatch intent is NOT yet crossed.
+    if (!this.willEnterGateHookFired) {
+      this.willEnterGateHookFired = true;
+      if (this.opts.willEnterDispatchGate) await this.opts.willEnterDispatchGate();
+    }
+    const began = await this.real.beginFencedDispatch(handoffId, owner, claimEpoch);
+    if (began) {
+      if (this.opts.stats) this.opts.stats.beginCount += 1;
+      // Round 6: the onDispatchGateEntered hook fires AFTER a successful
+      // crossing (the durable dispatch intent is open at THIS actor's epoch;
+      // the provider submit has NOT started).
+      if (!this.gateEnteredHookFired) {
+        this.gateEnteredHookFired = true;
+        if (this.opts.onDispatchGateEntered) await this.opts.onDispatchGateEntered();
+      }
+    }
+    return began;
+  }
+  async completeFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    executionRecordId: string,
+    outcome: CrossModeHandoffFencedDispatchOutcome,
+  ): Promise<boolean> {
+    const completed = await this.real.completeFencedDispatch(
+      handoffId,
+      owner,
+      claimEpoch,
+      executionRecordId,
+      outcome,
+    );
+    if (this.opts.stats) {
+      if (completed) this.opts.stats.completeTrueCount += 1;
+      else this.opts.stats.completeFalseCount += 1;
+    }
+    return completed;
+  }
 }
 
-describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-handoff claim/lease + the unique-owner/heartbeat/epoch-fence lease semantics (real PostgreSQL two-actor concurrency)', () => {
+describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, + the FENCED DISPATCH boundary (real PostgreSQL two-actor concurrency)', () => {
   let stack: TestAuthStack;
   let second: { client: DatabaseClient; close: () => Promise<void> } | undefined;
 
@@ -638,23 +734,40 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
   }
 
   /** Build a T1 (caller-path) service on T1's client, sharing the counting
-   *  providers. The optional `willMutate` / `onFirstRenew` hooks wrap T1's
+   *  providers. The optional hooks (`willMutate` / `onFirstRenew` /
+   *  `willEnterDispatchGate` / `onDispatchGateEntered`) wrap T1's
    *  `crossModeHandoffRepository` in a `HookedHandoffRepository` so the test
-   *  can run T2 BETWEEN T1's reserve+claim and T1's mutate (willMutate) or
-   *  park T1 INSIDE the critical section after the first fence check
-   *  (onFirstRenew). The optional `leaseMs` / `heartbeatMs` configure the
-   *  round-5 lease + heartbeat (a huge heartbeatMs SUPPRESSES the heartbeat
-   *  — simulating a stalled owner whose renewals stopped). */
+   *  can run T2 BETWEEN T1's reserve+claim and T1's mutate (willMutate), park
+   *  T1 INSIDE the critical section after the first fence check
+   *  (onFirstRenew), park T1 after the pre-call dispatch fence passed but
+   *  BEFORE the atomic gate crossing (willEnterDispatchGate), or park T1
+   *  AFTER the gate crossing but BEFORE the provider submit
+   *  (onDispatchGateEntered). The optional `leaseMs` / `heartbeatMs`
+   *  configure the round-5 lease + heartbeat (a huge heartbeatMs SUPPRESSES
+   *  the heartbeat — simulating a stalled owner whose renewals stopped).
+   *  The optional `stats` is the SHARED dispatch-gate counter object (also
+   *  wired into T2's wrapper when passed to buildT2Service). */
   function buildT1Service(opts: {
     willMutate?: () => Promise<void>;
     onFirstRenew?: () => Promise<void>;
+    willEnterDispatchGate?: () => Promise<void>;
+    onDispatchGateEntered?: () => Promise<void>;
     leaseMs?: number;
     heartbeatMs?: number;
+    stats?: DispatchGateStats;
   } = {}): DefaultCrossModeHandoffService {
-    const repo: CrossModeHandoffRepository =
-      opts.willMutate || opts.onFirstRenew
-        ? new HookedHandoffRepository(crossModeHandoffRepo, opts.willMutate, opts.onFirstRenew)
-        : crossModeHandoffRepo;
+    const hasHooks =
+      opts.willMutate || opts.onFirstRenew ||
+      opts.willEnterDispatchGate || opts.onDispatchGateEntered || opts.stats;
+    const repo: CrossModeHandoffRepository = hasHooks
+      ? new HookedHandoffRepository(crossModeHandoffRepo, {
+          ...(opts.willMutate ? { willMutate: opts.willMutate } : {}),
+          ...(opts.onFirstRenew ? { onFirstRenew: opts.onFirstRenew } : {}),
+          ...(opts.willEnterDispatchGate ? { willEnterDispatchGate: opts.willEnterDispatchGate } : {}),
+          ...(opts.onDispatchGateEntered ? { onDispatchGateEntered: opts.onDispatchGateEntered } : {}),
+          ...(opts.stats ? { stats: opts.stats } : {}),
+        })
+      : crossModeHandoffRepo;
     return new DefaultCrossModeHandoffService({
       executionRecordRepository: executionRecordRepo,
       crossModeHandoffRepository: repo,
@@ -675,8 +788,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
       queue: new InMemoryQueue(),
       // PR #46 round 5: configurable lease + heartbeat for the lease-semantics
       // regressions (R5-#2 uses a short lease with the DEFAULT heartbeat to
-      // prove liveness; R5-#3 uses a short lease with a SUPPRESSED heartbeat
-      // to prove the fence abort).
+      // prove liveness; R5-#3/R6-* use a short lease with a SUPPRESSED
+      // heartbeat to prove the fence/gate aborts).
       ...(opts.leaseMs !== undefined ? { handoffClaimLeaseMs: opts.leaseMs } : {}),
       ...(opts.heartbeatMs !== undefined ? { handoffClaimHeartbeatMs: opts.heartbeatMs } : {}),
     });
@@ -686,11 +799,15 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
    *  counting providers (so T2's dispatch/session calls are visible through
    *  the SAME counters as T1's). T2's repos use `second.client`; the
    *  underlying session row + record row are in the SHARED schema (both
-   *  clients point to the same schema). */
-  function buildT2Service(): DefaultCrossModeHandoffService {
+   *  clients point to the same schema). The optional `stats` is the SHARED
+   *  dispatch-gate counter object (the SAME object wired into T1's wrapper —
+   * R6 asserts exactly ONE authoritative outcome write across BOTH actors). */
+  function buildT2Service(opts: { stats?: DispatchGateStats } = {}): DefaultCrossModeHandoffService {
     if (!second) throw new Error('T2 second client is not open (isRealPg=false?)');
     const t2RecordRepo = new PgExecutionRecordRepository(second.client);
-    const t2HandoffRepo = new PgCrossModeHandoffRepository(second.client);
+    const t2HandoffRepo = opts.stats
+      ? new HookedHandoffRepository(new PgCrossModeHandoffRepository(second.client), { stats: opts.stats })
+      : new PgCrossModeHandoffRepository(second.client);
     return new DefaultCrossModeHandoffService({
       executionRecordRepository: t2RecordRepo,
       crossModeHandoffRepository: t2HandoffRepo,
@@ -906,7 +1023,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
     // (so T2's reconcile, if it could claim, would re-mutate). This isolates
     // the claim-UPDATE serialization from the service-level handoff state.
     // PR #46 round 5: also reset claim_epoch to 0 (a fresh fencing-token
-    // baseline for the direct claim calls below).
+    // baseline for the direct claim calls below). PR #46 round 6: also reset
+    // the dispatch gate (dispatch_state/dispatch_epoch — a completed gate
+    // from the prior handoff would otherwise never be re-entered).
     await stack.db.client.query(
       `UPDATE wfos_executions SET status = 'failed', mode = 'native', agent_run_id = NULL, external_session_ref = NULL, package_json = NULL, expires_at = NULL, updated_at = NOW() WHERE id = $1`,
       [recordId],
@@ -917,7 +1036,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
              claimed_at = NULL,
              claim_expires_at = NULL,
              claim_owner = NULL,
-             claim_epoch = 0
+             claim_epoch = 0,
+             dispatch_state = NULL,
+             dispatch_epoch = NULL
        WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
       [recordId],
     );
@@ -1010,7 +1131,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
       { userId: 'test-user', source: 'cmh-test' },
     );
     // Reset: the record back to native/failed + the obligation back to
-    // pending + unclaimed + epoch 0 (the fresh fencing-token baseline).
+    // pending + unclaimed + epoch 0 (the fresh fencing-token baseline) + the
+    // dispatch gate cleared (PR #46 round 6 — a completed gate from the
+    // prior handoff would otherwise never be re-entered).
     await stack.db.client.query(
       `UPDATE wfos_executions SET status = 'failed', mode = 'native', agent_run_id = NULL, external_session_ref = NULL, package_json = NULL, expires_at = NULL, updated_at = NOW() WHERE id = $1`,
       [recordId],
@@ -1021,7 +1144,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
              claimed_at = NULL,
              claim_expires_at = NULL,
              claim_owner = NULL,
-             claim_epoch = 0
+             claim_epoch = 0,
+             dispatch_state = NULL,
+             dispatch_epoch = NULL
        WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
       [recordId],
     );
@@ -1312,5 +1437,386 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-
     expect(liveDischarge, 'the LIVE owner\'s discharge succeeded (the exact owner+epoch matched)').toBe(true);
     expect(await countDischargedObligations(executionId)).toBe(1);
     expect(await countPendingObligations(executionId)).toBe(0);
+  });
+
+  // =========================================================================
+  // Shared round-6 helpers: an external record (for the external→native
+  // direction) + a dispatch-gate state reader.
+  // =========================================================================
+
+  /** Create an external execution record in the handoff_ready state (with a
+   *  representative ExternalExecutionPackage persisted — the prior phase's
+   *  authoritative evidence; mirrors the pglite regression test's helper). */
+  async function createExternalRecord(): Promise<{ executionId: string; recordId: string }> {
+    const executionId = nextExecId();
+    const record = await executionRecordRepo.create({
+      executionId, projectId, workItemId, workOrderId,
+      implementationContextId: sharedContextId,
+      mode: 'external', provider: 'external', model: null,
+      prompt: `p ${executionId}`, promptDigest: `d ${executionId}`,
+      branch: 'feat/work-w042-r4-001',
+    });
+    const pkg = {
+      executionId, mode: 'external' as const, projectId, workItemId,
+      workItemLabel: 'WORK-W042-R4-001', workOrderId,
+      implementationContextId: sharedContextId, provider: 'external', model: null,
+      repository: { owner: null, name: null, url: null, defaultBranch: null },
+      branch: 'feat/work-w042-r4-001', prompt: `p ${executionId}`,
+      structuredInstructions: [], verificationRequirements: [],
+      expectedOutputs: [], browserTestRequirements: [],
+      returnCallback: {
+        eventsPath: `/execution/${executionId}/events`,
+        eventTypes: ['started', 'progress', 'completed', 'failed'],
+        auth: 'x-callback-token', note: 'test package',
+      },
+      expiration: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    };
+    await executionRecordRepo.updateStatus(record.id, { status: 'handoff_ready', packageValue: pkg });
+    return { executionId, recordId: record.id };
+  }
+
+  /** Read the obligation's dispatch-gate state (PR #46 round 6). */
+  async function readDispatchGate(
+    executionId: string,
+  ): Promise<{ dispatchState: string | null; dispatchEpoch: number | null }> {
+    const res = await stack.db.client.query<{ dispatch_state: string | null; dispatch_epoch: string | number | null }>(
+      `SELECT o.dispatch_state, o.dispatch_epoch
+       FROM wfos_cross_mode_handoff_obligations o
+       JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+       JOIN wfos_executions e ON e.id = o.execution_id
+       WHERE e.execution_id = $1`,
+      [executionId],
+    );
+    const row = res.rows[0];
+    return {
+      dispatchState: row?.dispatch_state ?? null,
+      dispatchEpoch: row ? (row.dispatch_epoch == null ? null : Number(row.dispatch_epoch)) : null,
+    };
+  }
+
+  // =========================================================================
+  // R6-#1. The architect's round-6 interleaving, variant A (stall
+  // IMMEDIATELY BEFORE the dispatch): T1 claims (epoch N) → T1 passes the
+  // pre-call ensureFence('dispatch') → T1 stalls (heartbeat dead) between the
+  // fence check and the provider call → the lease expires → T2 reclaims
+  // (epoch N+1) → T2 completes the dispatch (ONE authoritative provider
+  // operation) → T1 resumes → T1 MUST NOT create a second authoritative
+  // provider operation. The FENCED DISPATCH GATE (beginFencedDispatch — the
+  // lease fence evaluated ATOMICALLY with the durable dispatch intent) fences
+  // T1's resume out BEFORE its provider submit: ZERO provider calls from T1.
+  // =========================================================================
+  it('R6-#1. a stalled owner that PASSED the pre-call fence is fenced out AT the dispatch boundary — T1\'s resumed dispatch NEVER reaches the provider (zero provider calls from T1)', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+    const t2Service = buildT2Service({ stats });
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat. T1 parks at the
+    // willEnterDispatchGate hook — AFTER the pre-call ensureFence('dispatch')
+    // PASSED (the residual round-6 window: the check was a false positive)
+    // but BEFORE the atomic gate crossing (the durable dispatch intent is
+    // NOT crossed — the gate is still NULL).
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((r) => { resolveGate = r; });
+    let t1AtGate = false;
+    const willEnterDispatchGate = async () => {
+      t1AtGate = true;
+      await gate;
+    };
+    const t1Service = buildT1Service({
+      willEnterDispatchGate,
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r6-pre-dispatch-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is parked between the pre-call fence check and the gate
+    // (the mutate + session transition have already happened), then let the
+    // 150ms lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => t1AtGate, 5000);
+    await delay(300);
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) + drives the
+    // handoff to completion: crash-window #2 (record.mode === external but
+    // packageValue missing) → T2's re-dispatch crosses the gate (still NULL —
+    // T1 never crossed) → T2's submit → T2's atomic completeFencedDispatch
+    // (the ONE authoritative outcome write) → discharge.
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease + completed the handoff (the authoritative dispatch)').toBe('complete');
+
+    // T1 resumes: the ATOMIC gate crossing (beginFencedDispatch) evaluates
+    // the lease fence — T2 owns the obligation now → 0 rows → T1 aborts
+    // 'claim-fence-lost' BEFORE its provider submit.
+    resolveGate();
+    await t1Promise;
+    expect(t1Error, 'T1\'s resumed handoff FAILED with the fence-lost error (the ATOMIC dispatch boundary)').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'T1 aborted at the dispatch gate (claim-fence-lost) — BEFORE the provider submit').toBe('claim-fence-lost');
+
+    // THE ARCHITECT'S ROUND-6 INVARIANT: T1 performed NO provider operation —
+    // exactly ONE submit total (T2's). The pre-call fence check passing was
+    // NOT sufficient protection on its own (round-5's hole); the atomic gate
+    // crossing is what stops T1.
+    expect(countingExternalProvider.submitCount, 'ZERO provider calls from T1 — the gated boundary aborted it BEFORE the submit (exactly one submit: T2\'s)').toBe(1);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s — committed through the fenced completion)').toBe(1);
+    expect(stats.beginCount, 'exactly ONE gate crossing (T2\'s — T1\'s begin affected 0 rows)').toBe(1);
+
+    // Exactly ONE session transition (T1's pre-dispatch interrupt — T2's
+    // reconcile found it converged + skipped).
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+
+    // The obligation discharged + the gate COMPLETED at T2's epoch.
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchState, 'the dispatch gate is COMPLETED (the outcome write landed atomically with it)').toBe('completed');
+    expect(gateAfter.dispatchEpoch, 'the gate completed at T2\'s (the reclaiming owner\'s) epoch').toBeGreaterThan(0);
+
+    // The final state: the record IS external/handoff_ready + T2's package
+    // (T1's late attempt wrote NOTHING).
+    const after = await executionRecordRepo.findByExecutionId(executionId);
+    expect(after!.id).toBe(recordId);
+    expect(after!.mode).toBe('external');
+    expect(after!.status).toBe('handoff_ready');
+    expect(after!.packageValue).not.toBeNull();
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+    expect(afterSession!.status).toBe('interrupted');
+  });
+
+  // =========================================================================
+  // R6-#2. The architect's round-6 interleaving, variant B (stall DURING the
+  // dispatch): T1 claims (epoch N) → T1 passes the pre-call fence + CROSSES
+  // the dispatch gate → T1 stalls INSIDE its provider submit (heartbeat dead)
+  // → the lease expires → T2 reclaims (epoch N+1) → T2 TAKES OVER the
+  // in-flight gate + completes the dispatch (the authoritative outcome write)
+  // → T1 resumes + its ALREADY-STARTED submit completes → T1 MUST NOT create
+  // a second authoritative provider operation. Both actors submit (the
+  // external provider is a deterministic pure function — the CALL is not the
+  // authoritative operation), but exactly ONE authoritative outcome write
+  // commits: T1's completeFencedDispatch affects 0 rows (the transaction
+  // rolls back — its package + expiresAt are DISCARDED; T2's outcome stands).
+  // =========================================================================
+  it('R6-#2. a stalled owner\'s ALREADY-STARTED dispatch cannot commit a second authoritative outcome (T1 stalls mid-submit → T2 reclaims + completes → T1\'s resumed outcome write is DISCARDED)', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+    const t2Service = buildT2Service({ stats });
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat. T1's provider submit
+    // PARKS INSIDE the CountingExternalProvider (after the gate crossing —
+    // the durable dispatch intent is open at T1's epoch, the submit is
+    // in flight, the outcome write has NOT run).
+    let resolveSubmit!: () => void;
+    const submitGate = new Promise<void>((r) => { resolveSubmit = r; });
+    countingExternalProvider.parkFirstSubmit(submitGate);
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r6-mid-dispatch-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is stalled INSIDE its submit (submitCount === 1), then
+    // let the 150ms lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => countingExternalProvider.submitCount >= 1, 5000);
+    await delay(300);
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
+    // window #2 (record.mode === external, packageValue missing — T1's
+    // outcome write never ran) → T2's re-dispatch TAKES OVER the in-flight
+    // gate (dispatch_epoch N < N+1 — the monotonic take-over arm) → T2's
+    // submit → T2's atomic completeFencedDispatch (the ONE authoritative
+    // outcome write) → discharge.
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, + completed the handoff').toBe('complete');
+
+    // Capture T2's authoritative outcome (the record state after T2's
+    // completion) — T1's resumed dispatch must NOT disturb it.
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(afterT2!.packageValue).not.toBeNull();
+    expect(afterT2!.expiresAt).not.toBeNull();
+
+    // T1 resumes: its already-started submit completes (the pure provider
+    // returns a package computed NOW — a DIFFERENT expiresAt/expiration than
+    // T2's), then T1's completeFencedDispatch evaluates the fence — the lease
+    // is T2's (and the obligation is discharged) → 0 rows → the transaction
+    // ROLLS BACK — NO outcome write. T1 aborts 'claim-fence-lost'.
+    resolveSubmit();
+    await t1Promise;
+    expect(t1Error, 'T1\'s resumed handoff FAILED with the fence-lost error (the discarded already-started dispatch)').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'T1\'s already-started dispatch was fenced out at the atomic completion').toBe('claim-fence-lost');
+
+    // THE ARCHITECT'S ROUND-6 INVARIANT: BOTH actors submitted (2 provider
+    // CALLS — unavoidable for an in-flight non-transactional submit), but
+    // exactly ONE authoritative provider operation committed:
+    // completeTrueCount === 1 (T2's) + completeFalseCount === 1 (T1's
+    // discarded outcome — the transaction rolled back).
+    expect(countingExternalProvider.submitCount, 'both actors\' provider CALLS ran (the in-flight submit cannot be un-sent) — the CALL is not the authoritative operation').toBe(2);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write committed (T2\'s — the fenced completion)').toBe(1);
+    expect(stats.completeFalseCount, 'T1\'s already-started dispatch outcome was DISCARDED (0 rows — no second authoritative provider operation)').toBe(1);
+    expect(stats.beginCount, 'the gate was crossed by BOTH actors (T1 opened it; T2 took it over — the monotonic take-over arm)').toBe(2);
+
+    // T2's authoritative outcome is INTACT — T1's late completion wrote
+    // NOTHING (the package + expiresAt are byte-identical to T2's).
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.packageValue, 'T2\'s package is INTACT (T1\'s recomputed package never landed)').toEqual(afterT2!.packageValue);
+    expect(afterT1!.expiresAt?.getTime(), 'T2\'s expires_at is INTACT (T1\'s recomputed expiry never landed)').toBe(afterT2!.expiresAt?.getTime());
+    expect(afterT1!.status).toBe('handoff_ready');
+
+    // Exactly ONE session transition (T1's pre-dispatch interrupt — T2's
+    // reconcile found it converged + skipped).
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+
+    // The obligation discharged + the gate COMPLETED (at T2's epoch).
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchState, 'the dispatch gate is COMPLETED').toBe('completed');
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+    expect(afterSession!.status).toBe('interrupted');
+  });
+
+  // =========================================================================
+  // R6-#3. The architect's round-6 interleaving on the NATIVE path: T1 claims
+  // (epoch N) → T1 passes the pre-call fence + CROSSES the dispatch gate →
+  // T1 stalls between the gate + the gateway submit (heartbeat dead) → the
+  // lease expires → T2 reclaims (epoch N+1) → T2 takes over the in-flight
+  // gate + submits through the AgentGateway (creating the ONE AgentRun) +
+  // completes the dispatch + discharges → T1 resumes → T1's submit COLLIDES
+  // on the wfos_agent_runs.execution_id UNIQUE → T1 CONVERGES to the existing
+  // run through the fenced completion → the completion is FENCED OUT (0 rows
+  // — NO outcome write, neither success NOR a stale 'failed' clobber) → T1
+  // aborts 'claim-fence-lost'. Exactly ONE AgentRun + ONE authoritative
+  // outcome write.
+  // =========================================================================
+  it('R6-#3. a stalled NATIVE dispatch converges + is fenced out — exactly ONE AgentRun, exactly ONE authoritative outcome (T1\'s UNIQUE-colliding submit + conflict recovery write NOTHING)', async () => {
+    const { executionId, recordId } = await createExternalRecord();
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+    const t2Service = buildT2Service({ stats });
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat. T1 parks at the
+    // onDispatchGateEntered hook — AFTER the gate crossing (the durable
+    // dispatch intent is open at T1's epoch) but BEFORE the gateway submit
+    // (NO AgentRun exists yet).
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((r) => { resolveGate = r; });
+    let t1AtGate = false;
+    const onDispatchGateEntered = async () => {
+      t1AtGate = true;
+      await gate;
+    };
+    const t1Service = buildT1Service({
+      onDispatchGateEntered,
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'native', idempotencyKey: `r6-native-stall-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is parked after the gate crossing (the record is already
+    // mutated to native/running; NO AgentRun exists), then let the 150ms
+    // lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => t1AtGate, 5000);
+    await delay(300);
+    // Sanity: no AgentRun exists yet (T1 stalled before its gateway submit).
+    const midRun = await agentRunRepo.findByExecutionId(executionId);
+    expect(midRun, 'no AgentRun exists while T1 is stalled before its gateway submit').toBeNull();
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
+    // window #2 (record.mode === native, NO AgentRun, NOT terminal) → T2's
+    // re-dispatch TAKES OVER the in-flight gate → T2's gateway submit CREATES
+    // the AgentRun → T2's atomic completeFencedDispatch (the ONE
+    // authoritative outcome write) → discharge.
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, dispatched natively, + completed').toBe('complete');
+    const t2Run = await agentRunRepo.findByExecutionId(executionId);
+    expect(t2Run, 'T2\'s dispatch created the ONE AgentRun').not.toBeNull();
+
+    // Capture T2's authoritative outcome — T1's resumed dispatch must NOT
+    // disturb it.
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('native');
+    expect(afterT2!.status).toBe('completed');
+    expect(afterT2!.agentRunId).toBe(t2Run!.id);
+
+    // T1 resumes: its gateway submit COLLIDES on the wfos_agent_runs.
+    // execution_id UNIQUE (T2's run exists) → the gateway throws → T1's
+    // CONFLICT RECOVERY finds the existing run + attempts the converge
+    // completion through the fence → 0 rows (the lease is T2's + the
+    // obligation is discharged) → NO outcome write (neither a duplicate
+    // success NOR the legacy 'failed' clobber) → T1 aborts
+    // 'claim-fence-lost'.
+    resolveGate();
+    await t1Promise;
+    expect(t1Error, 'T1\'s resumed handoff FAILED with the fence-lost error (the UNIQUE-colliding native dispatch)').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'T1\'s colliding native dispatch was fenced out (conflict recovery wrote NOTHING)').toBe('claim-fence-lost');
+
+    // THE ARCHITECT'S ROUND-6 INVARIANT on the native path: exactly ONE
+    // AgentRun (the UNIQUE — T1's colliding INSERT failed) + exactly ONE
+    // authoritative outcome write (T2's; T1's converge completion affected 0
+    // rows + was discarded).
+    const runCountRes = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_agent_runs WHERE execution_id = $1`,
+      [executionId],
+    );
+    expect(Number(runCountRes.rows[0]?.c ?? 0), 'exactly ONE AgentRun (the execution_id UNIQUE — no second native provider operation)').toBe(1);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write committed (T2\'s)').toBe(1);
+    expect(stats.completeFalseCount, 'T1\'s conflict-recovery converge write was DISCARDED (0 rows)').toBe(1);
+    expect(stats.beginCount, 'the gate was crossed by BOTH actors (T1 opened it; T2 took it over)').toBe(2);
+
+    // T2's authoritative outcome is INTACT — T1's resumed dispatch wrote
+    // NOTHING (no 'failed' clobber, no duplicate agentRunId).
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.status, 'T2\'s completed status is INTACT (T1\'s collision did NOT write a stale failure)').toBe('completed');
+    expect(afterT1!.agentRunId, 'T2\'s AgentRun binding is INTACT').toBe(t2Run!.id);
+    expect(afterT1!.completedAt?.getTime(), 'T2\'s completion timestamp is INTACT').toBe(afterT2!.completedAt?.getTime());
+
+    // The obligation discharged + the gate COMPLETED.
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchState, 'the dispatch gate is COMPLETED').toBe('completed');
   });
 });

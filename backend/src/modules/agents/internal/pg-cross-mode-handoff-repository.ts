@@ -22,6 +22,7 @@ import type {
 } from './execution.types.js';
 import type {
   CreateCrossModeHandoffInput,
+  CrossModeHandoffFencedDispatchOutcome,
   CrossModeHandoffRecord,
   CrossModeHandoffRepository,
   PendingCrossModeHandoff,
@@ -443,6 +444,137 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
       [handoffId, owner, claimEpoch],
     );
     return result.rows.length > 0;
+  }
+
+  /**
+   * PR #46 round 6 (the side-effect-boundary fencing fix): CROSS the fenced
+   * dispatch gate — ONE conditional UPDATE that evaluates the lease fence
+   * (the EXACT owner + epoch + not discharged) ATOMICALLY with opening the
+   * durable dispatch intent (migration 0046's dispatch_state/dispatch_epoch
+   * columns). This replaces the check-then-act window between the round-5
+   * pre-call `ensureFence()` and the provider submit: an actor whose lease
+   * was reclaimed between the check and the submit affects 0 rows HERE and
+   * aborts BEFORE the provider call.
+   *
+   * The state arms:
+   *   - `dispatch_state IS NULL` — a fresh gate opens at this lease's epoch;
+   *   - `dispatch_state = 'in_flight' AND dispatch_epoch < $epoch` — a STALE
+   *     in-flight dispatch (a crashed/stalled owner that crossed but never
+   *     completed) is TAKEN OVER by this (newer, monotonic) lease — an
+   *     interrupted dispatch can never deadlock the gate;
+   *   - `dispatch_state = 'completed'` — never re-entered (the authoritative
+   *     outcome write is atomic with completion, so a completed gate implies
+   *     the outcome is present; the reconcile's outcome checks skip the
+   *     re-dispatch).
+   *
+   * A concurrent begin/reclaim pair is serialized by the obligation row lock
+   * (the second UPDATE's WHERE re-evaluates after the first commits —
+   * exactly one matches).
+   */
+  async beginFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>(
+      `UPDATE wfos_cross_mode_handoff_obligations
+          SET dispatch_state = 'in_flight',
+              dispatch_epoch = $3
+        WHERE handoff_id = $1
+          AND claim_owner = $2
+          AND claim_epoch = $3
+          AND discharged_at IS NULL
+          AND (
+            dispatch_state IS NULL
+            OR (dispatch_state = 'in_flight' AND dispatch_epoch < $3)
+          )
+       RETURNING id`,
+      [handoffId, owner, claimEpoch],
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
+   * PR #46 round 6 (the side-effect-boundary fencing fix): COMPLETE the
+   * fenced dispatch — the gate CAS AND the AUTHORITATIVE OUTCOME WRITE on
+   * `wfos_executions` in ONE transaction. This IS the side-effect boundary:
+   * the fence is not a pre-call check but the commit condition of the
+   * authoritative write itself.
+   *
+   * Transaction shape:
+   *   1. The gate CAS: `dispatch_state 'in_flight' @ THIS owner+epoch →
+   *      'completed'`, guarded by the lease identity (`claim_owner` +
+   *      `claim_epoch` + not discharged). 0 rows → ROLLBACK → FALSE — NO
+   *      outcome write happened (a stale actor whose lease was reclaimed
+   *      mid-dispatch cannot commit its already-computed outcome, and cannot
+   *      clobber the new owner's state with a failure write either).
+   *   2. The outcome write on wfos_executions — mirrors
+   *      {@link PgExecutionRecordRepository.updateStatus} semantics: status
+   *      is always set; agent_run_id/package_json/started_at/completed_at/
+   *      expires_at COALESCE (null keeps the current column value);
+   *      benchmark_metadata is merged with the jsonb `||` concatenation
+   *      (right-biased, top-level — identical to updateStatus's JS merge),
+   *      so the merge is itself atomic inside the transaction.
+   *
+   * The two row locks (the obligation row + the execution row) are both held
+   * until COMMIT: a concurrent reclaim UPDATE on the obligation row blocks
+   * until this transaction commits, after which its WHERE re-evaluates —
+   * either the lease already expired (the reclaim succeeds, but the outcome
+   * is already durably present → the reclaiming actor's reconcile converges
+   * + discharges) or the lease is still live (the reclaim fails).
+   */
+  async completeFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    executionRecordId: string,
+    outcome: CrossModeHandoffFencedDispatchOutcome,
+  ): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      const gate = await tx.query<{ id: string }>(
+        `UPDATE wfos_cross_mode_handoff_obligations
+            SET dispatch_state = 'completed'
+          WHERE handoff_id = $1
+            AND claim_owner = $2
+            AND claim_epoch = $3
+            AND discharged_at IS NULL
+            AND dispatch_state = 'in_flight'
+            AND dispatch_epoch = $3
+         RETURNING id`,
+        [handoffId, owner, claimEpoch],
+      );
+      if (gate.rows.length === 0) {
+        // Fenced out: the lease was reclaimed mid-dispatch (or the gate was
+        // already completed / the obligation discharged). NO outcome write.
+        return false;
+      }
+      await tx.query(
+        `UPDATE wfos_executions SET
+           status = $2,
+           agent_run_id = COALESCE($3, agent_run_id),
+           package_json = COALESCE($4::jsonb, package_json),
+           started_at = COALESCE($5, started_at),
+           completed_at = COALESCE($6, completed_at),
+           expires_at = COALESCE($7, expires_at),
+           benchmark_metadata = COALESCE(benchmark_metadata, '{}'::jsonb)
+                                 || COALESCE($8::jsonb, '{}'::jsonb),
+           updated_at = NOW()
+         WHERE id = $1`,
+        [
+          executionRecordId,
+          outcome.status,
+          outcome.agentRunId ?? null,
+          outcome.packageValue != null ? JSON.stringify(outcome.packageValue) : null,
+          outcome.startedAt ?? null,
+          outcome.completedAt ?? null,
+          outcome.expiresAt ?? null,
+          outcome.benchmarkMetadata != null
+            ? JSON.stringify(outcome.benchmarkMetadata)
+            : null,
+        ],
+      );
+      return true;
+    });
   }
 }
 

@@ -11169,14 +11169,15 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0045 (PR #46 round 5 — the cross-mode-handoff
-    // claim_epoch fencing token; 0044 is the claim/lease columns; 0043 is
-    // the obligation table itself; 0042 is the WORK-042 cross-mode handoff
-    // log). WORK-040 added none (0042-0045 belong to WORK-042, not WORK-040).
+    // The highest migration is 0046 (PR #46 round 6 — the cross-mode-handoff
+    // FENCED DISPATCH gate; 0045 is the claim_epoch fencing token; 0044 is
+    // the claim/lease columns; 0043 is the obligation table itself; 0042 is
+    // the WORK-042 cross-mode handoff log). WORK-040 added none (0042-0046
+    // belong to WORK-042, not WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-5 cross-mode-handoff claim-epoch fencing migration, NOT a planner-owned table)').toMatch(/^0045_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-6 cross-mode-handoff fenced-dispatch-gate migration, NOT a planner-owned table)').toMatch(/^0046_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -11878,6 +11879,10 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   const CROSS_MODE_MIGRATION_0045 = join(
     BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
     '0045_cross_mode_handoff_claim_epoch.sql',
+  );
+  const CROSS_MODE_MIGRATION_0046 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0046_cross_mode_handoff_dispatch_gate.sql',
   );
   const AGENTS_BARREL = join(MODULES_DIR, 'agents', 'index.ts');
   const PG_EXECUTION_REPO = join(AGENTS_INTERNAL, 'pg-execution-repository.ts');
@@ -12915,5 +12920,143 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // A fence loss inside the reconcile body is caught + converted to a
     // fence-lost return (NOT an error — the new owner completes the handoff).
     expect(reconcileBody, 'the reconcile catches claim-fence-lost + returns stage fence-lost').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?stage:\s*'fence-lost'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 round 6 (the side-effect-boundary fencing fix): the round-5
+  // phase-boundary ensureFence() runs BEFORE the side-effecting provider
+  // call, NOT ATOMICALLY with it — an owner that passed the pre-call check
+  // and then stalled could resume after a reclaim and complete its
+  // ALREADY-STARTED dispatch (a second authoritative provider operation).
+  // The dispatch side-effect boundary itself is now fenced:
+  // beginFencedDispatch (the lease fence evaluated ATOMICALLY with the
+  // durable dispatch intent, BEFORE the provider submit) +
+  // completeFencedDispatch (the gate CAS AND the authoritative outcome write
+  // in ONE transaction — a fenced-out completion rolls back with NO write).
+  // -------------------------------------------------------------------------
+
+  // R6-A (round 6 — migration 0046 + the dispatch-gate columns): the
+  // obligation carries the durable dispatch intent.
+  it('R6-A. migration 0046 exists + adds the dispatch-gate columns (dispatch_state, dispatch_epoch) with a state CHECK', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0046), '0046_cross_mode_handoff_dispatch_gate.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0046, 'utf8');
+    expect(src, 'the migration adds dispatch_state').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_state TEXT/);
+    expect(src, 'the migration adds dispatch_epoch').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_epoch BIGINT/);
+    expect(src, 'the dispatch_state CHECK constrains the gate to in_flight|completed').toMatch(/dispatch_state IN \('in_flight', 'completed'\)/);
+  });
+
+  // R6-B (round 6 — the repo exposes the fenced dispatch boundary): BOTH
+  // gate primitives exist on the repository + the interface.
+  it('R6-B. the repository + the interface expose beginFencedDispatch + completeFencedDispatch (the fenced dispatch boundary)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'beginFencedDispatch is implemented').toMatch(/async beginFencedDispatch\(/);
+    expect(repoSrc, 'completeFencedDispatch is implemented').toMatch(/async completeFencedDispatch\(/);
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'the interface declares beginFencedDispatch').toMatch(/beginFencedDispatch\(/);
+    expect(typesSrc, 'the interface declares completeFencedDispatch').toMatch(/completeFencedDispatch\(/);
+    expect(typesSrc, 'the fenced-dispatch OUTCOME type exists (the authoritative write payload)').toMatch(/interface CrossModeHandoffFencedDispatchOutcome/);
+  });
+
+  // R6-C (round 6 — the gate BEGIN is lease-fenced ATOMICALLY with the
+  // intent): ONE conditional UPDATE carrying claim_owner + claim_epoch in
+  // the WHERE clause (NOT a read-check-write), with the fresh + stale
+  // in-flight take-over arms + the never-re-enter-completed guard.
+  it('R6-C. the gate BEGIN is ONE lease-fenced conditional UPDATE (owner + epoch in the WHERE; fresh OR stale-take-over arms; completed never re-entered)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const beginMatch = repoSrc.match(/async beginFencedDispatch\([\s\S]*?\n  \}/);
+    expect(beginMatch, 'beginFencedDispatch is defined').toBeTruthy();
+    const beginSrc = beginMatch![0];
+    expect(beginSrc, 'the gate BEGIN is a single conditional UPDATE').toMatch(/UPDATE wfos_cross_mode_handoff_obligations/);
+    expect(beginSrc, 'the gate BEGIN carries the lease owner in the WHERE clause').toMatch(/AND claim_owner = \$2/);
+    expect(beginSrc, 'the gate BEGIN carries the fencing epoch in the WHERE clause').toMatch(/AND claim_epoch = \$3/);
+    expect(beginSrc, 'a fresh gate (dispatch_state IS NULL) opens').toMatch(/dispatch_state IS NULL/);
+    expect(beginSrc, 'a STALE in-flight gate is TAKEN OVER by the newer (monotonic) epoch').toMatch(/dispatch_state = 'in_flight' AND dispatch_epoch < \$3/);
+    expect(beginSrc, 'the gate opens at the claimant\'s epoch').toMatch(/SET dispatch_state = 'in_flight',\s*dispatch_epoch = \$3/);
+  });
+
+  // R6-D (round 6 — the gate COMPLETION is the atomic side-effect boundary):
+  // ONE TRANSACTION = the gate CAS (owner + epoch + in_flight@epoch) AND the
+  // authoritative outcome write on wfos_executions; a fenced-out completion
+  // returns FALSE with NO write (the rollback guarantee).
+  it('R6-D. the gate COMPLETION is ONE transaction — the gate CAS AND the authoritative wfos_executions outcome write (rollback on fence loss)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const completeMatch = repoSrc.match(/async completeFencedDispatch\([\s\S]*?\n  \}/);
+    expect(completeMatch, 'completeFencedDispatch is defined').toBeTruthy();
+    const completeSrc = completeMatch![0];
+    expect(completeSrc, 'the completion runs in a transaction').toMatch(/this\.db\.transaction\(/);
+    expect(completeSrc, 'the gate CAS requires the exact lease identity').toMatch(/AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+    expect(completeSrc, 'the gate CAS requires in_flight at THIS epoch').toMatch(/AND dispatch_state = 'in_flight'[\s\S]*?AND dispatch_epoch = \$3/);
+    expect(completeSrc, 'the authoritative outcome write targets wfos_executions').toMatch(/UPDATE wfos_executions SET/);
+    expect(completeSrc, 'the outcome write sets the status').toMatch(/status = \$2/);
+    expect(completeSrc, 'the outcome write COALESCEs agent_run_id + package_json + timestamps').toMatch(/agent_run_id = COALESCE\(\$3, agent_run_id\)/);
+    expect(completeSrc, 'the outcome write merges benchmark_metadata atomically (jsonb ||)').toMatch(/benchmark_metadata = COALESCE\(benchmark_metadata, '\{\}'::jsonb\)\s*\|\|\s*COALESCE\(\$8::jsonb, '\{\}'::jsonb\)/);
+    // The rollback guarantee: 0 rows on the gate CAS → NO outcome write.
+    const gateZeroIdx = completeSrc.indexOf('rows.length === 0');
+    const outcomeWriteIdx = completeSrc.indexOf('UPDATE wfos_executions');
+    expect(gateZeroIdx, 'the 0-rows fence-loss branch exists').toBeGreaterThan(-1);
+    expect(outcomeWriteIdx, 'the outcome write exists').toBeGreaterThan(-1);
+    expect(gateZeroIdx, 'the gate CAS is evaluated BEFORE the outcome write (0 rows → return false BEFORE any write)').toBeLessThan(outcomeWriteIdx);
+    expect(completeSrc, 'the 0-rows branch returns false WITHOUT writing').toMatch(/return false;/);
+  });
+
+  // R6-E (round 6 — BOTH dispatch sub-methods cross the fenced boundary on
+  // EVERY call site): dispatchExternal + dispatchNative call
+  // beginFencedDispatch BEFORE their provider submit + commit their outcome
+  // through completeFencedDispatch; the re-dispatch call sites in the
+  // reconcile pass the lease too (NO unfenced dispatch path remains).
+  it('R6-E. BOTH dispatch sub-methods cross the fenced dispatch boundary (begin before the submit; complete as the atomic outcome write; NO unfenced dispatch path)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // dispatchExternal: gated begin BEFORE the external submit; the outcome
+    // write goes THROUGH completeFencedDispatch (no direct updateStatus).
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 4000);
+    expect(deBody.indexOf('beginFencedDispatch('), 'dispatchExternal crosses the gate').toBeGreaterThan(-1);
+    expect(deBody.indexOf('beginFencedDispatch('), 'the gate crossing precedes the external provider submit').toBeLessThan(deBody.indexOf('externalExecutionProvider.submit('));
+    expect(deBody, 'the external outcome commits through the fenced completion').toMatch(/completeFencedDispatch\(/);
+    expect(deBody, 'dispatchExternal performs NO direct updateStatus write (the fenced completion is the ONLY outcome write)').not.toMatch(/executionRecordRepository\.updateStatus\(/);
+    // dispatchNative: gated begin BEFORE the gateway submit; the outcome
+    // write goes THROUGH completeFencedDispatch on EVERY path (success,
+    // existing-run converge, conflict recovery, AND run-less failure).
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 5000);
+    expect(dnBody.indexOf('beginFencedDispatch('), 'dispatchNative crosses the gate').toBeGreaterThan(-1);
+    expect(dnBody.indexOf('beginFencedDispatch('), 'the gate crossing precedes the gateway submit').toBeLessThan(dnBody.indexOf('nativeExecutionProvider.submit('));
+    const dnCompletions = dnBody.match(/completeFencedDispatch\(/g) ?? [];
+    expect(dnCompletions.length, 'dispatchNative commits EVERY outcome through the fenced completion (success + converge + conflict-recovery/failure)').toBeGreaterThanOrEqual(3);
+    expect(dnBody, 'dispatchNative performs NO direct updateStatus write (the fenced completion is the ONLY outcome write)').not.toMatch(/executionRecordRepository\.updateStatus\(/);
+    // The reconcile's re-dispatch call sites pass the lease (both
+    // directions) — no unfenced dispatch call remains.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'the external re-dispatch passes the lease (fenced)').toMatch(/dispatchExternal\(record, executionId, lease\)/);
+    expect(reconcileBody, 'the native re-dispatch passes the lease (fenced)').toMatch(/dispatchNative\(record, executionId, record\.model, lease\)/);
+  });
+
+  // R6-F (round 6 — a fenced-out dispatch aborts with 'claim-fence-lost' and
+  // the failure-clobber is GONE): every FALSE outcome throws the typed fence
+  // error (propagated as-is on the caller path / converted to stage
+  // fence-lost on the reconcile path); the legacy unconditional
+  // updateStatus-to-failed clobber no longer exists.
+  it('R6-F. a fenced-out dispatch aborts claim-fence-lost (the stale actor writes NOTHING — no failure clobber)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 4000);
+    expect(deBody, 'a failed gate BEGIN aborts BEFORE the submit (claim-fence-lost)').toMatch(/if \(!began\)[\s\S]*?'claim-fence-lost'/);
+    expect(deBody, 'a fenced-out completion aborts (claim-fence-lost)').toMatch(/if \(!completed\)[\s\S]*?'claim-fence-lost'/);
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 5000);
+    expect(dnBody, 'a failed gate BEGIN aborts BEFORE the gateway submit (claim-fence-lost)').toMatch(/if \(!began\)[\s\S]*?'claim-fence-lost'/);
+    expect(dnBody, 'every fenced-out completion aborts (claim-fence-lost — including the failure-handler path: NO failure clobber from a stale actor)').toMatch(/if \(!completed\)[\s\S]*?'claim-fence-lost'/);
+    // Fence errors propagate as-is (never swallowed into handoff-dispatch-failed).
+    expect(deBody, 'fence losses propagate as-is in dispatchExternal').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?throw err/);
+    expect(dnBody, 'fence losses propagate as-is in dispatchNative').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?throw err/);
+    // The conflict-recovery converge exists (a UNIQUE-colliding submit
+    // converges to the existing run instead of clobbering a stale failure).
+    expect(dnBody, 'the native conflict recovery converges to an existing AgentRun through the fence').toMatch(/CONFLICT RECOVERY[\s\S]*?completeFencedDispatch\(/);
   });
 });

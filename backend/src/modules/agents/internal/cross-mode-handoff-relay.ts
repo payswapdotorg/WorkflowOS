@@ -77,6 +77,18 @@
  * completes the handoff. The boot sweep reclaim of a CRASHED owner's
  * expired lease (the round-4 semantics) is preserved.
  *
+ * PR #46 round 6 (the side-effect-boundary fencing fix): the reconcile's
+ * re-dispatches now cross the FENCED DISPATCH GATE on the obligation row
+ * (migration 0046 — beginFencedDispatch evaluates the lease fence
+ * ATOMICALLY with the durable dispatch intent BEFORE the provider submit;
+ * completeFencedDispatch commits the gate CAS AND the authoritative outcome
+ * write in ONE transaction, rolling back with NO write when fenced out).
+ * A stalled delivery that passed its pre-call fence check but lost the
+ * lease mid-dispatch can no longer complete its ALREADY-STARTED dispatch —
+ * its outcome is DISCARDED (0 rows) and it returns `{ stage: 'fence-lost' }`
+ * while the reclaiming owner's outcome stands. A crashed delivery's
+ * interrupted in-flight gate is TAKEN OVER by the next (monotonic) lease.
+ *
  * NO scheduler, NO polling loop, NO second execution engine: the relay only
  * delivers ALREADY-AUTHORITATIVE durable intent (the obligation rows). It
  * never decides what work should exist. The reconciliation is the EXISTING

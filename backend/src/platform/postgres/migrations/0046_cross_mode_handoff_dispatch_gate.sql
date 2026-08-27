@@ -1,0 +1,69 @@
+-- WORK-042 (PR #46 round 6): the FENCED DISPATCH GATE for the
+-- cross-mode-handoff obligation — the side-effect-boundary fencing fix.
+--
+-- The round-6 review found that the round-5 phase-boundary `ensureFence()`
+-- runs BEFORE the side-effecting provider call, not ATOMICALLY with it:
+--
+--     T1 owns epoch N
+--     T1 passes ensureFence()          ← a pre-call CHECK, not a boundary
+--     T1 enters provider dispatch
+--     T1 stalls (heartbeat dead / event loop blocked)
+--     lease expires
+--     T2 reclaims → epoch N+1
+--     T2 dispatches
+--     T1 resumes → its ALREADY-STARTED dispatch completes
+--                                        ← a SECOND authoritative provider
+--                                          operation (an unfenced outcome
+--                                          write, clobbering T2's)
+--
+-- A pre-call lease check alone cannot close that window: the check and the
+-- authoritative side effect are two separate steps. The round-6 correction
+-- makes the DISPATCH SIDE-EFFECT BOUNDARY itself fenced — the classic
+-- intent + fenced-completion pattern, durable on the obligation row:
+--
+--   beginFencedDispatch(handoffId, owner, epoch):
+--     ONE conditional UPDATE — the lease fence (claim_owner + claim_epoch +
+--     not discharged) is evaluated ATOMICALLY with crossing the gate:
+--       NULL                 → 'in_flight' @ epoch   (a fresh dispatch)
+--       'in_flight' @ e < epoch → 'in_flight' @ epoch (a stale in-flight
+--                                                 dispatch is TAKEN OVER by
+--                                                 the new lease — liveness:
+--                                                 a crashed/stalled owner
+--                                                 cannot deadlock the gate)
+--       'completed'          → never re-entered (the outcome write is
+--                              atomic with completion — see below)
+--     0 rows → the actor no longer owns the lease → it aborts BEFORE the
+--     provider call (zero provider operations from a fenced-out actor).
+--
+--   completeFencedDispatch(handoffId, owner, epoch, outcome):
+--     ONE TRANSACTION — (a) the gate CAS ('in_flight' @ THIS owner+epoch →
+--     'completed') AND (b) the AUTHORITATIVE OUTCOME WRITE on
+--     wfos_executions (status + package/agent_run + timestamps + the merged
+--     benchmark metadata — mirroring updateStatus). Both commit together:
+--     dispatch_state='completed' ⟺ the authoritative outcome write landed.
+--     0 rows → the actor was fenced out (the lease was reclaimed mid-flight)
+--     → NO outcome write happens at all — a stale actor's already-started
+--     dispatch CANNOT produce a second authoritative provider operation
+--     (neither a duplicate success write NOR the old 'failed' clobber).
+--
+-- The provider CALL itself may still be issued twice across a stall (a
+-- non-transactional submit cannot be un-sent) — but the architecture now
+-- guarantees it converges to ONE authoritative operation:
+--   - external: the ExternalExecutionProvider is a deterministic pure
+--     function (no side effect); the authoritative operation IS the outcome
+--     write, which only the fence owner can commit;
+--   - native: wfos_agent_runs.execution_id is UNIQUE — a duplicate submit
+--     collides (23505) and the loser CONVERGES to the existing run
+--     (conflict recovery) instead of writing a failure; the outcome write
+--     is the fenced completion.
+--
+-- The new columns are FREE TO MUTATE: the 0043 immutability trigger only
+-- guards handoff_id/execution_id/created_at (the recorded intent). The
+-- dispatch gate columns are durable execution state (mutable, like the
+-- 0044 claim columns + the 0045 epoch). NO trigger extension is needed.
+
+ALTER TABLE wfos_cross_mode_handoff_obligations
+  ADD COLUMN IF NOT EXISTS dispatch_state TEXT
+    CONSTRAINT wfos_cross_mode_handoff_obligations_dispatch_state_check
+    CHECK (dispatch_state IS NULL OR dispatch_state IN ('in_flight', 'completed')),
+  ADD COLUMN IF NOT EXISTS dispatch_epoch BIGINT;

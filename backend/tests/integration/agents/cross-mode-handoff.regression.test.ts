@@ -1324,7 +1324,11 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
 
       // Simulate the crash-after-mutate state: reset the record to
       // mode=native, status=running (the post-mutate, pre-dispatch state) +
-      // delete the AgentRun (the dispatch did not happen).
+      // delete the AgentRun (the dispatch did not happen). PR #46 round 6:
+      // also reset the dispatch gate — the crash state being simulated
+      // PREDATES the gate completion (a completed gate implies the atomic
+      // outcome write, which the deleted AgentRun contradicts — without this
+      // reset the simulated state is unreachable-in-production).
       await stack.db.client.query(
         `UPDATE wfos_executions SET status = 'running', agent_run_id = NULL, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
         [recordId],
@@ -1332,6 +1336,12 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       await stack.db.client.query(
         `DELETE FROM wfos_agent_runs WHERE execution_id = $1`,
         [executionId],
+      );
+      await stack.db.client.query(
+        `UPDATE wfos_cross_mode_handoff_obligations
+           SET dispatch_state = NULL, dispatch_epoch = NULL
+         WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+        [recordId],
       );
       const midRecord = await executionRecordRepo.findByExecutionId(executionId);
       expect(midRecord!.mode).toBe('native');
@@ -1581,7 +1591,9 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         // Simulate the crash-after-mutate state: reset the record to
         // mode=native, status=running + delete the AgentRun (the dispatch
         // did not happen). Reset the obligation to pending (the crash
-        // undid the discharge).
+        // undid the discharge). PR #46 round 6: also reset the dispatch
+        // gate — the simulated crash state predates the gate completion
+        // (a completed gate implies the atomic outcome write).
         await stack.db.client.query(
           `UPDATE wfos_executions SET status = 'running', agent_run_id = NULL, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
           [recordId],
@@ -1591,7 +1603,10 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
           [executionId],
         );
         await stack.db.client.query(
-          `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+          `UPDATE wfos_cross_mode_handoff_obligations
+             SET discharged_at = NULL,
+                 dispatch_state = NULL,
+                 dispatch_epoch = NULL
            WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
           [recordId],
         );
@@ -2262,7 +2277,9 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
                claimed_at = NULL,
                claim_expires_at = NULL,
                claim_owner = NULL,
-               claim_epoch = 0
+               claim_epoch = 0,
+               dispatch_state = NULL,
+               dispatch_epoch = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );
@@ -2339,14 +2356,18 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // 'simulate the crash gap' intent robust to any future caller-path
       // change that might leave a stale held claim blocking the reconcile).
       // PR #46 round 5: also reset claim_epoch to 0 (the fencing-token
-      // baseline — a fresh lease mints epoch 1 on its claim).
+      // baseline — a fresh lease mints epoch 1 on its claim). PR #46 round 6:
+      // also reset the dispatch gate (a completed gate from the prior
+      // handoff would never be re-entered by a re-dispatch).
       await stack.db.client.query(
         `UPDATE wfos_cross_mode_handoff_obligations
            SET discharged_at = NULL,
                claimed_at = NULL,
                claim_expires_at = NULL,
                claim_owner = NULL,
-               claim_epoch = 0
+               claim_epoch = 0,
+               dispatch_state = NULL,
+               dispatch_epoch = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );

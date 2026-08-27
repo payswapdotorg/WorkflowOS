@@ -315,6 +315,93 @@ export interface CrossModeHandoffRepository {
     owner: string,
     claimEpoch: number,
   ): Promise<boolean>;
+  /**
+   * PR #46 round 6 (the side-effect-boundary fencing fix): CROSS the fenced
+   * dispatch gate — the durable intent record for the provider dispatch,
+   * evaluated ATOMICALLY with the lease fence (ONE conditional UPDATE, no
+   * check-then-act window). Called by the dispatch boundary BEFORE the
+   * provider submit.
+   *
+   * The round-6 review established that the round-5 phase-boundary
+   * `ensureFence()` runs BEFORE the side-effecting provider call, not
+   * atomically with it — a stalled owner that passed the pre-call check
+   * could resume after a reclaim and complete its ALREADY-STARTED dispatch
+   * (a second authoritative provider operation). The gate closes that
+   * window at the architecture level:
+   *
+   *   - the WHERE clause carries the EXACT lease identity (`claim_owner` +
+   *     `claim_epoch` + not discharged): an actor whose lease was reclaimed
+   *     affects 0 rows → returns FALSE → the caller aborts
+   *     'claim-fence-lost' BEFORE the provider call (zero provider
+   *     operations from a fenced-out actor);
+   *   - a FRESH gate (dispatch_state IS NULL) opens at the caller's epoch;
+   *   - a STALE in-flight gate (dispatch_state = 'in_flight' AND
+   *     dispatch_epoch < the caller's epoch — a crashed/stalled owner that
+   *     crossed but never completed) is TAKEN OVER by the new lease (the
+   *     epochs are monotonic fencing tokens — a new lease always out-ranks
+   *     an older in-flight dispatch; liveness: an interrupted dispatch can
+   *     never deadlock the gate);
+   *   - a COMPLETED gate is never re-entered (the outcome write is atomic
+   *     with completion — see {@link completeFencedDispatch}).
+   */
+  beginFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean>;
+  /**
+   * PR #46 round 6 (the side-effect-boundary fencing fix): COMPLETE the
+   * fenced dispatch — the gate CAS AND the AUTHORITATIVE OUTCOME WRITE on
+   * `wfos_executions` in ONE transaction (mirrors updateStatus semantics:
+   * `status` is set; agent_run_id/package_json/started_at/completed_at/
+   * expires_at COALESCE; benchmark_metadata is jsonb-merged). Called by the
+   * dispatch boundary AFTER the provider submit, with the submission's
+   * outcome payload.
+   *
+   * The transaction is the side-effect boundary itself:
+   *   - the gate CAS requires the gate to still be 'in_flight' at THIS
+   *     actor's owner + epoch AND the lease to still be owned by THIS actor
+   *     (`claim_owner` + `claim_epoch` + not discharged);
+   *   - 0 rows → FALSE → the transaction ROLLED BACK — NO outcome write
+   *     happened. A stale actor whose lease was reclaimed mid-dispatch
+   *     (the architect's round-6 interleaving: T1 passes the fence → T1
+   *     stalls during the dispatch → the lease expires → T2 reclaims → T2
+   *     completes the dispatch → T1 resumes) CANNOT commit its
+   *     already-computed outcome: not a duplicate success write, and not
+   *     the legacy failure-clobber either;
+   *   - 1 row → TRUE → the outcome write committed in the SAME transaction
+   *     — `dispatch_state = 'completed'` is the durable proof the
+   *     authoritative provider outcome landed exactly once.
+   */
+  completeFencedDispatch(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    executionRecordId: string,
+    outcome: CrossModeHandoffFencedDispatchOutcome,
+  ): Promise<boolean>;
+}
+
+/**
+ * PR #46 round 6: the authoritative provider-dispatch OUTCOME payload written
+ * by {@link CrossModeHandoffRepository.completeFencedDispatch} in the SAME
+ * transaction as the dispatch-gate completion. Field semantics mirror
+ * {@link ExecutionRecordRepository.updateStatus}: `status` is always set;
+ * the optional fields COALESCE (null keeps the current column value);
+ * `benchmarkMetadata` is MERGED over the current row.
+ */
+export interface CrossModeHandoffFencedDispatchOutcome {
+  /** The post-dispatch execution status (always written). */
+  readonly status: ExecutionState;
+  /** The native dispatch's AgentRun id (COALESCE — null keeps the current). */
+  readonly agentRunId?: string | null;
+  /** The external dispatch's package (COALESCE — null keeps the current). */
+  readonly packageValue?: ExternalExecutionPackage | null;
+  readonly startedAt?: Date | null;
+  readonly completedAt?: Date | null;
+  readonly expiresAt?: Date | null;
+  /** Merged over the record's current benchmark_metadata (jsonb ||). */
+  readonly benchmarkMetadata?: Record<string, unknown> | null;
 }
 
 /**
