@@ -107,6 +107,30 @@ export interface ExecutionTask {
   readonly contextPayload: string;
   /** Structured agent instructions (DEFAULT_AGENT_INSTRUCTIONS). */
   readonly instructions: readonly string[];
+  /**
+   * PR #46 round 7 (the provider-operation exactly-once boundary): the
+   * DURABLE idempotency key for THIS provider dispatch — derived from the
+   * LOGICAL HANDOFF IDENTITY (`cross-mode-dispatch-<handoffId>`), NEVER from
+   * the volatile lease owner/epoch, so every actor that dispatches the same
+   * logical handoff (the original owner, a reclaiming owner, a crash-recovery
+   * re-dispatch) derives the SAME key.
+   *
+   * THE PROVIDER CONTRACT (the architect's round-7 option 1 — the exactly-once
+   * side-effect boundary): when a task carries this key, `submit()` MUST NOT
+   * start a SECOND provider operation for the same key — a same-key submit
+   * CONVERGES to the operation the first submit already started (it returns
+   * that operation's submission — awaiting it when still in flight — exactly
+   * like a Stripe-style `Idempotency-Key`). The correctness of a keyed
+   * dispatch may never depend on provider determinism/purity: the provider
+   * must return the REGISTERED operation, not a re-computed lookalike.
+   *
+   * Native mode: the durable operation identity is the EXECUTION identity —
+   * `wfos_agent_runs.execution_id` is UNIQUE, so a keyed native dispatch whose
+   * run already exists CONVERGES to that run (no gateway call, no second
+   * adapter invocation). Absent/null (the mainline one-shot dispatch): the
+   * provider's pre-WORK-042 behavior applies unchanged.
+   */
+  readonly dispatchIdempotencyKey?: string | null;
 }
 
 /** What an ExecutionProvider returns after accepting a task. */
@@ -139,6 +163,18 @@ export interface ExecutionSubmission {
  *     ExternalExecutionPackage and returns 'handoff_ready'. It does NOT
  *     execute anything and contains NO provider-specific (Z.ai/ChatGPT/Claude)
  *     DOM automation or URLs — that belongs to WORK-028/029.
+ *
+ * PR #46 round 7 (the provider-operation exactly-once boundary): when the
+ * submitted {@link ExecutionTask} carries a `dispatchIdempotencyKey`, `submit`
+ * is IDEMPOTENT BY THAT KEY — a retried or reclaimed dispatch with the same
+ * key MUST CONVERGE to the SAME provider operation (the first submit's
+ * operation — its stored submission, awaited when still in flight), NEVER a
+ * second independent operation. The cross-mode handoff dispatch ALWAYS keys
+ * its submissions (the WORK-042 service derives the key from the handoff
+ * identity); the mainline one-shot dispatch is unkeyed (behavior unchanged).
+ * A future non-pure provider (WORK-028/029 real external platforms) MUST
+ * implement the key through the platform's own idempotency mechanism — the
+ * architecture does NOT rely on provider determinism.
  */
 export interface ExecutionProvider {
   readonly name: string;

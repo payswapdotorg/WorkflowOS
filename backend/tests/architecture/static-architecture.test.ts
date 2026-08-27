@@ -11169,15 +11169,16 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0046 (PR #46 round 6 — the cross-mode-handoff
-    // FENCED DISPATCH gate; 0045 is the claim_epoch fencing token; 0044 is
-    // the claim/lease columns; 0043 is the obligation table itself; 0042 is
-    // the WORK-042 cross-mode handoff log). WORK-040 added none (0042-0046
-    // belong to WORK-042, not WORK-040).
+    // The highest migration is 0047 (PR #46 round 7 — the cross-mode-handoff
+    // DURABLE DISPATCH IDEMPOTENCY KEY; 0046 is the fenced dispatch gate;
+    // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
+    // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
+    // handoff log). WORK-040 added none (0042-0047 belong to WORK-042, not
+    // WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-6 cross-mode-handoff fenced-dispatch-gate migration, NOT a planner-owned table)').toMatch(/^0046_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-7 cross-mode-handoff durable-dispatch-idempotency-key migration, NOT a planner-owned table)').toMatch(/^0047_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -13058,5 +13059,161 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // The conflict-recovery converge exists (a UNIQUE-colliding submit
     // converges to the existing run instead of clobbering a stale failure).
     expect(dnBody, 'the native conflict recovery converges to an existing AgentRun through the fence').toMatch(/CONFLICT RECOVERY[\s\S]*?completeFencedDispatch\(/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 ROUND 7 — the KEYED PROVIDER-DISPATCH BOUNDARY (the provider-
+  // operation exactly-once contract). The round-7 review established that the
+  // round-6 dispatch gate protects the AUTHORITATIVE DB OUTCOME but NOT the
+  // provider operation itself: the submit runs OUTSIDE the DB transaction, so
+  // a lease reclaimed while the first submit is in flight let the reclaiming
+  // owner's take-over re-dispatch start a SECOND provider operation. The
+  // round-7 correction adopts the architect's contract option 1 — the
+  // exactly-once side-effect boundary via a DURABLE IDEMPOTENCY KEY derived
+  // from the LOGICAL HANDOFF IDENTITY: the provider boundary CONVERGES
+  // same-key submits onto ONE operation (never a second).
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0047 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0047_cross_mode_handoff_dispatch_key.sql',
+  );
+  const R7_NATIVE_PROVIDER = join(AGENTS_INTERNAL, 'native-execution-provider.ts');
+  const R7_EXTERNAL_PROVIDER = join(AGENTS_INTERNAL, 'external-execution-provider.ts');
+
+  // R7-A (round 7 — migration 0047): the durable dispatch idempotency key is
+  // a column on the obligation row (recorded atomically with the gate-open).
+  it('R7-A. migration 0047 exists + adds the durable dispatch_idempotency_key column', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0047), '0047_cross_mode_handoff_dispatch_key.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0047, 'utf8');
+    expect(src, 'the migration adds dispatch_idempotency_key').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_idempotency_key TEXT/);
+  });
+
+  // R7-B (round 7 — the provider contract is DECLARED + implemented at BOTH
+  // provider boundaries): the ExecutionTask carries the dispatch idempotency
+  // key with the keyed-convergence contract; the external provider keys its
+  // operation registry on it; the native provider keys its convergence on the
+  // durable execution identity.
+  it('R7-B. the keyed provider-dispatch contract: the ExecutionTask declares dispatchIdempotencyKey + BOTH providers implement keyed convergence', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the ExecutionTask declares the dispatch idempotency key').toMatch(/readonly dispatchIdempotencyKey\?: string \| null/);
+    expect(typesSrc, 'the ExecutionProvider contract documents the keyed-convergence requirement').toMatch(/MUST CONVERGE to the SAME provider operation/);
+    // The external provider: the keyed operation registry — a same-key submit
+    // returns the REGISTERED operation, never a second generation.
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    expect(externalSrc, 'the external provider keys its registry on the dispatch key').toMatch(/task\.dispatchIdempotencyKey \?\? task\.executionId/);
+    expect(externalSrc, 'the external provider CONVERGES a same-key submit onto the registered operation').toMatch(/this\.operations\.get\(key\)/);
+    // The native provider: the keyed convergence on the durable execution
+    // identity — a keyed dispatch whose run exists NEVER reaches the gateway.
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider implements the keyed pre-check convergence').toMatch(/if \(task\.dispatchIdempotencyKey\) \{/);
+    expect(nativeSrc, 'the native provider implements the collision-recovery convergence').toMatch(/collision-recovery/);
+  });
+
+  // R7-C (round 7 — the key derivation is LOGICAL, not volatile): the service
+  // derives the key from the HANDOFF IDENTITY ONLY (the handoff row id —
+  // stable across owners, epochs, and reclaims) and stamps it on BOTH
+  // dispatch sub-methods' provider submits + the gate-open. A key derived
+  // from the lease owner/epoch would CHANGE on reclaim and could never
+  // converge two actors onto one operation.
+  it('R7-C. the service derives the dispatch key from the LOGICAL HANDOFF IDENTITY (never owner/epoch) + stamps it on BOTH dispatch sub-methods', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const deriveMatch = serviceSrc.match(/private dispatchIdempotencyKey\(lease: ClaimLeaseGuard\): string \{\s*return (`[^`]+`);/);
+    expect(deriveMatch, 'the dispatch-key derivation helper exists').toBeTruthy();
+    expect(deriveMatch![1], 'the key is derived from the handoff identity').toContain('${lease.handoffId}');
+    // The derivation must NOT reference the volatile lease identity.
+    const deriveBody = deriveMatch![1];
+    expect(deriveBody, 'the key derivation NEVER references the lease owner (volatile — changes on reclaim)').not.toContain('owner');
+    expect(deriveBody, 'the key derivation NEVER references the claim epoch (volatile — changes on reclaim)').not.toContain('Epoch');
+    // BOTH dispatch sub-methods stamp the key on the submitted task + pass it
+    // to the gate-open.
+    const deStart = serviceSrc.indexOf('private async dispatchExternal(');
+    const deEnd = serviceSrc.indexOf('private ', deStart + 10);
+    const deBody = serviceSrc.slice(deStart, deEnd > deStart ? deEnd : deStart + 5000);
+    expect(deBody, 'dispatchExternal derives the dispatch key').toMatch(/const dispatchKey = this\.dispatchIdempotencyKey\(lease\)/);
+    expect(deBody, 'dispatchExternal records the key with the gate-open').toMatch(/beginFencedDispatch\(\s*lease\.handoffId,\s*lease\.owner,\s*lease\.claimEpoch,\s*dispatchKey,/);
+    expect(deBody, 'dispatchExternal stamps the key on the submitted task (the KEYED submit)').toMatch(/externalExecutionProvider\.submit\(\{\s*\.\.\.built\.task,\s*dispatchIdempotencyKey: dispatchKey,/);
+    const dnStart = serviceSrc.indexOf('private async dispatchNative(');
+    const dnEnd = serviceSrc.indexOf('private ', dnStart + 10);
+    const dnBody = serviceSrc.slice(dnStart, dnEnd > dnStart ? dnEnd : dnStart + 6000);
+    expect(dnBody, 'dispatchNative derives the dispatch key').toMatch(/const dispatchKey = this\.dispatchIdempotencyKey\(lease\)/);
+    expect(dnBody, 'dispatchNative records the key with the gate-open').toMatch(/beginFencedDispatch\(\s*lease\.handoffId,\s*lease\.owner,\s*lease\.claimEpoch,\s*dispatchKey,/);
+    expect(dnBody, 'dispatchNative stamps the key on the submitted task (the KEYED submit)').toMatch(/nativeExecutionProvider\.submit\(\{\s*\.\.\.built\.task,\s*dispatchIdempotencyKey: dispatchKey,/);
+  });
+
+  // R7-D (round 7 — the key is recorded DURABLY, atomically with the
+  // gate-open): beginFencedDispatch's single conditional UPDATE also sets
+  // dispatch_idempotency_key — the durable record of the dispatch operation
+  // identity, in the SAME statement that evaluates the lease fence + opens
+  // the dispatch intent (no check-then-act window).
+  it('R7-D. the gate-open records dispatch_idempotency_key ATOMICALLY (the same conditional UPDATE as the fence + intent)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const beginMatch = repoSrc.match(/async beginFencedDispatch\([\s\S]*?\n  \}/);
+    expect(beginMatch, 'beginFencedDispatch is defined').toBeTruthy();
+    const beginSrc = beginMatch![0];
+    expect(beginSrc, 'the gate-open SETs the durable dispatch idempotency key').toMatch(/dispatch_idempotency_key = \$4/);
+    const setStateIdx = beginSrc.indexOf("SET dispatch_state = 'in_flight'");
+    const setKeyIdx = beginSrc.indexOf('dispatch_idempotency_key = $4');
+    const whereIdx = beginSrc.indexOf('WHERE handoff_id = $1');
+    expect(setStateIdx, 'the gate-open sets dispatch_state').toBeGreaterThan(-1);
+    expect(setKeyIdx, 'the gate-open sets the key').toBeGreaterThan(-1);
+    expect(whereIdx, 'the WHERE clause exists').toBeGreaterThan(-1);
+    expect(setKeyIdx, 'the key is set in the SAME UPDATE (one atomic statement with the intent)').toBeGreaterThan(setStateIdx);
+    expect(setKeyIdx, 'the key is set in the SAME UPDATE (not after the WHERE)').toBeLessThan(whereIdx);
+    // The interface declares the 4-arg signature.
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    expect(typesSrc, 'the repository interface passes the dispatch key to beginFencedDispatch').toMatch(/beginFencedDispatch\(\s*handoffId: string,\s*owner: string,\s*claimEpoch: number,\s*dispatchIdempotencyKey: string,/);
+  });
+
+  // R7-E (round 7 — the native provider boundary is AT-MOST-ONCE): a KEYED
+  // dispatch whose run already exists CONVERGES BEFORE the gateway call (no
+  // gateway call, no second adapter invocation); the gateway invokes the
+  // adapter only AFTER its own run-creation succeeded (the adapter execution
+  // is therefore structurally at-most-once per execution identity).
+  it('R7-E. the native provider NEVER reaches the gateway when the keyed operation identity already exists (converge BEFORE the gateway submit)', () => {
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    const preCheckIdx = nativeSrc.indexOf('if (task.dispatchIdempotencyKey) {');
+    const convergeIdx = nativeSrc.indexOf("return this.convergeToRun(task, existing, 'pre-check');");
+    const gatewayIdx = nativeSrc.indexOf('this.deps.agentGateway.execute(');
+    expect(preCheckIdx, 'the keyed pre-check exists').toBeGreaterThan(-1);
+    expect(convergeIdx, 'the pre-check convergence return exists').toBeGreaterThan(-1);
+    expect(gatewayIdx, 'the gateway submit exists').toBeGreaterThan(-1);
+    expect(preCheckIdx, 'the keyed pre-check runs BEFORE the gateway submit').toBeLessThan(gatewayIdx);
+    expect(convergeIdx, 'the convergence return precedes the gateway submit (a converged dispatch NEVER invokes the gateway/adapter)').toBeLessThan(gatewayIdx);
+    // The gateway invokes the adapter only AFTER its own run-creation
+    // succeeded (the adapter execution is inside the post-create section).
+    const gatewaySrc = readFileSync(join(AGENTS_INTERNAL, 'agent-gateway.ts'), 'utf8');
+    const createIdx = gatewaySrc.indexOf('await this.runRepo.create(');
+    const adapterIdx = gatewaySrc.indexOf('await adapter.execute(request)');
+    expect(createIdx, 'the gateway creates the AgentRun').toBeGreaterThan(-1);
+    expect(adapterIdx, 'the gateway invokes the adapter').toBeGreaterThan(-1);
+    expect(createIdx, 'the gateway creates the run BEFORE invoking the adapter (the adapter only runs for the ONE create-winner)').toBeLessThan(adapterIdx);
+  });
+
+  // R7-F (round 7 — the external convergence does NOT depend on determinism):
+  // the same-key branch returns the REGISTERED operation's stored submission
+  // (the Map entry created by the FIRST generation) — it never re-invokes the
+  // generation for a same-key submit. The architect's round-7 words: "the
+  // cross-mode architecture cannot make its correctness depend on that
+  // implementation detail [determinism]".
+  it('R7-F. the external provider returns the REGISTERED operation on a same-key submit (convergence independent of provider determinism)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const submitMatch = externalSrc.match(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmission> \{[\s\S]*?\n  \}/);
+    expect(submitMatch, 'the external submit is defined').toBeTruthy();
+    const submitSrc = submitMatch![0];
+    const getIdx = submitSrc.indexOf('this.operations.get(key)');
+    const returnIdx = submitSrc.indexOf('return registered;');
+    const generateIdx = submitSrc.indexOf('this.generate(task)');
+    expect(getIdx, 'the registry lookup exists').toBeGreaterThan(-1);
+    expect(returnIdx, 'the same-key branch returns the REGISTERED operation').toBeGreaterThan(-1);
+    expect(generateIdx, 'the generation call exists').toBeGreaterThan(-1);
+    // The same-key return precedes the generation call site: a converged
+    // submit NEVER reaches the generation.
+    expect(returnIdx, 'the same-key branch returns BEFORE the generation path (a converged submit never re-generates)').toBeLessThan(generateIdx);
+    // The generation registers its promise BEFORE awaiting, so a concurrent
+    // same-key submit converges onto the in-flight operation.
+    const registerIdx = submitSrc.indexOf('this.operations.set(key, operation)');
+    expect(registerIdx, 'the operation promise is registered').toBeGreaterThan(-1);
+    expect(registerIdx, 'the registration follows the generation start (concurrent same-key submits converge onto the in-flight operation)').toBeGreaterThan(generateIdx);
   });
 });

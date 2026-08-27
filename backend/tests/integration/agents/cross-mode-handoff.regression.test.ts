@@ -1339,7 +1339,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       );
       await stack.db.client.query(
         `UPDATE wfos_cross_mode_handoff_obligations
-           SET dispatch_state = NULL, dispatch_epoch = NULL
+           SET dispatch_state = NULL, dispatch_epoch = NULL, dispatch_idempotency_key = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );
@@ -1606,6 +1606,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
           `UPDATE wfos_cross_mode_handoff_obligations
              SET discharged_at = NULL,
                  dispatch_state = NULL,
+                 dispatch_idempotency_key = NULL,
                  dispatch_epoch = NULL
            WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
           [recordId],
@@ -2279,6 +2280,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
                claim_owner = NULL,
                claim_epoch = 0,
                dispatch_state = NULL,
+               dispatch_idempotency_key = NULL,
                dispatch_epoch = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
@@ -2367,6 +2369,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
                claim_owner = NULL,
                claim_epoch = 0,
                dispatch_state = NULL,
+               dispatch_idempotency_key = NULL,
                dispatch_epoch = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],

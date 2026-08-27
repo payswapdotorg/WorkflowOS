@@ -447,11 +447,15 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
   }
 
   /**
-   * PR #46 round 6 (the side-effect-boundary fencing fix): CROSS the fenced
-   * dispatch gate — ONE conditional UPDATE that evaluates the lease fence
-   * (the EXACT owner + epoch + not discharged) ATOMICALLY with opening the
-   * durable dispatch intent (migration 0046's dispatch_state/dispatch_epoch
-   * columns). This replaces the check-then-act window between the round-5
+   * PR #46 round 6 (the side-effect-boundary fencing fix) + round 7 (the
+   * provider-operation exactly-once boundary): CROSS the fenced dispatch
+   * gate — ONE conditional UPDATE that evaluates the lease fence (the EXACT
+   * owner + epoch + not discharged) ATOMICALLY with opening the durable
+   * dispatch intent (migration 0046's dispatch_state/dispatch_epoch columns
+   * + migration 0047's dispatch_idempotency_key — the durable record of the
+   * dispatch operation identity, derived from the LOGICAL HANDOFF IDENTITY
+   * so every actor driving the same handoff records + submits under the SAME
+   * key). This replaces the check-then-act window between the round-5
    * pre-call `ensureFence()` and the provider submit: an actor whose lease
    * was reclaimed between the check and the submit affects 0 rows HERE and
    * aborts BEFORE the provider call.
@@ -461,7 +465,9 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
    *   - `dispatch_state = 'in_flight' AND dispatch_epoch < $epoch` — a STALE
    *     in-flight dispatch (a crashed/stalled owner that crossed but never
    *     completed) is TAKEN OVER by this (newer, monotonic) lease — an
-   *     interrupted dispatch can never deadlock the gate;
+   *     interrupted dispatch can never deadlock the gate; the take-over
+   *     re-records the SAME idempotency key (the deterministic handoff-
+   *     identity derivation makes every actor's key identical);
    *   - `dispatch_state = 'completed'` — never re-entered (the authoritative
    *     outcome write is atomic with completion, so a completed gate implies
    *     the outcome is present; the reconcile's outcome checks skip the
@@ -475,11 +481,13 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
     handoffId: string,
     owner: string,
     claimEpoch: number,
+    dispatchIdempotencyKey: string,
   ): Promise<boolean> {
     const result = await this.db.query<{ id: string }>(
       `UPDATE wfos_cross_mode_handoff_obligations
           SET dispatch_state = 'in_flight',
-              dispatch_epoch = $3
+              dispatch_epoch = $3,
+              dispatch_idempotency_key = $4
         WHERE handoff_id = $1
           AND claim_owner = $2
           AND claim_epoch = $3
@@ -489,7 +497,7 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
             OR (dispatch_state = 'in_flight' AND dispatch_epoch < $3)
           )
        RETURNING id`,
-      [handoffId, owner, claimEpoch],
+      [handoffId, owner, claimEpoch, dispatchIdempotencyKey],
     );
     return result.rows.length > 0;
   }

@@ -1,0 +1,68 @@
+-- WORK-042 (PR #46 round 7): the DURABLE DISPATCH IDEMPOTENCY KEY for the
+-- cross-mode-handoff dispatch — the provider-operation exactly-once boundary.
+--
+-- The round-7 review found the round-6 dispatch gate protects the
+-- AUTHORITATIVE DATABASE OUTCOME but not the PROVIDER OPERATION itself:
+-- the provider submit runs OUTSIDE the DB transaction, so a lease can be
+-- reclaimed while the first provider call is still in flight —
+--
+--     T1 owns claim / epoch N
+--     T1 -> beginFencedDispatch(N) succeeds
+--     T1 -> provider.submit() starts                <- OUTSIDE the transaction
+--     T1 stalls long enough for lease expiry
+--     T2 -> reclaims obligation / epoch N+1
+--     T2 -> beginFencedDispatch(N+1) succeeds       <- the take-over arm
+--     T2 -> provider.submit() runs                  <- a SECOND provider
+--                                                    operation for ONE logical
+--                                                    handoff
+--     T2 -> authoritative outcome commits
+--     T1 -> original provider call eventually returns
+--     T1 -> completeFencedDispatch(N) is rejected   <- the DB outcome is
+--                                                    singular, but the SIDE
+--                                                    EFFECT happened twice
+--
+-- The round-6 migration header argued the provider CALL "may still be issued
+-- twice" and leaned on the ExternalExecutionProvider's determinism + the
+-- wfos_agent_runs UNIQUE. The round-7 review rejects exactly that framing:
+-- the architecture cannot make its correctness depend on those implementation
+-- details.
+--
+-- The round-7 correction adopts the architect's contract option 1 — the
+-- EXACTLY-ONCE SIDE-EFFECT BOUNDARY: the target provider exposes a DURABLE
+-- IDEMPOTENCY KEY (derived from the LOGICAL HANDOFF IDENTITY — stable across
+-- actors, epochs, and reclaims; NEVER from the volatile lease owner/epoch) so
+-- a retried or reclaimed dispatch CONVERGES to the same provider operation
+-- instead of starting a second one:
+--
+--   - the service derives `cross-mode-dispatch-<handoffId>` and (a) records
+--     it HERE — atomically with crossing the dispatch gate (the same
+--     conditional UPDATE that opens dispatch_state/dispatch_epoch also sets
+--     dispatch_idempotency_key) — and (b) stamps it on the ExecutionTask
+--     submitted to the provider;
+--   - the ExternalExecutionProvider keys its operation registry on it: a
+--     same-key submit returns the REGISTERED operation (the first
+--     generation's stored submission) — never a second generation;
+--   - the NativeExecutionProvider keys its convergence on the durable
+--     execution identity (wfos_agent_runs.execution_id): a keyed dispatch
+--     whose run already exists CONVERGES to that run (no gateway call, no
+--     adapter invocation — the provider operation is the ADAPTER execution);
+--     a create collision (the residual race, backstopped by the UNIQUE)
+--     also converges instead of propagating.
+--
+-- Why contract option 2 (a non-reclaimable in-flight state) was NOT chosen:
+-- an uncertain provider operation from a CRASHED owner can never be "safely
+-- resolved" without a provider-side handle — waiting forever deadlocks the
+-- gate (exactly what the round-6 take-over arm exists to prevent), while
+-- resuming after a deadline blindly re-submits and re-opens the double-
+-- operation hazard. The durable key resolves the uncertainty BY CONSTRUCTION:
+-- the reclaiming actor's re-submit converges onto the SAME operation (the
+-- provider owns the operation; the original submitter's liveness is
+-- irrelevant), preserving BOTH uniqueness and the round-6 liveness.
+--
+-- The new column is FREE TO MUTATE: the 0043 immutability trigger only
+-- guards handoff_id/execution_id/created_at (the recorded intent). Like the
+-- 0044 claim columns, the 0045 epoch, and the 0046 gate columns, this is
+-- durable execution state. NO trigger extension is needed.
+
+ALTER TABLE wfos_cross_mode_handoff_obligations
+  ADD COLUMN IF NOT EXISTS dispatch_idempotency_key TEXT;

@@ -100,6 +100,33 @@
  *     but never completed) is TAKEN OVER by the next (monotonic) lease —
  *     liveness: an interrupted dispatch can never deadlock the gate.
  *
+ * PR #46 round 7 (the provider-operation exactly-once boundary): the round-6
+ * review REJECTED the "the provider call may still be duplicated, but it
+ * converges to ONE authoritative operation" framing — the DB outcome being
+ * singular does NOT make the PROVIDER OPERATION exactly-once: the submit runs
+ * OUTSIDE the DB transaction, so a lease reclaimed while the first submit is
+ * still in flight let the reclaiming owner's take-over re-dispatch start a
+ * SECOND provider operation (two in-flight submits for ONE logical handoff).
+ * The correction adopts the architect's contract option 1 — the exactly-once
+ * side-effect boundary via a DURABLE IDEMPOTENCY KEY (migration 0047):
+ *   - the dispatch derives `cross-mode-dispatch-<handoffId>` — from the
+ *     LOGICAL HANDOFF IDENTITY ONLY (NEVER the volatile lease owner/epoch),
+ *     so the original owner, a reclaiming owner, + a crash-recovery
+ *     re-dispatch all derive the SAME key;
+ *   - the key is recorded DURABLY, atomically with the gate-open
+ *     (beginFencedDispatch's UPDATE also sets dispatch_idempotency_key), and
+ *     stamped on the submitted ExecutionTask;
+ *   - the provider boundary CONVERGES same-key submits onto ONE operation:
+ *     the ExternalExecutionProvider's keyed registry returns the REGISTERED
+ *     (first-generation) submission; the NativeExecutionProvider converges a
+ *     keyed dispatch whose run already exists onto that run (no gateway
+ *     call, no second adapter invocation) + a creation collision converges
+ *     the loser to the winner's run — the convergence is a CONTRACT, not a
+ *     determinism accident;
+ *   - the round-6 fence + gate are RETAINED: even a converged submission
+ *     commits its outcome ONLY through completeFencedDispatch (the lease
+ *     owner wins; a stale actor's completion affects 0 rows).
+ *
  * This file is private to /agents (PLAT-AC-02). It composes the EXISTING
  * boundaries — it is NOT an ExecutionService, it NEVER creates a second
  * ExecutionRecord, and it NEVER touches wfos_workflow_*, wfos_verification_*,
@@ -1672,6 +1699,22 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   }
 
   /**
+   * PR #46 round 7: derive the DURABLE DISPATCH IDEMPOTENCY KEY for a
+   * handoff dispatch — from the LOGICAL HANDOFF IDENTITY ONLY (the handoff
+   * row id), NEVER from the volatile lease owner/epoch. This is the
+   * architect's round-7 contract option 1 (the exactly-once side-effect
+   * boundary): every actor that dispatches the same logical handoff — the
+   * original owner, a reclaiming owner (a newer owner + epoch), a
+   * crash-recovery re-dispatch — derives the SAME key, records it atomically
+   * with the gate-open, and submits it to the provider, so the provider
+   * boundary CONVERGES all of their submits onto ONE provider operation
+   * (never a second independent operation for one logical handoff).
+   */
+  private dispatchIdempotencyKey(lease: ClaimLeaseGuard): string {
+    return `cross-mode-dispatch-${lease.handoffId}`;
+  }
+
+  /**
    * native -> external dispatch: rebuild the task (mode=external, reuse the
    * ImplementationContext), submit through the ExternalExecutionProvider
    * (deterministic package), then commit the authoritative outcome (the
@@ -1689,10 +1732,14 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
    *      dispatch intent (migration 0046). 0 rows → this actor no longer
    *      owns the lease → abort BEFORE the provider submit (zero provider
    *      operations from a fenced-out actor).
-   *   2. the provider submit — the ExternalExecutionProvider is a pure
-   *      deterministic function (no side effect); a duplicated submit is
-   *      harmless BY VALUE, but the authoritative operation is the outcome
-   *      write, which only the fence owner can commit.
+   *   2. the provider submit — round 7: the task carries the DURABLE
+   *      DISPATCH IDEMPOTENCY KEY (derived from the handoff identity), and
+   *      the ExternalExecutionProvider's operation registry CONVERGES a
+   *      same-key submit onto the REGISTERED operation (the first
+   *      generation's stored submission): a reclaiming owner's take-over
+   *      re-dispatch NEVER starts a second provider operation — both actors
+   *      observe the SAME operation (the same package + the same expiry),
+   *      and only the lease owner can commit its outcome (step 3).
    *   3. {@link CrossModeHandoffRepository.completeFencedDispatch} — the
    *      gate CAS + the authoritative outcome write in ONE transaction. 0
    *      rows → ROLLBACK — NO write happened: a stale actor's
@@ -1702,9 +1749,9 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
    * A submit failure leaves the gate in_flight at THIS actor's epoch with NO
    * outcome write — the obligation stays pending; the next claim (a strictly
    * greater epoch) TAKES OVER the stale in-flight gate and retries (the
-   * take-over arm of beginFencedDispatch). The typed
-   * 'handoff-dispatch-failed' error propagates (the route returns 500; the
-   * boot sweep reconciles).
+   * take-over arm of beginFencedDispatch) — converging onto the SAME
+   * keyed provider operation. The typed 'handoff-dispatch-failed' error
+   * propagates (the route returns 500; the boot sweep reconciles).
    */
   private async dispatchExternal(
     record: ExecutionRecord,
@@ -1720,6 +1767,12 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         executionId,
         implementationContextId: record.implementationContextId,
       });
+      // PR #46 round 7: the DURABLE dispatch idempotency key — derived from
+      // the LOGICAL HANDOFF IDENTITY (stable across owners/epochs/reclaims).
+      // Recorded atomically with the gate-open below + stamped on the
+      // submitted task, so the provider boundary converges every actor's
+      // dispatch of this handoff onto ONE provider operation.
+      const dispatchKey = this.dispatchIdempotencyKey(lease);
       // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence is
       // evaluated ATOMICALLY with the durable dispatch intent, immediately
       // BEFORE the provider submit (no check-then-act window). A FALSE here
@@ -1730,6 +1783,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           lease.handoffId,
           lease.owner,
           lease.claimEpoch,
+          dispatchKey,
         );
       if (!began) {
         throw new CrossModeHandoffError(
@@ -1737,9 +1791,14 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
           'claim-fence-lost',
         );
       }
-      const submission = await this.deps.externalExecutionProvider.submit(
-        built.task,
-      );
+      // PR #46 round 7: the KEYED submit — the task carries the dispatch
+      // idempotency key, so a same-key submit (a reclaiming owner's take-over
+      // re-dispatch racing this in-flight submit) CONVERGES onto the SAME
+      // registered provider operation instead of starting a second one.
+      const submission = await this.deps.externalExecutionProvider.submit({
+        ...built.task,
+        dispatchIdempotencyKey: dispatchKey,
+      });
       const pkg = submission.package ?? null;
       const expiresAt = submission.expiresAt ?? null;
       if (!pkg) {
@@ -1810,9 +1869,15 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
    *      gateway submit (the lease fence evaluated ATOMICALLY with the
    *      durable dispatch intent; a fenced-out actor never reaches the
    *      provider);
-   *   2. the provider submit — `wfos_agent_runs.execution_id` is UNIQUE, so
-   *      a duplicate submit (a stale actor's resumed dispatch racing a taken-
-   *      over dispatch) COLLIDES instead of creating a second AgentRun;
+   *   2. the provider submit — round 7: the task carries the DURABLE
+   *      DISPATCH IDEMPOTENCY KEY (derived from the handoff identity), and
+   *      the NativeExecutionProvider keys its convergence on the durable
+   *      EXECUTION identity (wfos_agent_runs.execution_id is UNIQUE): a
+   *      keyed dispatch whose run already exists CONVERGES to that run (NO
+   *      gateway call, NO second adapter invocation), and a run-creation
+   *      collision (the residual race) converges the loser to the winner's
+   *      run — the provider operation (the adapter execution) is
+   *      structurally AT-MOST-ONCE per execution;
    *   3. {@link CrossModeHandoffRepository.completeFencedDispatch} — the
    *      gate CAS + the authoritative outcome write in ONE transaction. A
    *      stale actor's already-started dispatch is fenced out (0 rows → NO
@@ -1840,6 +1905,12 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     const existingRun = await this.deps.agentRunRepository.findByExecutionId(
       executionId,
     );
+    // PR #46 round 7: the DURABLE dispatch idempotency key — derived from
+    // the LOGICAL HANDOFF IDENTITY (stable across owners/epochs/reclaims);
+    // recorded atomically with the gate-open + stamped on the submitted task
+    // so the native provider boundary converges every actor's dispatch of
+    // this handoff onto the ONE run (the durable execution identity).
+    const dispatchKey = this.dispatchIdempotencyKey(lease);
     // PR #46 round 6: cross the FENCED DISPATCH GATE — the lease fence
     // evaluated ATOMICALLY with the durable dispatch intent, BEFORE any
     // provider call (including the existing-run converge path below, whose
@@ -1849,6 +1920,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         lease.handoffId,
         lease.owner,
         lease.claimEpoch,
+        dispatchKey,
       );
     if (!began) {
       throw new CrossModeHandoffError(
@@ -1897,9 +1969,14 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     });
 
     try {
-      const submission = await this.deps.nativeExecutionProvider.submit(
-        built.task,
-      );
+      // PR #46 round 7: the KEYED submit — the task carries the dispatch
+      // idempotency key, so the native provider boundary converges a
+      // same-key dispatch whose run already exists onto that ONE run (no
+      // gateway call, no second adapter invocation) instead of colliding.
+      const submission = await this.deps.nativeExecutionProvider.submit({
+        ...built.task,
+        dispatchIdempotencyKey: dispatchKey,
+      });
       // PR #46 round 6: the atomic completion — the gate CAS AND the
       // authoritative outcome write in ONE transaction. FALSE → fenced out
       // mid-dispatch → NO write happened (the stale dispatch's outcome is

@@ -316,9 +316,10 @@ export interface CrossModeHandoffRepository {
     claimEpoch: number,
   ): Promise<boolean>;
   /**
-   * PR #46 round 6 (the side-effect-boundary fencing fix): CROSS the fenced
-   * dispatch gate — the durable intent record for the provider dispatch,
-   * evaluated ATOMICALLY with the lease fence (ONE conditional UPDATE, no
+   * PR #46 round 6 (the side-effect-boundary fencing fix) + round 7 (the
+   * provider-operation exactly-once boundary): CROSS the fenced dispatch
+   * gate — the durable intent record for the provider dispatch, evaluated
+   * ATOMICALLY with the lease fence (ONE conditional UPDATE, no
    * check-then-act window). Called by the dispatch boundary BEFORE the
    * provider submit.
    *
@@ -343,11 +344,21 @@ export interface CrossModeHandoffRepository {
    *     never deadlock the gate);
    *   - a COMPLETED gate is never re-entered (the outcome write is atomic
    *     with completion — see {@link completeFencedDispatch}).
+   *
+   * PR #46 round 7: the gate-open ALSO records the DURABLE DISPATCH
+   * IDEMPOTENCY KEY (migration 0047's `dispatch_idempotency_key` column) in
+   * the SAME atomic UPDATE — the durable record that this dispatch's
+   * provider operation is identified by the LOGICAL HANDOFF IDENTITY (the
+   * key is derived from the handoff id — NEVER from the volatile lease
+   * owner/epoch — so the original owner, a reclaiming owner, and a
+   * crash-recovery re-dispatch all record + submit under the SAME key, and
+   * the provider boundary CONVERGES their submits onto ONE operation).
    */
   beginFencedDispatch(
     handoffId: string,
     owner: string,
     claimEpoch: number,
+    dispatchIdempotencyKey: string,
   ): Promise<boolean>;
   /**
    * PR #46 round 6 (the side-effect-boundary fencing fix): COMPLETE the
