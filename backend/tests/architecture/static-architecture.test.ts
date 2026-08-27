@@ -14871,3 +14871,348 @@ describe('WORK-044 invariants — Adaptive Execution Router (§33.3/§33.4)', ()
     expect(api).toMatch(/CROSS-TENANT API key is 403/);
   });
 });
+
+// ============================================================================
+// WORK-045 — Agent Roles (§33.9, the bounded role-contract slice)
+//
+// The agent-roles domain lives at src/agent-roles/ (application-layer ROLE
+// MODEL outside src/modules/, mirroring the §34 benchmark /
+// execution-policy / execution-routing pattern — NOT the 18th frozen
+// module). It is the provider-independent role contract + the CLOSED static
+// catalog:
+//
+//   WORK-044 (routing) → WORK-045 Agent Roles → WORK-046 Delegation
+//        → WORK-047 Agent Intelligence
+//
+// The role layer is ADVISORY CONFIGURATION, never authority: it never
+// evaluates capabilities/constraints (no second eligibility/ranking/policy
+// engine — WORK-043/WORK-044/WORK-037 stay the authorities), never
+// dispatches or selects a provider, never mutates workflow state, never
+// touches credentials, and binds to NO provider/model. These checks prove
+// the boundary is intact.
+// ============================================================================
+
+describe('WORK-045 invariants — Agent Roles (§33.9)', () => {
+  const ROLES_DIR = join(BACKEND_ROOT, 'src', 'agent-roles');
+  const ROLES_INTERNAL = join(ROLES_DIR, 'internal');
+  const ROLES_TYPES = join(ROLES_DIR, 'types.ts');
+  const ROLES_BARREL = join(ROLES_DIR, 'index.ts');
+  const ROLE_DEFINITIONS = join(ROLES_INTERNAL, 'role-definitions.ts');
+  const ROLE_CATALOG = join(ROLES_INTERNAL, 'role-catalog.ts');
+  const ROLE_SERVICE = join(ROLES_INTERNAL, 'agent-role-catalog.service.ts');
+  const ROLES_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'agent-roles.route.ts');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const SERVER_TS = join(BACKEND_ROOT, 'src', 'api', 'server.ts');
+  const INDEX_TS = join(BACKEND_ROOT, 'src', 'index.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readRoleFiles(): { path: string; src: string }[] {
+    if (!existsSync(ROLES_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(ROLES_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module ------------------------
+
+  it('the agent-roles domain exists at src/agent-roles/ (index.ts + types.ts + internal/) and is NOT a frozen module', () => {
+    expect(existsSync(ROLES_DIR), 'src/agent-roles/ must exist').toBe(true);
+    expect(existsSync(ROLES_BARREL), 'src/agent-roles/index.ts must exist').toBe(true);
+    expect(existsSync(ROLES_TYPES), 'src/agent-roles/types.ts must exist').toBe(true);
+    expect(existsSync(ROLES_INTERNAL), 'src/agent-roles/internal/ must exist').toBe(true);
+    expect(existsSync(ROLE_DEFINITIONS), 'the role definitions file must exist').toBe(true);
+    expect(existsSync(ROLE_CATALOG), 'the catalog builder file must exist').toBe(true);
+    expect(existsSync(ROLE_SERVICE), 'the catalog service file must exist').toBe(true);
+    expect(existsSync(join(MODULES_DIR, 'agent-roles'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'agent-roles must not be a frozen module').not.toContain('/agent-roles');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) the provider-independent role contract (W045-AC01/AC04) -----------
+
+  it('the role contract declares identity, displayName, purpose, responsibilities, requiredCapabilities, advisoryConstraints, expectedInputs, expectedOutputs, execution, lifecycle, and extensions — with NO provider/model field', () => {
+    const typesSrc = stripCodeComments(readFileSync(ROLES_TYPES, 'utf8'));
+    for (const field of [
+      'identity: AgentRoleId',
+      'displayName: string',
+      'purpose: string',
+      'responsibilities: readonly string[]',
+      'requiredCapabilities: readonly CapabilityRequirement[]',
+      'advisoryConstraints: readonly AgentRoleAdvisoryConstraint[]',
+      'expectedInputs: readonly AgentRoleArtifactDescriptor[]',
+      'expectedOutputs: readonly AgentRoleArtifactDescriptor[]',
+      'execution: AgentRoleExecutionDeclaration',
+      'lifecycle: AgentRoleLifecycle',
+      'extensions: AgentRoleExtensions',
+    ]) {
+      expect(typesSrc, `the contract must declare: ${field}`).toContain(field);
+    }
+    // W045-AC04: the contract has NO provider/model/adapter binding field.
+    expect(typesSrc).not.toMatch(/readonly provider:|readonly model:|readonly adapter:/);
+    // No provider SDK / adapter imports anywhere in the domain.
+    for (const { path: p, src } of readRoleFiles()) {
+      const rel = relative(BACKEND_ROOT, p);
+      expect(src, `${rel}: no provider SDK import`).not.toMatch(/from ['"](openai|anthropic|@anthropic-ai|@octokit)/);
+      expect(src, `${rel}: no provider adapter import`).not.toMatch(/provider-adapter|external-ui-catalog/i);
+    }
+  });
+
+  // --- (c) NO provider tokens in the authored catalog (W045-AC04) ------------
+
+  it('NO provider/model token appears in ANY authored role definition (provider-independent content)', () => {
+    const defsSrc = stripCodeComments(readFileSync(ROLE_DEFINITIONS, 'utf8'));
+    const providerLiterals = /['"`][^'"`]*(claude|qwen|gpt|openai|anthropic|gemini|copilot|cursor|codex|aider|windsurf|sonnet|opus|haiku)[^'"`]*['"`]/i;
+    expect(defsSrc, 'no provider-name literal in the catalog content').not.toMatch(providerLiterals);
+    // The runtime catalog validation enforces the same rule fail-closed.
+    const catalogSrc = stripCodeComments(readFileSync(ROLE_CATALOG, 'utf8'));
+    expect(catalogSrc).toMatch(/provider\/model tokens are forbidden/);
+  });
+
+  // --- (d) declarative requirements ONLY (W045-AC05) --------------------------
+
+  it('capability requirements are DECLARATIVE — the domain evaluates nothing and imports the WORK-043 vocabulary through the execution-policy PUBLIC barrel', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoleFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      // No evaluator of anything.
+      if (/\bfunction\s+(evaluate|assess|authorize|rank|score|select)\w*\(/.test(text)) {
+        offenders.push(`${rel}: declares an evaluator function (the role layer evaluates nothing)`);
+      }
+      if (/implements\s+(ExecutionEligibilityService|AdaptiveExecutionRouterService|AgentPolicyService)/.test(text)) {
+        offenders.push(`${rel}: implements an authority service`);
+      }
+      if (/ExecutionConstraintSet|blockingReasons\.push/.test(text)) {
+        offenders.push(`${rel}: constructs eligibility constraints/blocking reasons (the WORK-043 engine's authority)`);
+      }
+      if (/\.dispatch\(|\.submit\(|dispatchExecution|submitExecution/.test(text)) {
+        offenders.push(`${rel}: calls a dispatch/submission seam (the role layer never dispatches)`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+    // The capability vocabulary is REUSED (type import from the
+    // execution-policy public barrel — never re-invented locally). The
+    // domain-root types.ts imports one level up; internal/ files two levels.
+    const typesSrc = readFileSync(ROLES_TYPES, 'utf8');
+    expect(typesSrc).toMatch(/import type \{ CapabilityRequirement \} from '\.\.\/execution-policy\/index\.js'/);
+    // Every execution-policy import targets the PUBLIC barrel.
+    for (const { path: p, src } of readRoleFiles()) {
+      const rel = relative(BACKEND_ROOT, p);
+      expect(src, `${rel}: must not import execution-policy internals`).not.toMatch(/execution-policy\/internal\//);
+      const m = src.match(/from\s+['"]([^'"]*execution-policy[^'"]*)['"]/);
+      if (m) {
+        expect(m[1], `${rel}: execution-policy imports use the public barrel`).toMatch(/^(\.\.\/)+execution-policy\/index\.js$/);
+      }
+    }
+  });
+
+  // --- (e) native/external NEUTRALITY (W045-AC06) ------------------------------
+
+  it('no role definition prefers a mode: the shared NEUTRAL execution declaration + NO mode-selecting capability + validation pins the symmetry', () => {
+    const defsSrc = stripCodeComments(readFileSync(ROLE_DEFINITIONS, 'utf8'));
+    // The catalog shares ONE neutral declaration: both modes, advisory.
+    expect(defsSrc).toMatch(/supportedModes: \['native', 'external'\]/);
+    expect(defsSrc).toMatch(/semantics: 'advisory'/);
+    // No role definition carries its own asymmetric mode set.
+    expect(defsSrc).not.toMatch(/supportedModes: \['native'\]/);
+    expect(defsSrc).not.toMatch(/supportedModes: \['external'\]/);
+    // The validation forbids the mode-selecting capabilities fail-closed.
+    const catalogSrc = stripCodeComments(readFileSync(ROLE_CATALOG, 'utf8'));
+    expect(catalogSrc).toMatch(/MODE_SELECTING_CAPABILITIES/);
+    expect(catalogSrc).toMatch(/selects an execution mode/);
+    expect(catalogSrc).toMatch(/symmetric \['native', 'external'\]/);
+  });
+
+  // --- (f) NO workflow authority (W045-AC07) ------------------------------------
+
+  it('the role layer mutates NO workflow state and references NO authoritative table or authority module', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoleFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      if (/INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE/i.test(text)) {
+        offenders.push(`${rel}: contains SQL (the role layer is static — no persistence of its own)`);
+      }
+      if (/wfos_workflow|wfos_executions|wfos_verification|wfos_reviews|wfos_github|wfos_agent_runs/i.test(text)) {
+        offenders.push(`${rel}: references an authoritative table (workflow/execution/verification/review/github state)`);
+      }
+      if (/AuthorizationService|requireProjectAuthorization/.test(text)) {
+        offenders.push(`${rel}: references authorization (the ROUTE layer authorizes; the role layer never does)`);
+      }
+      if (/@modules\/(github|verification|reviews|workflows|work-items)/.test(text)) {
+        offenders.push(`${rel}: imports an authority module (github/verification/reviews/workflows/work-items)`);
+      }
+      if (/\bExecutionService\b|ExecutionGateway\b/.test(text)) {
+        offenders.push(`${rel}: references the execution service/gateway (the role layer never dispatches)`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  // --- (g) NO second execution/routing engine (W045-AC08) ------------------------
+
+  it('the role layer creates NO second execution, eligibility, ranking, or provider-registry engine and does not consume the router', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoleFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      if (/execution-routing|AdaptiveExecutionRouter/.test(text)) {
+        offenders.push(`${rel}: references the WORK-044 router (roles do not consume routing — tests compose them)`);
+      }
+      if (/ProviderRegistry|AgentProviderRegistry|getExecutionProviders/.test(text)) {
+        offenders.push(`${rel}: references a provider registry (the /agents module stays the registry authority)`);
+      }
+      if (/class\s+\w*(Engine|Router|Ranker|Evaluator)\b/.test(text)) {
+        offenders.push(`${rel}: declares an engine/router/ranker/evaluator class`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  // --- (h) NO credential or secret ownership (W045-AC12) ---------------------------
+
+  it('the role layer persists/reads NO credentials, tokens, cookies, or secrets', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoleFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      if (/process\.env/.test(text)) {
+        offenders.push(`${rel}: reads the environment (the static catalog needs nothing)`);
+      }
+      // Credential-OWNERSHIP tokens (the security-reviewer role legitimately
+      // MENTIONS credentials in its responsibilities — prose is not storage).
+      if (/SecretStore|secretRef|process\.env|\bapiKey\b|api_key|callbackToken|handoffToken|credentialStore|readCredential|storeCredential/i.test(text)) {
+        offenders.push(`${rel}: references credential storage/ownership`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+    // No migration introduces role persistence (the static catalog preference).
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = readFileSync(join(migrationsDir, f), 'utf8').replace(/--[^\n]*$/gm, '');
+      expect(text, `${f}: no role/agent-role table`).not.toMatch(/CREATE TABLE[^\n]*(agent_role|role_catalog)/i);
+    }
+  });
+
+  // --- (i) deterministic resolution + tenant-free surface (W045-AC03/AC11) ----------
+
+  it('resolution is deterministic and STRUCTURALLY context-free: the service contract takes ONLY the role identity (no tenant/project/org/user input)', () => {
+    const typesSrc = stripCodeComments(readFileSync(ROLES_TYPES, 'utf8'));
+    expect(typesSrc).toMatch(/resolveRole\(identity: string\)/);
+    expect(typesSrc).toMatch(/listRoles\(\)/);
+    // The SERVICE CONTRACT carries no tenant/project/organization/user field.
+    const serviceContract = typesSrc.slice(
+      typesSrc.indexOf('export interface AgentRoleCatalogService'),
+    );
+    expect(serviceContract).not.toMatch(/projectId|organizationId|tenantId|userId/);
+    // The domain imports no repository/db types at all (pure static data).
+    // Case-SENSITIVE: the lowercase capability literal 'repository_access'
+    // is vocabulary, not a Repository type.
+    for (const { path: p, src } of readRoleFiles()) {
+      const rel = relative(BACKEND_ROOT, p);
+      const text = stripCodeComments(src);
+      expect(text, `${rel}: no repository/db import`).not.toMatch(/Repository|DatabaseClient|from 'pg'|pglite/);
+    }
+    // The declared order drives listRoles (never object iteration).
+    const defsSrc = stripCodeComments(readFileSync(ROLE_DEFINITIONS, 'utf8'));
+    expect(defsSrc).toMatch(/AGENT_ROLE_CATALOG_ORDER/);
+  });
+
+  // --- (j) stable versioning (W045-AC10) ----------------------------------------------
+
+  it('the revision is the CONTENT-DERIVED digest (deterministic; any definition change is detectable)', () => {
+    const catalogSrc = stripCodeComments(readFileSync(ROLE_CATALOG, 'utf8'));
+    expect(catalogSrc, 'the digest is computed over canonical content').toMatch(/computeRoleRevision/);
+    expect(catalogSrc).toMatch(/createHash\('sha256'\)/);
+    expect(catalogSrc).toMatch(/canonicalRoleContent/);
+    expect(catalogSrc).toMatch(/deepFreeze/);
+    expect(catalogSrc).toMatch(/buildAgentRoleCatalog/);
+    const typesSrc = stripCodeComments(readFileSync(ROLES_TYPES, 'utf8'));
+    expect(typesSrc).toMatch(/revision: string/);
+    expect(typesSrc).toMatch(/contractVersion: number/);
+  });
+
+  // --- (k) the forward-compatibility extension seam (W045-AC14) --------------------------
+
+  it('the contract exposes the stable delegation/intelligence extension seam — EMPTY in WORK-045 (reserved for WORK-046/047)', () => {
+    const typesSrc = stripCodeComments(readFileSync(ROLES_TYPES, 'utf8'));
+    expect(typesSrc).toMatch(/delegation: Readonly<Record<string, never>>/);
+    expect(typesSrc).toMatch(/intelligence: Readonly<Record<string, never>>/);
+    const catalogSrc = stripCodeComments(readFileSync(ROLE_CATALOG, 'utf8'));
+    expect(catalogSrc, 'validation enforces the empty seam').toMatch(/extensions\.delegation must be EMPTY in WORK-045/);
+    expect(catalogSrc).toMatch(/extensions\.intelligence must be EMPTY in WORK-045/);
+  });
+
+  // --- (l) the read-only API surface is wired (project-scoped authorization) ---------------
+
+  it('the agent-roles routes are wired (server.ts + index.ts + app.ts) with the two read-only project-scoped endpoints', () => {
+    const routeSrc = stripCodeComments(readFileSync(ROLES_ROUTE, 'utf8'));
+    expect(routeSrc).toMatch(/\/projects\/:projectId\/agent-roles'/);
+    expect(routeSrc).toMatch(/\/projects\/:projectId\/agent-roles\/:roleId/);
+    expect(routeSrc).toMatch(/agentRoleCatalogService\.listRoles\(\)/);
+    expect(routeSrc).toMatch(/agentRoleCatalogService\.resolveRole\(roleId\)/);
+    // Read-only: GET only; authorized project.read; 404 on unknown identity.
+    expect(routeSrc).not.toMatch(/app\.(post|put|delete|patch)\(/);
+    expect(routeSrc).toMatch(/permission: 'project\.read'/);
+    expect(routeSrc).toMatch(/role-not-found/);
+    // The route layer is the ONLY place authorization meets the catalog.
+    expect(routeSrc).toMatch(/requireProjectAuthorization/);
+
+    const serverSrc = stripCodeComments(readFileSync(SERVER_TS, 'utf8'));
+    expect(serverSrc).toMatch(/agentRolesRoutes/);
+
+    const indexSrc = stripCodeComments(readFileSync(INDEX_TS, 'utf8'));
+    expect(indexSrc).toMatch(/agentRoles:\s*\{/);
+    expect(indexSrc).toMatch(/agentRoleCatalogService/);
+
+    const appSrc = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(appSrc).toMatch(/new DefaultAgentRoleCatalogService\(\)/);
+  });
+
+  // --- (m) the regression evidence is pinned ----------------------------------------------
+
+  it('the WORK-045 regression matrix is pinned (the catalog unit tests + the PG AC-matrix + the API tests exist and carry their AC markers)', () => {
+    const unit = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agent-roles', 'agent-role-catalog.unit.test.ts'),
+      'utf8',
+    );
+    expect(unit).toMatch(/W045-AC02 — the closed initial catalog/);
+    expect(unit).toMatch(/W045-AC03 — deterministic resolution/);
+    expect(unit).toMatch(/W045-AC04 — no provider binding/);
+    expect(unit).toMatch(/W045-AC05 — declarative capability requirements/);
+    expect(unit).toMatch(/W045-AC06 — native\/external neutrality/);
+    expect(unit).toMatch(/W045-AC10 — stable versioning \+ immutability/);
+    expect(unit).toMatch(/W045-AC13 — the explainable resolution output/);
+    expect(unit).toMatch(/W045-AC14 — the forward-compatibility extension seam/);
+    expect(unit).toMatch(/fail-closed catalog validation/);
+
+    const pg = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agent-roles', 'agent-roles.integration.test.ts'),
+      'utf8',
+    );
+    expect(pg).toMatch(/W045-AC09 — reusable role semantics/);
+    expect(pg).toMatch(/W045-AC10 — stable versioning across the flow/);
+    expect(pg).toMatch(/W045-AC11 — tenant-safe resolution/);
+
+    const api = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agent-roles', 'agent-roles.api.integration.test.ts'),
+      'utf8',
+    );
+    expect(api).toMatch(/DECLARED deterministic order/);
+    expect(api).toMatch(/CROSS-TENANT API key is 403/);
+    expect(api).toMatch(/NO fallback and no nearest-match/);
+  });
+});

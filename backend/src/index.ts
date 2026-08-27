@@ -340,6 +340,23 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-045: Agent Roles routes — the read-only, provider-independent
+      // role-catalog surface (backend-authorized project.read within the
+      // caller's project context — W045-AC11 tenant-safe resolution). The
+      // role layer itself is pure static data with no authority: these
+      // routes expose the closed catalog + deterministic identity
+      // resolution, and NEVER mutate workflow state.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.agentRoleCatalogService
+        ? {
+            agentRoles: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              agentRoleCatalogService: app.deps.agentRoleCatalogService,
+            },
+          }
+        : {}),
       // WORK-037: Agent Policy & Permissions routes. Backend-authorized
       // (project.read / project.admin). The engine never imports the
       // authorization service — only this route layer calls
