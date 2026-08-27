@@ -1,0 +1,164 @@
+name: WORK-043 remediation apply
+
+on:
+  push:
+    branches:
+      - feat/work-043-execution-eligibility
+
+permissions:
+  contents: write
+
+jobs:
+  remediate:
+    if: ${{ !contains(github.event.head_commit.message, '[WORK-043-REMEDIATED]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        working-directory: backend
+        run: bun install --frozen-lockfile
+      - name: Apply WORK-043 architectural corrections
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+
+          # 1. Organization scope is mandatory at the execution-policy seam.
+          p = root / 'backend/src/execution-policy/types.ts'
+          s = p.read_text()
+          s = s.replace("  readonly organizationId?: string | null;", "  readonly organizationId: string;")
+          s = re.sub(
+              r"\* `workItemId` supplies[\s\S]*?\*/\nexport interface CandidateEligibilityInput",
+              "* `workItemId` supplies the task profile context (the handoff passes the\n * EXISTING execution's work item — the logical task does not change across\n * a mode handoff; §33.7). `userId` (optional — the handoff actor) resolves\n * the user-scoped subscription/access-profile constraints.\n * `organizationId` is REQUIRED and MUST be resolved from the authoritative\n * Project → Organization relation; callers may not omit or null it.\n */\nexport interface CandidateEligibilityInput",
+              s,
+              count=1,
+          )
+          p.write_text(s)
+
+          # 2. Add the provider-independent admission contract.
+          p = root / 'backend/src/modules/agents/internal/execution.types.ts'
+          s = p.read_text()
+          anchor = "export interface ExecutionProvider {\n"
+          idx = s.index(anchor)
+          insert_at = s.index("}\n\n", idx) + 3
+          admission = '''\n/**\n * WORK-043: final execution admission gate. Eligibility answers whether a\n * candidate satisfies the current hard constraints; admission is the distinct\n * execution-side boundary immediately before provider dispatch. The admission\n * implementation may perform authoritative re-evaluation/reservation, but it\n * does not own workflow state or provider execution.\n */\nexport interface ExecutionAdmissionResult {\n  readonly admitted: boolean;\n  readonly reason: string;\n  readonly policyVersion: number | null;\n  readonly blockingReasons: readonly {\n    readonly category: string;\n    readonly constraint: string;\n    readonly reason: string;\n  }[];\n}\n\nexport interface ExecutionAdmissionPort {\n  admit(task: ExecutionTask): Promise<ExecutionAdmissionResult>;\n}\n'''
+          s = s[:insert_at] + admission + s[insert_at:]
+          p.write_text(s)
+
+          # 3. Add the default application-layer admission service.
+          p = root / 'backend/src/execution-policy/internal/default-execution-admission-service.ts'
+          p.write_text('''/**\n * WORK-043 — final execution admission boundary.\n *\n * This is an application-layer adapter, not a new authority. It re-evaluates\n * the same hard eligibility engine immediately before provider dispatch and\n * resolves organization scope from the authoritative Project relation.\n * Recommendation ranking cannot bypass this boundary.\n */\nimport type { Logger } from '@platform/logger.js';\nimport type { ExecutionTask, ExecutionAdmissionPort, ExecutionAdmissionResult } from '@modules/agents';\nimport type { ExecutionPolicyService } from '../types.js';\n\nexport interface ProjectOrganizationResolver {\n  getOrganizationId(projectId: string): Promise<string | null>;\n}\n\nexport interface DefaultExecutionAdmissionServiceDeps {\n  readonly executionPolicyService: ExecutionPolicyService;\n  readonly organizationResolver: ProjectOrganizationResolver;\n  readonly logger: Logger;\n}\n\nexport class DefaultExecutionAdmissionService implements ExecutionAdmissionPort {\n  constructor(private readonly deps: DefaultExecutionAdmissionServiceDeps) {}\n\n  async admit(task: ExecutionTask): Promise<ExecutionAdmissionResult> {\n    const organizationId = await this.deps.organizationResolver.getOrganizationId(task.projectId);\n    if (!organizationId) {\n      return {\n        admitted: false,\n        reason: 'execution-admission-organization-unresolvable',\n        policyVersion: null,\n        blockingReasons: [{\n          category: 'organization',\n          constraint: 'project_organization_resolution',\n          reason: `Organization for project ${task.projectId} could not be resolved.`,\n        }],\n      };\n    }\n\n    let verdict;\n    try {\n      verdict = await this.deps.executionPolicyService.evaluateCandidateEligibility({\n        organizationId,\n        projectId: task.projectId,\n        workItemId: task.workItemId,\n        provider: task.provider,\n        model: task.model,\n        executionMode: task.mode,\n        userId: null,\n      });\n    } catch (error) {\n      this.deps.logger.error('execution-admission.evaluation-failed', {\n        projectId: task.projectId,\n        executionId: task.executionId,\n        error: (error as Error).message,\n      });\n      return {\n        admitted: false,\n        reason: 'execution-admission-evaluation-failed',\n        policyVersion: null,\n        blockingReasons: [{\n          category: 'policy',\n          constraint: 'evaluation',\n          reason: (error as Error).message,\n        }],\n      };\n    }\n\n    return {\n      admitted: verdict.eligibility.eligible,\n      reason: verdict.eligibility.eligible\n        ? 'execution-admitted-current-hard-constraints'\n        : 'execution-admission-hard-constraint-block',\n      policyVersion: verdict.policyVersion,\n      blockingReasons: verdict.eligibility.blockingReasons,\n    };\n  }\n}\n''')
+
+          # 4. Export the admission types/service from the execution-policy barrel.
+          p = root / 'backend/src/execution-policy/index.ts'
+          s = p.read_text()
+          s = s.replace("  CandidateEligibilityResult,\n", "  CandidateEligibilityResult,\n  ExecutionAdmissionResult,\n  ExecutionAdmissionPort,\n")
+          s = s.replace("export { DefaultExecutionEligibilityService }", "export { DefaultExecutionAdmissionService } from './internal/default-execution-admission-service.js';\n\nexport { DefaultExecutionEligibilityService }")
+          p.write_text(s)
+
+          # 5. Cross-mode handoff: organization scope is mandatory and authoritative.
+          p = root / 'backend/src/modules/agents/internal/default-cross-mode-handoff-service.ts'
+          s = p.read_text()
+          s = s.replace("  evaluateCandidateEligibility?(input: {", "  evaluateCandidateEligibility(input: {")
+          s = s.replace("    organizationId?: string | null;", "    organizationId: string;")
+          marker = "export interface CrossModeAgentProviderRegistryPort {"
+          resolver = '''/** WORK-043: authoritative Project → Organization resolver. */\nexport interface CrossModeProjectOrganizationResolver {\n  getOrganizationId(projectId: string): Promise<string | null>;\n}\n\n'''
+          if 'interface CrossModeProjectOrganizationResolver' not in s:
+              s = s.replace(marker, resolver + marker, 1)
+          s = s.replace("  readonly executionPolicyService: CrossModeExecutionPolicyPort;", "  readonly executionPolicyService: CrossModeExecutionPolicyPort;\n  /** WORK-043: authoritative project→organization scope resolver. */\n  readonly organizationResolver: CrossModeProjectOrganizationResolver;")
+          old = """    const seam = this.deps.executionPolicyService.evaluateCandidateEligibility;\n    if (!seam) {\n      // Pre-WORK-043 port — the destination gate is not wired. Compose a\n      // skip marker so the log row records the gate's absence honestly.\n      return composeSummary(policySummary, {\n        destinationEligibility: { status: 'not_evaluated', eligible: null, reason: 'WORK-043 destination eligibility seam not wired' },\n      });\n    }\n    let verdict;\n    try {\n      verdict = await seam.call(\n        this.deps.executionPolicyService,\n        {\n          // No organization context at the handoff service layer: the\n          // org-scoped families are inactive; the per-execution agent-policy\n          // gate (step 6) already enforces the external domain STRICTER.\n          organizationId: null,\n          projectId: record.projectId,\n          workItemId: record.workItemId,\n          provider,\n          model,\n          executionMode: input.targetMode,\n          userId: actor.userId,\n        },\n      );\n"""
+          new = """    const organizationId = await this.deps.organizationResolver.getOrganizationId(record.projectId);\n    if (!organizationId) {\n      throw new CrossModeHandoffError(\n        `handoff-ineligible-destination: organization for project ${record.projectId} could not be resolved — failing closed`,\n        'handoff-ineligible-destination',\n      );\n    }\n    let verdict;\n    try {\n      verdict = await this.deps.executionPolicyService.evaluateCandidateEligibility({\n        organizationId,\n        projectId: record.projectId,\n        workItemId: record.workItemId,\n        provider,\n        model,\n        executionMode: input.targetMode,\n        userId: actor.userId,\n      });\n"""
+          if old not in s:
+              raise SystemExit('handoff destination gate block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 6. Execution service: mandatory admission before provider submit.
+          p = root / 'backend/src/modules/agents/internal/execution-service.ts'
+          s = p.read_text()
+          s = s.replace("  CreateExecutionRecordInput,\n", "  CreateExecutionRecordInput,\n  ExecutionAdmissionPort,\n")
+          s = s.replace("  readonly sessionService?: ExecutionSessionService;\n", "  readonly sessionService?: ExecutionSessionService;\n  /** WORK-043: mandatory final hard-constraint admission before provider dispatch. */\n  readonly executionAdmission: ExecutionAdmissionPort;\n")
+          old = """    // 3. Dispatch through the provider boundary.\n    let submission;\n"""
+          new = """    // 3. Final admission through the execution-side boundary.\n    // Recommendation/eligibility is not sufficient to authorize a provider\n    // side effect: this gate re-evaluates the CURRENT hard constraints at the\n    // actual dispatch boundary. A denied admission never reaches the provider.\n    const admission = await this.deps.executionAdmission.admit(task);\n    if (!admission.admitted) {\n      const reason = admission.blockingReasons.map((b) => `${b.category}/${b.constraint}: ${b.reason}`).join('; ');\n      throw new Error(`execution-admission-denied: ${admission.reason}${reason ? ` (${reason})` : ''}`);\n    }\n\n    // 3b. Dispatch through the provider boundary.\n    let submission;\n"""
+          if old not in s:
+              raise SystemExit('execution dispatch anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 7. Composition root: construct admission service and authoritative org resolver.
+          p = root / 'backend/src/app.ts'
+          s = p.read_text()
+          s = s.replace("  DefaultExecutionPolicyService,\n", "  DefaultExecutionPolicyService,\n  DefaultExecutionAdmissionService,\n")
+          anchor = "    executionService = new DefaultExecutionService({\n"
+          admission = """    const executionAdmissionService = new DefaultExecutionAdmissionService({\n      executionPolicyService,\n      organizationResolver: {\n        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,\n      },\n      logger,\n    });\n    executionService = new DefaultExecutionService({\n"""
+          if admission.strip() not in s:
+              s = s.replace(anchor, admission, 1)
+          s = s.replace("      sessionService: executionSessionService,\n    });\n", "      sessionService: executionSessionService,\n      executionAdmission: executionAdmissionService,\n    });\n", 1)
+          # Cross-mode receives the same authoritative resolver; insert alongside its policy dep.
+          s = s.replace("      executionPolicyService,\n      agentProviderRegistryService,\n", "      executionPolicyService,\n      organizationResolver: {\n        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,\n      },\n      agentProviderRegistryService,\n", 1)
+          p.write_text(s)
+
+          # 8. Update test construction sites with an explicit permissive admission fake.
+          admission_line = "      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },\n"
+          for p in (root / 'backend/tests').rglob('*.ts'):
+              text = p.read_text()
+              if 'new DefaultExecutionService({' not in text or 'executionAdmission:' in text:
+                  continue
+              out = []
+              i = 0
+              while True:
+                  start = text.find('new DefaultExecutionService({', i)
+                  if start < 0:
+                      out.append(text[i:])
+                      break
+                  out.append(text[i:start])
+                  depth = 0
+                  j = start + len('new DefaultExecutionService(')
+                  # Find the matching object close using brace nesting.
+                  while j < len(text):
+                      if text[j] == '{': depth += 1
+                      elif text[j] == '}':
+                          depth -= 1
+                          if depth == 0:
+                              break
+                      j += 1
+                  obj = text[start:j+1]
+                  if 'executionAdmission:' not in obj:
+                      obj = obj[:-1] + '\n' + admission_line + '  }'
+                  out.append(obj)
+                  i = j + 1
+              new_text = ''.join(out)
+              if new_text != text:
+                  p.write_text(new_text)
+
+          # 9. Add integration regression for the admission boundary.
+          test = root / 'backend/tests/integration/execution-policy/execution-admission.regression.test.ts'
+          test.write_text('''import { describe, expect, it, vi } from 'vitest';\nimport type { ExecutionTask, ExecutionAdmissionPort, ExecutionAdmissionResult } from '@modules/agents';\nimport { DefaultExecutionAdmissionService } from '../../src/execution-policy/internal/default-execution-admission-service.js';\n\nconst task: ExecutionTask = {\n  executionId: 'wf_test_admission', mode: 'native', provider: 'fake', model: 'fake-1',\n  projectId: 'project-a', workItemId: 'wi-a', workItemLabel: 'WORK-TEST', workOrderId: 'wo-a',\n  architectureVersionId: null, implementationContextId: 'ctx-a', implementationContextRevision: 1,\n  implementationContextKind: 'initial', repositoryOwner: null, repositoryName: null, repositoryDefaultBranch: null,\n  implementationBranch: null, scope: null, expectedOutputs: [], verificationRequirements: [],\n  architectureConstraints: null, prompt: 'test', promptDigest: 'digest', contextPayload: '{}', instructions: [],\n};\n\nfunction result(admitted: boolean): ExecutionAdmissionResult {\n  return { admitted, reason: admitted ? 'ok' : 'blocked', policyVersion: 7, blockingReasons: admitted ? [] : [{ category: 'project', constraint: 'deny', reason: 'blocked' }] };\n}\n\ndescribe('WORK-043 execution admission boundary', () => {\n  it('fails closed when project organization cannot be resolved', async () => {\n    const policy = { evaluateCandidateEligibility: vi.fn() } as unknown as import('../../src/execution-policy/types.js').ExecutionPolicyService;\n    const service = new DefaultExecutionAdmissionService({\n      executionPolicyService: policy,\n      organizationResolver: { getOrganizationId: async () => null },\n      logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() } as never,\n    });\n    const out = await service.admit(task);\n    expect(out.admitted).toBe(false);\n    expect(out.reason).toBe('execution-admission-organization-unresolvable');\n    expect(policy.evaluateCandidateEligibility).not.toHaveBeenCalled();\n  });\n\n  it('re-evaluates current hard constraints with authoritative organization scope', async () => {\n    const evaluateCandidateEligibility = vi.fn().mockResolvedValue({ eligibility: result(false).blockingReasons.length ? { eligible: false, status: 'policy_blocked', blockingReasons: result(false).blockingReasons } : result(true), policyVersion: 7, constraints: {} });\n    const service = new DefaultExecutionAdmissionService({\n      executionPolicyService: { evaluateCandidateEligibility } as never,\n      organizationResolver: { getOrganizationId: async () => 'org-a' },\n      logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() } as never,\n    });\n    const out = await service.admit(task);\n    expect(evaluateCandidateEligibility).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-a', projectId: 'project-a' }));\n    expect(out.admitted).toBe(false);\n  });\n\n  it('admits only when the current hard-constraint verdict is eligible', async () => {\n    const evaluateCandidateEligibility = vi.fn().mockResolvedValue({ eligibility: { eligible: true, status: 'eligible', blockingReasons: [] }, policyVersion: 9, constraints: {} });\n    const service = new DefaultExecutionAdmissionService({\n      executionPolicyService: { evaluateCandidateEligibility } as never,\n      organizationResolver: { getOrganizationId: async () => 'org-a' },\n      logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() } as never,\n    });\n    const out = await service.admit(task);\n    expect(out).toEqual({ admitted: true, reason: 'execution-admitted-current-hard-constraints', policyVersion: 9, blockingReasons: [] });\n  });\n});\n''')
+
+          # 10. Remove this one-shot workflow before committing so no workflow is left behind.
+          Path('.github/workflows/work-043-remediation-apply.yml').unlink()
+          print('WORK-043 remediation applied')
+      - name: Verify
+        working-directory: backend
+        run: |
+          bunx tsc --noEmit
+          bunx eslint .
+          bunx vitest run tests/architecture/work-043-remediation.test.ts tests/integration/execution-policy/execution-admission.regression.test.ts
+          bunx vitest run tests/integration/execution-policy/execution-eligibility-engine.integration.test.ts
+          bunx vitest run tests/integration/agents/cross-mode-handoff.regression.test.ts
+      - name: Commit remediation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/src/execution-policy backend/src/modules/agents backend/src/app.ts backend/tests
+          git add -u .github/workflows/work-043-remediation-apply.yml
+          git commit -m "fix(WORK-043): enforce scoped policy admission [WORK-043-REMEDIATED]"
+          git push
