@@ -23,6 +23,7 @@ import { executionRoutes, type ExecutionRouteDeps } from './routes/execution.rou
 import { companionRoutes, type CompanionRouteDeps } from './routes/companion.route.js';
 import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.route.js';
 import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
+import { executionRoutingRoutes, type ExecutionRoutingRouteDeps } from './routes/execution-routing.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
 import {
@@ -99,6 +100,10 @@ export interface ServerDeps extends JobsRouteDeps {
   benchmark?: BenchmarkRouteDeps;
   /** WORK-033: Execution Policy & Fair Benchmarking routes. Backend-authorized. */
   executionPolicy?: ExecutionPolicyRouteDeps;
+  /** WORK-044: Adaptive Execution Router routes (recommendation + automatic
+   *  selection — both ADVISORY; backend-authorized, never mutating workflow
+   *  state). */
+  executionRouting?: ExecutionRoutingRouteDeps;
   /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
   agentPolicy?: AgentPolicyRouteDeps;
   /** WORK-038: Existing Project Onboarding routes (connect + analyze a
@@ -219,6 +224,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.executionPolicy) {
     await executionPolicyRoutes(app, deps.executionPolicy);
+  }
+  if (deps.auth && deps.executionRouting) {
+    await executionRoutingRoutes(app, deps.executionRouting);
   }
   if (deps.auth && deps.agentPolicy) {
     await agentPolicyRoutes(app, deps.agentPolicy);
