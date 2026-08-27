@@ -11169,18 +11169,18 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0049 (PR #46 round 9 — the GENERATION-FENCED,
-    // IDENTITY-RECOVERABLE provider-operation ledger; 0048 is the durable
-    // provider-operation ledger; 0047 is the cross-mode-handoff durable
-    // dispatch idempotency key; 0046 is the fenced dispatch gate;
-    // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
-    // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
-    // handoff log). WORK-040 added none (0042-0049 belong to WORK-042, not
-    // WORK-040).
+    // The highest migration is 0050 (PR #46 round 10 — the EXPLICIT
+    // PROVIDER-OPERATION LIFECYCLE; 0049 is the generation fence + the
+    // operation-identity columns; 0048 is the durable provider-operation
+    // ledger; 0047 is the cross-mode-handoff durable dispatch idempotency
+    // key; 0046 is the fenced dispatch gate; 0045 is the claim_epoch fencing
+    // token; 0044 is the claim/lease columns; 0043 is the obligation table
+    // itself; 0042 is the WORK-042 cross-mode handoff log). WORK-040 added
+    // none (0042-0050 belong to WORK-042, not WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-9 generation-fenced provider-operation ledger migration, NOT a planner-owned table)').toMatch(/^0049_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-10 explicit provider-operation lifecycle migration, NOT a planner-owned table)').toMatch(/^0050_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -13027,7 +13027,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(dnBody.indexOf('beginFencedDispatch('), 'dispatchNative crosses the gate').toBeGreaterThan(-1);
     expect(dnBody.indexOf('beginFencedDispatch('), 'the gate crossing precedes the gateway submit').toBeLessThan(dnBody.indexOf('nativeExecutionProvider.submit('));
     const dnCompletions = dnBody.match(/completeFencedDispatch\(/g) ?? [];
-    expect(dnCompletions.length, 'dispatchNative commits EVERY outcome through the fenced completion (success + converge + conflict-recovery/failure)').toBeGreaterThanOrEqual(3);
+    expect(dnCompletions.length, 'dispatchNative commits EVERY outcome through the fenced completion (the keyed submit outcome + the conflict-recovery/failure outcome — round 10 removed the guard\'s third site: ALL existing-run convergence flows through the provider boundary)').toBeGreaterThanOrEqual(2);
     expect(dnBody, 'dispatchNative performs NO direct updateStatus write (the fenced completion is the ONLY outcome write)').not.toMatch(/executionRecordRepository\.updateStatus\(/);
     // The reconcile's re-dispatch call sites pass the lease (both
     // directions) — no unfenced dispatch call remains.
@@ -13297,34 +13297,43 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(appSrc, 'app.ts constructs the ExternalExecutionProvider WITH the durable store').toMatch(/new ExternalExecutionProvider\(\{\s*operationStore: new PgExecutionProviderOperationRepository\(database\),/);
   });
 
-  // R8-D (round 8, rewritten by round 9): the ledger state machine is
+  // R8-D (round 8, rewritten by rounds 9 + 10): the ledger state machine is
   // CAS-only (single conditional statements — no read-check-write) and (the
-  // round-9 correction) GENERATION-FENCED: register opens exactly one row
-  // (and NEVER re-arms a terminal row — the key is immutable), the
-  // completion/failure are the generation-fenced resolution CASes, the
-  // operation identity has its own attach CAS, and takeOver RETURNS the new
-  // generation token.
-  it('R8-D. the durable ledger state machine — the INSERT-only register (NO re-arm — the key is immutable) + the GENERATION-FENCED resolution CASes + the operation-identity attach CAS + the takeOver-returns-the-token recovery', () => {
+  // round-9 correction) GENERATION-FENCED + (the round-10 correction)
+  // LIFECYCLE-EXPLICIT: register opens exactly one row (and NEVER re-arms a
+  // terminal row — the key is immutable), the attach is the
+  // PROVIDER-CONFIRMED-START CAS ('pending' → 'started'), the completion is
+  // the generation-fenced resolution CAS that REQUIRES 'started' (a terminal
+  // success is only recordable for a CONFIRMED operation), the failure
+  // accepts either non-terminal state, and takeOver RETURNS the new
+  // generation token from EITHER non-terminal state.
+  it('R8-D. the durable ledger state machine — the INSERT-only register (NO re-arm — the key is immutable) + the PROVIDER-CONFIRMED-START attach CAS (pending → started) + the GENERATION-FENCED resolution CASes (complete REQUIRES started) + the takeOver-returns-the-token recovery', () => {
     const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
     // register: the FRESH open is an INSERT ... ON CONFLICT DO NOTHING.
     expect(repoSrc, 'the fresh open is INSERT ... ON CONFLICT DO NOTHING (ONE row per key)').toMatch(/ON CONFLICT \(idempotency_key\) DO NOTHING/);
     // register: NO re-arm — a terminally FAILED row is returned AS-IS (round 9
     // removed the round-8 `AND state = 'failed'` conditional re-arm).
     expect(repoSrc, 'NO re-arm: register NEVER conditionally updates a failed row back to pending (the key identifies ONE operation with ONE terminal result)').not.toMatch(/AND state = 'failed'/);
-    // complete: the GENERATION-FENCED resolution CAS ('pending' @ THIS
-    // generation → 'completed') — concurrent drivers and a late dead driver
-    // all funnel through it; only the ACTIVE generation can resolve.
-    expect(repoSrc, 'the completion is the generation-fenced resolution CAS (pending @ generation → completed)').toMatch(/state = 'completed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    // attachOperation (round 10): the PROVIDER-CONFIRMED-START CAS —
+    // 'pending' @ THIS generation → 'started' (the handle is recorded ONLY
+    // AFTER the provider confirmed the operation).
+    expect(repoSrc, 'the attach CAS transitions the row to started (the provider-confirmed start)').toMatch(/state = 'started',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2\s+AND provider_operation_handle IS NULL/);
+    // complete (round 10): the GENERATION-FENCED resolution CAS requires
+    // 'started' — the LIFECYCLE GATE (a terminal success is only recordable
+    // for a CONFIRMED operation; the database can never record a terminal
+    // success for a merely-prepared operation that was never observed
+    // starting).
+    expect(repoSrc, 'the completion is the generation-fenced resolution CAS that REQUIRES started (the lifecycle gate)').toMatch(/state = 'completed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'started'\s+AND generation = \$2/);
     expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$3::jsonb/);
-    // fail: the symmetric GENERATION-FENCED CAS (a stale generation's
-    // failure is structurally discarded — it can never defeat the active
-    // recovery generation).
-    expect(repoSrc, 'the failure is the symmetric generation-fenced CAS').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
-    // attachOperation: the operation-identity CAS (migration 0049's column).
-    expect(repoSrc, 'the operation-identity attach CAS exists (the handle is durably recorded BEFORE the body)').toMatch(/AND provider_operation_handle IS NULL/);
-    // takeOver: the process-loss recovery — the recovery drive of the SAME
-    // row, RETURNING the NEW GENERATION TOKEN (the fencing token).
-    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1) + RETURNS the token').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+    // fail (round 10): the symmetric GENERATION-FENCED CAS accepting EITHER
+    // non-terminal state (a failed submission attempt or a failed
+    // resolution may each terminally fail the key; a stale generation's
+    // failure is structurally discarded).
+    expect(repoSrc, 'the failure is the symmetric generation-fenced CAS accepting pending OR started').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state IN \('pending', 'started'\)\s+AND generation = \$2/);
+    // takeOver (round 10): the process-loss recovery from EITHER
+    // non-terminal state — the recovery drive of the SAME row, RETURNING
+    // the NEW GENERATION TOKEN (the fencing token).
+    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1) from EITHER non-terminal state + RETURNS the token').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state IN \('pending', 'started'\)\s+RETURNING generation/);
     expect(repoSrc, 'the takeOver port returns the NEW GENERATION TOKEN').toMatch(/tookOver: boolean;\s*generation: number \| null;/);
   });
 
@@ -13396,51 +13405,65 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     '0049_execution_provider_operation_generation_fence.sql',
   );
 
-  // R9-A (round 9 — migration 0049): the operation-identity layer + the
-  // generation fence's durable columns — provider_operation_handle (the
-  // durable provider-side identity of the ONE operation, recorded BEFORE
-  // the operation body runs) + operation_attached_at.
-  it('R9-A. migration 0049 exists — the provider-operation IDENTITY columns (provider_operation_handle + operation_attached_at) + the generation-fence/key-immutability header', () => {
+  // R9-A (round 9, rewritten by round 10): migration 0049's operation-
+  // identity columns + the generation fence — with the round-10 CORRECTION of
+  // the invalid attach-before-body premise (the round-10 review: "the
+  // migration itself explicitly encodes the incorrect premise that a
+  // recorded handle proves the operation was started").
+  it('R9-A. migration 0049 exists — the provider-operation IDENTITY columns + the generation-fence/key-immutability header + the ROUND-10 CORRECTION of the attach-before-body premise', () => {
     expect(existsSync(CROSS_MODE_MIGRATION_0049), '0049_execution_provider_operation_generation_fence.sql must exist').toBe(true);
     const src = readFileSync(CROSS_MODE_MIGRATION_0049, 'utf8');
     expect(src, 'the migration adds the provider operation handle').toMatch(/ADD COLUMN IF NOT EXISTS provider_operation_handle TEXT/);
     expect(src, 'the migration adds the attach timestamp').toMatch(/ADD COLUMN IF NOT EXISTS operation_attached_at TIMESTAMPTZ/);
     expect(src, 'the header documents the generation-fenced resolution CAS').toMatch(/GENERATION-FENCED RESOLUTION/);
     expect(src, 'the header documents the key immutability (FAILED is terminal — no re-arm)').toMatch(/KEY IMMUTABILITY/);
-    expect(src, 'the header documents the resolve-by-identity recovery (takeover NEVER re-runs the operation body)').toMatch(/NEVER re-runs the operation body/);
     expect(src, 'the header applies the review\'s exact native wording').toMatch(/AgentRun[\s\S]{0,12}is the durable native operation ledger/);
+    // PR #46 round 10: the INCORRECT premise is corrected in place — the
+    // header no longer claims a recorded handle proves the operation started.
+    expect(src, 'the round-10 correction is recorded (the attach-before-body premise was INVALID)').toMatch(/ROUND-10 CORRECTION/);
+    expect(src, 'the corrected semantics: the handle is recorded ONLY AFTER the provider confirmed the operation').toMatch(/recorded ONLY AFTER the provider[\s\S]{0,40}confirmed the operation/);
+    expect(src, 'the database-must-never-infer principle is stated').toMatch(/database must never[\s\S]{0,80}infer that an irreversible provider operation happened/);
+    expect(src, 'the incorrect claim is NOT re-asserted (no "handle recorded ⇒ started" proof)').not.toMatch(/handle recorded\s+⇒ the operation was STARTED/);
   });
 
-  // R9-B (round 9 — the provider protocol): the ATTACH-BEFORE-BODY ordering
-  // + the RESOLVE-BY-IDENTITY recovery. The operation identity is derived
-  // WITHOUT side effects + durably attached BEFORE the operation body runs,
-  // so a recorded handle PROVES the operation started (a recovery driver
-  // resolves it by identity — it NEVER re-runs the body) and an absent handle
-  // PROVES the body never started (driving it is the FIRST execution). The
-  // generic takeover primitive is therefore no longer "run the operation
-  // again".
-  it('R9-B. the attach-before-body operation-identity protocol + the resolve-by-identity recovery — takeover NEVER re-runs a started operation\'s body', () => {
+  // R9-B (round 9, rewritten by round 10 — the SUBMIT-THEN-ATTACH ordering):
+  // the IDEMPOTENT-BY-KEY submission seam + the attach AFTER the provider
+  // confirmation + the resolve-by-identity recovery. The round-9
+  // attach-BEFORE-body ordering was INVALID (the crash window between the
+  // durable attach and the body left a row whose recorded identity pointed
+  // at an operation that never existed — every recovery driver then resolved
+  // by that identity forever without executing the body). Round 10 makes the
+  // authority the PROVIDER BOUNDARY: startOperation(key) is IDEMPOTENT BY
+  // KEY (a re-call converges onto the ONE operation), the handle is attached
+  // ONLY AFTER the submission returned it, and the recovery driver
+  // re-submits ('pending' — safe by the idempotency contract) or resolves by
+  // the CONFIRMED identity ('started').
+  it('R9-B. the IDEMPOTENT-BY-KEY submission protocol — SUBMIT (startOperation) THEN attach (the provider-confirmed start) THEN resolve; a pending row is safely RE-SUBMITTED + a started row is resolved by identity (never a re-submission)', () => {
     const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
-    // The identity seams exist with their contracts.
-    expect(externalSrc, 'the openOperation seam derives the durable operation identity WITHOUT side effects').toMatch(/protected async openOperation\(/);
-    expect(externalSrc, 'the resolveOperation seam resolves a STARTED operation by identity (a status fetch for a platform provider; re-derivation ONLY because the default operations are PURE)').toMatch(/protected async resolveOperation\(/);
-    // THE ORDERING: in attemptDrive, the attach CAS precedes the body call.
+    // The submission seam exists with its IDEMPOTENCY contract.
+    expect(externalSrc, 'the startOperation seam is the IDEMPOTENT-BY-KEY submission boundary').toMatch(/protected async startOperation\(/);
+    expect(externalSrc, 'the submission contract states the idempotency-by-key requirement (a re-call CONVERGES onto the ONE operation)').toMatch(/MUST\s+\n?\s*\*\s*BE IDEMPOTENT BY KEY/);
+    expect(externalSrc, 'the resolveOperation seam resolves a CONFIRMED operation by identity (a status fetch for a platform provider; re-derivation ONLY because the default operations are PURE)').toMatch(/protected async resolveOperation\(/);
+    // THE ORDERING (round 10): in attemptDrive, the SUBMISSION precedes the
+    // attach CAS — the handle is durably recorded ONLY AFTER the provider
+    // confirmed the operation.
     const driveMatch = externalSrc.match(/private async attemptDrive\([\s\S]*?\n  \}/);
     expect(driveMatch, 'attemptDrive is defined').toBeTruthy();
     const driveSrc = driveMatch![0];
-    const handleCheckIdx = driveSrc.indexOf('row.providerOperationHandle != null');
+    const startedCheckIdx = driveSrc.indexOf("row.state === 'started'");
+    const submitIdx = driveSrc.indexOf('this.startOperation(key, task)');
     const attachIdx = driveSrc.indexOf('store.attachOperation(');
-    const bodyIdx = driveSrc.indexOf('this.generate(task)');
-    expect(handleCheckIdx, 'the drive checks the recorded identity FIRST').toBeGreaterThan(-1);
+    expect(startedCheckIdx, 'the drive checks the STARTED state (the confirmed operation) FIRST').toBeGreaterThan(-1);
+    expect(submitIdx, 'the submission seam is in the drive').toBeGreaterThan(-1);
     expect(attachIdx, 'the attach CAS is in the drive').toBeGreaterThan(-1);
-    expect(bodyIdx, 'the body call is in the drive').toBeGreaterThan(-1);
-    expect(attachIdx, 'the identity is ATTACHED BEFORE the operation body runs (a recorded handle proves the operation started; an absent handle proves the body never started)').toBeLessThan(bodyIdx);
-    // The resolve-by-identity routing: a recorded handle resolves through the
-    // resolveOperation seam — never the body.
+    expect(submitIdx, 'the SUBMISSION precedes the attach (the handle is recorded ONLY AFTER the provider confirmed the operation — the database never infers a start from an intended identity)').toBeLessThan(attachIdx);
+    // The resolve-by-identity routing: a 'started' row resolves through the
+    // resolveOperation seam — never a re-submission.
     const resolveMatch = externalSrc.match(/private async resolveByIdentity\([\s\S]*?\n  \}/);
     expect(resolveMatch, 'resolveByIdentity is defined').toBeTruthy();
     expect(resolveMatch![0], 'the recovery resolves through the contract-bound resolveOperation seam').toContain('this.resolveOperation(');
-    expect(resolveMatch![0], 'the recovery NEVER calls the operation body').not.toContain('this.generate(');
+    expect(resolveMatch![0], 'the recovery NEVER re-submits the operation').not.toContain('this.startOperation(');
+    expect(resolveMatch![0], 'the recovery NEVER calls the unkeyed one-shot body seam').not.toContain('this.generate(');
     expect(externalSrc, 'the resolve-by-identity observability log exists').toMatch(/provider-operation-resolve-by-identity/);
     // The provider-side convergence contract (the justification for the
     // residual window — the default provider declares its operations PURE).
@@ -13485,7 +13508,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(repoSrc, 'the store\'s register declares the key-immutability contract (a terminally failed row is returned AS-IS)').toMatch(/NEVER re-arms/);
     // And the recovery window itself never flips a terminal row: takeOver is
     // the ONLY generation mutation, and it requires state = 'pending'.
-    expect(repoSrc, 'takeOver requires state = pending (a terminal row is never taken over)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+RETURNING generation/);
+    expect(repoSrc, 'takeOver requires a NON-TERMINAL state (round 10: pending OR started — both unresolved; a terminal row is never taken over)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state IN \('pending', 'started'\)\s+RETURNING generation/);
   });
 
   // R9-E (round 9 — the review's exact native wording): "AgentRun is the
@@ -13502,27 +13525,194 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(nativeSrc, 'the native provider states the mechanics distinction').toMatch(/they do not share one mechanism/);
   });
 
-  // R9-F (round 9 — the regression suite proves the adversarial
-  // interleavings): the two review-required races (stale FAIL after takeover;
-  // stale SUCCESS after takeover) + the key-immutability semantics + the
-  // non-pure provider's exactly-once body + the identity-absent FIRST
-  // execution — all on REAL PostgreSQL with provider-instance separation.
-  it('R9-F. the concurrency regression suite covers the round-9 adversarial interleavings (stale fail / stale success / key immutability / the side-effecting provider / the identity-absent first execution)', () => {
+  // R9-F (round 9, rewritten by round 10): the regression suite proves the
+  // round-10 adversarial interleavings — the architect's COMPLETE crash
+  // matrix (before identity / after provider-accept-before-attach / after
+  // provider start / after provider result / stale completes / stale fails)
+  // + the native lifecycle convergence (in_progress awaited; terminal
+  // reflected; stuck fails closed) — all on REAL PostgreSQL with
+  // provider-instance separation.
+  it('R9-F. the concurrency regression suite covers the round-10 crash matrix + the native lifecycle convergence (the idempotent submission / the started resolution / the stale generations / the key immutability / the native await + failure + stuck arms)', () => {
     const suitePath = join(
       BACKEND_ROOT, 'tests', 'integration', 'agents',
       'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
     );
     const suiteSrc = readFileSync(suitePath, 'utf8');
-    expect(suiteSrc, 'R9-#1 — the stale-generation FAIL interleaving is asserted').toMatch(/R9-#1\. takeover → stale-generation FAIL → new-generation SUCCESS/);
-    expect(suiteSrc, 'R9-#2 — the old-generation SUCCESS interleaving is asserted').toMatch(/R9-#2\. takeover → old-generation SUCCESS → new-generation SUCCESS/);
-    expect(suiteSrc, 'R9-#3 — the key-immutability semantics are asserted').toMatch(/R9-#3\. KEY IMMUTABILITY/);
-    expect(suiteSrc, 'R9-#4 — the genuinely side-effecting provider proof').toMatch(/R9-#4\. the genuinely SIDE-EFFECTING provider/);
-    expect(suiteSrc, 'R9-#5 — the identity-absent FIRST-execution proof').toMatch(/R9-#5\. the identity-ABSENT takeover is the FIRST execution/);
-    // The side-effecting provider double resolves by a STATUS FETCH (never
-    // the body) + the park seams for the adversarial interleavings exist.
-    expect(suiteSrc, 'the SideEffectingExternalProvider double (the platform status fetch recovery)').toMatch(/class SideEffectingExternalProvider/);
+    // The external arm — the architect's crash matrix.
+    expect(suiteSrc, 'R10-#1 — the crash BEFORE the provider accepted (the re-submission is the FIRST execution)').toMatch(/R10-#1\./);
+    expect(suiteSrc, 'R10-#2 — the crash AFTER the provider accepted, BEFORE the ledger attach (the re-submission CONVERGES — the provider\'s key→operation mapping is the authority)').toMatch(/R10-#2\./);
+    expect(suiteSrc, 'R10-#3 — the crash AFTER the attach (the started operation is resolved BY IDENTITY)').toMatch(/R10-#3\./);
+    expect(suiteSrc, 'R10-#4 — the stale-generation FAIL interleaving is asserted').toMatch(/R10-#4\./);
+    expect(suiteSrc, 'R10-#5 — the old-generation SUCCESS interleaving is asserted').toMatch(/R10-#5\./);
+    expect(suiteSrc, 'R10-#6 — the key-immutability + lifecycle-CAS semantics are asserted').toMatch(/R10-#6\./);
+    // The native arm — the lifecycle convergence.
+    expect(suiteSrc, 'R10-N1 — the existing in_progress run is AWAITED (never reported completed) + the terminal SUCCESS is eventually reflected').toMatch(/R10-N1\./);
+    expect(suiteSrc, 'R10-N2 — the existing in_progress run later FAILS + the converging caller receives failed').toMatch(/R10-N2\./);
+    expect(suiteSrc, 'R10-N3 — the stuck (never-terminal) run fails CLOSED (never a manufactured completion)').toMatch(/R10-N3\./);
+    // The side-effecting provider double + the park seams for the
+    // adversarial interleavings exist.
+    expect(suiteSrc, 'the SideEffectingExternalProvider double (the idempotent platform submission + the status fetch recovery)').toMatch(/class SideEffectingExternalProvider/);
     expect(suiteSrc, 'the parkAtResolve seam (the mid-recovery stall point)').toMatch(/parkAtResolve/);
-    expect(suiteSrc, 'the parkAtOpen seam (the pre-identity death point)').toMatch(/parkAtOpen/);
+    expect(suiteSrc, 'the parkBeforeSubmit seam (the die-before-the-provider-accepted point)').toMatch(/parkBeforeSubmit/);
+    expect(suiteSrc, 'the parkAfterSubmitAccepted seam (the die-after-the-provider-accepted point — the round-10 crash-window hole)').toMatch(/parkAfterSubmitAccepted/);
     expect(suiteSrc, 'the resolution marker (proves WHICH generation\'s result was stored)').toMatch(/resolutionMarker/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 10 — the EXPLICIT PROVIDER-OPERATION LIFECYCLE + the NATIVE
+  // LIFECYCLE CONVERGENCE (the round-10 review's two blockers + its four
+  // required static invariants). Blocker 1: attachOperation() ran BEFORE the
+  // operation body, so a recorded handle did NOT prove the operation started
+  // (the crash window between the durable attach and the body left every
+  // recovery driver resolving by an identity whose operation never existed).
+  // Blocker 2: native convergence treated an in_progress AgentRun as
+  // completed. The corrections: the IDEMPOTENT-BY-KEY submission boundary
+  // (migration 0050's pending → started → terminal lifecycle; the handle is
+  // recorded ONLY AFTER the provider confirmed the operation) + the native
+  // lifecycle convergence (EXISTING ≠ COMPLETED — a non-terminal run is
+  // awaited until terminal; a stuck run fails closed).
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0050 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0050_execution_provider_operation_lifecycle.sql',
+  );
+
+  // R10-A (round 10 — migration 0050): the EXPLICIT lifecycle — the CHECK is
+  // widened to pending/started/completed/failed, and the LEGACY reset clears
+  // the round-9 unproven handles from in-flight rows (the database never
+  // infers a start from a persisted intended identity).
+  it('R10-A. migration 0050 exists — the EXPLICIT provider-operation lifecycle (pending/started/completed/failed CHECK + the legacy unproven-handle reset + the corrected-protocol header)', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0050), '0050_execution_provider_operation_lifecycle.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0050, 'utf8');
+    expect(src, 'the lifecycle CHECK is widened to include started').toMatch(/CHECK \(state IN \('pending', 'started', 'completed', 'failed'\)\)/);
+    expect(src, 'the round-9 CHECK constraint is replaced').toMatch(/DROP CONSTRAINT IF EXISTS wfos_execution_provider_operations_state_check/);
+    expect(src, 'the LEGACY reset clears the unproven handles from in-flight rows').toMatch(/SET provider_operation_handle = NULL,[\s\S]*?WHERE state = 'pending'\s+AND provider_operation_handle IS NOT NULL/);
+    // The architect's principle, stated verbatim in the migration header.
+    expect(src, 'the database-must-never-infer principle is stated').toMatch(/THE DATABASE MUST NEVER INFER THAT AN IRREVERSIBLE PROVIDER OPERATION[\s\S]*?HAPPENED MERELY BECAUSE WORKFLOWOS PERSISTED AN INTENDED IDENTITY/);
+    expect(src, 'the idempotent-submission contract is the correction\'s foundation').toMatch(/IDEMPOTENT BY KEY/i);
+    expect(src, 'the native lifecycle correction (EXISTING ≠ COMPLETED) is stated').toMatch(/EXISTING[\s\S]{0,4}≠[\s\S]{0,4}COMPLETED/);
+  });
+
+  // R10-B (round 10 — the architect's required static invariant #1): NO
+  // code path treats providerOperationHandle != null as PROOF that the
+  // provider body started. The attach is the PROVIDER-CONFIRMED-START CAS
+  // (recorded after startOperation returned); the provider routes on the
+  // row's 'started' STATE (the durable fact), never on a bare handle-presence
+  // check; and the repository's docs state the recording order.
+  it('R10-B. NO handle-presence inference — the drive routes on the started STATE (the durable provider-confirmed fact), never on a bare handle != null check; the attach records the confirmed identity AFTER the submission', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // The drive routes on the STATE, not the handle's mere presence.
+    const driveMatch = externalSrc.match(/private async attemptDrive\([\s\S]*?\n  \}/);
+    expect(driveMatch, 'attemptDrive is defined').toBeTruthy();
+    expect(driveMatch![0], 'the drive routes on the started STATE (the provider-confirmed fact)').toMatch(/row\.state === 'started' && row\.providerOperationHandle != null/);
+    expect(externalSrc, 'the provider never treats a bare handle presence as proof of start (the round-9 inference is gone)').not.toMatch(/recorded identity PROVES the operation (?:was )?started/i);
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the repository contract states the AFTER-confirmation recording order').toMatch(/recorded by attachOperation ONLY\s*\n?\s*\*?\s*AFTER the provider confirmed/);
+    expect(repoSrc, 'the pending row makes NO claim about the provider').toMatch(/NO handle[\s\S]{0,120}row makes NO claim about the provider/);
+  });
+
+  // R10-C (round 10 — the architect's required static invariants #2 + #3):
+  // NO existing NON-TERMINAL AgentRun is treated as a completed execution —
+  // the native convergence maps ONLY terminal statuses, and NO branch maps
+  // pending/in_progress to completed. The converge path must contain the
+  // lifecycle gate (the terminal check) + the await path.
+  it('R10-C. native convergence maps ONLY terminal run statuses — the lifecycle gate + the awaitExistingRunTerminal path; no branch maps pending/in_progress to completed', () => {
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    const convergeMatch = nativeSrc.match(/private async convergeToRun\([\s\S]*?\n  \}/);
+    expect(convergeMatch, 'convergeToRun is defined').toBeTruthy();
+    // The lifecycle gate: ONLY terminal statuses map directly.
+    expect(convergeMatch![0], 'the lifecycle gate checks the TERMINAL statuses explicitly').toMatch(/const terminal =\s*\n?\s*run\.status === 'success' \|\|\s*\n?\s*run\.status === 'failed' \|\|\s*\n?\s*run\.status === 'cancelled'/);
+    expect(convergeMatch![0], 'a NON-TERMINAL run is AWAITED (never reported directly)').toMatch(/awaitExistingRunTerminal/);
+    // The await path exists with the fail-closed typed error.
+    const awaitMatch = nativeSrc.match(/private async awaitExistingRunTerminal\([\s\S]*?\n  \}/);
+    expect(awaitMatch, 'awaitExistingRunTerminal is defined').toBeTruthy();
+    expect(awaitMatch![0], 'the await polls the run repository until a TERMINAL state').toMatch(/fresh\.status === 'success'/);
+    expect(awaitMatch![0], 'the window elapse FAILS CLOSED with the typed unresolved error').toMatch(/native-execution-existing-run-unresolved/);
+    expect(awaitMatch![0], 'the typed error states EXISTING ≠ COMPLETED').toMatch(/EXISTING ≠ COMPLETED/);
+    // The round-9 shape (every non-failed status → completed) is GONE: the
+    // ONLY status ternary maps the (terminal) converged run.
+    expect(nativeSrc, 'the failed/cancelled → failed, success → completed mapping remains (for TERMINAL runs only)').toMatch(/failed \?\s*\n?\s*'failed' : 'completed'/);
+    // The service-level catch-path performs NO write for a non-terminal run.
+    const serviceSrc = readFileSync(join(AGENTS_INTERNAL, 'default-cross-mode-handoff-service.ts'), 'utf8');
+    expect(serviceSrc, 'the dispatch failure handler performs NO outcome write for a NON-TERMINAL existing run (fail closed)').toMatch(/dispatch-native-existing-run-non-terminal/);
+    expect(serviceSrc, 'the non-terminal guard rejects with EXISTING ≠ COMPLETED').toMatch(/EXISTING ≠ COMPLETED: no authoritative outcome is written for a non-terminal run/);
+    // The service-level existing-run guard (the premature completed write) is
+    // REMOVED — ALL existing-run convergence flows through the provider
+    // boundary.
+    expect(serviceSrc, 'the service-level existing-run guard is removed (no direct completed write for an existing run)').not.toMatch(/dispatch-native-existing-run',\s*\{[\s\S]{0,200}status: 'completed'/);
+  });
+
+  // R10-D (round 10 — the architect's required static invariant #4): NO
+  // recovery path can silently SKIP an operation that was merely prepared,
+  // not actually started. The pending branch of the drive ALWAYS goes through
+  // the SUBMISSION seam (startOperation — which converges onto the ONE
+  // operation by contract); the resolution path is ONLY reachable for a
+  // 'started' row; and the ledger's complete CAS requires 'started' (the
+  // database structurally cannot record a terminal success for a
+  // never-observed operation).
+  it('R10-D. no silent skip of a merely-prepared operation — the pending branch ALWAYS submits (the idempotent seam); only a started row resolves by identity; complete requires started', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const driveMatch = externalSrc.match(/private async attemptDrive\([\s\S]*?\n  \}/);
+    expect(driveMatch, 'attemptDrive is defined').toBeTruthy();
+    const driveSrc = driveMatch![0];
+    // The pending branch ALWAYS calls the submission seam — there is no path
+    // from 'pending' to a resolution that skips the provider.
+    const pendingBranchIdx = driveSrc.indexOf("The row is 'pending'");
+    expect(pendingBranchIdx, 'the pending branch exists').toBeGreaterThan(-1);
+    const pendingBranch = driveSrc.slice(pendingBranchIdx);
+    expect(pendingBranch, 'the pending branch submits through the idempotent seam (never skips the provider)').toMatch(/await this\.startOperation\(key, task\)/);
+    // The resolution is ONLY reachable for a started row.
+    const resolveByIdentityMatch = externalSrc.match(/private async resolveByIdentity\([\s\S]*?\n  \}/);
+    expect(resolveByIdentityMatch, 'resolveByIdentity is defined').toBeTruthy();
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the complete CAS requires state = started (the lifecycle gate — a terminal success is only recordable for a CONFIRMED operation)').toMatch(/AND state = 'started'\s+\n?\s*AND generation = \$2/);
+    // The keyed path never runs the unkeyed one-shot body.
+    expect(externalSrc, 'the generate seam is documented as the UNKEYED-only path').toMatch(/UNKEYED \(mainline one-shot\)/);
+  });
+
+  // R10-E (round 10 — the native lifecycle contract): the native provider's
+  // deps expose the existing-run await knobs (window + interval), and the
+  // contract (execution.types.ts) states the EXISTING ≠ COMPLETED principle
+  // for the native arm.
+  it('R10-E. the native await knobs + the EXISTING ≠ COMPLETED contract wording (the lifecycle is preserved across the convergence boundary)', () => {
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the existing-run resolution window knob exists').toMatch(/existingRunResolutionWindowMs/);
+    expect(nativeSrc, 'the existing-run poll interval knob exists').toMatch(/existingRunPollIntervalMs/);
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the contract states EXISTING ≠ COMPLETED for the native arm').toMatch(/EXISTING ≠ COMPLETED/);
+    expect(typesSrc, 'the contract states a non-terminal run is AWAITED until terminal').toMatch(/NON-TERMINAL run[\s\S]{0,120}is AWAITED until terminal/);
+    expect(typesSrc, 'the contract states a keyed submit never manufactures a completed outcome from a non-terminal run').toMatch(/never[\s\S]{0,60}manufactures a completed outcome from a non-terminal run/);
+  });
+
+  // R10-F (round 10 — the SIDE-EFFECTING provider's idempotent submission):
+  // the test double's submission is idempotent by key THROUGH THE PLATFORM
+  // (the platform map is the key→operation authority), proving the recovery
+  // re-submission converges rather than duplicating — the provider-boundary
+  // guarantee the round-10 protocol depends on.
+  it('R10-F. the side-effecting double submits idempotently by key through the platform (the platform map is the key→operation authority — a re-submission converges, never a second effect)', () => {
+    const suitePath = join(
+      BACKEND_ROOT, 'tests', 'integration', 'agents',
+      'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
+    );
+    const suiteSrc = readFileSync(suitePath, 'utf8');
+    expect(suiteSrc, 'the double\'s submission is keyed on the platform map (the idempotency authority)').toMatch(/platform\.has\(handle\)/);
+    expect(suiteSrc, 'the double counts SUBMISSIONS, EFFECTS, and RESOLUTIONS separately (the re-submission converges without a second effect)').toMatch(/get effectCount/);
+    expect(suiteSrc, 'the before-effect + after-effect death gates exist (the two sides of the provider-accept crash window)').toMatch(/beforeEffect/);
+    expect(suiteSrc, 'the after-effect death gate parks AFTER the platform accepted (the round-10 crash-window hole)').toMatch(/afterEffect/);
+  });
+
+  // R10-G (round 10 — the keyed path never runs the unkeyed body): the
+  // instrumented double counts generate() entries and the keyed regressions
+  // assert ZERO — the structural proof that the keyed dispatch never falls
+  // back to the raw one-shot body seam.
+  it('R10-G. the keyed regressions assert ZERO generate entries (the keyed path never runs the unkeyed one-shot body seam)', () => {
+    const suitePath = join(
+      BACKEND_ROOT, 'tests', 'integration', 'agents',
+      'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
+    );
+    const suiteSrc = readFileSync(suitePath, 'utf8');
+    expect(suiteSrc, 'the drive counter (generate entries) exists on the instrumented double').toMatch(/get driveCount/);
+    expect(suiteSrc, 'a keyed regression asserts ZERO drives (the keyed path never runs the body seam)').toMatch(/driveCount[\s\S]{0,200}toBe\(0\)/);
   });
 });
