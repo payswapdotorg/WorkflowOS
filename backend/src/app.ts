@@ -1556,6 +1556,13 @@ export async function buildApp(
       taskProfileBuilder: executionTaskProfileBuilder,
       agentProviderRegistry: agentProviderRegistryService,
       benchmarkEvidenceProvider: executionEvidenceProvider,
+      // WORK-043 (§33.3): the project-scoped agent-policy external-domain
+      // gate (WORK-037) feeds recommendation-time eligibility for external
+      // candidates. Non-interactive by design — the ask→approval interaction
+      // stays on the handoff path (evaluateExternalHandoff); this gate only
+      // decides the pre-ranking eligibility verdict. The AgentPolicyEngine
+      // structurally satisfies AgentPolicyProjectGateLike.
+      agentPolicyProjectGate: agentPolicyEngine,
     });
 
     // --- WORK-042: Cross-Mode Execution Handoff. ---

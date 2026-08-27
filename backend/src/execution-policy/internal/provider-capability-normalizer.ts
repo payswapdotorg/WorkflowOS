@@ -121,6 +121,49 @@ export class ProviderCapabilityNormalizer {
     }
     return base;
   }
+
+  /**
+   * WORK-043: the capability profile for a provider that is NOT in the
+   * registry at all (the point-in-time single-candidate evaluation of an
+   * unknown provider). NO invented capabilities (§6): every surface is
+   * unavailable and no execution mode is supported — the evaluator blocks
+   * the candidate with 'configuration_missing' (the honest verdict).
+   */
+  static notConfigured(_mode: 'native' | 'external'): ProviderCapabilityProfile {
+    return {
+      conversational: 'unavailable',
+      codingAgent: 'unavailable',
+      browser: 'unavailable',
+      repositoryAccess: 'unavailable',
+      terminal: 'unavailable',
+      nativeApi: 'unavailable',
+      externalUi: 'unavailable',
+      streaming: 'unavailable',
+      toolUse: 'unavailable',
+      maxContext: { tokens: null, source: 'unknown' },
+      supportedExecutionModes: [],
+    };
+  }
+
+  /**
+   * WORK-043: the neutral NO-EVIDENCE historical performance (an unknown
+   * provider has no benchmark cell). Sufficient=false → the recommendation
+   * scoring treats it as an insufficient sample; eligibility is unaffected
+   * (capability evidence never makes a candidate eligible, §3).
+   */
+  static noEvidence(): import('../types.js').HistoricalPerformance {
+    return {
+      sampleSize: 0,
+      sufficient: false,
+      observedQuality: null,
+      ciFirstPassRate: null,
+      verificationFirstPassRate: null,
+      medianCorrectionCycles: null,
+      medianTimeToVerifiedMs: null,
+      humanInterventionCount: null,
+      evidenceCells: [],
+    };
+  }
 }
 
 function defaultSurface(): ProviderSurfaceCapabilities {

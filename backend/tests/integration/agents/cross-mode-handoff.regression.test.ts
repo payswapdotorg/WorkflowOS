@@ -114,6 +114,73 @@ class StubExecutionPolicyService implements CrossModeExecutionPolicyPort {
   }
 }
 
+/**
+ * WORK-043 (§33.3): a stub policy service WITH the destination-eligibility
+ * seam — verdicts are configurable (eligible / ineligible with structured
+ * blocking reasons / throwing). Records every call for seam-input assertions
+ * (provider + model + mode + workItemId are the RESOLVED destination).
+ */
+class VerdictExecutionPolicyService implements CrossModeExecutionPolicyPort {
+  readonly calls: {
+    organizationId: string | null | undefined;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId: string | null | undefined;
+  }[] = [];
+  constructor(
+    private readonly nativeAllowed: boolean = true,
+    private readonly verdict:
+      | { kind: 'eligible' }
+      | { kind: 'ineligible'; status: string; reasons: { category: string; constraint: string; reason: string }[] }
+      | { kind: 'throw' } = { kind: 'eligible' },
+  ) {}
+  async getProjectPolicy(_projectId: string): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null> {
+    return { nativeExecutionAllowed: this.nativeAllowed, policyVersion: 1 };
+  }
+  async evaluateCandidateEligibility(input: {
+    organizationId?: string | null;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly { category: string; constraint: string; reason: string }[];
+    };
+    policyVersion: number;
+  }> {
+    this.calls.push({
+      organizationId: input.organizationId,
+      projectId: input.projectId,
+      workItemId: input.workItemId,
+      provider: input.provider,
+      model: input.model,
+      executionMode: input.executionMode,
+      userId: input.userId,
+    });
+    if (this.verdict.kind === 'throw') {
+      throw new Error('stub evaluation failure');
+    }
+    if (this.verdict.kind === 'ineligible') {
+      return {
+        eligibility: { status: this.verdict.status, eligible: false, blockingReasons: this.verdict.reasons },
+        policyVersion: 7,
+      };
+    }
+    return {
+      eligibility: { status: 'eligible', eligible: true, blockingReasons: [] },
+      policyVersion: 7,
+    };
+  }
+}
+
 class StubAgentProviderRegistry implements CrossModeAgentProviderRegistryPort {
   getPlatformDefaultProvider(): string | undefined {
     return 'fake';
@@ -2634,6 +2701,151 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const after = await executionRecordRepo.findByExecutionId(executionId);
       expect(after!.mode).toBe('external');
       expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // WORK-043 (§33.3) — destination RE-ELIGIBILITY (the full constraint engine
+  // applied to the RESOLVED destination candidate at handoff time).
+  // =========================================================================
+  describe('WORK-043 destination re-eligibility', () => {
+    function serviceWith(policy: CrossModeExecutionPolicyPort): DefaultCrossModeHandoffService {
+      return new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: policy,
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: new InMemoryQueue(),
+      });
+    }
+
+    // 43a: an INELIGIBLE external destination (quota-exhausted) rejects the
+    // handoff BEFORE the reserve (side-effect-free) with EVERY blocking
+    // reason named in the error.
+    it('43a. quota-exhausted external destination → handoff-ineligible-destination with the named reasons, NO side effects', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, {
+        kind: 'ineligible',
+        status: 'quota_exhausted',
+        reasons: [
+          { category: 'quota', constraint: 'monthly_quota_exhausted', reason: 'Monthly execution quota exhausted (10/10 used this period).' },
+        ],
+      });
+      const svc = serviceWith(policy);
+      const err = await svc.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-q-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('quota_exhausted');
+      expect((err as Error).message).toContain('monthly_quota_exhausted');
+      expect((err as Error).message).toContain('Monthly execution quota exhausted');
+      // The seam saw the RESOLVED destination (external + the catalog
+      // provider) + the execution's work item + the actor.
+      expect(policy.calls).toHaveLength(1);
+      expect(policy.calls[0]!.executionMode).toBe('external');
+      expect(policy.calls[0]!.provider).toBeTruthy();
+      expect(policy.calls[0]!.userId).toBe('test-user');
+      // Side-effect-free rejection: mode unchanged, no handoff log row.
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('native');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43b: an INELIGIBLE native destination (security-blocked) rejects an
+    // external→native handoff the same way.
+    it('43b. security-blocked native destination → handoff-ineligible-destination (external→native)', async () => {
+      const { executionId } = await createExternalRecord('handoff_ready');
+      const policy = new VerdictExecutionPolicyService(true, {
+        kind: 'ineligible',
+        status: 'security_blocked',
+        reasons: [
+          { category: 'security', constraint: 'external_security_ceiling', reason: "Project security classification 'restricted' exceeds the external execution ceiling 'confidential'." },
+        ],
+      });
+      const err = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `w043-s-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('security_blocked');
+      // The seam saw the RESOLVED native destination (provider + model).
+      expect(policy.calls[0]!.executionMode).toBe('native');
+      expect(policy.calls[0]!.provider).toBe('fake');
+      expect(policy.calls[0]!.model).toBe('test-model');
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('external');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43c: a THROWING evaluation fails CLOSED (an unresolvable constraint
+    // evaluation is NOT neutral).
+    it('43c. a throwing evaluation → fail-closed handoff-ineligible-destination', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, { kind: 'throw' });
+      const err = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-t-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossModeHandoffError);
+      expect((err as CrossModeHandoffError).code).toBe('handoff-ineligible-destination');
+      expect((err as Error).message).toContain('failing closed');
+      expect(await countHandoffsForExecution(executionId)).toBe(0);
+    });
+
+    // 43d: an ELIGIBLE destination proceeds AND the verdict is composed into
+    // the handoff log row's policy_decision (the audit trail).
+    it('43d. eligible destination → handoff proceeds + the verdict is recorded on the append-only log row', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const policy = new VerdictExecutionPolicyService(true, { kind: 'eligible' });
+      const result = await serviceWith(policy).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-e-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(result.handoff).toBeTruthy();
+      expect(result.record.mode).toBe('external');
+      // The composed summary: the original external policy decision + the
+      // destinationEligibility block (status/policyVersion/provider/mode).
+      const parsed = JSON.parse(result.handoff.policyDecision ?? '{}') as Record<string, unknown>;
+      expect(parsed.target).toBe('external');
+      const dest = parsed.destinationEligibility as {
+        status: string; eligible: boolean; policyVersion: number; provider: string; mode: string;
+      };
+      expect(dest.status).toBe('eligible');
+      expect(dest.eligible).toBe(true);
+      expect(dest.policyVersion).toBe(7);
+      expect(dest.mode).toBe('external');
+      expect(dest.provider).toBeTruthy();
+    });
+
+    // 43e: a pre-WORK-043 port (no seam) → the handoff proceeds and the
+    // summary records the gate's absence HONESTLY ('not_evaluated').
+    it('43e. pre-WORK-043 port (no seam) → proceeds with an honest not_evaluated marker', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const result = await serviceWith(new StubExecutionPolicyService(true)).handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `w043-n-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(result.record.mode).toBe('external');
+      const parsed = JSON.parse(result.handoff.policyDecision ?? '{}') as Record<string, unknown>;
+      const dest = parsed.destinationEligibility as { status: string };
+      expect(dest.status).toBe('not_evaluated');
     });
   });
 });

@@ -266,6 +266,29 @@ function makeConstraints(overrides: Partial<ExecutionConstraintSet> = {}): Execu
     level: 'standard',
     approvedLocations: [],
   };
+  // WORK-043 (§33.3): the new constraint families default to INACTIVE
+  // (no quota, no rate limit, no security ceiling, agent policy allowing) —
+  // the pre-WORK-043 regression scenarios keep their exact verdicts.
+  const quota = overrides.quota ?? {
+    monthlyMaxExecutions: null,
+    dailyMaxExecutions: null,
+    monthlyUsed: 0,
+    dailyUsed: 0,
+  };
+  const rateLimit = overrides.rateLimit ?? {
+    maxRequestsPerWindow: null,
+    windowSeconds: null,
+    providerWindowUsage: {},
+  };
+  const security = overrides.security ?? {
+    projectClassification: 'standard' as const,
+    externalCeiling: null,
+  };
+  const agentPolicy = overrides.agentPolicy ?? {
+    externalDecision: 'allow' as const,
+    reason: null,
+    policyVersion: null,
+  };
   return {
     capability: [],
     user,
@@ -274,6 +297,10 @@ function makeConstraints(overrides: Partial<ExecutionConstraintSet> = {}): Execu
     availability,
     subscription,
     privacy,
+    quota,
+    rateLimit,
+    security,
+    agentPolicy,
   };
 }
 
@@ -945,6 +972,10 @@ function policyRecord(): ProjectPolicyRecord {
     maxCostPerTaskCents: null, maxCostPerTrialCents: null, maxTimeToPrMs: null,
     humanInterventionAllowed: true, privacyLevel: 'standard',
     allowedProviders: [], deniedProviders: [], allowedModes: [],
+    // WORK-043: the new constraint columns default to INACTIVE.
+    maxExecutionsPerMonth: null, maxExecutionsPerDay: null,
+    rateLimitMaxRequests: null, rateLimitWindowSeconds: null,
+    securityClassification: 'standard', externalSecurityCeiling: null,
     frozen: false, policyVersion: 1, createdAt: new Date(), updatedAt: new Date(),
   };
 }

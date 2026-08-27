@@ -38,6 +38,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
               max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
               human_intervention_allowed, privacy_level,
               allowed_providers, denied_providers, allowed_modes,
+              max_executions_per_month, max_executions_per_day,
+              rate_limit_max_requests, rate_limit_window_seconds,
+              security_classification, external_security_ceiling,
               frozen, policy_version, created_at, updated_at
          FROM wfos_execution_policies
         WHERE project_id = $1
@@ -58,6 +61,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                  max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                  human_intervention_allowed, privacy_level,
                  allowed_providers, denied_providers, allowed_modes,
+                 max_executions_per_month, max_executions_per_day,
+                 rate_limit_max_requests, rate_limit_window_seconds,
+                 security_classification, external_security_ceiling,
                  frozen, policy_version, created_at, updated_at`,
       [organizationId, projectId],
     );
@@ -87,6 +93,13 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
     if (input.allowedProviders != null) push('allowed_providers', Array.from(input.allowedProviders));
     if (input.deniedProviders != null) push('denied_providers', Array.from(input.deniedProviders));
     if (input.allowedModes != null) push('allowed_modes', Array.from(input.allowedModes));
+    // WORK-043 (§33.3): quota + rate-limit + security columns.
+    if ('maxExecutionsPerMonth' in input) push('max_executions_per_month', input.maxExecutionsPerMonth ?? null);
+    if ('maxExecutionsPerDay' in input) push('max_executions_per_day', input.maxExecutionsPerDay ?? null);
+    if ('rateLimitMaxRequests' in input) push('rate_limit_max_requests', input.rateLimitMaxRequests ?? null);
+    if ('rateLimitWindowSeconds' in input) push('rate_limit_window_seconds', input.rateLimitWindowSeconds ?? null);
+    if (input.securityClassification != null) push('security_classification', input.securityClassification);
+    if ('externalSecurityCeiling' in input) push('external_security_ceiling', input.externalSecurityCeiling ?? null);
     if (sets.length === 0) return this.getProjectPolicy(projectId);
     params.push(projectId);
     const res = await this.db.query<ProjectPolicyRow>(
@@ -98,6 +111,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                   max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                   human_intervention_allowed, privacy_level,
                   allowed_providers, denied_providers, allowed_modes,
+                  max_executions_per_month, max_executions_per_day,
+                  rate_limit_max_requests, rate_limit_window_seconds,
+                  security_classification, external_security_ceiling,
                   frozen, policy_version, created_at, updated_at`,
       params,
     );
@@ -115,11 +131,47 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                   max_cost_per_task_cents, max_cost_per_trial_cents, max_time_to_pr_ms,
                   human_intervention_allowed, privacy_level,
                   allowed_providers, denied_providers, allowed_modes,
+                  max_executions_per_month, max_executions_per_day,
+                  rate_limit_max_requests, rate_limit_window_seconds,
+                  security_classification, external_security_ceiling,
                   frozen, policy_version, created_at, updated_at`,
       [projectId],
     );
     const row = res.rows[0];
     return row ? mapProjectPolicy(row) : null;
+  }
+
+  // ---------------------------------------------------------------- usage (WORK-043)
+
+  /**
+   * WORK-043 (§33.3) — the quota/rate-limit USAGE query. Counts executions
+   * dispatched for the project since `since`, optionally scoped to one
+   * provider (the per-provider rate-limit window). The authoritative source
+   * is wfos_executions itself (NO parallel usage ledger — no dual-write, no
+   * drift). Returns NULL when the query fails: an ACTIVE quota/rate limit
+   * whose usage cannot be resolved fails CLOSED in the evaluator.
+   */
+  async countProjectExecutionsSince(
+    projectId: string,
+    provider: string | null,
+    since: Date,
+  ): Promise<number | null> {
+    try {
+      const res = await this.db.query<{ c: number }>(
+        provider != null
+          ? `SELECT COUNT(*)::int AS c
+               FROM wfos_executions
+              WHERE project_id = $1 AND provider = $2 AND created_at >= $3`
+          : `SELECT COUNT(*)::int AS c
+               FROM wfos_executions
+              WHERE project_id = $1 AND created_at >= $2`,
+        provider != null ? [projectId, provider, since] : [projectId, since],
+      );
+      return Number(res.rows[0]?.c ?? 0);
+    } catch {
+      // Unresolvable usage — the evaluator's fail-closed posture handles it.
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------- user prefs
@@ -354,6 +406,9 @@ interface ProjectPolicyRow {
   max_time_to_pr_ms: number | null;
   human_intervention_allowed: boolean; privacy_level: string;
   allowed_providers: string[]; denied_providers: string[]; allowed_modes: string[];
+  max_executions_per_month: number | null; max_executions_per_day: number | null;
+  rate_limit_max_requests: number | null; rate_limit_window_seconds: number | null;
+  security_classification: string; external_security_ceiling: string | null;
   frozen: boolean; policy_version: number;
   created_at: Date; updated_at: Date;
 }
@@ -372,6 +427,12 @@ function mapProjectPolicy(r: ProjectPolicyRow): ProjectPolicyRecord {
     allowedProviders: r.allowed_providers ?? [],
     deniedProviders: r.denied_providers ?? [],
     allowedModes: (r.allowed_modes ?? []) as ('native' | 'external')[],
+    maxExecutionsPerMonth: r.max_executions_per_month,
+    maxExecutionsPerDay: r.max_executions_per_day,
+    rateLimitMaxRequests: r.rate_limit_max_requests,
+    rateLimitWindowSeconds: r.rate_limit_window_seconds,
+    securityClassification: (r.security_classification ?? 'standard') as ProjectPolicyRecord['securityClassification'],
+    externalSecurityCeiling: (r.external_security_ceiling ?? null) as ProjectPolicyRecord['externalSecurityCeiling'],
     frozen: r.frozen, policyVersion: r.policy_version,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };

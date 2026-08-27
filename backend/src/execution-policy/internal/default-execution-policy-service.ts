@@ -18,6 +18,8 @@
 import type {
   BenchmarkMode,
   BenchmarkPolicy,
+  CandidateEligibilityInput,
+  CandidateEligibilityResult,
   CostEstimate,
   EligibilityEvaluationInput,
   ExecutionCandidate,
@@ -43,8 +45,12 @@ import type {
   UpsertAccessProfileInput,
   ToolPolicy,
   ControlledComparisonDimensions,
+  AgentPolicyConstraints,
+  QuotaConstraints,
+  RateLimitConstraints,
 } from '../types.js';
 import type {
+  AgentPolicyProjectGateLike,
   DefaultExecutionPolicyServiceDeps,
   ResolvedOrgPolicy,
 } from './execution-policy.types.js';
@@ -53,6 +59,11 @@ import type { ExecutionProviderInfo } from '@modules/agents';
 
 export class DefaultExecutionPolicyService implements ExecutionPolicyService {
   constructor(private readonly deps: DefaultExecutionPolicyServiceDeps) {}
+
+  /** WORK-043: the clock seam (period/window boundaries). */
+  private now(): Date {
+    return this.deps.now ? this.deps.now() : new Date();
+  }
 
   async recommend(input: RecommendInput): Promise<ExecutionRecommendation> {
     const { organizationId, projectId, workItemId, userId } = input;
@@ -117,7 +128,14 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     // violating the §12 contract "advisory; NEVER overrides hard
     // constraints".
     const orgPolicy = this.deps.orgPolicyResolver ? await this.deps.orgPolicyResolver.resolve(organizationId) : null;
-    const constraints = this.buildConstraintSet(policy, orgPolicy);
+    // --- WORK-043 (§33.3): resolve the NEW constraint-family inputs ---
+    // Usage is DERIVED from the authoritative execution records (no parallel
+    // ledger); the agent-policy external decision is resolved ONCE per scope
+    // (the external-domain rule is project-scoped, not provider-refined).
+    const providerNames = providers.map((p) => p.provider);
+    const usage = await this.resolveUsageConstraints(policy, projectId, providerNames);
+    const agentPolicy = await this.resolveAgentPolicyConstraint(organizationId, projectId);
+    const constraints = this.buildConstraintSet(policy, orgPolicy, usage, agentPolicy);
 
     // --- evaluate eligibility (§3 hard filter) ---
     const evaluated = candidates.map((c) => {
@@ -231,6 +249,17 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         input.maxCostPerTaskCents !== undefined ? input.maxCostPerTaskCents : existing.maxCostPerTaskCents,
         input.maxTimeToPrMs !== undefined ? input.maxTimeToPrMs : existing.maxTimeToPrMs,
       );
+      // WORK-043 (§33.3): validate the merged quota / rate-limit / security
+      // fields (clean domain errors; migration 0050's CHECKs are the
+      // backstop — the same two-boundary pattern).
+      validateWork043PolicyFields({
+        maxExecutionsPerMonth: input.maxExecutionsPerMonth !== undefined ? input.maxExecutionsPerMonth : existing.maxExecutionsPerMonth,
+        maxExecutionsPerDay: input.maxExecutionsPerDay !== undefined ? input.maxExecutionsPerDay : existing.maxExecutionsPerDay,
+        rateLimitMaxRequests: input.rateLimitMaxRequests !== undefined ? input.rateLimitMaxRequests : existing.rateLimitMaxRequests,
+        rateLimitWindowSeconds: input.rateLimitWindowSeconds !== undefined ? input.rateLimitWindowSeconds : existing.rateLimitWindowSeconds,
+        securityClassification: input.securityClassification ?? existing.securityClassification,
+        externalSecurityCeiling: input.externalSecurityCeiling !== undefined ? input.externalSecurityCeiling : existing.externalSecurityCeiling,
+      });
     }
     const updated = await this.deps.repository.updateProjectPolicy(projectId, input);
     if (!updated) throw new Error(`execution-policy: project ${projectId} not found (or frozen)`);
@@ -294,6 +323,90 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     };
   }
 
+  // ------------------------------------------------------------------ WORK-043
+
+  /**
+   * WORK-043 (§33.3): point-in-time single-candidate eligibility — the SAME
+   * engine the recommendation path uses, exposed for re-eligibility at a
+   * mode transition (the WORK-042 cross-mode handoff destination gate: the
+   * logical task continues in the OTHER mode; the destination candidate must
+   * still clear EVERY hard constraint family — capability, subscription,
+   * privacy, security, quota, rate limits, agent policy, org/project
+   * policy). Persists NOTHING (no §22 decision — this is not a
+   * recommendation).
+   */
+  async evaluateCandidateEligibility(input: CandidateEligibilityInput): Promise<CandidateEligibilityResult> {
+    const { projectId, workItemId, provider, model, executionMode } = input;
+    const organizationId = input.organizationId ?? null;
+
+    let policy = await this.deps.repository.getProjectPolicy(projectId);
+    if (!policy && organizationId) {
+      policy = await this.deps.repository.insertDefaultProjectPolicy(organizationId, projectId);
+    }
+    if (!policy) {
+      // No policy row AND no org context (the handoff path for a project
+      // that never evaluated a recommendation): evaluate against the SAME
+      // defaults insertDefaultProjectPolicy would create (the in-memory
+      // mirror of the SQL DEFAULTs — both modes allowed, no quotas, no rate
+      // limits, standard classification). Consistency note: the handoff's
+      // native gate ALREADY fails closed on a missing policy row
+      // (nativeExecutionAllowed ?? false) BEFORE this gate runs, so the
+      // only reachable path here is an EXTERNAL destination — whose
+      // pre-WORK-043 posture (agent policy only) is exactly preserved.
+      policy = defaultProjectPolicyRecord(organizationId, projectId);
+    }
+    const taskProfile = await this.deps.taskProfileBuilder.build(workItemId);
+    const policySnapshot = this.buildPolicySnapshot(policy, policy.defaultBenchmarkMode);
+
+    // The candidate: resolved from the SAME provider registry the
+    // recommendation path uses (no invented capabilities — §6). A provider
+    // absent from the registry is a configuration_missing candidate. The
+    // optional userId (the handoff actor) resolves the user-scoped
+    // access-profile constraints; absent → no access profile (the
+    // subscription family treats an absent profile as unknown).
+    const providers = await this.deps.agentProviderRegistry.getExecutionProviders(projectId);
+    const accessProfiles = input.userId ? await this.deps.repository.listAccessProfiles(input.userId) : [];
+    const accessMap = new Map<string, ProviderAccessProfile>(
+      accessProfiles.map((a) => [a.provider, { provider: a.provider, plan: a.plan, codingAgent: a.codingAgent, externalUi: a.externalUi, nativeApi: a.nativeApi, statusSource: a.statusSource }]),
+    );
+    const normalizer = new ProviderCapabilityNormalizer(accessMap);
+    const candidate = await this.buildSingleCandidate(
+      providers, normalizer, projectId, provider, model, executionMode, accessMap,
+    );
+
+    // The constraint set: the SAME families the recommendation path
+    // evaluates (usage derived from the authoritative execution records; the
+    // project-scoped agent-policy decision; security classification).
+    // Org-scoped families are INACTIVE without an organizationId (the
+    // handoff path's own per-execution agent-policy gate is STRICTER — no
+    // coverage lost).
+    const orgPolicy = organizationId && this.deps.orgPolicyResolver
+      ? await this.deps.orgPolicyResolver.resolve(organizationId)
+      : null;
+    const usage = await this.resolveUsageConstraints(policy, projectId, [provider]);
+    const agentPolicy = organizationId
+      ? await this.resolveAgentPolicyConstraint(organizationId, projectId)
+      : { externalDecision: 'allow' as const, reason: 'organization scope absent (handoff path — the per-execution agent-policy gate enforces the external domain)', policyVersion: null };
+    // POINT-IN-TIME posture: the subscription family's "unknown subscription
+    // → blocked" is the INTERACTIVE recommendation nudge (§5: the user should
+    // configure their access profile). At a mode transition the question is
+    // DEPLOYABILITY — the destination's actual usability is availability
+    // (the registry configuration, already fail-closed) + the hard families
+    // below. The actor's absent access profile must not spuriously deny a
+    // handoff to a platform-configured destination.
+    const constraints = this.buildConstraintSet(policy, orgPolicy, usage, agentPolicy, {
+      subscriptionBlockUnknown: false,
+    });
+
+    const eligibility = this.deps.eligibilityService.evaluate({
+      candidate,
+      taskProfile,
+      policy: policySnapshot,
+      constraints,
+    });
+    return { eligibility, constraints, policyVersion: policy.policyVersion };
+  }
+
   // ------------------------------------------------------------------ private
 
   private buildPolicySnapshot(policy: ProjectPolicyRecord, benchmarkMode: BenchmarkMode): BenchmarkPolicy {
@@ -334,36 +447,212 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         return m;
       })();
       for (const mode of supportedModes) {
-        const capabilities = normalizer.normalizeForMode(p, mode);
-        const access = _accessMap.get(p.provider) ?? null;
-        const evidence = await this.deps.benchmarkEvidenceProvider.historicalPerformanceForCell(projectId, p.provider, mode);
-        const cost: CostEstimate = { cents: null, confidence: 'unknown', currency: 'USD' };
-        const latency: LatencyEstimate = {
-          estimatedMs: evidence.medianTimeToVerifiedMs ?? null,
-          confidence: evidence.sufficient ? 'known' : 'unknown',
-          source: evidence.sufficient ? 'historical_observed' : 'unknown',
-        };
-        const availability = computeAvailability(p, mode, access);
-        out.push({
-          provider: p.provider,
-          name: p.name,
-          model: p.model,
-          executionMode: mode,
-          capabilities,
-          accessProfile: access,
-          availability,
-          estimatedCost: cost,
-          estimatedLatency: latency,
-          historicalPerformance: evidence,
-        });
+        out.push(await this.buildCandidateForProvider(p, mode, projectId, normalizer, _accessMap));
       }
     }
     return out;
   }
 
+  /**
+   * WORK-043: the shared per-provider candidate builder — used by BOTH the
+   * recommendation path (all providers × supported modes) and the
+   * point-in-time single-candidate evaluation (the handoff destination
+   * gate). One construction path = one capability/availability/evidence
+   * model (no divergent candidate shapes between the two entries).
+   */
+  private async buildCandidateForProvider(
+    p: ExecutionProviderInfo,
+    mode: 'native' | 'external',
+    projectId: string,
+    normalizer: ProviderCapabilityNormalizer,
+    accessMap: Map<string, ProviderAccessProfile>,
+  ): Promise<ExecutionCandidateInput> {
+    const capabilities = normalizer.normalizeForMode(p, mode);
+    const access = accessMap.get(p.provider) ?? null;
+    const evidence = await this.deps.benchmarkEvidenceProvider.historicalPerformanceForCell(projectId, p.provider, mode);
+    const cost: CostEstimate = { cents: null, confidence: 'unknown', currency: 'USD' };
+    const latency: LatencyEstimate = {
+      estimatedMs: evidence.medianTimeToVerifiedMs ?? null,
+      confidence: evidence.sufficient ? 'known' : 'unknown',
+      source: evidence.sufficient ? 'historical_observed' : 'unknown',
+    };
+    const availability = computeAvailability(p, mode, access);
+    return {
+      provider: p.provider,
+      name: p.name,
+      model: p.model,
+      executionMode: mode,
+      capabilities,
+      accessProfile: access,
+      availability,
+      estimatedCost: cost,
+      estimatedLatency: latency,
+      historicalPerformance: evidence,
+    };
+  }
+
+  /**
+   * WORK-043: build the SINGLE (provider, mode) candidate for the
+   * point-in-time evaluation. A provider present in the registry but
+   * WITHOUT the requested mode surfaces as a configuration_missing /
+   * unavailable candidate (the honest verdict); a provider ABSENT from the
+   * registry entirely yields a synthetic not-configured candidate (the
+   * evaluator's availability family blocks it with configuration_missing).
+   */
+  private async buildSingleCandidate(
+    providers: readonly ExecutionProviderInfo[],
+    normalizer: ProviderCapabilityNormalizer,
+    projectId: string,
+    provider: string,
+    model: string | null,
+    mode: 'native' | 'external',
+    accessMap: Map<string, ProviderAccessProfile>,
+  ): Promise<ExecutionCandidateInput> {
+    const info = providers.find((p) => p.provider === provider);
+    if (!info) {
+      // Not in the registry at all: no invented capabilities (§6) — a bare
+      // not-configured candidate the evaluator blocks honestly.
+      return {
+        provider,
+        name: provider,
+        model: model ?? '',
+        executionMode: mode,
+        capabilities: ProviderCapabilityNormalizer.notConfigured(mode),
+        accessProfile: accessMap.get(provider) ?? null,
+        availability: 'configuration_missing',
+        estimatedCost: { cents: null, confidence: 'unknown', currency: 'USD' },
+        estimatedLatency: { estimatedMs: null, confidence: 'unknown', source: 'unknown' },
+        historicalPerformance: ProviderCapabilityNormalizer.noEvidence(),
+      };
+    }
+    const candidate = await this.buildCandidateForProvider(info, mode, projectId, normalizer, accessMap);
+    // The caller's model override wins when provided (the handoff resolves
+    // the destination model explicitly).
+    return model != null && model !== '' ? { ...candidate, model } : candidate;
+  }
+
+  // ----- WORK-043: constraint-family resolution -----
+
+  /**
+   * WORK-043 (§33.3): resolve the QUOTA + RATE-LIMIT usage from the
+   * AUTHORITATIVE execution records (wfos_executions via the repository's
+   * countProjectExecutionsSince — NO parallel usage ledger). Period
+   * boundaries are UTC calendar boundaries; the rate window is the
+   * trailing sliding window. Any UNRESOLVABLE usage (query failure → null)
+   * stays null — the evaluator fails CLOSED while the corresponding
+   * constraint is active.
+   */
+  private async resolveUsageConstraints(
+    policy: ProjectPolicyRecord,
+    projectId: string,
+    providers: readonly string[],
+  ): Promise<{ quota: QuotaConstraints; rateLimit: RateLimitConstraints }> {
+    const now = this.now();
+    // UTC calendar month + day starts.
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const quotaActive = policy.maxExecutionsPerMonth != null || policy.maxExecutionsPerDay != null;
+    const rateActive = policy.rateLimitMaxRequests != null && policy.rateLimitWindowSeconds != null;
+
+    // Quota usage — resolved ONLY while a quota is active (no constraint →
+    // no query → usage 0; the evaluator's quota family is inactive anyway).
+    let monthlyUsed: number | null = 0;
+    let dailyUsed: number | null = 0;
+    if (quotaActive) {
+      const monthly = policy.maxExecutionsPerMonth != null
+        ? await this.deps.repository.countProjectExecutionsSince(projectId, null, monthStart)
+        : 0;
+      const daily = policy.maxExecutionsPerDay != null
+        ? await this.deps.repository.countProjectExecutionsSince(projectId, null, dayStart)
+        : 0;
+      // A failure on EITHER period check fails the whole quota family
+      // closed (the constraint cannot be verified).
+      monthlyUsed = monthly;
+      dailyUsed = daily;
+    }
+
+    // Rate-window usage per provider — resolved ONLY while a limit is
+    // active, and only for the providers under evaluation. ONE failed
+    // provider query nulls the WHOLE map (systemic failure → fail closed
+    // for every provider under the active limit).
+    let providerWindowUsage: Readonly<Record<string, number>> | null = {};
+    if (rateActive && policy.rateLimitWindowSeconds != null) {
+      const windowStart = new Date(now.getTime() - policy.rateLimitWindowSeconds * 1000);
+      const map: Record<string, number> = {};
+      for (const provider of providers) {
+        const used = await this.deps.repository.countProjectExecutionsSince(projectId, provider, windowStart);
+        if (used == null) {
+          providerWindowUsage = null;
+          break;
+        }
+        map[provider] = used;
+      }
+      if (providerWindowUsage != null) providerWindowUsage = map;
+    }
+
+    return {
+      quota: {
+        monthlyMaxExecutions: policy.maxExecutionsPerMonth,
+        dailyMaxExecutions: policy.maxExecutionsPerDay,
+        monthlyUsed,
+        dailyUsed,
+      },
+      rateLimit: {
+        maxRequestsPerWindow: policy.rateLimitMaxRequests,
+        windowSeconds: policy.rateLimitWindowSeconds,
+        providerWindowUsage,
+      },
+    };
+  }
+
+  /**
+   * WORK-043 (§33.3): resolve the project-scoped agent-policy external-domain
+   * decision (WORK-037) as a constraint input. Postures:
+   *   - gate NOT wired        → 'allow' (the family is INACTIVE — the runtime
+   *                             handoff gate + tool gates still enforce the
+   *                             policy; this layer simply has no
+   *                             recommendation-time input);
+   *   - gate wired, succeeded → the engine's decision (allow/constrained/
+   *                             deny/ask — the engine itself fails closed to
+   *                             'deny' on internal errors);
+   *   - gate wired, THREW     → 'unresolved' (fail-closed for external
+   *                             candidates).
+   */
+  private async resolveAgentPolicyConstraint(
+    organizationId: string,
+    projectId: string,
+  ): Promise<AgentPolicyConstraints> {
+    const gate: AgentPolicyProjectGateLike | undefined = this.deps.agentPolicyProjectGate;
+    if (!gate) {
+      return { externalDecision: 'allow', reason: 'agent-policy gate not configured for recommendation-time eligibility', policyVersion: null };
+    }
+    try {
+      const decision = await gate.evaluateExternalForProject({ organizationId, projectId });
+      return {
+        externalDecision: decision.decision,
+        reason: decision.reason,
+        policyVersion: decision.policyVersion,
+      };
+    } catch (err) {
+      this.deps.logger.warn('execution-policy.agent-policy-gate-failed', {
+        organizationId,
+        projectId,
+        error: (err as Error).message,
+      });
+      return {
+        externalDecision: 'unresolved',
+        reason: `the agent-policy gate could not be consulted (${(err as Error).message})`,
+        policyVersion: null,
+      };
+    }
+  }
+
   private buildConstraintSet(
     policy: ProjectPolicyRecord,
     org: ResolvedOrgPolicy | null,
+    usage: { quota: QuotaConstraints; rateLimit: RateLimitConstraints },
+    agentPolicy: AgentPolicyConstraints,
+    options: { subscriptionBlockUnknown?: boolean } = {},
   ): ExecutionConstraintSet {
     return {
       capability: [],
@@ -399,6 +688,9 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         approvedProvidersOnly: org?.allowedProviders ?? [],
         noThirdPartyBrowserAutomation: false,
         maximumExecutionCostCents: org?.maximumCostCents ?? null,
+        // WORK-043: the org-provided external security ceiling (§32 resolved
+        // org policy; NULL = unset — the project policy's own
+        // externalSecurityCeiling governs below).
         securityClassification: null,
       },
       availability: {
@@ -408,7 +700,13 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         codingSurfaceVerified: [],
       },
       subscription: {
-        blockUnknownSubscription: true,
+        // §5: candidates whose subscription capability is 'unknown' default
+        // to blocked IN RECOMMENDATIONS (the interactive configure-your-
+        // profile nudge). The point-in-time candidate evaluation (the handoff
+        // destination gate) passes subscriptionBlockUnknown: false — its
+        // question is deployability, and the destination's actual usability
+        // is the availability family (registry configuration, fail-closed).
+        blockUnknownSubscription: options.subscriptionBlockUnknown ?? true,
         // §5: requiredCodingAgentProviders is project-configurable; the default
         // is empty (no provider-specific hard-coding — preserves the WORK-027
         // invariant: no hard-coded provider names outside the agents catalog).
@@ -418,6 +716,14 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         level: policy.privacyLevel,
         approvedLocations: [],
       },
+      // --- WORK-043 (§33.3): the new constraint families ---
+      quota: usage.quota,
+      rateLimit: usage.rateLimit,
+      security: {
+        projectClassification: policy.securityClassification,
+        externalCeiling: policy.externalSecurityCeiling,
+      },
+      agentPolicy,
     };
   }
 }
@@ -459,6 +765,77 @@ export function validateBenchmarkModeConstraint(
   }
 }
 
+/**
+ * WORK-043 (§33.3): validate the merged quota / rate-limit / security fields
+ * at the POLICY BOUNDARY (clean domain errors; migration 0050's CHECK
+ * constraints are the DB backstop — the same two-boundary pattern as the
+ * constrained-mode validation):
+ *
+ *   quotas                  → non-negative when set
+ *   rate limit              → BOTH halves (max requests AND a positive
+ *                             window) or NEITHER — a labeled limit without
+ *                             the data to evaluate it is meaningless
+ *   security classification → the closed ladder
+ *                             standard < confidential < restricted
+ *
+ * Error messages start with 'execution-policy-invalid-constraint' — the
+ * route layer maps them to HTTP 400 (client-supplied semantics errors).
+ */
+export function validateWork043PolicyFields(merged: {
+  maxExecutionsPerMonth: number | null;
+  maxExecutionsPerDay: number | null;
+  rateLimitMaxRequests: number | null;
+  rateLimitWindowSeconds: number | null;
+  securityClassification: string;
+  externalSecurityCeiling: string | null;
+}): void {
+  const {
+    maxExecutionsPerMonth, maxExecutionsPerDay,
+    rateLimitMaxRequests, rateLimitWindowSeconds,
+    securityClassification, externalSecurityCeiling,
+  } = merged;
+  if (maxExecutionsPerMonth != null && (!Number.isInteger(maxExecutionsPerMonth) || maxExecutionsPerMonth < 0)) {
+    throw new Error(
+      'execution-policy-invalid-constraint: maxExecutionsPerMonth must be a non-negative integer (or null = unlimited)',
+    );
+  }
+  if (maxExecutionsPerDay != null && (!Number.isInteger(maxExecutionsPerDay) || maxExecutionsPerDay < 0)) {
+    throw new Error(
+      'execution-policy-invalid-constraint: maxExecutionsPerDay must be a non-negative integer (or null = unlimited)',
+    );
+  }
+  const hasMax = rateLimitMaxRequests != null;
+  const hasWindow = rateLimitWindowSeconds != null;
+  if (hasMax !== hasWindow) {
+    throw new Error(
+      'execution-policy-invalid-constraint: a rate limit requires BOTH halves — rateLimitMaxRequests (max dispatches) AND rateLimitWindowSeconds (the sliding-window width, a positive integer); set both or clear both',
+    );
+  }
+  if (hasMax && hasWindow) {
+    if (!Number.isInteger(rateLimitMaxRequests!) || rateLimitMaxRequests! < 0) {
+      throw new Error(
+        'execution-policy-invalid-constraint: rateLimitMaxRequests must be a non-negative integer',
+      );
+    }
+    if (!Number.isInteger(rateLimitWindowSeconds!) || rateLimitWindowSeconds! <= 0) {
+      throw new Error(
+        'execution-policy-invalid-constraint: rateLimitWindowSeconds must be a positive integer (the sliding-window width in seconds)',
+      );
+    }
+  }
+  const ladder = new Set(['standard', 'confidential', 'restricted']);
+  if (!ladder.has(securityClassification)) {
+    throw new Error(
+      'execution-policy-invalid-constraint: securityClassification must be one of standard | confidential | restricted',
+    );
+  }
+  if (externalSecurityCeiling != null && !ladder.has(externalSecurityCeiling)) {
+    throw new Error(
+      'execution-policy-invalid-constraint: externalSecurityCeiling must be one of standard | confidential | restricted (or null = no external security restriction)',
+    );
+  }
+}
+
 function computeAvailability(
   p: ExecutionProviderInfo,
   mode: 'native' | 'external',
@@ -468,6 +845,47 @@ function computeAvailability(
   if (mode === 'external' && p.externalUi !== 'available') return 'unavailable';
   if (access && access.statusSource === 'unknown') return 'unverified';
   return 'ready';
+}
+
+/**
+ * WORK-043: the in-memory mirror of insertDefaultProjectPolicy's SQL
+ * DEFAULTs — used by the point-in-time candidate evaluation when no policy
+ * row exists AND no organization context is available to create one (the
+ * cross-mode handoff path for a project that never evaluated a
+ * recommendation). Both modes allowed, no quotas, no rate limits, standard
+ * classification — the exact defaults migration 0026 + 0050 define.
+ */
+function defaultProjectPolicyRecord(
+  organizationId: string | null,
+  projectId: string,
+): ProjectPolicyRecord {
+  const now = new Date();
+  return {
+    id: `in-memory-default-${projectId}`,
+    organizationId: organizationId ?? 'unknown',
+    projectId,
+    defaultBenchmarkMode: 'maximum_capability',
+    externalExecutionAllowed: true,
+    nativeExecutionAllowed: true,
+    maxCostPerTaskCents: null,
+    maxCostPerTrialCents: null,
+    maxTimeToPrMs: null,
+    humanInterventionAllowed: true,
+    privacyLevel: 'standard',
+    allowedProviders: [],
+    deniedProviders: [],
+    allowedModes: [],
+    maxExecutionsPerMonth: null,
+    maxExecutionsPerDay: null,
+    rateLimitMaxRequests: null,
+    rateLimitWindowSeconds: null,
+    securityClassification: 'standard',
+    externalSecurityCeiling: null,
+    frozen: false,
+    policyVersion: 1,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 function attachEligibility(c: ExecutionCandidateInput, eligibility: ExecutionEligibilityResult): ExecutionCandidate {

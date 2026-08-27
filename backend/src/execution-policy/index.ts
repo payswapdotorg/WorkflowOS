@@ -66,6 +66,8 @@ export type {
   RankResult,
   ExecutionPolicyService,
   RecommendInput,
+  CandidateEligibilityInput,
+  CandidateEligibilityResult,
   ProjectPolicyRecord,
   UserPreferenceRecord,
   ProviderAccessProfileRecord,
@@ -73,6 +75,13 @@ export type {
   UpdateProjectPolicyInput,
   UpdateUserPreferencesInput,
   UpsertAccessProfileInput,
+  // WORK-043 (§33.3) — the new constraint families.
+  QuotaConstraints,
+  RateLimitConstraints,
+  SecurityConstraints,
+  AgentPolicyConstraints,
+  SecurityClassification,
+  SECURITY_CLASSIFICATION_RANK,
 } from './types.js';
 
 export { DEFAULT_TOOL_POLICY } from './types.js';
@@ -104,3 +113,7 @@ export { DefaultExecutionPolicyService } from './internal/default-execution-poli
 // than silently falling back to unconstrained behavior). Exported for the
 // route layer's 400 mapping + direct testing.
 export { validateBenchmarkModeConstraint } from './internal/default-execution-policy-service.js';
+// WORK-043 (§33.3): the quota / rate-limit / security field validation (the
+// same policy-boundary pattern — clean domain errors; migration 0050's CHECKs
+// are the DB backstop). Exported for the route layer's 400 mapping + tests.
+export { validateWork043PolicyFields } from './internal/default-execution-policy-service.js';

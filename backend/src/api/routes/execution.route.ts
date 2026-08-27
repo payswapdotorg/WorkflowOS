@@ -133,6 +133,14 @@ function codedErrorBody(err: unknown): { status: number; body: Record<string, un
       // The execution is in a state that does not admit a cross-mode handoff
       // (e.g. native/completed -> external, or external/cancelled -> native).
       return { status: 409, body: { error: 'handoff-ineligible-state', message } };
+    case 'handoff-ineligible-destination':
+      // WORK-043 (§33.3): the RESOLVED destination candidate failed the full
+      // constraint-engine re-eligibility (quota, rate limits, security,
+      // capability, subscription, project policy...). 409: the logical task
+      // cannot continue on this destination under the current constraints —
+      // the message names EVERY blocking reason (the caller can relax the
+      // constraint, wait out the quota/rate window, or pick another target).
+      return { status: 409, body: { error: 'handoff-ineligible-destination', message } };
     case 'native-provider-unavailable':
       // No platform-native provider is configured (fail-closed). 503 (the
       // service is unavailable, not a client error).

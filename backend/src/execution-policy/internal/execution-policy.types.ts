@@ -60,6 +60,16 @@ export interface ExecutionPolicyRepository {
    */
   insertDecision(organizationId: string, projectId: string, workItemId: string, requestedBy: string | null, row: DecisionRow, guard: DecisionSnapshotGuard): Promise<ExecutionPolicyDecisionRecord | null>;
   listDecisions(workItemId: string, limit?: number): Promise<ExecutionPolicyDecisionRecord[]>;
+
+  // --- WORK-043 (§33.3): quota / rate-limit usage derivation ---
+  /**
+   * Counts executions dispatched for the project since `since` (optionally
+   * provider-scoped — the per-provider rate-limit window). The AUTHORITATIVE
+   * source is wfos_executions (no parallel usage ledger). NULL = the usage
+   * is unresolvable → an ACTIVE quota/rate limit FAILS CLOSED in the
+   * evaluator.
+   */
+  countProjectExecutionsSince(projectId: string, provider: string | null, since: Date): Promise<number | null>;
 }
 
 /**
@@ -101,6 +111,20 @@ export interface DefaultExecutionPolicyServiceDeps {
   readonly benchmarkEvidenceProvider: BenchmarkEvidenceProviderLike;
   /** §31/§32: org-policy resolver (deferred persistence — §32). */
   readonly orgPolicyResolver?: OrgPolicyResolverLike;
+  /**
+   * WORK-043 (§33.3): the project-scoped agent-policy external-domain gate
+   * (WORK-037). Optional — when ABSENT the constraint family is INACTIVE
+   * (externalDecision 'allow': this layer has no recommendation-time input,
+   * and the RUNTIME boundaries — the policy-gated handoff decorator + the
+   * cross-mode handoff gate — still enforce the agent policy). When WIRED:
+   * the engine's decision flows into the constraint set (the engine itself
+   * fails closed to 'deny' on internal errors); a THROWN error becomes
+   * 'unresolved' → external candidates fail closed. Wired in app.ts to the
+   * AgentPolicyEngine's evaluateExternalForProject.
+   */
+  readonly agentPolicyProjectGate?: AgentPolicyProjectGateLike;
+  /** WORK-043: clock seam (period/window boundaries). Defaults to real time. */
+  readonly now?: () => Date;
 }
 
 // Local structural interfaces so this file does NOT import the service files
@@ -153,4 +177,23 @@ export interface ResolvedOrgPolicy {
 
 export interface OrgPolicyResolverLike {
   resolve(organizationId: string): Promise<ResolvedOrgPolicy>;
+}
+
+/**
+ * WORK-043 (§33.3): the project-scoped agent-policy external-domain gate —
+ * the narrow port of the WORK-037 AgentPolicyEngine's ADDITIVE
+ * `evaluateExternalForProject` entry (non-interactive: 'ask' stays 'ask' —
+ * a recommendation cannot pre-approve a future handoff). Structurally
+ * compatible with AgentPolicyExternalDecision from @modules/agents.
+ */
+export interface AgentPolicyProjectGateLike {
+  evaluateExternalForProject(input: {
+    organizationId: string;
+    projectId: string;
+  }): Promise<{
+    decision: 'allow' | 'deny' | 'ask' | 'constrained';
+    reason: string | null;
+    policyVersion: number | null;
+    scopeSource?: string | null;
+  }>;
 }

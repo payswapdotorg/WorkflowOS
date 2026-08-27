@@ -541,6 +541,14 @@ export class CrossModeHandoffError extends Error {
       // the route maps it to 409 (a concurrent actor owns the obligation —
       // the client can retry + converge on the owner's completed state).
       | 'claim-fence-lost'
+      // WORK-043 (§33.3): the RESOLVED destination candidate (provider +
+      // model + mode) failed the full constraint-engine re-eligibility
+      // (quota, rate limits, security, capability, subscription, project
+      // policy...) or the evaluation itself failed (fail-closed). The route
+      // maps it to 409 — the logical task cannot continue on this
+      // destination under the current constraints; every blocking reason is
+      // named in the message.
+      | 'handoff-ineligible-destination'
       // Internal-only: the repository's 23505 surface (the service catches +
       // re-resolves convergence; never reaches the route).
       | 'cross-mode-handoff-already-exists'
@@ -565,6 +573,9 @@ export const CROSS_MODE_HANDOFF_ERROR_CODES = [
   'native-provider-unavailable',
   'handoff-dispatch-failed',
   'claim-fence-lost',
+  // WORK-043 (§33.3): the destination candidate failed the full
+  // constraint-engine re-eligibility (or the evaluation failed — fail-closed).
+  'handoff-ineligible-destination',
   'cross-mode-handoff-already-exists',
   'cross-mode-handoff-not-external',
 ] as const;

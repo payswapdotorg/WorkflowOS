@@ -212,6 +212,34 @@ export interface CrossModeExecutionPolicyPort {
   getProjectPolicy(
     projectId: string,
   ): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null>;
+  /**
+   * WORK-043 (§33.3): the point-in-time destination-candidate eligibility
+   * seam (the full constraint engine — quota, rate limits, security,
+   * subscription, capability, project policy — evaluated against the
+   * RESOLVED destination provider+model+mode at handoff time). OPTIONAL so
+   * pre-WORK-043 fakes/ports still satisfy the interface; the destination
+   * gate is skipped when absent (the composition root always wires it).
+   */
+  evaluateCandidateEligibility?(input: {
+    organizationId?: string | null;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly {
+        category: string;
+        constraint: string;
+        reason: string;
+      }[];
+    };
+    policyVersion: number;
+  }>;
 }
 
 /**
@@ -373,6 +401,22 @@ const EXTERNAL_TO_NATIVE_ELIGIBLE = new Set([
 ]);
 
 /**
+ * WORK-043: compose an additive verdict block into the policy summary JSON
+ * (the summary is always this service's own JSON.stringify output — the
+ * parse is safe; a defensive fallback keeps the original summary if a
+ * future shape ever diverges). The composed summary lands on the
+ * append-only handoff log row (policy_decision) + the audit event.
+ */
+function composeSummary(policySummary: string, block: Record<string, unknown>): string {
+  try {
+    const parsed = JSON.parse(policySummary) as Record<string, unknown>;
+    return JSON.stringify({ ...parsed, ...block });
+  } catch {
+    return policySummary;
+  }
+}
+
+/**
  * PR #46 round 5: the in-flight claim lease guard — the heartbeat renewal +
  * the fence for ONE critical-section invocation. Created by
  * {@link DefaultCrossModeHandoffService.startClaimLease} after a successful
@@ -529,6 +573,28 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       input,
     );
 
+    // 7b. WORK-043 (§33.3): destination RE-ELIGIBILITY. The logical task
+    //     continues in the OTHER mode; the RESOLVED destination candidate
+    //     (provider + model + mode) must still clear the FULL constraint
+    //     engine — quota, rate limits, security classification, capability,
+    //     subscription, privacy, project policy — the SAME families the
+    //     recommendation path evaluates BEFORE ranking. An ineligible
+    //     destination rejects the handoff with every blocking reason named
+    //     (the caller sees exactly WHY); an eligible verdict is composed into
+    //     the policy summary recorded on the append-only handoff log row.
+    //     This gate runs AFTER provider resolution (the verdict is about the
+    //     CONCRETE destination) and BEFORE the reserve (no side effect has
+    //     happened yet — the rejection is side-effect-free).
+    const summaryWithDestination = await this.destinationEligibilityGate(
+      record,
+      executionId,
+      input,
+      provider,
+      model,
+      actor,
+      policySummary,
+    );
+
     // 8. Reserve + claim: INSERT the append-only handoff log row (previous_*
     //    snapshot) AND claim the durable obligation in ONE transaction (PR
     //    #46 round 4). migration 0043's AFTER INSERT trigger writes the
@@ -566,7 +632,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       provider,
       resultingStatus,
       idempotencyKey,
-      policySummary,
+      policySummary: summaryWithDestination,
       actor,
       claimOwner,
     });
@@ -689,7 +755,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     }
 
     // 11. Audit (best-effort).
-    await this.audit(record, executionId, input, reserved, actor, policySummary);
+    await this.audit(record, executionId, input, reserved, actor, summaryWithDestination);
 
     // 12. Return the post-handoff record (re-fetch).
     const finalRecord = await this.deps.executionRecordRepository.findByExecutionId(
@@ -1325,6 +1391,82 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       target: 'native',
       nativeExecutionAllowed: nativeAllowed,
       policyVersion: projectPolicy?.policyVersion ?? null,
+    });
+  }
+
+  /**
+   * WORK-043 (§33.3): the destination RE-ELIGIBILITY gate. Evaluates the
+   * RESOLVED destination candidate (provider + model + target mode) through
+   * the execution-policy constraint engine — the SAME engine the
+   * recommendation path applies BEFORE ranking. Rejection is
+   * side-effect-free (this runs before the reserve) and names EVERY
+   * blocking reason (the caller sees exactly why the destination is
+   * ineligible). An eligible verdict is composed into the policy summary
+   * (recorded on the append-only handoff log row + the audit event).
+   *
+   * Fail-closed: a THROWING engine rejects the handoff (an unresolvable
+   * constraint evaluation is NOT neutral — the destination cannot be
+   * declared eligible). When the port lacks the WORK-043 seam (pre-WORK-043
+   * fakes), the gate is skipped (the composition root always wires it).
+   */
+  private async destinationEligibilityGate(
+    record: ExecutionRecord,
+    executionId: string,
+    input: CrossModeHandoffInput,
+    provider: string,
+    model: string | null,
+    actor: { userId: string; source: string },
+    policySummary: string,
+  ): Promise<string> {
+    const seam = this.deps.executionPolicyService.evaluateCandidateEligibility;
+    if (!seam) {
+      // Pre-WORK-043 port — the destination gate is not wired. Compose a
+      // skip marker so the log row records the gate's absence honestly.
+      return composeSummary(policySummary, {
+        destinationEligibility: { status: 'not_evaluated', eligible: null, reason: 'WORK-043 destination eligibility seam not wired' },
+      });
+    }
+    let verdict;
+    try {
+      verdict = await seam.call(
+        this.deps.executionPolicyService,
+        {
+          // No organization context at the handoff service layer: the
+          // org-scoped families are inactive; the per-execution agent-policy
+          // gate (step 6) already enforces the external domain STRICTER.
+          organizationId: null,
+          projectId: record.projectId,
+          workItemId: record.workItemId,
+          provider,
+          model,
+          executionMode: input.targetMode,
+          userId: actor.userId,
+        },
+      );
+    } catch (err) {
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-destination: the destination eligibility evaluation failed for execution ${executionId} (${(err as Error).message}) — failing closed`,
+        'handoff-ineligible-destination',
+      );
+    }
+    if (!verdict.eligibility.eligible) {
+      const reasons = verdict.eligibility.blockingReasons
+        .map((b) => `${b.category}/${b.constraint}: ${b.reason}`)
+        .join('; ');
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-destination: the ${input.targetMode} destination ${provider}${model ? `/${model}` : ''} is ineligible for execution ${executionId} (${verdict.eligibility.status}: ${reasons || 'no reason surfaced'}) — the logical task cannot continue on this destination under the current constraints`,
+        'handoff-ineligible-destination',
+      );
+    }
+    return composeSummary(policySummary, {
+      destinationEligibility: {
+        status: verdict.eligibility.status,
+        eligible: true,
+        policyVersion: verdict.policyVersion,
+        provider,
+        model,
+        mode: input.targetMode,
+      },
     });
   }
 

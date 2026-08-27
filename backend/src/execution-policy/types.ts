@@ -150,7 +150,15 @@ export type ExecutionEligibilityStatus =
   | 'privacy_blocked'
   | 'project_policy_blocked'
   | 'configuration_missing'
-  | 'provider_temporarily_unavailable';
+  | 'provider_temporarily_unavailable'
+  /** WORK-043 — the project execution quota for the current period is exhausted (or unverifiable, fail-closed). */
+  | 'quota_exhausted'
+  /** WORK-043 — the per-provider rate-limit window is exhausted (or unverifiable, fail-closed). */
+  | 'rate_limited'
+  /** WORK-043 — the project security classification exceeds the destination-mode security ceiling. */
+  | 'security_blocked'
+  /** WORK-043 — the agent policy denies / requires approval for the candidate's execution domain. */
+  | 'agent_policy_blocked';
 
 /**
  * §3: Eligibility is a HARD filter. Benchmark quality MUST NEVER make an
@@ -191,7 +199,34 @@ export type ExecutionConstraintCategory =
    * is NOT neutral — the candidate cannot legitimately be declared eligible
    * (fail-closed), because the constraint cannot be verified.
    */
-  | 'evidence';
+  | 'evidence'
+  /**
+   * WORK-043 — quota constraints: the project's execution quota for the
+   * current period (monthly/daily) is exhausted, or an active quota cannot
+   * be verified against usage (fail-closed). Quotas are eligibility inputs
+   * (§33.3), never quality scores.
+   */
+  | 'quota'
+  /**
+   * WORK-043 — rate-limit constraints: the per-provider sliding-window
+   * dispatch limit is exhausted, or an active rate limit cannot be verified
+   * against current window usage (fail-closed).
+   */
+  | 'rate_limit'
+  /**
+   * WORK-043 — security requirements: the project's security classification
+   * exceeds what the destination mode is permitted to carry (the external
+   * execution ceiling). Security is a hard constraint (§33.3), not a
+   * preference.
+   */
+  | 'security'
+  /**
+   * WORK-043 — agent-policy constraints (WORK-037): the project-scoped agent
+   * policy denies (or requires approval for) the candidate's execution
+   * domain. Policies apply to native execution and to external handoff
+   * eligibility/observability (WORK-037 execution modes).
+   */
+  | 'agent_policy';
 
 /**
  * §4: the full constraint set evaluated for a candidate. This is the input to
@@ -206,6 +241,14 @@ export interface ExecutionConstraintSet {
   readonly availability: AvailabilityConstraints;
   readonly subscription: SubscriptionConstraints;
   readonly privacy: PrivacyConstraints;
+  /** WORK-043: quota constraints (period execution limits + current usage). */
+  readonly quota: QuotaConstraints;
+  /** WORK-043: rate-limit constraints (per-provider sliding window + usage). */
+  readonly rateLimit: RateLimitConstraints;
+  /** WORK-043: security requirements (project classification + mode ceilings). */
+  readonly security: SecurityConstraints;
+  /** WORK-043: the project-scoped agent-policy decision (WORK-037). */
+  readonly agentPolicy: AgentPolicyConstraints;
 }
 
 export interface CapabilityConstraint {
@@ -277,6 +320,96 @@ export interface PrivacyConstraints {
 }
 
 export type PrivacyLevel = 'standard' | 'private' | 'local_only' | 'regulated';
+
+// ============================================================================
+// WORK-043 — §33.3 constraint families: quota, rate limits, security, agent policy
+// ============================================================================
+
+/**
+ * WORK-043 — the security classification ladder. Ordered:
+ *   standard (0) < confidential (1) < restricted (2).
+ * A mode may carry a classification only when classification ≤ mode ceiling.
+ */
+export type SecurityClassification = 'standard' | 'confidential' | 'restricted';
+
+export const SECURITY_CLASSIFICATION_RANK: Readonly<Record<SecurityClassification, number>> =
+  Object.freeze({ standard: 0, confidential: 1, restricted: 2 });
+
+/**
+ * WORK-043 — quota constraints (§33.3 "quota"). Period execution limits are
+ * ELIGIBILITY INPUTS, never quality scores. Usage counts are resolved by the
+ * orchestrator from the AUTHORITATIVE execution records (wfos_executions —
+ * no parallel usage ledger). A configured quota whose usage is UNRESOLVABLE
+ * (null) fails CLOSED: the candidate cannot be declared eligible against a
+ * constraint that cannot be verified (the fail-closed evidence precedent).
+ */
+export interface QuotaConstraints {
+  /** Max executions per calendar month (project-wide). NULL = unlimited. */
+  readonly monthlyMaxExecutions: number | null;
+  /** Max executions per calendar day (project-wide). NULL = unlimited. */
+  readonly dailyMaxExecutions: number | null;
+  /** Executions dispatched in the CURRENT calendar month. NULL = unresolvable. */
+  readonly monthlyUsed: number | null;
+  /** Executions dispatched in the CURRENT calendar day. NULL = unresolvable. */
+  readonly dailyUsed: number | null;
+}
+
+/**
+ * WORK-043 — rate-limit constraints (§33.3 "rate limits"). A per-provider
+ * sliding window over dispatch events. `providerWindowUsage` maps provider →
+ * dispatch count inside the trailing window; NULL = usage unresolvable
+ * (fail-closed while a limit is active). Providers absent from the map used
+ * 0 — the usage query is provider-scoped only for the evaluated candidate's
+ * provider (the pure evaluator reads `providerWindowUsage[candidate.provider]`).
+ */
+export interface RateLimitConstraints {
+  /** Max dispatches per window PER PROVIDER. NULL = no rate limit. */
+  readonly maxRequestsPerWindow: number | null;
+  /** The sliding-window width in seconds. Required when maxRequestsPerWindow is set. */
+  readonly windowSeconds: number | null;
+  /** provider → dispatches in the trailing window. NULL = unresolvable (fail-closed). */
+  readonly providerWindowUsage: Readonly<Record<string, number>> | null;
+}
+
+/**
+ * WORK-043 — security requirements (§33.3 "security constraints"). The
+ * project's data classification vs. the classification ceiling each execution
+ * mode is permitted to carry. Native execution stays inside the WorkflowOS
+ * boundary; EXTERNAL execution sends code/context to a third-party provider
+ * product — the external ceiling bounds what may leave.
+ */
+export interface SecurityConstraints {
+  /** The project's security classification. */
+  readonly projectClassification: SecurityClassification;
+  /**
+   * The maximum classification EXTERNAL execution may carry
+   * (NULL = no external security restriction beyond privacy constraints).
+   */
+  readonly externalCeiling: SecurityClassification | null;
+}
+
+/**
+ * WORK-043 — the project-scoped agent-policy decision (WORK-037) as a
+ * constraint input. Resolved ONCE per evaluation scope by the orchestrator
+ * (the external-domain rule is project-scoped — it is not
+ * provider-refined), then applied by the pure evaluator to the affected
+ * candidates.
+ */
+export interface AgentPolicyConstraints {
+  /**
+   * The project-scoped external-domain decision:
+   *   'allow'       → external candidates pass this family
+   *   'constrained' → pass (the constraints are advisory to the runtime)
+   *   'deny'        → external candidates blocked (agent_policy_blocked)
+   *   'ask'         → blocked pending approval (a recommendation cannot
+   *                   pre-approve a future handoff — non-interactive context)
+   *   'unresolved'  → the policy engine could not resolve a decision —
+   *                   FAIL-CLOSED for external candidates
+   */
+  readonly externalDecision: 'allow' | 'constrained' | 'deny' | 'ask' | 'unresolved';
+  readonly reason: string | null;
+  readonly policyVersion: number | null;
+}
 
 // ============================================================================
 // §8  BENCHMARK MODES + §9 BENCHMARK POLICY (immutable once experiment starts)
@@ -591,6 +724,15 @@ export interface ExecutionPolicyService {
   upsertAccessProfile(organizationId: string, userId: string, input: UpsertAccessProfileInput): Promise<ProviderAccessProfileRecord>;
   /** §10: compute controlled-comparison dimension display for an experiment. */
   controlledComparisonDimensions(): ControlledComparisonDimensions;
+  /**
+   * WORK-043 (§33.3): evaluate ONE execution candidate (provider + model +
+   * mode) against the project's CURRENT full constraint set — the SAME
+   * engine the recommendation path uses, exposed for point-in-time
+   * re-eligibility (the WORK-042 cross-mode handoff destination gate).
+   * Returns the hard-filter verdict with structured blocking reasons;
+   * persists NOTHING (no §22 decision — this is not a recommendation).
+   */
+  evaluateCandidateEligibility(input: CandidateEligibilityInput): Promise<CandidateEligibilityResult>;
 }
 
 export interface RecommendInput {
@@ -607,6 +749,38 @@ export interface RecommendInput {
    * no-op and stays allowed; unfrozen policies keep the full override.
    */
   readonly benchmarkMode?: BenchmarkMode;
+}
+
+/**
+ * WORK-043 — the point-in-time single-candidate eligibility input.
+ * `workItemId` supplies the task profile context (the handoff passes the
+ * EXISTING execution's work item — the logical task does not change across
+ * a mode handoff; §33.7). `userId` (optional — the handoff actor) resolves
+ * the user-scoped subscription/access-profile constraints.
+ * `organizationId` is OPTIONAL: absent → the org-scoped families (org
+ * policy, the recommendation-time agent-policy gate) are INACTIVE. The
+ * cross-mode handoff path (which has no org context at the service layer)
+ * relies on its OWN per-execution agent-policy gate — evaluateExternalHandoff
+ * — which is STRICTER (approval-aware); no coverage is lost.
+ */
+export interface CandidateEligibilityInput {
+  readonly organizationId?: string | null;
+  readonly projectId: string;
+  readonly workItemId: string;
+  readonly provider: string;
+  readonly model: string | null;
+  readonly executionMode: ExecutionMode;
+  readonly userId?: string | null;
+}
+
+/**
+ * WORK-043 — the single-candidate eligibility verdict (+ the constraint
+ * snapshot the verdict was computed from, for handoff audit records).
+ */
+export interface CandidateEligibilityResult {
+  readonly eligibility: ExecutionEligibilityResult;
+  readonly constraints: ExecutionConstraintSet;
+  readonly policyVersion: number;
 }
 
 // ============================================================================
@@ -628,6 +802,13 @@ export interface ProjectPolicyRecord {
   readonly allowedProviders: readonly string[];
   readonly deniedProviders: readonly string[];
   readonly allowedModes: readonly ExecutionMode[];
+  // --- WORK-043 (§33.3): quota, rate limits, security requirements ---
+  readonly maxExecutionsPerMonth: number | null;
+  readonly maxExecutionsPerDay: number | null;
+  readonly rateLimitMaxRequests: number | null;
+  readonly rateLimitWindowSeconds: number | null;
+  readonly securityClassification: SecurityClassification;
+  readonly externalSecurityCeiling: SecurityClassification | null;
   readonly frozen: boolean;
   readonly policyVersion: number;
   readonly createdAt: Date;
@@ -690,6 +871,13 @@ export interface UpdateProjectPolicyInput {
   readonly allowedProviders?: readonly string[];
   readonly deniedProviders?: readonly string[];
   readonly allowedModes?: readonly ExecutionMode[];
+  // --- WORK-043 (§33.3): quota, rate limits, security requirements ---
+  readonly maxExecutionsPerMonth?: number | null;
+  readonly maxExecutionsPerDay?: number | null;
+  readonly rateLimitMaxRequests?: number | null;
+  readonly rateLimitWindowSeconds?: number | null;
+  readonly securityClassification?: SecurityClassification;
+  readonly externalSecurityCeiling?: SecurityClassification | null;
 }
 
 export interface UpdateUserPreferencesInput {
