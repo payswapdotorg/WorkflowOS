@@ -57,12 +57,32 @@
 --                        A cross-mode handed-off execution contributes ONE
 --                        event to EACH provider that dispatched.
 --
+-- AR-043-03 — each rate-limit event is gated by ITS OWN AUTHORITATIVE
+-- dispatch timestamp, never a reservation timestamp:
+--
+--   native event      → wfos_agent_runs.created_at (the run row is created
+--                       immediately BEFORE the adapter invocation)
+--   external event    → ExternalExecutionPackage.dispatchedAt — stamped by
+--                       the provider at the dispatch initiation, carried by
+--                       the package artifact into package_json, and
+--                       PRESERVED by the append-only handoff log's
+--                       previous_package_json snapshot when the external
+--                       phase is handed off away
+--
+-- The execution row's created_at and the handoff log row's created_at are
+-- RESERVATION timestamps: the sequence reserve → wait/scheduling gap →
+-- submit → package persisted means both can precede the actual dispatch by
+-- an arbitrary amount. Gating the window on them mis-times boundary events
+-- (a dispatch 10 seconds ago counted at a 2-minute-old reservation time
+-- falls out of the window; the inverse admits stale dispatches).
+--
 -- created execution without dispatch        → NOT counted (either model)
 -- rejected before dispatch                  → NOT counted (either model)
 -- actual provider dispatch                  → quota: once per LOGICAL
 --                                              execution; rate: once per
 --                                              PROVIDER (the dispatching
---                                              provider's own window)
+--                                              provider's own window, at
+--                                              the event's OWN time)
 --
 --   SECURITY      — security_classification (the project's data
 --                   classification) + external_security_ceiling (the maximum

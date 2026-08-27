@@ -2051,6 +2051,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
         auth: 'x-callback-token', note: 'test package',
       },
       expiration: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      // AR-043-03: the authoritative dispatch-event timestamp (the real
+      // provider stamps it at the package derivation).
+      dispatchedAt: new Date().toISOString(),
     };
     await executionRecordRepo.updateStatus(record.id, { status: 'handoff_ready', packageValue: pkg });
     return { executionId, recordId: record.id };

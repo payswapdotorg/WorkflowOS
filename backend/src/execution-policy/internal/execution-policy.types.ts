@@ -89,6 +89,20 @@ export interface ExecutionPolicyRepository {
   // failed before provider submission is NOT a dispatch — it never counts
   // in EITHER model. NULL = the usage is unresolvable → an ACTIVE
   // quota/rate limit FAILS CLOSED in the evaluator.
+  //
+  // AR-043-03 — the EVENT-TIME anchor for the rate-limit sliding window is
+  // the AUTHORITATIVE dispatch timestamp of each event, never a reservation
+  // timestamp:
+  //   native event     → wfos_agent_runs.created_at (the run row is created
+  //                      immediately BEFORE the adapter invocation)
+  //   external event   → ExternalExecutionPackage.dispatchedAt (stamped by
+  //                      the provider at the dispatch initiation) — for the
+  //                      CURRENT phase AND for a HANDED-OFF-AWAY phase's
+  //                      previous_package_json snapshot (the snapshot
+  //                      preserves it)
+  // The execution row's created_at and the handoff log row's created_at are
+  // RESERVATION timestamps — both can precede the actual dispatch by an
+  // arbitrary scheduling gap and must never gate the window.
   /**
    * QUOTA usage — the project's LOGICAL EXECUTIONS since `since` (one per
    * execution row that actually dispatched — the AR-043-01 predicate;
@@ -104,7 +118,10 @@ export interface ExecutionPolicyRepository {
    * native; the ExternalExecutionPackage's OWN provider field — external,
    * including a handed-off-away external phase's snapshot in the append-only
    * handoff log). A cross-mode handed-off execution contributes ONE event
-   * to EACH provider that dispatched.
+   * to EACH provider that dispatched. Each event is gated by ITS OWN
+   * authoritative dispatch timestamp (AR-043-03): the run row's created_at
+   * (native) / the package's dispatchedAt (external, including snapshots) —
+   * never a reservation timestamp.
    */
   countProjectProviderDispatchesSince(projectId: string, provider: string, since: Date): Promise<number | null>;
 }

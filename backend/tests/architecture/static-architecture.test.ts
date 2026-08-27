@@ -13605,9 +13605,10 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
 
   // --- (b) NO parallel usage ledger — the two DISTINCT usage models
   //         (AR-043-02): quota = LOGICAL EXECUTIONS; rate-limit = PROVIDER
-  //         DISPATCH EVENTS attributed to the dispatching provider --------
+  //         DISPATCH EVENTS attributed to the dispatching provider, each
+  //         gated by ITS OWN authoritative dispatch timestamp (AR-043-03) --
 
-  it('NO parallel usage ledger — quota counts LOGICAL EXECUTIONS, rate limits count PROVIDER DISPATCH EVENTS via the authoritative artifacts (AR-043-01 + AR-043-02)', () => {
+  it('NO parallel usage ledger — quota counts LOGICAL EXECUTIONS, rate limits count PROVIDER DISPATCH EVENTS (each at its OWN authoritative dispatch time) via the authoritative artifacts (AR-043-01 + AR-043-02 + AR-043-03)', () => {
     // Migration 0050 adds NO table (ALTER + INDEX only).
     const migration = stripCodeComments(readFileSync(MIGRATION_0050, 'utf8'));
     expect(migration, 'migration 0050 must not create a usage/quota table').not.toMatch(/CREATE TABLE/i);
@@ -13651,6 +13652,55 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     );
     expect(repoSrc, 'the handed-off-away external phase attributes through the log snapshot').toMatch(
       /h\.to_mode = 'native'[\s\S]{0,120}h\.previous_package_json IS NOT NULL/,
+    );
+    // AR-043-03 — every rate-limit event is gated by ITS OWN AUTHORITATIVE
+    // dispatch timestamp, never a reservation timestamp:
+    //   native events   → the run row's OWN created_at (created immediately
+    //                     BEFORE the adapter invocation)
+    //   external events → the package's OWN dispatchedAt (stamped by the
+    //                     provider at the dispatch initiation) — including
+    //                     the handed-off-away phase's snapshot
+    expect(repoSrc, 'the current-phase external arm gates the window on the package dispatchedAt').toMatch(
+      /package_json->>'dispatchedAt'/,
+    );
+    expect(repoSrc, 'the handed-off-away arm gates the window on the SNAPSHOT dispatchedAt').toMatch(
+      /previous_package_json->>'dispatchedAt'/,
+    );
+    expect(repoSrc, 'the native arm gates the window on the run row creation').toMatch(
+      /r\.created_at >= \$3/,
+    );
+    // AR-043-03 regression pin #1: the handoff-log reservation (h.created_at)
+    // must NEVER gate the window — the reserve precedes the actual dispatch
+    // by an arbitrary scheduling gap.
+    expect(
+      repoSrc,
+      'the handoff-log reservation must NOT gate the window (AR-043-03: reserve → gap → dispatch)',
+    ).not.toMatch(/COALESCE\(h\.created_at, e\.created_at\)/);
+    // AR-043-03 regression pin #2: the handed-off-away snapshot arm must not
+    // fall back to the execution row creation (a reservation that can
+    // precede the external dispatch by an arbitrary amount).
+    expect(
+      repoSrc,
+      'the snapshot arm must NOT gate the window on the execution row creation (AR-043-03)',
+    ).not.toMatch(/to_mode = 'native'[\s\S]{0,300}e\.created_at >= \$\d/);
+    // AR-043-03 — the package artifact CARRIES the authoritative dispatch
+    // timestamp (the contract field), and the provider STAMPS it at the
+    // package derivation (the dispatch initiation); the benchmark provider
+    // mirrors the contract.
+    const execTypes = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'execution.types.ts'), 'utf8'),
+    );
+    expect(execTypes, 'ExternalExecutionPackage declares the authoritative dispatchedAt').toMatch(
+      /readonly dispatchedAt: string/,
+    );
+    const extProvider = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'external-execution-provider.ts'), 'utf8'),
+    );
+    expect(extProvider, 'the provider stamps dispatchedAt at the derivation').toMatch(
+      /const dispatchedAt = now\.toISOString\(\)/,
+    );
+    expect(extProvider, 'the stamped value rides on the package artifact').toMatch(
+      /dispatchedAt,\s*\};/,
     );
     // AR-043-01 regression pin: the BARE execution-row count (existence +
     // created_at only — counting executions that never dispatched) must NOT
@@ -13885,6 +13935,10 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     // dispatch attributed to the provider that dispatched it, including
     // cross-mode handoffs in BOTH directions (the architect's four-line
     // proof table + the reverse-direction log-snapshot attribution).
+    // AR-043-03: the suite must prove the window boundary is gated by each
+    // event's OWN authoritative dispatch timestamp (the package's
+    // dispatchedAt — current phase AND handoff snapshot), straddling the
+    // boundary in BOTH directions against every reservation timestamp.
     expect(integration).toMatch(/countProjectDispatchedExecutionsSince/);
     expect(integration).toMatch(/countProjectProviderDispatchesSince/);
     expect(integration).toMatch(/WITHOUT dispatch → NOT counted/);
@@ -13896,6 +13950,9 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(integration).toMatch(/REVERSE cross-mode handoff/);
     expect(integration).toMatch(/previous_package_json/);
     expect(integration).toMatch(/falls out of the window by ITS OWN event time/);
+    expect(integration).toMatch(/AR-043-03, both boundary directions/);
+    expect(integration).toMatch(/NEVER the handoff-log reservation/);
+    expect(integration).toMatch(/SNAPSHOT preserves dispatchedAt/);
     expect(integration).toMatch(/an exhausted monthly quota EXCLUDES every candidate/);
     expect(integration).toMatch(/an UNKNOWN provider → the honest configuration_missing verdict/);
 

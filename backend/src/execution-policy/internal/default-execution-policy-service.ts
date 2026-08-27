@@ -549,7 +549,13 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
    *               package artifact's OWN provider field — external,
    *               including a handed-off-away external phase's snapshot).
    *               A cross-mode handed-off execution contributes ONE event
-   *               to EACH provider that dispatched.
+   *               to EACH provider that dispatched. Each event gates the
+   *               window by ITS OWN authoritative dispatch timestamp
+   *               (AR-043-03): the run row's created_at (native) / the
+   *               package's dispatchedAt (external, snapshots included) —
+   *               never a reservation timestamp (the execution/handoff-log
+   *               row creations can precede the actual dispatch by an
+   *               arbitrary scheduling gap).
    *
    * Neither model ever counts mere execution-row existence: a
    * created-without-dispatch record or a rejected-before-dispatch attempt

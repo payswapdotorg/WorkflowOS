@@ -272,8 +272,13 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     );
   }
 
-  /** A minimal valid ExternalExecutionPackage (the dispatch artifact). */
-  function fixturePackage(executionId: string, provider: string): ExternalExecutionPackage {
+  /**
+   * A minimal valid ExternalExecutionPackage (the dispatch artifact). The
+   * `dispatchedAt` (the AR-043-03 AUTHORITATIVE dispatch-event timestamp) is
+   * parameterizable so the window-boundary proofs can place the DISPATCH
+   * independently of every reservation timestamp — it defaults to NOW.
+   */
+  function fixturePackage(executionId: string, provider: string, dispatchedAt: Date = new Date()): ExternalExecutionPackage {
     return {
       executionId,
       mode: 'external',
@@ -298,6 +303,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         note: 'fixture',
       },
       expiration: new Date(Date.now() + 60_000).toISOString(),
+      dispatchedAt: dispatchedAt.toISOString(),
     };
   }
 
@@ -329,6 +335,13 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
       previousStatus: string;
       resultingStatus: string;
       previousPackage: ExternalExecutionPackage | null;
+      /**
+       * AR-043-03: back-date the handoff-log row's creation — the
+       * RESERVATION timestamp. The real flow can sit between the reserve
+       * and the actual external dispatch for an arbitrary scheduling gap;
+       * the window must gate on the package's dispatchedAt, never here.
+       */
+      reservedAt?: Date;
     },
   ): Promise<void> {
     await stack.db.client.query(
@@ -336,13 +349,14 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
          (execution_record_id, from_mode, to_mode, reason, actor, source,
           previous_status, resulting_status, previous_agent_run_id,
           previous_external_session_ref, previous_package_json, authorized,
-          policy_decision, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          policy_decision, idempotency_key, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, NOW()))`,
       [
         executionRowId, opts.fromMode, opts.toMode, 'fixture', 'test', 'api',
         opts.previousStatus, opts.resultingStatus, null, null,
         opts.previousPackage ? JSON.stringify(opts.previousPackage) : null,
         true, null, `fixture-handoff-${++execCount}`,
+        opts.reservedAt ?? null,
       ],
     );
   }
@@ -355,19 +369,27 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
    * (mode=external + provider=`toProvider`), and the external phase's
    * package outcome write (dispatch 2, attributed to `toProvider` — the
    * package is self-describing). TWO provider dispatches, TWO providers.
+   *
+   * AR-043-03: `opts` places the ENTIRE pre-dispatch history (the execution
+   * row creation, the native run row, the handoff-log reservation) at
+   * `reservedAt` while the external package's dispatchedAt stays NOW — the
+   * architect's problematic sequence (reserve → wait/scheduling gap →
+   * submit → package persisted), with the dispatch the only recent event.
    */
   async function insertNativeToExternalHandoff(
     fromProvider = 'fake',
     toProvider = 'external-coder',
+    opts: { reservedAt?: Date } = {},
   ): Promise<{ id: string; executionId: string }> {
     const record = await insertExecution(fromProvider, 'native');
-    await insertRunRow(record.executionId, fromProvider, 'failed');
+    await insertRunRow(record.executionId, fromProvider, 'failed', opts.reservedAt);
     await insertHandoffLogRow(record.id, {
       fromMode: 'native',
       toMode: 'external',
       previousStatus: 'failed',
       resultingStatus: 'handoff_ready',
       previousPackage: null,
+      reservedAt: opts.reservedAt,
     });
     const mutated = await executionRecordRepo.transitionMode(record.id, {
       mode: 'external',
@@ -395,13 +417,24 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
    * attributed through the LOG SNAPSHOT (the row's retained package
    * belongs to a handed-off-away phase — mode='native' excludes it from
    * the current-phase arm).
+   *
+   * AR-043-03: `opts` places the execution row's creation (the reservation)
+   * at `rowCreatedAt` independently of the package's dispatchedAt — the
+   * snapshot must carry the dispatch's OWN timestamp, never the row's.
    */
   async function insertExternalToNativeHandoff(
     fromProvider = 'external-coder',
     toProvider = 'fake',
+    opts: { rowCreatedAt?: Date; dispatchedAt?: Date } = {},
   ): Promise<{ id: string; executionId: string }> {
     const record = await insertExecution(fromProvider, 'external');
-    const pkg = fixturePackage(record.executionId, fromProvider);
+    if (opts.rowCreatedAt) {
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET created_at = $2 WHERE id = $1`,
+        [record.id, opts.rowCreatedAt],
+      );
+    }
+    const pkg = fixturePackage(record.executionId, fromProvider, opts.dispatchedAt);
     await executionRecordRepo.updateStatus(record.id, {
       status: 'handoff_ready',
       packageValue: pkg,
@@ -426,22 +459,28 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   }
 
   /**
-   * Insert a BACK-DATED external dispatch: an execution row created at
-   * 2000-01-01 (outside every modern window) carrying the package artifact
-   * — the direct external path's dispatch is anchored at the row's creation
-   * (the row is created immediately before the synchronous submit).
+   * AR-043-03 — insert a DIRECT-PATH external dispatch with FULLY
+   * CONTROLLED times: the execution row's creation (the reservation) AND
+   * the package's dispatchedAt (the authoritative dispatch event) are set
+   * INDEPENDENTLY, so the window-boundary proofs can straddle them in both
+   * directions (a recent dispatch on an old reservation; an old dispatch on
+   * a recent reservation).
    */
-  async function insertOldExternalDispatch(provider: string): Promise<string> {
+  async function insertExternalDispatchAt(
+    provider: string,
+    opts: { rowCreatedAt: Date; dispatchedAt: Date },
+  ): Promise<string> {
     const executionId = `wf-w043-${++execCount}`;
     await stack.db.client.query(
       `INSERT INTO wfos_executions
          (execution_id, project_id, work_item_id, work_order_id, implementation_context_id,
           mode, provider, model, status, prompt, prompt_digest, package_json, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'external', $6, $7, 'handoff_ready', $8, $9, $10, '2000-01-01T00:00:00Z')`,
+       VALUES ($1, $2, $3, $4, $5, 'external', $6, $7, 'handoff_ready', $8, $9, $10, $11)`,
       [
         executionId, projectId, workItemId, workOrderId, contextId,
         provider, `${provider}-model`, `p-${executionId}`, `d-${executionId}`,
-        JSON.stringify(fixturePackage(executionId, provider)),
+        JSON.stringify(fixturePackage(executionId, provider, opts.dispatchedAt)),
+        opts.rowCreatedAt,
       ],
     );
     return executionId;
@@ -728,19 +767,89 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
       expect(fakeAncient).toBe(5); // the event exists — its OWN time gates it
     });
 
-    it('a back-dated external dispatch (direct path) also falls out of the window by its own event time (the row creation)', async () => {
-      // The direct external path anchors its dispatch at the row's creation
-      // (created immediately before the synchronous submit): a row created
-      // in 2000 carrying the package is outside every modern window.
-      await insertOldExternalDispatch('external-coder');
+    it('an EXTERNAL dispatch event is gated by the package\'s OWN dispatchedAt — NEVER the row creation (AR-043-03, both boundary directions)', async () => {
+      // The architect's boundary case, direction 1: "dispatch happened 10
+      // seconds ago but reservation/execution timestamp = 2 minutes ago →
+      // incorrectly excluded". The execution row (the reservation) is
+      // created in 2000, but the package's dispatchedAt — the AUTHORITATIVE
+      // dispatch-event timestamp — is NOW: the recent window MUST count the
+      // dispatch (the pre-fix query gated on e.created_at and dropped it).
+      await insertExternalDispatchAt('external-coder', {
+        rowCreatedAt: new Date(Date.UTC(2000, 0, 1)),
+        dispatchedAt: new Date(),
+      });
+      // Direction 2 (the inverse): the execution row is created NOW, but the
+      // dispatch actually happened in 2000 — the recent window must EXCLUDE
+      // it (the pre-fix query gated on e.created_at and admitted it).
+      await insertExternalDispatchAt('external-coder', {
+        rowCreatedAt: new Date(),
+        dispatchedAt: new Date(Date.UTC(2000, 0, 1)),
+      });
 
       const externalRecent = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', recent);
-      expect(externalRecent).toBe(3);
+      expect(externalRecent).toBe(4); // ONLY the dispatch at NOW — direction 1 in, direction 2 out
       const externalAncient = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
-      expect(externalAncient).toBe(4);
-      // The quota period (this month) excludes it too — created in 2000.
-      const quotaThisMonth = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
-      expect(quotaThisMonth).toBe(6);
+      expect(externalAncient).toBe(5); // both dispatch events exist — each gated by its OWN time
+      // The QUOTA (a different unit) still gates on the ROW creation: only
+      // the NOW-created row is inside the recent quota period (the 2000 row
+      // is outside it), regardless of either dispatch time.
+      const quotaRecent = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
+      expect(quotaRecent).toBe(7);
+      const quotaAncient = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quotaAncient).toBe(8);
+    });
+
+    it('a native->external handoff\'s external dispatch is gated by the package dispatchedAt — NEVER the handoff-log reservation (AR-043-03)', async () => {
+      // The architect's problematic sequence:
+      //   reserve handoff log → wait/scheduling gap → submit → package
+      // persisted. The handoff log row (the RESERVATION) is back-dated to
+      // 2000, the native phase's run row with it — but the external
+      // dispatch JUST happened (dispatchedAt NOW). The current-phase arm
+      // MUST count it in the recent window (the pre-fix query gated on
+      // COALESCE(h.created_at, e.created_at) — the reservation — and
+      // excluded a 10-seconds-ago dispatch as a 2000 reservation).
+      await insertNativeToExternalHandoff('fake', 'external-coder', {
+        reservedAt: new Date(Date.UTC(2000, 0, 1)),
+      });
+
+      const externalRecent = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', recent);
+      expect(externalRecent).toBe(5); // the recent DISPATCH is IN — despite the 2000 reservation
+      const externalAncient = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalAncient).toBe(6); // exactly one event for the handed-off external phase
+      // The native phase's OWN event time (its run row, back-dated to 2000
+      // with the reservation) gates its window independently.
+      const fakeRecent = await repository.countProjectProviderDispatchesSince(projectId, 'fake', recent);
+      expect(fakeRecent).toBe(4); // the 2000 native dispatch is OUTSIDE
+      const fakeAncient = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeAncient).toBe(6); // the 2000 native event exists — its OWN time gates it
+    });
+
+    it('the reverse-handoff SNAPSHOT preserves dispatchedAt — the handed-off-away external dispatch is gated by the SNAPSHOT\'s OWN timestamp (AR-043-03)', async () => {
+      // An execution row created in 2000 (the reservation), whose external
+      // dispatch happened NOW (dispatchedAt NOW), then handed off to native:
+      // the append-only log's previous_package_json snapshot PRESERVES the
+      // package — dispatchedAt included. The handed-off-away arm MUST gate
+      // on that SNAPSHOT timestamp (the pre-fix query gated on e.created_at
+      // — attributing the dispatch to the 2000 reservation and excluding a
+      // just-made dispatch from the window).
+      await insertExternalToNativeHandoff('external-coder', 'fake', {
+        rowCreatedAt: new Date(Date.UTC(2000, 0, 1)),
+        dispatchedAt: new Date(),
+      });
+
+      const externalRecent = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', recent);
+      expect(externalRecent).toBe(6); // the snapshot's dispatchedAt gates it IN
+      const externalAncient = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalAncient).toBe(7); // EXACTLY ONCE — never twice from the retained row package
+      // The native phase dispatched NOW → its own event is in the window.
+      const fakeRecent = await repository.countProjectProviderDispatchesSince(projectId, 'fake', recent);
+      expect(fakeRecent).toBe(5);
+      const fakeAncient = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeAncient).toBe(7);
+      // The 2000-created row never enters the recent quota period (the
+      // NOW-created rows from the boundary tests above keep it at 8).
+      const quotaRecent = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
+      expect(quotaRecent).toBe(8);
     });
 
     it('the usage is tenant-scoped (another project counts 0 in both models)', async () => {
@@ -762,10 +871,11 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     // WORK-033 regression suite models).
 
     it('an exhausted monthly quota EXCLUDES every candidate with the structured quota_exhausted reason', async () => {
-      // Quota 5, usage 6 — the SIX DISPATCHED LOGICAL EXECUTIONS above (the
-      // non-dispatched records — created or rejected-before-dispatch — and
-      // the back-dated 2000 row never count; each cross-mode handed-off
-      // record is ONE logical execution despite its two dispatch phases).
+      // Quota 5, usage 8 — the EIGHT DISPATCHED LOGICAL EXECUTIONS created
+      // this period (the non-dispatched records — created or rejected-before-
+      // dispatch — never count, and the two 2000-created boundary rows from
+      // the AR-043-03 proofs fall outside the month; each cross-mode handed-
+      // off record is ONE logical execution despite its two dispatch phases).
       await service.updateProjectPolicy(projectId, { maxExecutionsPerMonth: 5 });
       const recommendation = await service.recommend({
         organizationId, projectId, workItemId, userId,
@@ -781,7 +891,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         ).toBe(true);
       }
       expect(recommendation.recommendedCandidate).toBeNull();
-      // Raising the quota re-admits the candidates (usage 6 < 10).
+      // Raising the quota re-admits the candidates (usage 8 < 10).
       await service.updateProjectPolicy(projectId, { maxExecutionsPerMonth: 10 });
       const lifted = await service.recommend({ organizationId, projectId, workItemId, userId });
       expect(lifted.eligibleCandidates.length).toBeGreaterThan(0);
@@ -810,26 +920,26 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     });
 
     it('a per-provider rate limit excludes ONLY the exhausted provider', async () => {
-      // 4 DISPATCH EVENTS on 'fake' in the window (its two native
-      // dispatches + the native phase of EACH cross-mode handoff) and 3 on
-      // 'external-coder' (its direct dispatch + the external phase of EACH
-      // handoff) — the two handed-off records contribute to BOTH
-      // providers' windows (AR-043-02: each actual dispatch attributed to
-      // the provider that dispatched it). Limit 4 → 'fake' (4 >= 4)
-      // excluded, 'external-coder' (3 < 4) eligible. The back-dated events
-      // and the non-dispatched records consume no window capacity —
-      // counting them was the AR-043-01 defect.
+      // 6 DISPATCH EVENTS on 'external-coder' in the window (its direct
+      // dispatch + the external phase of EACH cross-mode handoff + the
+      // AR-043-03 boundary dispatches gated by their OWN dispatchedAt — the
+      // 2000-dispatch boundary row is OUTSIDE) and 5 on 'fake' (its two
+      // native dispatches + the native phase of each handoff — the two
+      // back-dated 2000 run rows are OUTSIDE by their OWN event times).
+      // Limit 6 → 'external-coder' (6 >= 6) excluded, 'fake' (5 < 6)
+      // eligible. Every event is gated by ITS OWN authoritative dispatch
+      // timestamp (AR-043-03) — never a reservation timestamp.
       await service.updateProjectPolicy(projectId, {
-        rateLimitMaxRequests: 4,
+        rateLimitMaxRequests: 6,
         rateLimitWindowSeconds: 3_600,
       });
       const recommendation = await service.recommend({ organizationId, projectId, workItemId, userId });
-      const fake = recommendation.excludedCandidates.find((c) => c.provider === 'fake');
-      expect(fake).toBeDefined();
-      expect(fake!.eligibility.status).toBe('rate_limited');
-      expect(fake!.eligibility.blockingReasons.some((b) => b.constraint === 'rate_limit_window_exhausted')).toBe(true);
-      const external = recommendation.eligibleCandidates.find((c) => c.provider === 'external-coder');
+      const external = recommendation.excludedCandidates.find((c) => c.provider === 'external-coder');
       expect(external).toBeDefined();
+      expect(external!.eligibility.status).toBe('rate_limited');
+      expect(external!.eligibility.blockingReasons.some((b) => b.constraint === 'rate_limit_window_exhausted')).toBe(true);
+      const fake = recommendation.eligibleCandidates.find((c) => c.provider === 'fake');
+      expect(fake).toBeDefined();
       await service.updateProjectPolicy(projectId, {
         rateLimitMaxRequests: null,
         rateLimitWindowSeconds: null,

@@ -319,6 +319,23 @@ export interface ExternalExecutionPackage {
   };
   /** ISO-8601 instant after which the package is no longer redeemable. */
   readonly expiration: string;
+  /**
+   * WORK-043 (AR-043-03): the AUTHORITATIVE DISPATCH-EVENT timestamp — the
+   * ISO-8601 instant at which this external provider dispatch actually
+   * INITIATED (the provider operation body — the package derivation — IS the
+   * dispatch for the external boundary). Stamped by the provider at
+   * derivation time; carried by the package artifact into package_json; and
+   * PRESERVED in the append-only handoff log's previous_package_json snapshot
+   * when the external phase is handed off away.
+   *
+   * This is the event-time anchor for the per-provider sliding-window rate
+   * limit (§33.3) — deliberately NOT the execution row's created_at (the
+   * reservation) and NOT the handoff log row's created_at (the handoff
+   * reservation): both can precede the actual dispatch by an arbitrary
+   * scheduling gap. Like `expiration`, inherently per-dispatch (excluded
+   * from the package's deterministic-content guarantee).
+   */
+  readonly dispatchedAt: string;
 }
 
 /** Persisted execution record (safe view; package fetched via handoff only). */

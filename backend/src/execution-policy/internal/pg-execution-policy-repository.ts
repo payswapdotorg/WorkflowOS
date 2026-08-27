@@ -215,10 +215,10 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
   }
 
   /**
-   * WORK-043 (§33.3) — RATE-LIMIT usage (AR-043-02): counts the project's
-   * PROVIDER DISPATCH EVENTS since `since` for `provider` — each ACTUAL
-   * dispatch attributed to the provider that dispatched it, never to the
-   * execution row's (mutable, current) provider. The unit is the DISPATCH
+   * WORK-043 (§33.3) — RATE-LIMIT usage (AR-043-02 + AR-043-03): counts the
+   * project's PROVIDER DISPATCH EVENTS since `since` for `provider` — each
+   * ACTUAL dispatch attributed to the provider that dispatched it, never to
+   * the execution row's (mutable, current) provider. The unit is the DISPATCH
    * EVENT (rate_limit_max_requests per sliding window), so a cross-mode
    * handed-off execution contributes ONE event to EACH provider that
    * actually dispatched. Three arms over the EXISTING authoritative
@@ -232,18 +232,19 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
    *   2. EXTERNAL events (the CURRENT external phase) — one per package
    *      artifact on the execution row, attributed to the package's OWN
    *      `provider` field (ExternalExecutionPackage is self-describing).
-   *      Event time = the handoff-log row's creation (a native->external
-   *      handoff dispatches right after the log row is reserved) or, with no
-   *      handoff, the execution row's creation (the direct external path
-   *      submits synchronously immediately after creating the row).
+   *      Event time = the package's OWN `dispatchedAt` (AR-043-03): the
+   *      AUTHORITATIVE dispatch-event timestamp stamped by the provider at
+   *      the moment the dispatch initiated — NEVER the execution row's or
+   *      the handoff log row's created_at (both are RESERVATION timestamps
+   *      that can precede the actual dispatch by an arbitrary scheduling
+   *      gap).
    *   3. EXTERNAL events (a HANDED-OFF-AWAY external phase) — one per
    *      previous_package_json snapshot in the append-only
    *      wfos_execution_mode_handoffs log (to_mode = 'native'), attributed
    *      to the snapshot package's OWN `provider` field. Event time = the
-   *      execution row's creation: a handed-off-away external phase implies
-   *      the execution was CREATED external (at most one handoff per
-   *      execution — the log's UNIQUE(execution_record_id)), so the row's
-   *      creation is that external dispatch's time anchor.
+   *      SNAPSHOT's OWN `dispatchedAt` — the snapshot preserves the
+   *      dispatched-away phase's authoritative dispatch timestamp (again
+   *      NEVER the execution row's creation).
    *
    * Arms 2 and 3 are MUTUALLY EXCLUSIVE per external dispatch: arm 2
    * requires mode = 'external' (the current phase) while arm 3 requires
@@ -251,6 +252,14 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
    * COALESCE RETAINS the prior package on the row, so the row's package
    * would otherwise be invisible after the handoff). Every external
    * dispatch is therefore counted EXACTLY ONCE, from exactly one arm.
+   *
+   * FAIL-CLOSED on a missing timestamp: both external arms count the event
+   * when its package lacks `dispatchedAt` (COALESCE(..., TRUE)) — a dispatch
+   * whose event time cannot be resolved is assumed IN the window
+   * (conservative admission control; structurally impossible through the
+   * typed package constructors, which REQUIRE the field). A MALFORMED
+   * dispatchedAt throws in the cast → the whole query returns NULL → the
+   * evaluator fails closed.
    */
   async countProjectProviderDispatchesSince(
     projectId: string,
@@ -262,7 +271,8 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
         `SELECT COUNT(*)::int AS c
            FROM (
                   -- (1) NATIVE dispatch events: the AgentRun ledger row's
-                  --     OWN provider + OWN creation time.
+                  --     OWN provider + OWN creation time (the row is created
+                  --     immediately BEFORE the adapter invocation).
                   SELECT 1
                     FROM wfos_agent_runs r
                     JOIN wfos_executions e ON e.execution_id = r.execution_id
@@ -272,19 +282,25 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                   UNION ALL
                   -- (2) EXTERNAL dispatch events — the CURRENT external
                   --     phase's package artifact (self-describing provider).
+                  --     Event time = the package's OWN dispatchedAt — the
+                  --     AUTHORITATIVE dispatch timestamp (AR-043-03), NEVER
+                  --     the execution/handoff-log row creation (reservations).
+                  --     COALESCE(..., TRUE): a package without dispatchedAt
+                  --     counts FAIL-CLOSED (assumed in-window).
                   SELECT 1
                     FROM wfos_executions e
-                    LEFT JOIN wfos_execution_mode_handoffs h
-                           ON h.execution_record_id = e.id
                    WHERE e.project_id = $1
                      AND e.mode = 'external'
                      AND e.package_json IS NOT NULL
                      AND e.package_json->>'provider' = $2
-                     AND COALESCE(h.created_at, e.created_at) >= $3
+                     AND COALESCE((e.package_json->>'dispatchedAt')::timestamptz >= $3, TRUE)
                   UNION ALL
                   -- (3) EXTERNAL dispatch events — the HANDED-OFF-AWAY
                   --     external phase's package snapshot in the append-only
-                  --     handoff log.
+                  --     handoff log. Event time = the SNAPSHOT's OWN
+                  --     dispatchedAt (the snapshot preserves the dispatched-
+                  --     away phase's authoritative dispatch timestamp).
+                  --     COALESCE(..., TRUE): fail-closed as in arm (2).
                   SELECT 1
                     FROM wfos_execution_mode_handoffs h
                     JOIN wfos_executions e ON e.id = h.execution_record_id
@@ -292,7 +308,7 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
                      AND h.to_mode = 'native'
                      AND h.previous_package_json IS NOT NULL
                      AND h.previous_package_json->>'provider' = $2
-                     AND e.created_at >= $3
+                     AND COALESCE((h.previous_package_json->>'dispatchedAt')::timestamptz >= $3, TRUE)
                 ) dispatch_events`,
         [projectId, provider, since],
       );
