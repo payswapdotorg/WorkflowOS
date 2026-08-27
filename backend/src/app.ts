@@ -280,6 +280,11 @@ import {
 import type {
   ExecutionPolicyService,
 } from './execution-policy/index.js';
+// WORK-044: the adaptive execution router — the SELECTION layer over the
+// WORK-043 eligibility verdicts (application-layer orchestrator at
+// src/execution-routing/, mirroring the §34 benchmark pattern).
+import { AdaptiveExecutionRouter } from './execution-routing/index.js';
+import type { AdaptiveExecutionRouterService } from './execution-routing/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -473,6 +478,12 @@ export interface AppDeps {
    *  DB + execution + benchmark + agent-provider-registry are configured.
    *  Advisory only — never bypasses ExecutionService.submit() (§34). */
   executionPolicyService?: ExecutionPolicyService;
+  /** WORK-044: the Adaptive Execution Router — the SELECTION layer over the
+   *  WORK-043 eligibility verdicts (recommendation + automatic-selection
+   *  modes, both ADVISORY). Present when the execution-policy service is
+   *  configured. Never re-evaluates hard constraints; never mutates
+   *  workflow state; never dispatches. */
+  executionRouterService?: AdaptiveExecutionRouterService;
   /** WORK-038: Existing Project Onboarding — the application-layer
    *  orchestrator (NOT a module, NOT an authority). Composes /github
    *  (revision resolution) + /agents (the project-scoped ToolPolicyGate) +
@@ -718,6 +729,10 @@ export async function buildApp(
   // The session service is also referenced by the handler registry below.
   let executionSessionServiceRef: { reconcileTerminalForExecution(executionId: string): Promise<unknown> } | undefined;
   let executionPolicyService: ExecutionPolicyService | undefined;
+  // WORK-044: the adaptive execution router (the selection layer over the
+  // WORK-043 eligibility verdicts). Declared at function scope; constructed
+  // inside the execution-policy block (after the policy service).
+  let executionRouterService: AdaptiveExecutionRouterService | undefined;
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -1579,6 +1594,26 @@ export async function buildApp(
       // structurally satisfies AgentPolicyProjectGateLike.
       agentPolicyProjectGate: agentPolicyEngine,
     });
+    // --- WORK-044: the Adaptive Execution Router (the SELECTION layer).
+    //     Constructed AFTER the execution-policy service (the ONE WORK-043
+    //     eligibility authority it consumes). The router ranks the
+    //     ALREADY-ELIGIBLE candidates the recommendation returns — it NEVER
+    //     re-evaluates a hard constraint, NEVER mutates workflow state, and
+    //     NEVER dispatches (both routing modes are advisory; the caller
+    //     submits via the existing ExecutionService.submit() authority). The
+    //     org scope is resolved SERVER-SIDE from the authoritative project →
+    //     organization relation (the AR-043-04 lesson — same adapter the
+    //     policy service's single-candidate seam uses).
+    executionRouterService = new AdaptiveExecutionRouter({
+      executionPolicyService,
+      projectOrganizationResolver: {
+        resolveProjectOrganization: async (projectId: string) => {
+          const project = await projectRepository!.findById(projectId);
+          return project?.organizationId ?? null;
+        },
+      },
+      logger,
+    });
     // WORK-043 (final admission): NOW the policy service exists — construct
     // the concrete admission boundary + bind it into the executionService's
     // delegating port (see the agents block above for the forward
@@ -1888,6 +1923,10 @@ export async function buildApp(
       // WORK-033: execution-policy service (present when DB + benchmark +
       // agent-provider-registry configured). Advisory only (§34).
       executionPolicyService,
+      // WORK-044: the adaptive execution router (present when the
+      // execution-policy service is configured). Advisory only — the
+      // selection layer over the WORK-043 eligibility verdicts.
+      executionRouterService,
     },
     start: async () => {
       if (options.startWorker !== false) {

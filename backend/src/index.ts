@@ -316,6 +316,30 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-044: Adaptive Execution Router routes — the two DISTINCT caller
+      // intents (GET .../routing/recommendation = recommendation mode;
+      // POST .../routing/selection = automatic-selection mode). Both are
+      // ADVISORY: neither mutates authoritative workflow state; the caller
+      // dispatches via the existing execution submit authority. Backend-
+      // authorized (project.read); the organization scope is resolved
+      // SERVER-SIDE by the router (the AR-043-04 lesson).
+      ...(app.deps.authorizationService &&
+      app.deps.executionRouterService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository
+        ? {
+            executionRouting: {
+              authorizationService: app.deps.authorizationService,
+              executionRouterService: app.deps.executionRouterService,
+              projectRepository: app.deps.projectRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              workItemRepository: app.deps.workItemRepository,
+            },
+          }
+        : {}),
       // WORK-037: Agent Policy & Permissions routes. Backend-authorized
       // (project.read / project.admin). The engine never imports the
       // authorization service — only this route layer calls
