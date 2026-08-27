@@ -3674,4 +3674,217 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     const afterSession = await executionSessionService.getSessionForExecution(executionId);
     expect(afterSession!.id).toBe(sessionId);
   });
+
+  // =========================================================================
+  // WORK-043 (AR-043-03) — the TIMESTAMP dimension of the retried logical
+  // handoff. The architect's preservation invariants:
+  //
+  //     one authoritative dispatch event
+  //     no parallel usage ledger
+  //     idempotent replay preserves original dispatch timestamp
+  //     handoff snapshots preserve original timestamp
+  //     same logical handoff retried → no timestamp mutation
+  //
+  // The interleaving below is the R6-#2 reclaim-re-dispatch shape with
+  // DIVERGENT INJECTABLE CLOCKS on every actor, so the timestamp assertions
+  // are deterministic (a re-stamp would carry the later actor's clock —
+  // impossible to miss):
+  //
+  //   T1 (instance A, clock T1) dispatches; its drive stalls INSIDE the
+  //   operation body (the ledger row is OPEN + PENDING, identity attached);
+  //   the 150ms lease expires → T2 (the boot sweep) reclaims (epoch N+1),
+  //   takes over the in-flight gate, and RE-DISPATCHES the SAME logical
+  //   handoff through a FRESH instance (B, second client, clock T2 = T1+1h):
+  //   the durable ledger converges B's same-key submit onto the ONE in-flight
+  //   operation (B awaits — ZERO drives) → T1's stalled drive completes and
+  //   its derivation stamps dispatchedAt = T1 (its OWN clock) → the
+  //   generation-fenced CAS stores the ONE result → B's await REPLAYS the
+  //   stored package VERBATIM (dispatchedAt = T1 — NOT T2's clock) → B's
+  //   completeFencedDispatch commits the ONE authoritative outcome write →
+  //   T1's resumed completion is fenced out (0 rows — NO outcome write) → a
+  //   THIRD fresh instance (C, clock T3 = T1+2h) replays the SAME key
+  //   post-completion (a pure replay — ZERO drives, ZERO resolves) and STILL
+  //   observes dispatchedAt = T1.
+  //
+  // THE AR-043-03 INVARIANT: the rate-limit window's event-time anchor —
+  // package_json.dispatchedAt — is the FIRST dispatch's stamp for the whole
+  // life of the operation. No retry (the reclaiming owner's re-dispatch), no
+  // stale completion (T1's discarded write), and no later same-key replay
+  // (instance C) ever mutates it.
+  // =========================================================================
+  it('R-W43-#1 (AR-043-03). the RETRIED logical handoff + every idempotent same-key replay preserve the ORIGINAL dispatch timestamp — the reclaiming owner\'s re-dispatch (a LATER clock, a FRESH instance) REPLAYS the first dispatch\'s stored package VERBATIM (dispatchedAt never re-stamped; the stale owner\'s late completion mutates NOTHING)', async () => {
+    const { executionId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // The three actors' INJECTABLE CLOCKS: A (the original dispatcher) at
+    // T1; B (the reclaiming owner) at T2 = T1 + 1h; C (the post-completion
+    // replayer) at T3 = T1 + 2h. If ANY actor re-stamped the package, its
+    // dispatchedAt would carry that actor's clock — every assertion below
+    // pins the ORIGINAL T1 stamp instead.
+    const t1ClockMs = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const t2ClockMs = t1ClockMs + 60 * 60 * 1000;
+    const t3ClockMs = t1ClockMs + 2 * 60 * 60 * 1000;
+    const t1Iso = new Date(t1ClockMs).toISOString();
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat, dispatching through
+    // provider instance A (client 1, clock T1) whose FIRST operation drive
+    // PARKS INSIDE the operation body (the ledger row OPEN + PENDING, the
+    // identity ATTACHED — the dispatch is in flight but unresolved).
+    let resolveSubmit!: () => void;
+    const submitGate = new Promise<void>((r) => { resolveSubmit = r; });
+    const providerA = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkFirstGeneration: submitGate,
+      now: () => new Date(t1ClockMs),
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `w43-retry-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is stalled INSIDE its in-flight operation, then let the
+    // 150ms lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => providerA.inFlight, 5000);
+    const rowsAtStall = await readProviderOperations(executionId);
+    expect(rowsAtStall.length, 'T1 OPENED exactly ONE durable provider-operation ledger row').toBe(1);
+    expect(rowsAtStall[0]!.state).toBe('pending');
+    expect(rowsAtStall[0]!.handle, 'the operation identity was durably ATTACHED before the body parked').not.toBeNull();
+    expect(providerA.driveCount, 'T1 started exactly ONE operation drive (parked inside the body)').toBe(1);
+    await delay(300);
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → takes
+    // over the in-flight gate → RE-DISPATCHES the same logical handoff
+    // through a FRESH provider instance (B, second client) whose clock is
+    // ONE HOUR LATER. B's same-key submit converges onto the PENDING row
+    // (the DURABLE ledger is the authority — never instance memory) and
+    // AWAITS its resolution (a LONG window — T1's drive is stalled, not
+    // dead; ZERO drives from B).
+    const providerB = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 30_000,
+      operationPollIntervalMs: 10,
+      now: () => new Date(t2ClockMs),
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    let t2Result: { stage?: string } | undefined;
+    const t2Promise = (async () => {
+      t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    })();
+    await waitFor(() => providerB.submitCount >= 1, 5000);
+    expect(providerB.submitKeys()[0], 'B\'s re-dispatch carried the SAME handoff-derived durable key').toMatch(/^cross-mode-dispatch-/);
+    expect(providerB.driveCount, 'B\'s re-dispatch performed ZERO drives (converged onto the ONE in-flight operation through the DURABLE ledger)').toBe(0);
+
+    // T1's stalled drive completes — its derivation stamps dispatchedAt with
+    // ITS OWN clock (T1) — and the generation-fenced CAS stores the ONE
+    // result. B's await then REPLAYS the STORED package; B completes the
+    // ONE authoritative outcome through the fence.
+    resolveSubmit();
+    await t2Promise;
+    expect(t2Result!.stage, 'T2 reclaimed, re-dispatched, converged onto the ONE operation, + completed the handoff').toBe('complete');
+
+    // THE AR-043-03 INVARIANT — the authoritative outcome (T2's write, the
+    // ONE completion that committed) carries the FIRST dispatch's stamp:
+    // dispatchedAt = T1 (the original dispatcher's clock), NOT T2's — the
+    // reclaiming owner's re-dispatch NEVER re-stamped the package.
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(afterT2!.packageValue, 'the authoritative outcome write holds the converged operation\'s package').not.toBeNull();
+    expect(
+      afterT2!.packageValue!.dispatchedAt,
+      'AR-043-03: package_json.dispatchedAt is the FIRST dispatch\'s stamp (T1\'s clock) — the re-dispatching actor\'s LATER clock never re-stamped it',
+    ).toBe(t1Iso);
+
+    // The STORED ledger result — the replay source for every later same-key
+    // submit — carries the SAME original stamp.
+    const rowsAfter = await readProviderOperations(executionId);
+    expect(rowsAfter.length, 'still exactly ONE durable provider operation for the whole interleaving').toBe(1);
+    expect(rowsAfter[0]!.state).toBe('completed');
+    expect(rowsAfter[0]!.submissionJson).not.toBeNull();
+    const stored = JSON.parse(rowsAfter[0]!.submissionJson!) as { package: { dispatchedAt: string } };
+    expect(
+      stored.package.dispatchedAt,
+      'the DURABLE provider-operation ledger stored the FIRST dispatch\'s stamp (the replay source preserves it)',
+    ).toBe(t1Iso);
+    expect(providerA.driveCount + providerB.driveCount, 'exactly ONE operation drive for the whole interleaving (A drove; B replayed)').toBe(1);
+
+    // T1 resumes: its completion is FENCED OUT (0 rows — the lease is T2's
+    // and the obligation is discharged) — NO outcome write, NO mutation of
+    // the persisted timestamp.
+    await t1Promise;
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'the stale owner\'s late completion was DISCARDED at the atomic completion').toBe('claim-fence-lost');
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write committed (T2\'s)').toBe(1);
+    expect(stats.completeFalseCount, 'T1\'s late completion was discarded (0 rows)').toBe(1);
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.packageValue, 'the stale owner\'s late completion wrote NOTHING (byte-identical package)').toEqual(afterT2!.packageValue);
+    expect(
+      afterT1!.packageValue!.dispatchedAt,
+      'AR-043-03: the retried logical handoff did NOT mutate the persisted dispatch timestamp',
+    ).toBe(t1Iso);
+
+    // A THIRD fresh instance (C — yet another instance boundary, clock T3 =
+    // T1 + 2h): the post-completion same-key submit is a PURE REPLAY (ZERO
+    // drives, ZERO resolves) of the STORED operation — the idempotent replay
+    // returns the ORIGINAL package VERBATIM, dispatchedAt included.
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchState).toBe('completed');
+    expect(gateAfter.dispatchKey).toBe(rowsAfter[0]!.idempotencyKey);
+    const providerC = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      now: () => new Date(t3ClockMs),
+    });
+    const recordForTask = await executionRecordRepo.findByExecutionId(executionId);
+    const builtTask = await executionTaskService.build({
+      workItemId: recordForTask!.workItemId,
+      mode: 'external',
+      provider: recordForTask!.provider,
+      model: recordForTask!.model,
+      executionId,
+      implementationContextId: recordForTask!.implementationContextId,
+    });
+    const replaySubmission = await providerC.submit({
+      ...builtTask.task,
+      dispatchIdempotencyKey: gateAfter.dispatchKey!,
+    });
+    expect(providerC.driveCount, 'instance C performed ZERO drives — a pure post-completion REPLAY').toBe(0);
+    expect(providerC.resolveCount, 'instance C performed ZERO resolves — the terminal row replays directly').toBe(0);
+    expect(replaySubmission.package, 'the replay returned a package (the stored operation result)').toBeDefined();
+    expect(
+      replaySubmission.package!.dispatchedAt,
+      'AR-043-03: the idempotent same-key replay preserves the ORIGINAL dispatch timestamp (T1\'s stamp — 2 hours before C\'s clock)',
+    ).toBe(t1Iso);
+    expect(replaySubmission.package, 'the replayed package is the STORED operation result (byte-identical — dispatchedAt included)').toEqual(afterT2!.packageValue);
+
+    // FINAL: ONE ledger row, COMPLETED, its stored result UNCHANGED by the
+    // replay; the record's package_json — the rate-limit window's event-time
+    // source — still carries the FIRST dispatch's stamp.
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length).toBe(1);
+    expect(rowsFinal[0]!.submissionJson, 'the ONE stored result is UNCHANGED by the replay').toBe(rowsAfter[0]!.submissionJson);
+    const finalRecord = await executionRecordRepo.findByExecutionId(executionId);
+    expect(finalRecord!.packageValue!.dispatchedAt, 'FINAL: package_json.dispatchedAt is STILL the FIRST dispatch\'s stamp — never mutated across the whole retried-handoff interleaving').toBe(t1Iso);
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+  });
 });

@@ -13955,6 +13955,12 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(integration).toMatch(/AR-043-03, both boundary directions/);
     expect(integration).toMatch(/NEVER the handoff-log reservation/);
     expect(integration).toMatch(/SNAPSHOT preserves dispatchedAt/);
+    // AR-043-03 round 5: the inverse boundary on the SNAPSHOT arm (a recent
+    // handoff reservation of an OLD dispatch → excluded), completing the
+    // "reservation now + dispatch old → excluded" line for the handed-off
+    // external phase.
+    expect(integration).toMatch(/the inverse boundary/);
+    expect(integration).toMatch(/NEVER the recent handoff reservation/);
     expect(integration).toMatch(/an exhausted monthly quota EXCLUDES every candidate/);
     expect(integration).toMatch(/an UNKNOWN provider → the honest configuration_missing verdict/);
 
@@ -13966,5 +13972,27 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(handoff).toMatch(/quota-exhausted external destination/);
     expect(handoff).toMatch(/a throwing evaluation → fail-closed/);
     expect(handoff).toMatch(/the verdict is recorded on the append-only log row/);
+    // AR-043-03 round 5 — the writer-level preservation proofs:
+    // handoff snapshots preserve the original timestamp byte-for-byte (#17b)
+    // and the retried logical handoff mutates nothing (#10b).
+    expect(handoff).toMatch(/17b\. AR-043-03/);
+    expect(handoff).toMatch(/NEVER re-stamps the historical dispatch timestamp/);
+    expect(handoff).toMatch(/10b\. AR-043-03/);
+    expect(handoff).toMatch(/the persisted dispatch timestamp is byte-identical/);
+
+    const claimLease = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff-claim-lease-concurrency.regression.test.ts'),
+      'utf8',
+    );
+    // AR-043-03 round 5 — the idempotency/retry timestamp proofs with
+    // DIVERGENT INJECTABLE CLOCKS (a re-stamp would carry the later actor's
+    // clock): the reclaiming owner's same-key re-dispatch replays the FIRST
+    // dispatch's stored package verbatim; the stale owner's late completion
+    // is discarded; the post-completion same-key replay preserves the
+    // original stamp.
+    expect(claimLease).toMatch(/R-W43-#1 \(AR-043-03\)/);
+    expect(claimLease).toMatch(/idempotent replay preserves original dispatch timestamp/);
+    expect(claimLease).toMatch(/never re-stamped/);
+    expect(claimLease).toMatch(/never mutated across the whole retried-handoff interleaving/);
   });
 });

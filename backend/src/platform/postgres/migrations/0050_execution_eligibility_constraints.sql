@@ -76,6 +76,21 @@
 -- (a dispatch 10 seconds ago counted at a 2-minute-old reservation time
 -- falls out of the window; the inverse admits stale dispatches).
 --
+-- AR-043-03 (the timestamp's IMMUTABILITY — the preservation invariants):
+-- the dispatchedAt value is the FIRST dispatch's stamp for the whole life
+-- of the operation. The keyed (cross-mode) dispatch path stores the settled
+-- submission (package + dispatchedAt) in the durable provider-operation
+-- ledger, and every later same-key submit REPLAYS that stored package
+-- verbatim — the reclaiming owner's re-dispatch after a lease expiry, the
+-- idempotent post-completion replay, and the duplicate handoff call (which
+-- never re-dispatches at all) can NEVER re-stamp it; a stale owner's late
+-- completion is discarded by the dispatch-gate CAS (0 rows — no outcome
+-- write). The handoff snapshot copies the package WHOLESALE, so a handed-
+-- off-away external phase keeps its original dispatch time in the
+-- append-only log. ONE authoritative dispatch event; NO parallel usage
+-- ledger — the existing artifacts' exactly-once behavior IS the
+-- preservation mechanism.
+--
 -- created execution without dispatch        → NOT counted (either model)
 -- rejected before dispatch                  → NOT counted (either model)
 -- actual provider dispatch                  → quota: once per LOGICAL

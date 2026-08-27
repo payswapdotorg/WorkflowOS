@@ -852,6 +852,43 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
       expect(quotaRecent).toBe(8);
     });
 
+    it('the reverse-handoff SNAPSHOT\'s OLD dispatchedAt EXCLUDES the event — NEVER the recent handoff reservation (AR-043-03, the inverse boundary)', async () => {
+      // The architect's boundary line, direction 2, on the SNAPSHOT arm:
+      // "reservation now + dispatch old → excluded". An external dispatch
+      // made in 2000 whose external phase was handed off to native JUST NOW
+      // (the handoff log row — the native phase's RESERVATION — is created
+      // NOW, and the row's history is all 2000): the event must fall OUT of
+      // the recent window by the SNAPSHOT's OWN dispatchedAt (2000) — never
+      // be admitted by the recent handoff reservation. The SAME handoff's
+      // native dispatch (made NOW) is counted at its OWN time — each event
+      // of the logical execution gates the window independently.
+      const nativeAlt = 'native-alt';
+      await insertExternalToNativeHandoff('external-coder', nativeAlt, {
+        rowCreatedAt: new Date(Date.UTC(2000, 0, 1)),
+        dispatchedAt: new Date(Date.UTC(2000, 0, 1)),
+        // the handoff log row (the reservation) defaults to NOW()
+      });
+
+      const externalRecent = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', recent);
+      expect(externalRecent).toBe(6); // the 2000 dispatch is EXCLUDED — despite the NOW handoff reservation
+      const externalAncient = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalAncient).toBe(8); // the event exists — its OWN (old) time gates it OUT of the recent window
+      // The same handoff's NATIVE dispatch happened NOW (a different
+      // provider): counted at ITS OWN event time — the contrast proves each
+      // dispatch of one logical execution is gated independently.
+      const nativeAltRecent = await repository.countProjectProviderDispatchesSince(projectId, nativeAlt, recent);
+      expect(nativeAltRecent).toBe(1);
+      const nativeAltAncient = await repository.countProjectProviderDispatchesSince(projectId, nativeAlt, ancient);
+      expect(nativeAltAncient).toBe(1);
+      // The 2000-created row never enters the recent quota period (its unit
+      // is the LOGICAL EXECUTION, gated by the row creation — one unit, and
+      // only inside the ancient period).
+      const quotaRecent = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
+      expect(quotaRecent).toBe(8);
+      const quotaAncient = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quotaAncient).toBe(11);
+    });
+
     it('the usage is tenant-scoped (another project counts 0 in both models)', async () => {
       const otherProject = '00000000-0000-0000-0000-000000000000';
       const quota = await repository.countProjectDispatchedExecutionsSince(otherProject, ancient);

@@ -640,10 +640,14 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   /** Create an external execution record in the given state (with a
    * representative ExternalExecutionPackage persisted on the record so the
    * cross-mode handoff log's previous_package_json snapshot is non-null —
-   * the prior phase's authoritative evidence is preserved). */
+   * the prior phase's authoritative evidence is preserved). AR-043-03: the
+   * optional `dispatchedAt` overrides the package's authoritative
+   * dispatch-event timestamp (back-dating the dispatch for the window /
+   * snapshot-preservation proofs). */
   async function createExternalRecord(
     status: 'handoff_ready' | 'submitted' | 'failed' | 'expired' = 'handoff_ready',
     branch: string | null = 'feat/work-w042-001',
+    dispatchedAt?: Date,
   ): Promise<{ executionId: string; recordId: string }> {
     const executionId = nextExecId();
     const record = await executionRecordRepo.create({
@@ -673,7 +677,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       expiration: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       // AR-043-03: the authoritative dispatch-event timestamp (the real
       // provider stamps it at the package derivation).
-      dispatchedAt: new Date().toISOString(),
+      dispatchedAt: (dispatchedAt ?? new Date()).toISOString(),
     };
     if (status === 'handoff_ready' || status === 'submitted') {
       await executionRecordRepo.updateStatus(record.id, { status, packageValue: pkg });
@@ -1223,6 +1227,61 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // preserved (the correction chain is visible).
       expect(e2nResult.handoff.previousPackageValue).not.toBeNull();
     });
+
+    // #17b (WORK-043 AR-043-03): the handoff SNAPSHOT preserves the external
+    // dispatch's ORIGINAL dispatchedAt byte-for-byte — the recent handoff
+    // reservation NEVER re-stamps the historical dispatch timestamp. This is
+    // the writer-level proof for the handed-off-away arm of the rate-limit
+    // query (the eligibility suite's snapshot proofs gate the window on this
+    // exact value).
+    it('17b. AR-043-03 — the handoff snapshot preserves the external dispatch\'s ORIGINAL dispatchedAt byte-for-byte (the recent handoff reservation NEVER re-stamps the historical dispatch timestamp)', async () => {
+      // An external dispatch whose authoritative dispatchedAt is BACK-DATED
+      // (2000 — the dispatch happened long ago), whose external phase is
+      // handed off to native NOW.
+      const oldDispatch = new Date(Date.UTC(2000, 0, 1));
+      const { executionId } = await createExternalRecord('handoff_ready', undefined, oldDispatch);
+      const recordBefore = await executionRecordRepo.findByExecutionId(executionId);
+      const originalPackage = recordBefore!.packageValue!;
+      expect(originalPackage.dispatchedAt).toBe(oldDispatch.toISOString());
+
+      const result = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `ar43-snap-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+
+      // The snapshot preserves the ORIGINAL package VERBATIM — dispatchedAt
+      // included (byte-for-byte, NOT a re-stamp at the handoff time).
+      expect(result.handoff.fromMode).toBe('external');
+      expect(result.handoff.previousPackageValue).not.toBeNull();
+      expect(result.handoff.previousPackageValue!.dispatchedAt).toBe(oldDispatch.toISOString());
+      expect(result.handoff.previousPackageValue).toEqual(originalPackage);
+
+      // The handoff log row (the RESERVATION) is created NOW — long AFTER
+      // the dispatch — yet the snapshot it carries is the ORIGINAL
+      // dispatch-time package: the reservation timestamp and the
+      // dispatch-event timestamp are DISTINCT, and the snapshot keeps the
+      // latter (the rate-limit window gates on the dispatch event — never
+      // the reservation).
+      const logRow = await stack.db.client.query<{ created_at: Date; previous_package_json: { dispatchedAt: string } }>(
+        `SELECT h.created_at, h.previous_package_json
+           FROM wfos_execution_mode_handoffs h
+           JOIN wfos_executions e ON e.id = h.execution_record_id
+          WHERE e.execution_id = $1`,
+        [executionId],
+      );
+      expect(logRow.rows.length).toBe(1);
+      const reservation = new Date(logRow.rows[0]!.created_at);
+      expect(reservation.getTime(), 'the handoff reservation is NOW (millennia after the 2000 dispatch)').toBeGreaterThan(oldDispatch.getTime() + 60 * 60 * 1000);
+      expect(logRow.rows[0]!.previous_package_json!.dispatchedAt, 'the snapshot carries the ORIGINAL dispatch timestamp — never the reservation time').toBe(oldDispatch.toISOString());
+
+      // The record's RETAINED package (transitionMode COALESCE) is also the
+      // ORIGINAL — the handed-off-away phase's evidence is unchanged on the
+      // row.
+      const recordAfter = await executionRecordRepo.findByExecutionId(executionId);
+      expect(recordAfter!.packageValue!.dispatchedAt).toBe(oldDispatch.toISOString());
+      expect(recordAfter!.packageValue).toEqual(originalPackage);
+    });
   });
 
   // ===========================================================================
@@ -1251,6 +1310,58 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const events = await auditService.listForProject(projectId, { eventTypes: ['EXECUTION_CROSS_MODE_HANDOFF'], limit: 100 });
       const mine = events.filter((e) => e.executionId === executionId);
       expect(mine.length).toBe(1);
+    });
+
+    // #10b (WORK-043 AR-043-03): "same logical handoff retried → no timestamp
+    // mutation" at the SERVICE boundary. A duplicate handoff call (the same
+    // idempotencyKey) converges at the reserve boundary WITHOUT re-dispatching
+    // (claimed:false → the caller never reaches the dispatch): still ONE
+    // durable provider-operation ledger row, and the persisted package —
+    // dispatchedAt included — is byte-identical. (The re-dispatch retry shape
+    // — the reclaiming owner's same-key re-dispatch — is proven with
+    // divergent clocks in the claim-lease concurrency suite, R-W43-#1.)
+    it('10b. AR-043-03 — the same logical handoff RETRIED (a duplicate idempotency-key call) mutates NOTHING: no re-dispatch (still ONE provider-operation ledger row) + the persisted dispatch timestamp is byte-identical', async () => {
+      const { executionId } = await createNativeRecord('failed');
+      const idempotencyKey = `ar43-retry-${executionId}`;
+      const first = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(first.handoff.fromMode).toBe('native');
+      // The first dispatch persisted the external package (with its
+      // authoritative dispatchedAt) through the fenced outcome write.
+      const recordAfterFirst = await executionRecordRepo.findByExecutionId(executionId);
+      const firstPackage = recordAfterFirst!.packageValue!;
+      expect(firstPackage.dispatchedAt).toBeTruthy();
+      // The keyed external dispatch left exactly ONE durable
+      // provider-operation ledger row (the ONE dispatch event).
+      const countLedgerRows = async (): Promise<number> => {
+        const res = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations WHERE execution_id = $1`,
+          [executionId],
+        );
+        return Number(res.rows[0]?.c ?? 0);
+      };
+      expect(await countLedgerRows()).toBe(1);
+
+      // The SAME logical handoff retried: converges at the reserve boundary
+      // (no second handoff log row, no re-dispatch).
+      const second = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      expect(second.handoff.id).toBe(first.handoff.id);
+      expect(await countHandoffsForExecution(executionId)).toBe(1);
+      // Still ONE dispatch event — the retry never reached the provider.
+      expect(await countLedgerRows()).toBe(1);
+
+      // The persisted dispatch timestamp is UNCHANGED (byte-identical
+      // package — the retry wrote NOTHING).
+      const recordAfterSecond = await executionRecordRepo.findByExecutionId(executionId);
+      expect(recordAfterSecond!.packageValue).toEqual(firstPackage);
+      expect(recordAfterSecond!.packageValue!.dispatchedAt).toBe(firstPackage.dispatchedAt);
     });
 
     // #11: concurrent handoff has one winner.
