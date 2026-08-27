@@ -289,6 +289,46 @@ class FlakySessionPort implements CrossModeExecutionSessionPort {
   }
 }
 
+/**
+ * PR #46 review round 3 (the concurrency fix): a Queue wrapper that captures
+ * the ExecutionRecord + ExecutionSession state AT ENQUEUE TIME. Proves the
+ * relay job is enqueued AFTER the mutation+dispatch+session convergence (NOT
+ * at reserve — round 2's claim-time enqueue created a live-relay race). When
+ * the enqueue fires, the record IS already mutated (mode === toMode) + the
+ * dispatch IS done (packageValue for native→external / AgentRun for
+ * external→native) + the session IS converged (interrupted for native→external
+ * / running for external→native). A live worker that picks up the relay job
+ * therefore sees a COMPLETE (or near-complete) handoff + the reconcile is a
+ * no-op discharge (NOT a competing mutation). Used for the R3-#1 regression.
+ */
+class RecordingQueue implements Queue {
+  private readonly _enqueueRecordStates: ExecutionRecord[] = [];
+  private readonly _enqueueSessionStates: (ExecutionSession | null)[] = [];
+  constructor(
+    private readonly real: Queue,
+    private readonly recordRepo: PgExecutionRecordRepository,
+    private readonly sessionService: CrossModeExecutionSessionPort,
+    private readonly executionId: string,
+  ) {}
+  /** The record state captured at each enqueue call (proves the ordering). */
+  get enqueueRecordStates(): readonly ExecutionRecord[] { return this._enqueueRecordStates; }
+  /** The session state captured at each enqueue call (proves the ordering). */
+  get enqueueSessionStates(): readonly (ExecutionSession | null)[] { return this._enqueueSessionStates; }
+  async enqueue<T>(type: string, payload: T, options?: EnqueueOptions): Promise<JobRecord<T>> {
+    // Capture the record + session state AT ENQUEUE TIME (proves the enqueue
+    // happens AFTER the mutation+dispatch+session convergence — round 3).
+    const record = await this.recordRepo.findByExecutionId(this.executionId);
+    if (record) this._enqueueRecordStates.push(record);
+    const session = await this.sessionService.getSessionForExecution(this.executionId);
+    this._enqueueSessionStates.push(session);
+    return this.real.enqueue<T>(type, payload, options);
+  }
+  dequeue(): Promise<JobRecord | null> { return this.real.dequeue(); }
+  ack(jobId: string): Promise<void> { return this.real.ack(jobId); }
+  size(): Promise<number> { return this.real.size(); }
+  close(): Promise<void> { return this.real.close(); }
+}
+
 describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   let stack: TestAuthStack;
   let executionRecordRepo: PgExecutionRecordRepository;
@@ -1377,11 +1417,21 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // createCrossModeHandoffRelayJobHandler runs reconcileCrossModeHandoffForExecution;
     // the handoff converges (exactly-one handoff, one package, the obligation
     // discharges).
+    //
+    // PR #46 round 3 (the concurrency fix): the enqueue now happens AFTER the
+    // mutation+dispatch+session convergence (NOT at reserve). So a crash at the
+    // mutate step means the caller NEVER enqueued a relay job — the boot sweep
+    // is the EXCLUSIVE recovery path (the obligation row is durable; the next
+    // boot sweep enqueues + reconciles). This is the exact "crash between
+    // reserve and the post-mutation enqueue" window the architect prescribed
+    // the boot sweep for.
     it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // Build a service whose transitionMode crashes the FIRST time (the
       // reserve persists the handoff log row + the obligation before the
-      // crash; a queue is wired so the claim-time relay job enqueues).
+      // crash). PR #46 round 3: the enqueue is AFTER the mutate, so a crash
+      // at the mutate means NO relay job was enqueued by the caller — the
+      // boot sweep is the recovery path.
       const crashingRepo = new CrashAfterReserveRepo(executionRecordRepo, 1);
       const queue = new InMemoryQueue();
       const crashingService = new DefaultCrossModeHandoffService({
@@ -1433,9 +1483,13 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         const midRecord = await executionRecordRepo.findByExecutionId(executionId);
         expect(midRecord!.mode).toBe('native');
 
-        // The claim-time relay job is on the queue. The WorkerHost's poll
-        // loop drains it (a live worker); wait for the reconcile to converge
-        // (record.mode === external + the obligation discharges).
+        // PR #46 round 3: the caller NEVER enqueued a relay job (the handoff
+        // threw at the mutate, BEFORE reaching the post-mutation enqueue). The
+        // boot sweep is the recovery path — manually trigger it (it scans
+        // pending obligations + enqueues relay jobs). The WorkerHost's poll
+        // loop drains the job; wait for the reconcile to converge (record.mode
+        // === external + the obligation discharges).
+        await relay.enqueuePendingRelayJobs();
         await waitFor(
           () => executionRecordRepo.findByExecutionId(executionId),
           (r) => r?.mode === 'external' && r.status === 'handoff_ready' && r.packageValue != null,
@@ -1463,7 +1517,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', async () => {
       const { executionId, recordId } = await createExternalRecord('handoff_ready');
       const queue = new InMemoryQueue();
-      // A service wired with the queue (the claim-time relay job enqueues).
+      // A service wired with the queue (PR #46 round 3: the post-mutation relay
+      // job enqueues — AFTER the mutation+dispatch+session convergence).
       const relayService = new DefaultCrossModeHandoffService({
         executionRecordRepository: executionRecordRepo,
         crossModeHandoffRepository: crossModeHandoffRepo,
@@ -1596,15 +1651,16 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       );
       await worker.start();
       try {
-        // A successful handoff (completes + discharges the obligation).
+        // A successful handoff (completes + discharges the obligation). PR
+        // #46 round 3: the relay job is enqueued AFTER the mutation+dispatch+
+        // session convergence (NOT at reserve). The WorkerHost's poll loop
+        // drains it (a no-op for a complete handoff — the reconcile sees a
+        // complete handoff + discharges); wait for the obligation to discharge.
         await relayService.handoff(
           executionId,
           { targetMode: 'external', idempotencyKey: `idempotent-${executionId}` },
           { userId: 'test-user', source: 'cmh-test' },
         );
-        // The claim-time relay job is on the queue. The WorkerHost's poll
-        // loop drains it (a no-op for a complete handoff); wait for the
-        // obligation to discharge.
         await waitFor(
           async () => countDischargedObligations(executionId),
           (c) => c === 1,
@@ -1646,7 +1702,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // succeeds (a live worker drains the job) OR the handoff fails fast (the
     // obligation is pending; the boot sweep reconciles). This proves the
     // enqueue failure is NOT swallowed.
-    it('R2-#1. a durable enqueue failure PROPAGATES — the handoff fails fast; the obligation stays pending; the boot sweep reconciles → converges → discharges', async () => {
+    //
+    // PR #46 round 3 (the concurrency fix): the enqueue now happens AFTER
+    // the mutation+dispatch+session convergence (NOT at reserve). So when the
+    // enqueue fails, the synchronous work IS already done (record mutated +
+    // dispatch complete + session converged) — the handoff IS complete; the
+    // only thing that failed is the live delivery (the enqueue). The boot
+    // sweep sees a COMPLETE handoff → discharges (no re-mutate, no
+    // re-dispatch). This is the round-3 semantics: the live relay does NOT
+    // race the caller (the enqueue happens after the caller's synchronous
+    // work); a failed enqueue is a liveness gap, NOT a correctness gap.
+    it('R2-#1. a durable enqueue failure PROPAGATES (after the mutation+dispatch) — the handoff fails fast; the record IS mutated + dispatched; the obligation stays pending; the boot sweep reconciles → discharges', async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // A FailingQueue that throws on the FIRST enqueue (simulating a
       // transient enqueue failure — the durability guarantee must NOT
@@ -1669,9 +1735,12 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         logger: stack.db.logger,
         queue: failingQueue, // the FailingQueue — enqueue throws + propagates
       });
-      // The first handoff throws (the enqueue failed + propagated — NOT
-      // swallowed). The reserve + the obligation row ARE durable (the
-      // trigger wrote them before the enqueue).
+      // The first handoff: reserve (succeeds) + mutate (succeeds — record now
+      // external/handoff_ready) + dispatch (succeeds — packageValue set) +
+      // session transition (no session → no-op → converged) + enqueue
+      // (THROWS via FailingQueue) → handoff() throws. The enqueue failed +
+      // propagated — NOT swallowed. The synchronous work IS done (round 3:
+      // the enqueue happens AFTER the mutation+dispatch+session).
       const err = await failingService.handoff(
         executionId,
         { targetMode: 'external', idempotencyKey: `r2-crash1-${executionId}` },
@@ -1683,10 +1752,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // migration 0043's trigger ran before the enqueue failure).
       expect(await countHandoffsForExecution(executionId)).toBe(1);
       expect(await countPendingObligations(executionId)).toBe(1);
-      // The record is NOT mutated (still native/failed — the enqueue threw
-      // BEFORE the mutate ran).
+      // PR #46 round 3: the record IS mutated (external/handoff_ready) + the
+      // dispatch IS done (packageValue present) — the enqueue happens AFTER
+      // the mutation+dispatch, so the synchronous work IS complete when the
+      // enqueue fails. The handoff IS complete; the only thing that failed
+      // is the live delivery (the enqueue). The obligation stays pending
+      // (the boot sweep is the recovery path for the missing live delivery).
       const midRecord = await executionRecordRepo.findByExecutionId(executionId);
-      expect(midRecord!.mode).toBe('native');
+      expect(midRecord!.id).toBe(recordId);
+      expect(midRecord!.mode).toBe('external'); // IS mutated (round 3)
+      expect(midRecord!.status).toBe('handoff_ready');
+      expect(midRecord!.packageValue).not.toBeNull(); // dispatch IS done
       // The FailingQueue threw exactly once (the enqueue was attempted +
       // propagated).
       expect(failingQueue.enqueueCalls).toBe(1);
@@ -1730,17 +1806,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         // (the FailingQueue's enqueue failed; the boot sweep is the backstop
         // — the obligation row is the durable source of truth).
         await relay.enqueuePendingRelayJobs();
-        // Wait for the reconcile to converge (record.mode === external +
-        // packageValue + the obligation discharges).
-        await waitFor(
-          () => executionRecordRepo.findByExecutionId(executionId),
-          (r) => r?.mode === 'external' && r.status === 'handoff_ready' && r.packageValue != null,
-        );
+        // The reconcile sees a COMPLETE handoff (round 3: the synchronous
+        // work IS done — record.mode === external + packageValue + session
+        // converged) → discharges (a no-op reconcile — no re-mutate, no
+        // re-dispatch). Wait for the discharge.
         await waitFor(
           async () => countDischargedObligations(executionId),
           (c) => c === 1,
         );
-        // The handoff converged (the relay reconciled: re-mutate + re-dispatch).
+        // The handoff is complete (the record stays external/handoff_ready
+        // with packageValue — the reconcile did NOT re-mutate or re-dispatch;
+        // it only discharged the obligation).
         const after = await executionRecordRepo.findByExecutionId(executionId);
         expect(after!.id).toBe(recordId);
         expect(after!.mode).toBe('external');
@@ -1794,11 +1870,14 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         logger: stack.db.logger,
         queue: realQueue,
       });
-      // The first handoff: reserve (succeeds) + enqueue (succeeds) + mutate
-      // (succeeds — record now external/handoff_ready) + interruptSession
-      // (THROWS via FlakySessionPort) → handoff() throws. The record IS
-      // mutated but the session is STILL running (pre-handoff state — NOT
-      // converged) + the dispatch did NOT happen (no packageValue).
+      // The first handoff: reserve (succeeds) + mutate (succeeds — record now
+      // external/handoff_ready) + interruptSession (THROWS via FlakySessionPort)
+      // → handoff() throws. PR #46 round 3: the enqueue happens AFTER the
+      // mutation+dispatch+session convergence, so the handoff threw BEFORE
+      // reaching the enqueue — no relay job was enqueued by the caller (the
+      // obligation row is durable; the boot sweep is the recovery path). The
+      // record IS mutated but the session is STILL running (pre-handoff state —
+      // NOT converged) + the dispatch did NOT happen (no packageValue).
       const err = await crashingService.handoff(
         executionId,
         { targetMode: 'external', idempotencyKey: `r2-crash2-${executionId}` },
@@ -1955,6 +2034,294 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const afterSession = await getSession(executionId);
       expect(afterSession!.id).toBe(sessionId);
       expect(afterSession!.status).toBe('interrupted'); // converged
+      expect(await countDischargedObligations(executionId)).toBe(1);
+      expect(await countPendingObligations(executionId)).toBe(0);
+    });
+  });
+
+  // ===========================================================================
+  // PR #46 review round 3 — the concurrency blocker:
+  //   * BLOCKER: the claim-time relay (enqueued BEFORE the mutation) could
+  //     race the caller — a live WorkerHost consumed the relay BETWEEN the
+  //     reserve and the caller's transitionMode, after which BOTH the worker
+  //     and the caller performed the same mutation+dispatch. The handoff-row
+  //     UNIQUE constraint did NOT serialize these two executions (both operated
+  //     on the same already-reserved handoff row). Now the relay job is
+  //     enqueued AFTER the mutation+dispatch+session convergence — a live
+  //     worker sees a COMPLETE handoff + the reconcile is a no-op discharge.
+  //   * SECONDARY: sessionConverged treated terminal sessions as converged
+  //     for external→native — a terminal session that arose mid-handoff
+  //     (concurrent terminalization) would discharge the obligation
+  //     accidentally. Now a terminal session does NOT discharge unless the
+  //     record is also terminal (the authoritative signal the execution
+  //     finished).
+  // ===========================================================================
+  describe('PR #46 round 3 — BLOCKER: the relay job is enqueued AFTER the mutation (no live-relay race)', () => {
+    // R3-#1: the relay job is enqueued AFTER the mutation+dispatch+session
+    // convergence. A RecordingQueue captures the record + session state AT
+    // ENQUEUE TIME — proving the enqueue happens AFTER the synchronous work
+    // is done. When a live worker picks up the relay job, it sees a COMPLETE
+    // (or near-complete) handoff + the reconcile is a no-op discharge (NOT a
+    // competing mutation). This is the architect's prescribed ordering:
+    //   reserve → mutate + session convergence + dispatch → enqueue relay →
+    //   audit / return.
+    it('R3-#1. native→external: the relay job is enqueued AFTER the mutation+dispatch+session (the record IS external + packageValue + session interrupted at enqueue time)', async () => {
+      const { executionId, recordId } = await createNativeRecord('failed');
+      const { sessionId } = await createRunningSession(executionId);
+      // A RecordingQueue that captures the record + session state at enqueue
+      // time (proves the enqueue happens AFTER the synchronous work).
+      const realQueue = new InMemoryQueue();
+      const recordingQueue = new RecordingQueue(realQueue, executionRecordRepo, executionSessionService, executionId);
+      const recordingService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: recordingQueue,
+      });
+      // The handoff: reserve → mutate → dispatch → session transition →
+      // enqueue (the RecordingQueue captures the state). The synchronous
+      // work IS done when the enqueue fires (round 3: the enqueue is AFTER
+      // the mutation+dispatch+session).
+      await recordingService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `r3-order-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      // Exactly ONE enqueue call (the post-mutation relay job).
+      expect(recordingQueue.enqueueRecordStates).toHaveLength(1);
+      // AT ENQUEUE TIME: the record IS already mutated (external) + dispatched
+      // (packageValue present). This proves the enqueue happens AFTER the
+      // mutation+dispatch — a live worker that picks up the relay job sees a
+      // COMPLETE handoff (NOT a half-mutated one). The round-2 race (enqueue
+      // at reserve → worker reconciles BEFORE the caller's mutate) is gone.
+      const enqueueRecord = recordingQueue.enqueueRecordStates[0]!;
+      expect(enqueueRecord.id).toBe(recordId);
+      expect(enqueueRecord.mode).toBe('external'); // IS mutated at enqueue time
+      expect(enqueueRecord.status).toBe('handoff_ready');
+      expect(enqueueRecord.packageValue).not.toBeNull(); // dispatch IS done
+      // AT ENQUEUE TIME: the session IS already converged (interrupted for
+      // native→external). This proves the enqueue happens AFTER the session
+      // transition — a live worker sees a CONVERGED handoff (NOT a mismatched
+      // record/session state).
+      const enqueueSession = recordingQueue.enqueueSessionStates[0]!;
+      expect(enqueueSession).not.toBeNull();
+      expect(enqueueSession!.id).toBe(sessionId);
+      expect(enqueueSession!.status).toBe('interrupted'); // converged
+      // The final state: the handoff is complete.
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('external');
+      expect(after!.packageValue).not.toBeNull();
+      const afterSession = await getSession(executionId);
+      expect(afterSession!.status).toBe('interrupted');
+      // Exactly ONE handoff log row (no duplicate — no live-relay race).
+      expect(await countHandoffsForExecution(executionId)).toBe(1);
+    });
+
+    // R3-#1b: the external→native direction — the relay job is enqueued AFTER
+    // the mutation+dispatch+session. The record IS native/running + an AgentRun
+    // exists + the session IS running (resumed) at enqueue time.
+    it('R3-#1b. external→native: the relay job is enqueued AFTER the mutation+dispatch+session (the record IS native + AgentRun + session running at enqueue time)', async () => {
+      const { executionId, recordId } = await createExternalRecord('handoff_ready');
+      // An external→native handoff has no pre-existing session (the external
+      // phase has no native session). The handoff's session transition is a
+      // no-op (no session → converged). The dispatch creates an AgentRun.
+      const realQueue = new InMemoryQueue();
+      const recordingQueue = new RecordingQueue(realQueue, executionRecordRepo, executionSessionService, executionId);
+      const recordingService = new DefaultCrossModeHandoffService({
+        executionRecordRepository: executionRecordRepo,
+        crossModeHandoffRepository: crossModeHandoffRepo,
+        executionTaskService,
+        nativeExecutionProvider,
+        externalExecutionProvider,
+        agentRunRepository: agentRunRepo,
+        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+        executionPolicyService: new StubExecutionPolicyService(true),
+        agentProviderRegistryService: new StubAgentProviderRegistry(),
+        executionSessionService,
+        agentWorkspaceService,
+        auditService,
+        logger: stack.db.logger,
+        queue: recordingQueue,
+      });
+      await recordingService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `r3-order-e2n-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      // Exactly ONE enqueue call.
+      expect(recordingQueue.enqueueRecordStates).toHaveLength(1);
+      // AT ENQUEUE TIME: the record IS already mutated (native) + dispatched
+      // (AgentRun exists). The status is completed (the native dispatch is
+      // synchronous — the FakeAgentAdapter completes immediately).
+      const enqueueRecord = recordingQueue.enqueueRecordStates[0]!;
+      expect(enqueueRecord.id).toBe(recordId);
+      expect(enqueueRecord.mode).toBe('native'); // IS mutated at enqueue time
+      expect(enqueueRecord.agentRunId).not.toBeNull(); // dispatch IS done
+      // AT ENQUEUE TIME: no session exists (the external phase has no native
+      // session; the handoff's session transition is a no-op). Converged.
+      const enqueueSession = recordingQueue.enqueueSessionStates[0]!;
+      expect(enqueueSession).toBeNull(); // no session → converged
+      // The final state.
+      const after = await executionRecordRepo.findByExecutionId(executionId);
+      expect(after!.mode).toBe('native');
+      expect(after!.agentRunId).not.toBeNull();
+      expect(await countHandoffsForExecution(executionId)).toBe(1);
+    });
+  });
+
+  describe('PR #46 round 3 — SECONDARY: a terminal session does NOT accidentally discharge a handoff', () => {
+    // R3-#2: a terminal session that arose mid-handoff (concurrent
+    // terminalization) does NOT discharge the obligation by itself. The round-2
+    // sessionConverged had an unconditional `if (session.status === terminal)
+    // return true;` branch BEFORE the record-terminal check — a terminal
+    // session would discharge the obligation even when the record was NOT
+    // terminal (the execution was cancelled/failed concurrently). Now the
+    // terminal-session-as-converged branch is GONE for external→native: a
+    // terminal session falls through to the record-terminal check (the
+    // authoritative signal the execution finished). The obligation stays
+    // pending until the record reaches a terminal state or an operator
+    // resolves it.
+    //
+    // The scenario: a successful external→native handoff (record native/
+    // completed + AgentRun + session would be running if one existed) is
+    // reset to simulate the crash gap — the record is reset to native/running
+    // (non-terminal) + a terminal session is seeded (cancelled — simulating a
+    // concurrent terminalization). A direct reconcile call sees: record.mode
+    // === toMode (native) + AgentRun exists + sessionConverged: session is
+    // terminal BUT the record is NOT terminal → NOT converged → the obligation
+    // STAYS PENDING (the terminal session does NOT discharge the handoff).
+    it('R3-#2. a terminal session mid-handoff does NOT discharge the obligation (session cancelled + record non-terminal → NOT converged → obligation stays pending)', async () => {
+      const { executionId, recordId } = await createExternalRecord('handoff_ready');
+      // Run a successful external→native handoff (the happy path: record
+      // native/completed + an AgentRun + a running session resumed/created).
+      await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `r3-term-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      const happy = await executionRecordRepo.findByExecutionId(executionId);
+      expect(happy!.mode).toBe('native');
+      expect(happy!.status).toBe('completed');
+      expect(happy!.agentRunId).not.toBeNull();
+
+      // Seed a session for this execution (the external phase had no native
+      // session; create one now to simulate the pre-handoff state) + drive it
+      // to terminal (cancelled — simulating a concurrent terminalization: the
+      // execution was cancelled by another path mid-handoff).
+      const session = await executionSessionService.ensureSession(executionId);
+      await executionSessionService.startSession(session.id);
+      const running = await sessionRepo.getSession(session.id);
+      await sessionRepo.transitionWithEvent(
+        running!.id, running!.version, 'running', 'cancelled', 'cancelled',
+      );
+      const terminalSession = await getSession(executionId);
+      expect(terminalSession!.status).toBe('cancelled'); // terminal mid-handoff
+
+      // Simulate the crash gap: reset the record to native/running (non-
+      // terminal — the mutate landed but the execution did NOT finish) +
+      // reset the obligation to PENDING (the crash undid the discharge).
+      await stack.db.client.query(
+        `UPDATE wfos_executions SET status = 'running', updated_at = NOW() WHERE id = $1`,
+        [recordId],
+      );
+      await stack.db.client.query(
+        `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+         WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+        [recordId],
+      );
+
+      // The state is now: record native/running (non-terminal) + AgentRun
+      // exists + session cancelled (terminal — concurrent terminalization).
+      const gapRecord = await executionRecordRepo.findByExecutionId(executionId);
+      expect(gapRecord!.mode).toBe('native');
+      expect(gapRecord!.status).toBe('running'); // non-terminal
+      expect(gapRecord!.agentRunId).not.toBeNull();
+      const gapSession = await getSession(executionId);
+      expect(gapSession!.status).toBe('cancelled'); // terminal
+      expect(await countPendingObligations(executionId)).toBe(1);
+
+      // A direct reconcile call. The complete-check: record.mode === toMode
+      // (native) + AgentRun exists + sessionConverged: session is terminal
+      // BUT the record is NOT terminal (running) → NOT converged (round 3: the
+      // terminal-session-as-converged branch is GONE) → handoffComplete
+      // returns false → the obligation is NOT discharged. The crash window #3
+      // re-attempts the session transition (a no-op for a terminal session —
+      // immutable) → still NOT converged → the obligation STAYS PENDING.
+      await crossModeHandoffService.reconcileCrossModeHandoffForExecution(executionId);
+
+      // The obligation STAYS PENDING (the terminal session does NOT discharge
+      // the handoff — the record is non-terminal; an operator must resolve
+      // the concurrent terminalization). This is the round-3 secondary
+      // invariant: terminalization cannot accidentally discharge a handoff.
+      expect(await countPendingObligations(executionId)).toBe(1);
+      expect(await countDischargedObligations(executionId)).toBe(0);
+      // The session is still terminal (cancelled — immutable; the reconcile's
+      // re-attempt was a no-op).
+      const afterSession = await getSession(executionId);
+      expect(afterSession!.status).toBe('cancelled');
+      // The record is still non-terminal (running — the reconcile did NOT
+      // mutate it; the dispatch already happened, so no re-dispatch).
+      const afterRecord = await executionRecordRepo.findByExecutionId(executionId);
+      expect(afterRecord!.status).toBe('running');
+    });
+
+    // R3-#3: the contrast — when the record IS terminal (completed/failed),
+    // a terminal session DOES discharge the obligation (the execution
+    // finished — the authoritative signal). This proves the round-3 fix is
+    // NOT over-strict: a terminal session discharges when the record is also
+    // terminal (the execution is genuinely done).
+    it('R3-#3. a terminal session + a TERMINAL record DOES discharge the obligation (the execution finished — the authoritative signal)', async () => {
+      const { executionId, recordId } = await createExternalRecord('handoff_ready');
+      // Run a successful external→native handoff (record native/completed).
+      await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'native', idempotencyKey: `r3-term-ok-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      );
+      const happy = await executionRecordRepo.findByExecutionId(executionId);
+      expect(happy!.mode).toBe('native');
+      expect(happy!.status).toBe('completed'); // terminal record
+      expect(happy!.agentRunId).not.toBeNull();
+
+      // Seed a session + drive it to terminal (completed — the execution
+      // finished). This is the legitimate "terminal session + terminal record"
+      // state (the execution is done).
+      const session = await executionSessionService.ensureSession(executionId);
+      await executionSessionService.startSession(session.id);
+      const running = await sessionRepo.getSession(session.id);
+      await sessionRepo.transitionWithEvent(
+        running!.id, running!.version, 'running', 'completed', 'completed',
+      );
+      const terminalSession = await getSession(executionId);
+      expect(terminalSession!.status).toBe('completed'); // terminal
+
+      // Reset the obligation to PENDING (simulate the crash gap — the
+      // discharge was undone).
+      await stack.db.client.query(
+        `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+         WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+        [recordId],
+      );
+      expect(await countPendingObligations(executionId)).toBe(1);
+
+      // A direct reconcile call. The complete-check: record.mode === toMode
+      // (native) + AgentRun exists + sessionConverged: session is terminal
+      // AND the record IS terminal (completed) → converged → handoffComplete
+      // returns true → the obligation DISCHARGES (the execution finished).
+      await crossModeHandoffService.reconcileCrossModeHandoffForExecution(executionId);
+
+      // The obligation DISCHARGED (the terminal session + terminal record =
+      // the execution finished — the authoritative signal).
       expect(await countDischargedObligations(executionId)).toBe(1);
       expect(await countPendingObligations(executionId)).toBe(0);
     });

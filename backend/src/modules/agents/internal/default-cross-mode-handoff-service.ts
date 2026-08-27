@@ -18,14 +18,22 @@
  *      provider availability — fail-closed).
  *   7. resolve provider/model for the target.
  *   8. reserve: INSERT append-only handoff log row (previous_* snapshot +
- *      idempotency_key). Catch 23505 -> converge (same key) / reject (diff key).
- *   9-10. mutate record (transitionMode mode+status) THEN dispatch (provider
+ *      idempotency_key). Catch 23505 -> converge (same key) / reject (diff
+ *      key). migration 0043's AFTER INSERT trigger writes the durable
+ *      handoff obligation ATOMICALLY with this INSERT.
+ *   9-10. mutate record (transitionMode mode+status) THEN drive the session
+ *        through the EXISTING non-terminal path THEN dispatch (provider
  *        submit) THEN updateStatus (provider outcome) — crash-safety: a crash
  *        after mutate but before dispatch is recoverable (retry sees the
  *        mutated record + re-dispatches); a crash after dispatch converges
  *        (the agentRunRepository.findByExecutionId guard skips a second
  *        AgentRun for external->native; the ExternalExecutionProvider
  *        regenerates the package idempotently for native->external).
+ *   10b. enqueue the durable relay job (PR #46 round 3 — the concurrency fix:
+ *        enqueue AFTER the mutation+dispatch+session, NOT before — a live
+ *        WorkerHost that picks up the job sees a COMPLETE handoff + the
+ *        reconcile is a no-op discharge; the boot sweep is the recovery path
+ *        for a crash between reserve and this enqueue).
  *   11. audit (best-effort — try/catch, never breaks flow).
  *   12. return { executionId, handoff, record (re-fetch) }.
  *
@@ -193,18 +201,24 @@ export interface DefaultCrossModeHandoffServiceDeps {
   readonly auditService: AuditService;
   readonly logger: Logger;
   /**
-   * PR #46 review #2 (round 2): the existing durable queue — the reserve step
-   * enqueues the reconcile relay job (the claim-time durable delivery). The
-   * obligation row itself is written by migration 0043's trigger ATOMICALLY
-   * with the reserve INSERT; the relay job + the WorkerHost boot sweep are
-   * the liveness backstop. REQUIRED (Finding #1 round 2): the queue is no
-   * longer optional — a missing or failed enqueue is a hard error (the
-   * handoff fails fast; the obligation row is the durable source of truth;
-   * the boot sweep reconciles on the next worker start). The production
-   * durability guarantee no longer depends on a later boot sweep: either the
-   * enqueue succeeds (a live worker drains the job without any restart) OR
-   * the handoff fails fast (the caller sees the failure; the obligation is
-   * pending; the boot sweep reconciles).
+   * PR #46 review #2 (round 2) + round 3 (the concurrency fix): the existing
+   * durable queue. The service enqueues the reconcile relay job AFTER the
+   * mutation+dispatch+session convergence (NOT at reserve — round 3: a live
+   * WorkerHost can consume a relay job the instant it is enqueued; enqueuing
+   * at reserve created a race where a live worker reconciled BETWEEN the
+   * reserve and the caller's transitionMode, after which BOTH performed the
+   * same mutation+dispatch). The obligation row itself is written by
+   * migration 0043's trigger ATOMICALLY with the reserve INSERT; the relay
+   * job + the WorkerHost boot sweep are the liveness backstop (the boot sweep
+   * is the recovery path for a crash between reserve and the post-mutation
+   * enqueue). REQUIRED (Finding #1 round 2): the queue is no longer optional
+   * — a missing or failed enqueue is a hard error (the handoff fails fast;
+   * the obligation row is the durable source of truth; the boot sweep
+   * reconciles on the next worker start). The production durability guarantee
+   * no longer depends on a later boot sweep: either the enqueue succeeds (a
+   * live worker drains the job without any restart) OR the handoff fails
+   * fast (the caller sees the failure; the obligation is pending; the boot
+   * sweep reconciles).
    */
   readonly queue: Queue;
   /** Injectable clock for deterministic tests. */
@@ -344,10 +358,11 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
 
     // 8. Reserve: INSERT the append-only handoff log row (previous_* snapshot).
     //    PR #46 review #2: migration 0043's AFTER INSERT trigger writes the
-    //    durable handoff obligation ATOMICALLY with this INSERT. The reserve
-    //    ALSO enqueues the reconcile relay job (the claim-time durable
-    //    delivery) — a live worker drains it without any restart; the boot
-    //    sweep is the backstop.
+    //    durable handoff obligation ATOMICALLY with this INSERT (no window
+    //    where the handoff log exists but the obligation is missing). The
+    //    obligation row is the durable source of truth — a crash after reserve
+    //    leaves a pending obligation the boot sweep reconciles on the next
+    //    worker start.
     const resultingStatus: 'handoff_ready' | 'running' =
       input.targetMode === 'external' ? 'handoff_ready' : 'running';
     const reserved = await this.reserve({
@@ -360,13 +375,6 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       policySummary,
       actor,
     });
-    // PR #46 review #2 (round 2): the claim-time durable relay job enqueue.
-    // NOT best-effort (Finding #1 round 2): the queue is REQUIRED + an enqueue
-    // failure PROPAGATES — the handoff fails fast; the obligation row
-    // (migration 0043's trigger, written ATOMICALLY with the reserve) is the
-    // durable source of truth; the boot sweep reconciles on the next worker
-    // start. The durability guarantee no longer depends on a later boot sweep.
-    await this.enqueueRelayJob(executionId);
 
     // 9-10. Mutate (transitionMode) THEN drive the session through the
     //       EXISTING non-terminal path (interrupt on native→external; resume
@@ -388,6 +396,30 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       resultingStatus,
       existingSession,
     );
+
+    // 10b. PR #46 review #2 (round 2) + round 3 (the concurrency fix): the
+    //      durable relay job enqueue — AFTER the mutation + session
+    //      convergence + dispatch (NOT before). Round 3: the live WorkerHost
+    //      can consume a relay job the instant it is enqueued. Enqueueing
+    //      BEFORE the caller's synchronous mutation created a race — a live
+    //      worker could reconcile (re-mutate + re-dispatch) BETWEEN the
+    //      reserve and the caller's transitionMode, after which the caller
+    //      performed its OWN mutation + dispatch (duplicate provider
+    //      submission / conflicting session transitions). The handoff-row
+    //      UNIQUE constraint did NOT serialize these two executions (both
+    //      operated on the same already-reserved handoff row; it only fences
+    //      creation of a SECOND handoff row). Now the relay job is enqueued
+    //      ONLY AFTER the caller's synchronous state transition is safely
+    //      committed: a live worker that picks up the job sees a COMPLETE (or
+    //      near-complete) handoff + the reconcile is a no-op discharge (NOT a
+    //      competing mutation). The boot sweep remains the recovery path for a
+    //      crash between reserve and this enqueue (the obligation is pending;
+    //      the next worker start reconciles). NOT best-effort (Finding #1
+    //      round 2): the queue is REQUIRED + an enqueue failure PROPAGATES —
+    //      the handoff fails fast; the obligation row (migration 0043's
+    //      trigger, written ATOMICALLY with the reserve) is the durable source
+    //      of truth; the boot sweep reconciles on the next worker start.
+    await this.enqueueRelayJob(executionId);
 
     // 11. Audit (best-effort).
     await this.audit(record, executionId, input, reserved, actor, policySummary);
@@ -692,10 +724,25 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   }
 
   /**
-   * PR #46 review #2 (round 2): the claim-time durable relay job enqueue
-   * (mirrors the WORK-034 session-terminal relay's claim-time enqueue in
-   * {@link DefaultExecutionSessionService.terminalForExecution}). NOT
-   * best-effort (Finding #1 round 2): an enqueue failure PROPAGATES — the
+   * PR #46 review #2 (round 2) + round 3 (the concurrency fix): the durable
+   * relay job enqueue — AFTER the mutation + session convergence + dispatch
+   * (NOT before — mirrors the architecture-consistent ordering the architect
+   * prescribed for round 3). Round 3: the live WorkerHost can consume a relay
+   * job the instant it is enqueued. Enqueueing BEFORE the caller's synchronous
+   * mutation created a race — a live worker could reconcile (re-mutate +
+   * re-dispatch) BETWEEN the reserve and the caller's transitionMode, after
+   * which the caller performed its OWN mutation + dispatch (duplicate provider
+   * submission / conflicting session transitions); the handoff-row UNIQUE
+   * constraint did NOT serialize these two executions (both operated on the
+   * same already-reserved handoff row). Now the relay job is enqueued ONLY
+   * AFTER the caller's synchronous state transition is safely committed: a
+   * live worker that picks up the job sees a COMPLETE (or near-complete)
+   * handoff + the reconcile is a no-op discharge (NOT a competing mutation).
+   * The boot sweep remains the recovery path for a crash between reserve and
+   * this enqueue (the obligation is pending; the next worker start
+   * reconciles).
+   *
+   * NOT best-effort (Finding #1 round 2): an enqueue failure PROPAGATES — the
    * handoff fails fast, the obligation row (migration 0043's trigger, written
    * ATOMICALLY with the reserve INSERT) is the durable source of truth, and
    * the boot sweep reconciles on the next worker start. The production
@@ -803,21 +850,28 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   }
 
   /**
-   * PR #46 review #2 (round 2): the session convergence check. The handoff is
-   * NOT complete until the ExecutionSession has reached the EXPECTED
-   * post-handoff state. A crash after the record mutation (transitionMode)
-   * but before the session transition leaves the session in the pre-handoff
-   * state — the obligation MUST stay pending + the reconcile MUST re-attempt
-   * the session transition. The convergence rules:
+   * PR #46 review #2 (round 2) + round 3 (secondary): the session convergence
+   * check. The handoff is NOT complete until the ExecutionSession has reached
+   * the EXPECTED post-handoff state. A crash after the record mutation
+   * (transitionMode) but before the session transition leaves the session in
+   * the pre-handoff state — the obligation MUST stay pending + the reconcile
+   * MUST re-attempt the session transition. The convergence rules:
    *   - no session (null) → converged (nothing to transition — the external
    *     phase has no native session; a native handoff may create one
    *     downstream);
    *   - native→external: a `running` session is NOT converged (it should
-   *     have been interrupted); created/interrupted/terminal → converged;
+   *     have been interrupted); created/interrupted/terminal → converged
+   *     (the interrupt is moot for a terminal session — the execution is no
+   *     longer running; the package submission is the authoritative dispatch
+   *     outcome);
    *   - external→native: a `running` session is converged (resumed/started);
-   *     a terminal session is converged (immutable — can't continue); a
-   *     terminal native RECORD (completed/failed) is converged (the execution
-   *     finished); created/interrupted → NOT converged (should be running).
+   *     a terminal native RECORD (completed/failed) is converged (the
+   *     execution finished — the authoritative signal). A TERMINAL SESSION
+   *     that arose mid-handoff (concurrent terminalization) is NOT converged
+   *     by itself — the obligation stays pending until the record reaches a
+   *     terminal state or an operator resolves it (PR #46 round 3 secondary:
+   *     terminalization cannot accidentally discharge a handoff); created/
+   *     interrupted → NOT converged (should be running).
    */
   private sessionConverged(
     session: ExecutionSession | null,
@@ -826,24 +880,30 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   ): boolean {
     if (!session) return true; // no session — converged.
     if (handoff.toMode === 'external') {
-      // native→external: a running session is NOT converged.
+      // native→external: a running session is NOT converged (it should have
+      // been interrupted). created/interrupted/terminal → converged (the
+      // interrupt is moot for a terminal session — the execution is no
+      // longer running; the package submission is the authoritative
+      // dispatch outcome).
       return session.status !== 'running';
     }
-    // external→native: a running session is converged.
+    // external→native: a running session is converged (resumed/started).
     if (session.status === 'running') return true;
-    // A terminal session is immutable — converged (can't continue).
-    if (
-      session.status === 'completed' ||
-      session.status === 'failed' ||
-      session.status === 'cancelled'
-    ) {
-      return true;
-    }
-    // A terminal native RECORD means the execution finished — converged.
+    // A terminal native RECORD means the execution finished — converged
+    // (the session may have terminalized concurrently; the record's terminal
+    // state is the authoritative signal that the execution is done). This is
+    // the ONLY way a terminal session discharges a handoff (PR #46 round 3
+    // secondary: a terminal session cannot accidentally discharge a handoff —
+    // a terminal session that arose mid-handoff does NOT discharge unless the
+    // record is also terminal).
     if (record.status === 'completed' || record.status === 'failed') {
       return true;
     }
-    // created / interrupted → NOT converged (should be running).
+    // created / interrupted / terminal-session-with-non-terminal-record →
+    // NOT converged. A terminal session that arose mid-handoff (concurrent
+    // terminalization) does NOT discharge the obligation — the obligation
+    // stays pending until the record reaches a terminal state or an operator
+    // resolves it.
     return false;
   }
 

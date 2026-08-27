@@ -12341,14 +12341,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(serviceSrc, 'the service discharges the obligation on completion').toMatch(/dischargeHandoffObligation\(handoff\.id\)/);
   });
 
-  // R1-E (finding #2): the service enqueues the claim-time relay job at
-  // reserve (the live-worker delivery — a live worker drains the job
-  // without any restart; the boot sweep is the backstop). Without this, the
-  // only delivery path is the boot sweep (requires a restart).
-  it('R1-E. the service enqueues the claim-time relay job at reserve (the live-worker delivery path)', () => {
+  // R1-E (finding #2 + round 3): the service enqueues the durable relay job
+  // (the live-worker delivery — a live worker drains the job without any
+  // restart; the boot sweep is the backstop). PR #46 round 3 (the concurrency
+  // fix): the enqueue now happens AFTER the mutation+dispatch+session
+  // convergence (NOT at reserve — see R3-A for the ordering invariant). Without
+  // this enqueue, the only delivery path is the boot sweep (requires a
+  // restart).
+  it('R1-E. the service enqueues the durable relay job (the live-worker delivery path — PR #46 round 3: AFTER the mutation, not at reserve)', () => {
     const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
     expect(serviceSrc, 'enqueueRelayJob is defined').toMatch(/private async enqueueRelayJob/);
-    expect(serviceSrc, 'the reserve calls enqueueRelayJob').toMatch(/await this\.enqueueRelayJob\(executionId\)/);
+    expect(serviceSrc, 'the handoff calls enqueueRelayJob').toMatch(/await this\.enqueueRelayJob\(executionId\)/);
     expect(serviceSrc, 'the enqueue uses CROSS_MODE_HANDOFF_RELAY_JOB_TYPE').toMatch(/CROSS_MODE_HANDOFF_RELAY_JOB_TYPE/);
   });
 
@@ -12467,5 +12470,85 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(reconcileBody, 'the reconcile re-attempts the session transition (crash window #3)').toMatch(/transitionSessionForHandoff\(\s*sessionForConvergence/);
     // The stage type includes the new 'session-convergence' value.
     expect(reconcileBody, 'the stage type includes session-convergence').toMatch(/'session-convergence'/);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #46 review round 3 — the concurrency blocker. These PREVENT
+  // reintroduction of the forbidden patterns: a future change that enqueues
+  // the relay job BEFORE the mutation (re-introducing the live-worker race)
+  // OR treats a terminal session as converged for external→native
+  // (re-introducing the accidental-discharge path) fails the architecture
+  // suite.
+  // -------------------------------------------------------------------------
+
+  // R3-A (round 3 BLOCKER — the concurrency race): the relay job is enqueued
+  // AFTER the mutation+session convergence+dispatch (NOT before). Round 2
+  // enqueued at reserve (BEFORE the mutation) — a live WorkerHost could
+  // consume the relay BETWEEN the reserve and the caller's transitionMode,
+  // after which BOTH the worker and the caller performed the same
+  // mutation+dispatch (duplicate provider submission / conflicting session
+  // transitions). The handoff-row UNIQUE constraint did NOT serialize these
+  // two executions (both operated on the same already-reserved handoff row).
+  // Now the relay job is enqueued ONLY AFTER the caller's synchronous state
+  // transition is safely committed: a live worker that picks up the job sees
+  // a COMPLETE (or near-complete) handoff + the reconcile is a no-op
+  // discharge (NOT a competing mutation). This invariant checks the SOURCE
+  // ORDERING: the `enqueueRelayJob` call MUST appear AFTER the
+  // `mutateAndDispatch` call in the `handoff()` method body.
+  it('R3-A. the relay job is enqueued AFTER the mutation+dispatch+session (NOT before — the round 3 concurrency fix)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // Locate the handoff() method body (from `async handoff(` to the next
+    // method `async reconcileCrossModeHandoffForExecution(`).
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd > handoffStart ? handoffEnd : handoffStart + 6000);
+    // The mutateAndDispatch call MUST appear in the handoff body.
+    const mutateIdx = handoffBody.indexOf('await this.mutateAndDispatch(');
+    expect(mutateIdx, 'mutateAndDispatch is called in handoff').toBeGreaterThan(-1);
+    // The enqueueRelayJob call MUST appear in the handoff body.
+    const enqueueIdx = handoffBody.indexOf('await this.enqueueRelayJob(');
+    expect(enqueueIdx, 'enqueueRelayJob is called in handoff').toBeGreaterThan(-1);
+    // The enqueue MUST appear AFTER the mutate (the round 3 ordering — a live
+    // worker that picks up the job sees a COMPLETE handoff, not a half-mutated
+    // one). A future change that moves the enqueue BEFORE the mutate
+    // (re-introducing the round 2 race) fails this invariant.
+    expect(enqueueIdx, 'enqueueRelayJob is called AFTER mutateAndDispatch (round 3: no live-relay race)').toBeGreaterThan(mutateIdx);
+  });
+
+  // R3-B (round 3 secondary — the terminal-session accidental discharge):
+  // sessionConverged does NOT treat a terminal session as converged for
+  // external→native by itself. The round 2 impl had an unconditional
+  // `if (session.status === 'completed' || session.status === 'failed' ||
+  // session.status === 'cancelled') return true;` branch BEFORE the
+  // record-terminal check — a terminal session that arose mid-handoff
+  // (concurrent terminalization) would discharge the obligation
+  // accidentally. Now the terminal-session-as-converged branch is GONE for
+  // external→native: a terminal session falls through to the record-terminal
+  // check (the authoritative signal that the execution finished). The
+  // obligation stays pending until the record reaches a terminal state or an
+  // operator resolves it. This invariant checks that the OLD terminal-session-
+  // as-converged pattern (a `return true` guarded by a session.status check
+  // for a terminal state, appearing BEFORE the record.status check) is GONE
+  // from the sessionConverged method body.
+  it('R3-B. sessionConverged does NOT treat a terminal session as converged for external→native (round 3 secondary — terminalization cannot accidentally discharge a handoff)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const methodStart = serviceSrc.indexOf('private sessionConverged(');
+    expect(methodStart, 'sessionConverged is defined').toBeGreaterThan(-1);
+    // The method body extends to the next `private` method.
+    const methodEnd = serviceSrc.indexOf('private ', methodStart + 10);
+    const methodBody = serviceSrc.slice(methodStart, methodEnd > methodStart ? methodEnd : methodStart + 1500);
+    // The OLD terminal-session-as-converged branch is GONE. The pattern: a
+    // session.status check for a terminal state (completed/failed/cancelled),
+    // followed by `return true;`, appearing BEFORE the record.status check.
+    // This is the round 3 secondary defect — a terminal session that arose
+    // mid-handoff would discharge the obligation. Now this pattern is GONE.
+    expect(methodBody, 'no terminal-session-as-converged branch before the record check (the session.status===cancelled guard is gone)').not.toMatch(
+      /session\.status === '(?:completed|failed|cancelled)'[\s\S]*?return true;[\s\S]*?record\.status/,
+    );
+    // The record-terminal check IS present (the authoritative signal that the
+    // execution finished — the ONLY way a terminal session discharges a
+    // handoff).
+    expect(methodBody, 'the record-terminal check is present').toMatch(/record\.status === 'completed' \|\| record\.status === 'failed'/);
   });
 });

@@ -1,38 +1,44 @@
 /**
- * WORK-042 (PR #46 review correction): the cross-mode-handoff outbox relay —
- * the durable delivery mechanism for cross-mode-handoff obligations, using
- * the EXISTING generic OutboxRelay pattern (the SAME architecture as the
- * WORK-034 session-terminal relay + the WORK-035 workspace-release relay +
- * the benchmark start-delivery relay):
+ * WORK-042 (PR #46 review correction + round 3): the cross-mode-handoff
+ * outbox relay — the durable delivery mechanism for cross-mode-handoff
+ * obligations, using the EXISTING generic OutboxRelay pattern (the SAME
+ * architecture as the WORK-034 session-terminal relay + the WORK-035
+ * workspace-release relay + the benchmark start-delivery relay):
  *
  *     handoff log INSERT (reserve — migration 0042)
  *         ↓  migration 0043's AFTER INSERT trigger writes the obligation
  *            ATOMICALLY with the reserve (no window where the handoff log
  *            exists but the obligation is missing)
  *     durable cross-mode-handoff obligation
- *         ↓  claim-time relay job (the service enqueues on reserve) + the
- *            WorkerHost boot sweep (every worker start re-enqueues for ALL
- *            pending obligations — supervised restart ⇒ sweep ⇒ attempt)
+ *         ↓  post-mutation relay job (PR #46 round 3 — the service enqueues
+ *            AFTER the mutation+dispatch+session convergence, NOT at
+ *            reserve; a live worker that picks up the job sees a COMPLETE
+ *            handoff + the reconcile is a no-op discharge, NOT a competing
+ *            mutation) + the WorkerHost boot sweep (every worker start
+ *            re-enqueues for ALL pending obligations — supervised restart ⇒
+ *            sweep ⇒ attempt; the recovery path for a crash between reserve
+ *            and the post-mutation enqueue)
  *     existing Queue / WorkerHost (the relay job + the boot sweep)
  *         ↓
  *     idempotent reconcileCrossModeHandoffForExecution (re-mutate if the
  *       record.mode !== toMode; re-dispatch if the dispatch outcome is
- *       missing; discharge when complete)
+ *       missing; re-attempt the session transition when not converged;
+ *       discharge when complete)
  *
- * This closes the reviewer's blocking durability gap (#2): the relay was
- * previously declared OPTIONAL and was NOT wired into the WorkerHost, so a
- * crash in the reserve→mutate or mutate→dispatch window left a stranded
- * handoff (durable handoff log row, but no guaranteed recovery mechanism).
- * Now the obligation is durable BEFORE the window can open (migration
- * 0043's trigger writes it inside the reserve INSERT), and the liveness
- * chain guarantees eventual delivery:
- *   1. claim-time relay job — the service enqueues the job onto the
- *      durable queue at reserve time, so a live worker drains it without
- *      any restart;
- *   2. boot sweep — every worker start re-enqueues for ALL pending
- *      obligations (supervised restart ⇒ sweep ⇒ attempt);
- *   3. the fast path — the synchronous mutate+dispatch usually wins; the
- *      relay is the recovery backstop.
+ * PR #46 round 3 (the concurrency fix): the relay job is enqueued AFTER the
+ * caller's synchronous mutation+dispatch+session convergence, NOT at
+ * reserve. Enqueueing at reserve created a race — a live WorkerHost could
+ * consume the relay BETWEEN the reserve and the caller's transitionMode,
+ * after which BOTH the worker and the caller performed the same
+ * mutation+dispatch (the handoff-row UNIQUE constraint does NOT serialize
+ * these two executions — both operate on the same already-reserved handoff
+ * row; it only fences creation of a SECOND handoff row). Now the relay job
+ * is enqueued ONLY AFTER the caller's synchronous state transition is
+ * safely committed: a live worker that picks up the job sees a COMPLETE (or
+ * near-complete) handoff + the reconcile is a no-op discharge. The boot
+ * sweep remains the recovery path for a crash between reserve and the
+ * post-mutation enqueue (the obligation is durable; the next worker start
+ * reconciles).
  *
  * NO scheduler, NO polling loop, NO second execution engine: the relay only
  * delivers ALREADY-AUTHORITATIVE durable intent (the obligation rows). It
