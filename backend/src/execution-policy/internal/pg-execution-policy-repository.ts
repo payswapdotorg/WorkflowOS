@@ -144,27 +144,77 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
   // ---------------------------------------------------------------- usage (WORK-043)
 
   /**
-   * WORK-043 (§33.3) — the quota/rate-limit USAGE query. Counts executions
-   * dispatched for the project since `since`, optionally scoped to one
-   * provider (the per-provider rate-limit window). The authoritative source
-   * is wfos_executions itself (NO parallel usage ledger — no dual-write, no
-   * drift). Returns NULL when the query fails: an ACTIVE quota/rate limit
-   * whose usage cannot be resolved fails CLOSED in the evaluator.
+   * WORK-043 (§33.3) — the quota/rate-limit USAGE query (AR-043-01: the
+   * per-provider sliding-window limit counts DISPATCHES, not mere execution
+   * rows). Counts the project's executions whose PROVIDER DISPATCH ACTUALLY
+   * INITIATED since `since`, optionally scoped to one provider (the
+   * per-provider rate-limit window), via the explicit DISPATCH PREDICATE
+   * over the EXISTING authoritative records (NO parallel usage ledger — no
+   * dual-write, no drift):
+   *
+   *   dispatched(e) :=
+   *     EXISTS (SELECT 1 FROM wfos_agent_runs r
+   *              WHERE r.execution_id = e.execution_id)
+   *     OR e.package_json IS NOT NULL
+   *
+   *   - NATIVE arm — wfos_agent_runs IS the durable native provider-operation
+   *     ledger (PR #46 round 8): the AgentGateway creates the run row BEFORE
+   *     invoking the adapter (and only after the adapter-support check), so
+   *     a run row exists IFF the native provider operation actually
+   *     initiated. A FAILED run still counts — the provider operation ran
+   *     and consumed provider capacity. A pre-dispatch rejection (no model,
+   *     no adapter) leaves NO run row and does not count. execution_id is
+   *     UNIQUE on wfos_agent_runs → structurally one run per logical
+   *     execution (the existing ledger's exactly-once behavior is reused,
+   *     not duplicated).
+   *   - EXTERNAL arm — package_json IS the external dispatch artifact: it is
+   *     persisted ONLY by the dispatch-outcome writes (the execution
+   *     service's handoff_ready path and the cross-mode
+   *     completeFencedDispatch gate), both strictly AFTER
+   *     ExternalExecutionProvider.submit() succeeded. A provider-submit
+   *     failure or a fence-lost dispatch leaves package_json NULL and does
+   *     not count.
+   *   - The predicate is deliberately MODE-INDEPENDENT (the artifact
+   *     disjunction): a cross-mode handoff mutates mode BEFORE the target
+   *     dispatch, so a mode-gated predicate would misclassify in-flight and
+   *     failed handoffs. A record carrying BOTH artifacts (a handed-off
+   *     execution) still counts EXACTLY ONCE — the count is per execution
+   *     row, and the provider attribution is the record's (current)
+   *     provider.
+   *
+   * Returns NULL when the query fails: an ACTIVE quota/rate limit whose
+   * usage cannot be resolved fails CLOSED in the evaluator.
    */
-  async countProjectExecutionsSince(
+  async countProjectDispatchesSince(
     projectId: string,
     provider: string | null,
     since: Date,
   ): Promise<number | null> {
     try {
+      // AR-043-01 — the dispatch predicate: a row counts ONLY when a durable
+      // provider-dispatch artifact exists (an AgentRun ledger row — native —
+      // or the ExternalExecutionPackage — external). A merely-created
+      // record, a pre-dispatch rejection, or an attempt that failed before
+      // provider submission is NOT a dispatch and must not consume
+      // quota/window capacity.
+      const dispatched = `EXISTS (
+            SELECT 1 FROM wfos_agent_runs r
+             WHERE r.execution_id = e.execution_id
+          )
+          OR e.package_json IS NOT NULL`;
       const res = await this.db.query<{ c: number }>(
         provider != null
           ? `SELECT COUNT(*)::int AS c
-               FROM wfos_executions
-              WHERE project_id = $1 AND provider = $2 AND created_at >= $3`
+               FROM wfos_executions e
+              WHERE e.project_id = $1
+                AND e.provider = $2
+                AND e.created_at >= $3
+                AND (${dispatched})`
           : `SELECT COUNT(*)::int AS c
-               FROM wfos_executions
-              WHERE project_id = $1 AND created_at >= $2`,
+               FROM wfos_executions e
+              WHERE e.project_id = $1
+                AND e.created_at >= $2
+                AND (${dispatched})`,
         provider != null ? [projectId, provider, since] : [projectId, since],
       );
       return Number(res.rows[0]?.c ?? 0);

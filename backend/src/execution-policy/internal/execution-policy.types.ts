@@ -63,13 +63,25 @@ export interface ExecutionPolicyRepository {
 
   // --- WORK-043 (§33.3): quota / rate-limit usage derivation ---
   /**
-   * Counts executions dispatched for the project since `since` (optionally
-   * provider-scoped — the per-provider rate-limit window). The AUTHORITATIVE
-   * source is wfos_executions (no parallel usage ledger). NULL = the usage
-   * is unresolvable → an ACTIVE quota/rate limit FAILS CLOSED in the
-   * evaluator.
+   * AR-043-01 — counts the project's PROVIDER DISPATCHES since `since`
+   * (optionally provider-scoped — the per-provider rate-limit window),
+   * through the explicit DISPATCH PREDICATE over the EXISTING authoritative
+   * records (no parallel usage ledger):
+   *
+   *   dispatched(e) := EXISTS (a wfos_agent_runs row for e.execution_id)
+   *                    OR e.package_json IS NOT NULL
+   *
+   * An AgentRun ledger row is the durable native provider-operation record
+   * (created by the gateway BEFORE the adapter invocation — a failed run
+   * still dispatched); package_json is the external dispatch artifact
+   * (persisted only after ExternalExecutionProvider.submit succeeded). A
+   * merely-created record, a pre-dispatch rejection, or an attempt that
+   * failed before provider submission is NOT a dispatch — it never counts.
+   * A record carrying BOTH artifacts (a cross-mode handed-off execution)
+   * counts EXACTLY ONCE. NULL = the usage is unresolvable → an ACTIVE
+   * quota/rate limit FAILS CLOSED in the evaluator.
    */
-  countProjectExecutionsSince(projectId: string, provider: string | null, since: Date): Promise<number | null>;
+  countProjectDispatchesSince(projectId: string, provider: string | null, since: Date): Promise<number | null>;
 }
 
 /**

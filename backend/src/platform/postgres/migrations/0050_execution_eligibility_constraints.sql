@@ -11,13 +11,39 @@
 --
 --   QUOTA         — max_executions_per_month / max_executions_per_day
 --                   (project-wide period quotas; NULL = unlimited). Usage is
---                   DERIVED from the authoritative wfos_executions rows at
---                   evaluation time — there is deliberately NO parallel
---                   usage ledger (no dual-write, no drift; the executions
---                   table IS the usage source of truth).
+--                   DERIVED from the authoritative records at evaluation
+--                   time — there is deliberately NO parallel usage ledger
+--                   (no dual-write, no drift; the existing ledgers ARE the
+--                   usage source of truth).
 --   RATE LIMITS   — rate_limit_max_requests per rate_limit_window_seconds
---                   sliding window, evaluated PER PROVIDER (dispatch counts
---                   from wfos_executions within the trailing window).
+--                   sliding window, evaluated PER PROVIDER over the
+--                   DISPATCHES within the trailing window.
+--
+-- The usage derivation applies the AR-043-01 DISPATCH PREDICATE over the
+-- EXISTING authoritative records (usage counts provider DISPATCHES, never
+-- mere execution-row existence):
+--
+--     dispatched(e) :=
+--       EXISTS (SELECT 1 FROM wfos_agent_runs r
+--                WHERE r.execution_id = e.execution_id)
+--       OR e.package_json IS NOT NULL
+--
+--   - NATIVE arm: wfos_agent_runs IS the durable native provider-operation
+--     ledger (PR #46 round 8) — the AgentGateway creates the run row BEFORE
+--     invoking the adapter, so a run row exists IFF the native provider
+--     dispatch actually initiated (a FAILED run still dispatched; a
+--     pre-dispatch rejection leaves no run row).
+--   - EXTERNAL arm: package_json IS the external dispatch artifact — it is
+--     persisted ONLY after ExternalExecutionProvider.submit() succeeded
+--     (the handoff_ready outcome write / the fenced cross-mode dispatch
+--     completion); a rejected-before-dispatch attempt leaves it NULL.
+--   - A record carrying BOTH artifacts (a cross-mode handed-off execution)
+--     counts EXACTLY ONCE — the count is per execution row.
+--
+-- created execution without dispatch        → NOT counted
+-- rejected before dispatch                  → NOT counted
+-- actual provider dispatch                  → counted exactly once
+--
 --   SECURITY      — security_classification (the project's data
 --                   classification) + external_security_ceiling (the maximum
 --                   classification EXTERNAL execution may carry; NULL = no
@@ -28,10 +54,12 @@
 -- (§33.3) — never quality scores. They hard-block candidates; they never
 -- participate in ranking.
 --
--- The rate-limit usage query (provider + created_at over wfos_executions)
--- gets a covering index — every eligibility evaluation (recommendation AND
--- the WORK-042 handoff destination gate) runs it against the trailing
--- window.
+-- The usage query (project + provider + created_at over wfos_executions,
+-- plus the dispatch-predicate probe — wfos_agent_runs.execution_id carries
+-- its own UNIQUE index, package_json is a direct column test) gets a
+-- covering index on the driving columns — every eligibility evaluation
+-- (recommendation AND the WORK-042 handoff destination gate) runs it against
+-- the trailing window / quota periods.
 
 -- ============================================================================
 -- §33.3 quota + rate-limit + security columns on the project policy

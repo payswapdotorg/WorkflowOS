@@ -535,12 +535,16 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
 
   /**
    * WORK-043 (§33.3): resolve the QUOTA + RATE-LIMIT usage from the
-   * AUTHORITATIVE execution records (wfos_executions via the repository's
-   * countProjectExecutionsSince — NO parallel usage ledger). Period
-   * boundaries are UTC calendar boundaries; the rate window is the
-   * trailing sliding window. Any UNRESOLVABLE usage (query failure → null)
-   * stays null — the evaluator fails CLOSED while the corresponding
-   * constraint is active.
+   * AUTHORITATIVE execution records (wfos_executions + wfos_agent_runs via
+   * the repository's countProjectDispatchesSince — the AR-043-01 dispatch
+   * predicate; NO parallel usage ledger). Usage counts provider DISPATCHES
+   * (an AgentRun ledger row — native — or the persisted external package),
+   * never mere execution-row existence: a created-without-dispatch record
+   * or a rejected-before-dispatch attempt consumed no provider capacity and
+   * must not consume quota/window capacity. Period boundaries are UTC
+   * calendar boundaries; the rate window is the trailing sliding window.
+   * Any UNRESOLVABLE usage (query failure → null) stays null — the
+   * evaluator fails CLOSED while the corresponding constraint is active.
    */
   private async resolveUsageConstraints(
     policy: ProjectPolicyRecord,
@@ -560,10 +564,10 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     let dailyUsed: number | null = 0;
     if (quotaActive) {
       const monthly = policy.maxExecutionsPerMonth != null
-        ? await this.deps.repository.countProjectExecutionsSince(projectId, null, monthStart)
+        ? await this.deps.repository.countProjectDispatchesSince(projectId, null, monthStart)
         : 0;
       const daily = policy.maxExecutionsPerDay != null
-        ? await this.deps.repository.countProjectExecutionsSince(projectId, null, dayStart)
+        ? await this.deps.repository.countProjectDispatchesSince(projectId, null, dayStart)
         : 0;
       // A failure on EITHER period check fails the whole quota family
       // closed (the constraint cannot be verified).
@@ -580,7 +584,7 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
       const windowStart = new Date(now.getTime() - policy.rateLimitWindowSeconds * 1000);
       const map: Record<string, number> = {};
       for (const provider of providers) {
-        const used = await this.deps.repository.countProjectExecutionsSince(projectId, provider, windowStart);
+        const used = await this.deps.repository.countProjectDispatchesSince(projectId, provider, windowStart);
         if (used == null) {
           providerWindowUsage = null;
           break;

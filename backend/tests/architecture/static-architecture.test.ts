@@ -13603,9 +13603,10 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(offenders, offenders.join('\n')).toEqual([]);
   });
 
-  // --- (b) NO parallel usage ledger — usage DERIVED from wfos_executions ---
+  // --- (b) NO parallel usage ledger — usage DERIVED from the authoritative
+  //         records THROUGH the AR-043-01 dispatch predicate ---------------
 
-  it('NO parallel usage ledger — quota/rate usage is DERIVED from the authoritative wfos_executions rows', () => {
+  it('NO parallel usage ledger — quota/rate usage counts provider DISPATCHES via the AR-043-01 predicate over the authoritative records', () => {
     // Migration 0050 adds NO table (ALTER + INDEX only).
     const migration = stripCodeComments(readFileSync(MIGRATION_0050, 'utf8'));
     expect(migration, 'migration 0050 must not create a usage/quota table').not.toMatch(/CREATE TABLE/i);
@@ -13617,15 +13618,39 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
         /CREATE TABLE[^\n]*(usage|quota)/i,
       );
     }
-    // The usage query reads wfos_executions (the authoritative source).
+    // The usage query reads wfos_executions (the authoritative source) and
+    // applies the AR-043-01 DISPATCH PREDICATE: a row counts ONLY when a
+    // durable provider-dispatch artifact exists —
+    //   NATIVE:   an AgentRun ledger row (wfos_agent_runs IS the durable
+    //             native provider-operation ledger, PR #46 round 8 — the
+    //             gateway creates the run BEFORE the adapter invocation)
+    //   EXTERNAL: the persisted ExternalExecutionPackage (package_json —
+    //             written only after ExternalExecutionProvider.submit
+    //             succeeded)
     const repoSrc = stripCodeComments(readFileSync(POLICY_REPO, 'utf8'));
-    expect(repoSrc, 'the usage query counts wfos_executions').toMatch(
-      /FROM wfos_executions[\s\S]{0,200}WHERE project_id = \$1 AND provider = \$2 AND created_at >= \$3/,
+    expect(repoSrc, 'the usage query counts wfos_executions').toMatch(/FROM wfos_executions e/);
+    expect(repoSrc, 'the dispatch predicate probes the AgentRun ledger').toMatch(
+      /FROM wfos_agent_runs r[\s\S]{0,120}r\.execution_id = e\.execution_id/,
     );
-    // The repository port exposes the derivation seam + fail-closed NULL.
+    expect(repoSrc, 'the dispatch predicate probes the external package artifact').toMatch(
+      /e\.package_json IS NOT NULL/,
+    );
+    // AR-043-01 regression pin: the BARE execution-row count (existence +
+    // created_at only — counting executions that never dispatched) must NOT
+    // reappear.
+    expect(
+      repoSrc,
+      'the usage query must NOT be a bare execution-row count (AR-043-01: existence is not dispatch)',
+    ).not.toMatch(
+      /FROM wfos_executions\s+WHERE project_id = \$1 AND provider = \$2 AND created_at >= \$3/,
+    );
+    // The repository port exposes the derivation seam (named for what it
+    // counts — DISPATCHES) + the fail-closed NULL contract.
     const internalTypes = readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8');
-    expect(internalTypes).toMatch(/countProjectExecutionsSince/);
+    expect(internalTypes).toMatch(/countProjectDispatchesSince/);
+    expect(internalTypes).not.toMatch(/countProjectExecutionsSince/);
     expect(internalTypes).toMatch(/NULL = the usage\s*\*?\s*is unresolvable/);
+    expect(internalTypes).toMatch(/DISPATCH PREDICATE/);
   });
 
   // --- (c) the constraint vocabulary: categories + statuses + the ladder ---
@@ -13824,7 +13849,13 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
       join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-eligibility-engine.integration.test.ts'),
       'utf8',
     );
-    expect(integration).toMatch(/countProjectExecutionsSince/);
+    // AR-043-01: the PG suite must create BOTH dispatched and non-dispatched
+    // execution records and prove the distinction.
+    expect(integration).toMatch(/countProjectDispatchesSince/);
+    expect(integration).toMatch(/WITHOUT dispatch → NOT counted/);
+    expect(integration).toMatch(/rejected before dispatch → NOT counted/);
+    expect(integration).toMatch(/FAILED run still dispatched/);
+    expect(integration).toMatch(/EXACTLY ONCE/);
     expect(integration).toMatch(/an exhausted monthly quota EXCLUDES every candidate/);
     expect(integration).toMatch(/an UNKNOWN provider → the honest configuration_missing verdict/);
 
