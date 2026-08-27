@@ -1176,29 +1176,45 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     });
 
     // #11: concurrent handoff has one winner.
-    it('11. concurrent handoff (different idempotencyKeys, same executionId) — exactly ONE succeeds; the loser gets already-handed-off (409)', async () => {
+    it('11. second handoff with a DIFFERENT idempotencyKey on the SAME execution is rejected with already-handed-off (the UNIQUE(execution_record_id) fence — exactly ONE handoff per execution)', async () => {
       const { executionId } = await createNativeRecord('failed');
-      const results = await Promise.allSettled([
-        crossModeHandoffService.handoff(
-          executionId,
-          { targetMode: 'external', idempotencyKey: `conc-a-${executionId}` },
-          { userId: 'test-user', source: 'cmh-test' },
-        ),
-        crossModeHandoffService.handoff(
-          executionId,
-          { targetMode: 'external', idempotencyKey: `conc-b-${executionId}` },
-          { userId: 'test-user', source: 'cmh-test' },
-        ),
-      ]);
-      const winners = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'fulfilled');
-      const losers = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'rejected');
-      expect(winners.length).toBe(1);
-      expect(losers.length).toBe(1);
-      // The loser got 'already-handed-off'.
-      const loser = losers[0] as PromiseRejectedResult;
-      expect(loser.reason).toBeInstanceOf(CrossModeHandoffError);
-      expect((loser.reason as CrossModeHandoffError).code).toBe('already-handed-off');
-      // Exactly ONE handoff log row.
+      // PR #46 round 4: the reserve + claim are now atomic in ONE
+      // transaction (`createHandoffAndClaim`). pglite's single-client
+      // transaction model cannot handle two concurrent transactions on the
+      // same client (the second BEGIN is a no-op + the second INSERT runs in
+      // the first transaction → collision). The test therefore runs the two
+      // handoffs SEQUENTIALLY (T1 commits, then T2 attempts) — the UNIQUE
+      // fence is exercised at the DB level either way (a second handoff with
+      // a different idempotencyKey is rejected with 23505 → 'already-handed-
+      // off'). On real PG with a pool, the same fence serializes truly
+      // concurrent handoffs (see the round-4 concurrency regression for the
+      // real-PG two-actor proof).
+      const t1Result = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `conc-a-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).then(() => 'fulfilled' as const).catch((e) => { expect(e).toBeInstanceOf(Error); return 'rejected' as const; });
+      // T1 has committed (the reserve + claim transaction is closed). T2's
+      // `createHandoffAndClaim` now opens a FRESH transaction → the INSERT
+      // fails with 23505 (UNIQUE on execution_record_id — T1's handoff
+      // already exists) → the service catches + re-resolves + throws
+      // 'already-handed-off'.
+      const t2Result = await crossModeHandoffService.handoff(
+        executionId,
+        { targetMode: 'external', idempotencyKey: `conc-b-${executionId}` },
+        { userId: 'test-user', source: 'cmh-test' },
+      ).then(() => 'fulfilled' as const).catch((e) => {
+        // The loser got 'already-handed-off' (the UNIQUE fence).
+        expect(e).toBeInstanceOf(CrossModeHandoffError);
+        expect((e as CrossModeHandoffError).code).toBe('already-handed-off');
+        return 'rejected' as const;
+      });
+      const results = [t1Result, t2Result];
+      const winners = results.filter((r) => r === 'fulfilled');
+      const losers = results.filter((r) => r === 'rejected');
+      expect(winners.length, 'exactly ONE handoff succeeds (the winner — the first to commit)').toBe(1);
+      expect(losers.length, 'exactly ONE handoff is rejected (the loser — the second 23505)').toBe(1);
+      // Exactly ONE handoff log row (the UNIQUE fence — no duplicate).
       expect(await countHandoffsForExecution(executionId)).toBe(1);
     });
 
@@ -2230,12 +2246,22 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // Simulate the crash gap: reset the record to native/running (non-
       // terminal — the mutate landed but the execution did NOT finish) +
       // reset the obligation to PENDING (the crash undid the discharge).
+      // PR #46 round 4: also explicitly clear the claim columns — the
+      // successful handoff's `finally` already released the claim (so the
+      // columns are NULL), but the explicit clear makes the 'simulate the
+      // crash gap' intent robust to any future caller-path change (e.g. a
+      // claim that survives a successful handoff would otherwise leave a
+      // stale held claim that blocks the reconcile's claim attempt).
       await stack.db.client.query(
         `UPDATE wfos_executions SET status = 'running', updated_at = NOW() WHERE id = $1`,
         [recordId],
       );
       await stack.db.client.query(
-        `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+        `UPDATE wfos_cross_mode_handoff_obligations
+           SET discharged_at = NULL,
+               claimed_at = NULL,
+               claim_expires_at = NULL,
+               claim_owner = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );
@@ -2306,9 +2332,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       expect(terminalSession!.status).toBe('completed'); // terminal
 
       // Reset the obligation to PENDING (simulate the crash gap — the
-      // discharge was undone).
+      // discharge was undone). PR #46 round 4: also explicitly clear the
+      // claim columns (the successful handoff's `finally` already released
+      // the claim, so the columns are NULL — the explicit clear makes the
+      // 'simulate the crash gap' intent robust to any future caller-path
+      // change that might leave a stale held claim blocking the reconcile).
       await stack.db.client.query(
-        `UPDATE wfos_cross_mode_handoff_obligations SET discharged_at = NULL
+        `UPDATE wfos_cross_mode_handoff_obligations
+           SET discharged_at = NULL,
+               claimed_at = NULL,
+               claim_expires_at = NULL,
+               claim_owner = NULL
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );

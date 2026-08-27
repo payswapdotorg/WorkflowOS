@@ -1,8 +1,8 @@
 /**
- * WORK-042 (PR #46 review correction + round 3): the cross-mode-handoff
- * outbox relay — the durable delivery mechanism for cross-mode-handoff
- * obligations, using the EXISTING generic OutboxRelay pattern (the SAME
- * architecture as the WORK-034 session-terminal relay + the WORK-035
+ * WORK-042 (PR #46 review correction + round 3 + round 4): the cross-mode-
+ * handoff outbox relay — the durable delivery mechanism for cross-mode-
+ * handoff obligations, using the EXISTING generic OutboxRelay pattern (the
+ * SAME architecture as the WORK-034 session-terminal relay + the WORK-035
  * workspace-release relay + the benchmark start-delivery relay):
  *
  *     handoff log INSERT (reserve — migration 0042)
@@ -17,13 +17,19 @@
  *            mutation) + the WorkerHost boot sweep (every worker start
  *            re-enqueues for ALL pending obligations — supervised restart ⇒
  *            sweep ⇒ attempt; the recovery path for a crash between reserve
- *            and the post-mutation enqueue)
+ *            and the post-mutation enqueue) + the durable claim/lease
+ *            (PR #46 round 4 — migration 0044; the caller + the relay
+ *            reconcile use the SAME claim primitive so a concurrent sweep /
+ *            relay cannot re-mutate + re-dispatch the same obligation while
+ *            the caller holds the claim)
  *     existing Queue / WorkerHost (the relay job + the boot sweep)
  *         ↓
  *     idempotent reconcileCrossModeHandoffForExecution (re-mutate if the
  *       record.mode !== toMode; re-dispatch if the dispatch outcome is
  *       missing; re-attempt the session transition when not converged;
- *       discharge when complete)
+ *       discharge when complete) — runs UNDER the claim (a failed claim
+ *       returns early: NO re-mutate, NO re-dispatch — the structural
+ *       prevention of two concurrent handoff drivers)
  *
  * PR #46 round 3 (the concurrency fix): the relay job is enqueued AFTER the
  * caller's synchronous mutation+dispatch+session convergence, NOT at
@@ -40,12 +46,30 @@
  * post-mutation enqueue (the obligation is durable; the next worker start
  * reconciles).
  *
+ * PR #46 round 4 (the durable claim/lease): the round-3 reorder closed the
+ * live-relay race but NOT the boot-sweep race — `reserve()` created a
+ * pending obligation BEFORE the caller's mutation, and the boot sweep (or
+ * an already-enqueued relay job) could claim + reconcile BETWEEN the
+ * reserve and the caller's mutation (TWO concurrent handoff drivers). The
+ * handoff-row UNIQUE constraint did NOT serialize this (both actors operated
+ * on the SAME already-reserved handoff row). The fix introduces a durable
+ * execution claim/lease on the obligation row (migration 0044): the caller
+ * acquires the claim ATOMICALLY with the reserve (one transaction), and
+ * the relay reconcile acquires the claim at entry. A failed claim means
+ * another actor owns the obligation → return early (NO re-mutate, NO
+ * re-dispatch). A crashed owner's lease auto-expires (claim_expires_at <
+ * NOW()) and the boot sweep reclaims. This is the architect's required
+ * durable serialization boundary. The PR description must reflect that
+ * after round 4, the boot sweep is NOT merely a passive backstop — it is a
+ * potential concurrent driver and therefore participates in the claim/
+ * lease ownership semantics.
+ *
  * NO scheduler, NO polling loop, NO second execution engine: the relay only
  * delivers ALREADY-AUTHORITATIVE durable intent (the obligation rows). It
  * never decides what work should exist. The reconciliation is the EXISTING
  * service's idempotent replay. Duplicate relay jobs are harmless by
  * contract (the reconciliation is idempotent: exactly one transition, one
- * dispatch, one discharge).
+ * dispatch, one discharge — AND the claim serializes concurrent attempts).
  */
 import type { OutboxRelay, JobHandler, JobRecord, Queue } from '@platform/index.js';
 import type { Logger } from '@platform/logger.js';

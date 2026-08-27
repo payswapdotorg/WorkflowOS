@@ -177,6 +177,59 @@ export interface CrossModeHandoffRepository {
    * window where the handoff log exists but the obligation is missing.
    */
   createHandoff(input: CreateCrossModeHandoffInput): Promise<CrossModeHandoffRecord>;
+  /**
+   * PR #46 round 4 (the concurrency-serialization fix): INSERT the append-only
+   * handoff row AND claim the durable obligation in ONE transaction. The
+   * reserve INSERT (0042) + migration 0043's AFTER INSERT trigger (the
+   * obligation row) + the claim UPDATE are atomic — a concurrent reconcile
+   * (boot sweep / relay) cannot see the obligation until the transaction
+   * commits, at which point the claim is already held. This closes the
+   * round-4 boot-sweep race (a reconcile that fired between the reserve
+   * commit and a separate claim commit could previously claim + re-mutate).
+   *
+   * Returns `{ handoff, claimed: true }` on the happy path (the obligation
+   * is freshly created by the trigger, so the claim UPDATE always matches
+   * within the transaction). On a 23505 UNIQUE violation, the transaction
+   * rolls back (claim not applied) + the error is mapped to
+   * 'cross-mode-handoff-already-exists' — the service re-queries for
+   * idempotent convergence (returning `{ handoff: existing, claimed: false }`).
+   * The caller MUST release the claim via
+   * {@link releaseHandoffObligationClaim} after its critical section
+   * (success OR failure — the lease auto-expires as a crash backstop).
+   */
+  createHandoffAndClaim(
+    input: CreateCrossModeHandoffInput,
+    owner: string,
+    leaseMs: number,
+  ): Promise<{ handoff: CrossModeHandoffRecord; claimed: boolean }>;
+  /**
+   * PR #46 round 4: claim an EXISTING obligation for the reconcile critical
+   * section (the relay / boot-sweep path). A single conditional UPDATE
+   * serializes concurrent actors: the WHERE clause
+   * `discharged_at IS NULL AND (claimed_at IS NULL OR claim_expires_at < NOW())`
+   * is the reclaim predicate — only one actor's UPDATE matches (PostgreSQL
+   * row-locks the obligation row for the duration of the conflicting UPDATE;
+   * the second actor's WHERE re-evaluates after the first commits + sees a
+   * claimed row → 0 rows). Returns `{ claimed: true }` on success or
+   * `{ claimed: false, activeOwner }` when another actor holds a live claim
+   * (the reconcile returns early — NO mutate, NO dispatch — preventing two
+   * concurrent handoff drivers). A crashed owner's expired lease is
+   * reclaimable (the `claim_expires_at < NOW()` arm).
+   */
+  claimHandoffObligation(
+    handoffId: string,
+    owner: string,
+    leaseMs: number,
+  ): Promise<{ claimed: true } | { claimed: false; activeOwner: string | null }>;
+  /**
+   * PR #46 round 4: release the claim (clear claimed_at/claim_expires_at/
+   * claim_owner). Called by the caller + the reconcile in a `finally` block
+   * after their critical section (success OR failure). The `claim_owner`
+   * guard ensures only the owner can release (defensive). A no-op when the
+   * obligation was discharged (the `discharged_at IS NULL` guard) or the
+   * claim already expired/released — both return false (not an error).
+   */
+  releaseHandoffObligationClaim(handoffId: string, owner: string): Promise<boolean>;
   /** Find the (at most one) handoff row for an execution's record UUID. */
   findByExecutionId(executionId: string): Promise<CrossModeHandoffRecord | null>;
   /** Find a handoff row by its idempotency key (convergence check). */
@@ -199,6 +252,28 @@ export interface CrossModeHandoffRepository {
    */
   dischargeHandoffObligation(handoffId: string): Promise<boolean>;
 }
+
+/**
+ * PR #46 round 4: the durable claim owner identifiers. The synchronous
+ * caller uses {@link CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER}; the relay
+ * reconcile uses {@link CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER}. Distinguishing
+ * the owner makes the claim-lost diagnostics + the release guard explicit
+ * (only the owner can release its own claim). The claim/lease columns +
+ * the conditional UPDATE are the serialization boundary — see migration
+ * 0044 + {@link CrossModeHandoffRepository.claimHandoffObligation}.
+ */
+export const CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER = 'cross-mode-handoff-caller';
+export const CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER = 'cross-mode-handoff-relay';
+
+/**
+ * PR #46 round 4: the default claim lease duration (30s). The caller's
+ * critical section is ms-scale (mutate + dispatch + session + enqueue),
+ * but 30s covers a slow provider dispatch. A crashed owner's lease
+ * auto-expires after this duration — the boot sweep reclaims + recovers.
+ * Tests override this via `DefaultCrossModeHandoffServiceDeps.handoffClaimLeaseMs`
+ * to exercise crash-reclaim quickly.
+ */
+export const CROSS_MODE_HANDOFF_DEFAULT_CLAIM_LEASE_MS = 30_000;
 
 /**
  * PR #46 review #2: one pending cross-mode-handoff obligation (the durable

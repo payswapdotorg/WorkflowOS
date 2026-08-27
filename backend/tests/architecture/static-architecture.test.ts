@@ -11169,13 +11169,14 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0043 (PR #46 review #2 — the cross-mode-handoff
-    // durable obligation table; 0042 is the WORK-042 cross-mode handoff log).
-    // WORK-040 added none (0042/0043 belong to WORK-042, not WORK-040). The
-    // planner evidence lives in the existing Work Item metadata.planner
+    // The highest migration is 0044 (PR #46 round 4 — the cross-mode-handoff
+    // durable claim/lease columns on the obligation table; 0043 is the
+    // obligation table itself; 0042 is the WORK-042 cross-mode handoff log).
+    // WORK-040 added none (0042/0043/0044 belong to WORK-042, not WORK-040).
+    // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 cross-mode-handoff obligation table, NOT a planner-owned table)').toMatch(/^0043_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-4 cross-mode-handoff claim/lease migration, NOT a planner-owned table)').toMatch(/^0044_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -11870,6 +11871,10 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
     '0042_cross_mode_execution_handoff.sql',
   );
+  const CROSS_MODE_MIGRATION_0044 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0044_cross_mode_handoff_claim_lease.sql',
+  );
   const AGENTS_BARREL = join(MODULES_DIR, 'agents', 'index.ts');
   const PG_EXECUTION_REPO = join(AGENTS_INTERNAL, 'pg-execution-repository.ts');
   const EXECUTION_ROUTE = join(SRC_ROOT, 'api', 'routes', 'execution.route.ts');
@@ -12069,62 +12074,71 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     ).toBeLessThan(1);
 
     // SERVICE-LEVEL defense-in-depth: the service re-resolves the record
-    // (record.projectId is known) BEFORE the createHandoff INSERT. The FIRST
-    // occurrence of record.projectId must precede the FIRST createHandoff
-    // call site (the reserve step).
+    // (record.projectId is known) BEFORE the createHandoffAndClaim INSERT
+    // (PR #46 round 4: the reserve + claim are atomic in ONE transaction —
+    // the reserve step is now `createHandoffAndClaim`, NOT the round-1
+    // `createHandoff`). The FIRST occurrence of record.projectId must
+    // precede the FIRST createHandoffAndClaim call site (the reserve+claim
+    // step).
     const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
     const recordProjectIdIdx = serviceSrc.indexOf('record.projectId');
-    const createHandoffIdx = serviceSrc.indexOf('createHandoff(');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoffAndClaim(');
     expect(recordProjectIdIdx, 'the service resolves record.projectId').toBeGreaterThan(-1);
-    expect(createHandoffIdx, 'the service calls createHandoff').toBeGreaterThan(-1);
-    expect(recordProjectIdIdx, 'the service resolves record.projectId BEFORE the createHandoff INSERT (defense-in-depth)').toBeLessThan(createHandoffIdx);
+    expect(createHandoffIdx, 'the service calls createHandoffAndClaim (the round-4 atomic reserve+claim)').toBeGreaterThan(-1);
+    expect(recordProjectIdIdx, 'the service resolves record.projectId BEFORE the createHandoffAndClaim INSERT (defense-in-depth)').toBeLessThan(createHandoffIdx);
   });
 
   // -------------------------------------------------------------------------
   // A10: ONE handoff per execution (the UNIQUE fence). The migration has
   // UNIQUE(execution_record_id) (A1 covers); the service has EXACTLY ONE
-  // createHandoff call site. A mutated service with a second createHandoff
-  // site → the count check catches it.
+  // createHandoffAndClaim call site (PR #46 round 4: the reserve + claim
+  // are atomic in ONE transaction — the reserve step is now
+  // `createHandoffAndClaim`, NOT the round-1 `createHandoff`). A mutated
+  // service with a second createHandoffAndClaim site → the count check
+  // catches it.
   // -------------------------------------------------------------------------
-  it('A10. ONE handoff per execution — the service has EXACTLY ONE createHandoff call site (the UNIQUE(execution_record_id) fence)', () => {
+  it('A10. ONE handoff per execution — the service has EXACTLY ONE createHandoffAndClaim call site (the UNIQUE(execution_record_id) fence)', () => {
     const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
-    const createHandoffCallSites = (serviceSrc.match(/\.createHandoff\(/g) ?? []).length;
-    expect(createHandoffCallSites, 'the service has exactly ONE createHandoff call site (the reserve step)').toBe(1);
+    const createHandoffCallSites = (serviceSrc.match(/\.createHandoffAndClaim\(/g) ?? []).length;
+    expect(createHandoffCallSites, 'the service has exactly ONE createHandoffAndClaim call site (the round-4 atomic reserve+claim)').toBe(1);
     // MUTATION PROOF — synthesize a mutated service with a second
-    // createHandoff site → the count check catches it.
+    // createHandoffAndClaim site → the count check catches it.
     const mutatedService = serviceSrc + [
       '',
       '// MUTATION (for the static-arch test only — NOT in the real file):',
       'async function futureUnguardedCreate(ctx) {',
-      '  // A second createHandoff site — this is the regression the',
+      '  // A second createHandoffAndClaim site — this is the regression the',
       '  // invariant must catch (would bypass the UNIQUE fence on a',
       '  // different idempotency_key).',
-      '  return ctx.deps.crossModeHandoffRepository.createHandoff({} as never);',
+      '  return ctx.deps.crossModeHandoffRepository.createHandoffAndClaim({} as never, \'x\', 1);',
       '}',
       '',
     ].join('\n');
-    const mutatedCallSites = (mutatedService.match(/\.createHandoff\(/g) ?? []).length;
-    expect(mutatedCallSites, 'the mutated service has 2 createHandoff call sites').toBe(createHandoffCallSites + 1);
+    const mutatedCallSites = (mutatedService.match(/\.createHandoffAndClaim\(/g) ?? []).length;
+    expect(mutatedCallSites, 'the mutated service has 2 createHandoffAndClaim call sites').toBe(createHandoffCallSites + 1);
     expect(
       mutatedCallSites,
-      'the count check CATCHES the second createHandoff site — count > 1 in the mutated service',
+      'the count check CATCHES the second createHandoffAndClaim site — count > 1 in the mutated service',
     ).toBeGreaterThan(1);
   });
 
   // -------------------------------------------------------------------------
-  // A11: Idempotent convergence (findByIdempotencyKey BEFORE createHandoff —
-  // a retry with the same key converges to the existing result).
+  // A11: Idempotent convergence (findByIdempotencyKey BEFORE
+  // createHandoffAndClaim — a retry with the same key converges to the
+  // existing result).
   // -------------------------------------------------------------------------
-  it('A11. idempotent convergence — the service calls findByIdempotencyKey (the convergence lookup) BEFORE createHandoff', () => {
+  it('A11. idempotent convergence — the service calls findByIdempotencyKey (the convergence lookup) BEFORE createHandoffAndClaim', () => {
     const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
     expect(serviceSrc, 'the service calls findByIdempotencyKey (convergence check)').toMatch(/findByIdempotencyKey/);
-    // ORDERING — the findByIdempotencyKey lookup precedes the createHandoff
-    // INSERT (the convergence check is evaluated BEFORE the reserve).
+    // ORDERING — the findByIdempotencyKey lookup precedes the
+    // createHandoffAndClaim INSERT (the convergence check is evaluated
+    // BEFORE the reserve+claim). PR #46 round 4: the reserve step is now
+    // `createHandoffAndClaim` (the atomic reserve + claim).
     const idempotencyLookupIdx = serviceSrc.indexOf('findByIdempotencyKey');
-    const createHandoffIdx = serviceSrc.indexOf('createHandoff(');
+    const createHandoffIdx = serviceSrc.indexOf('createHandoffAndClaim(');
     expect(idempotencyLookupIdx, 'findByIdempotencyKey must be present').toBeGreaterThan(-1);
-    expect(createHandoffIdx, 'createHandoff must be present').toBeGreaterThan(-1);
-    expect(idempotencyLookupIdx, 'findByIdempotencyKey precedes createHandoff (converge before reserve)').toBeLessThan(createHandoffIdx);
+    expect(createHandoffIdx, 'createHandoffAndClaim must be present').toBeGreaterThan(-1);
+    expect(idempotencyLookupIdx, 'findByIdempotencyKey precedes createHandoffAndClaim (converge before reserve+claim)').toBeLessThan(createHandoffIdx);
   });
 
   // -------------------------------------------------------------------------
@@ -12550,5 +12564,162 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // execution finished — the ONLY way a terminal session discharges a
     // handoff).
     expect(methodBody, 'the record-terminal check is present').toMatch(/record\.status === 'completed' \|\| record\.status === 'failed'/);
+  });
+
+  // =========================================================================
+  // PR #46 round 4 (the durable claim/lease — the concurrency-serialization
+  // fix the architect required): the round-3 reorder (enqueue AFTER mutation)
+  // closed the live-relay race but NOT the boot-sweep race — the synchronous
+  // caller + the boot sweep / the relay reconcile could BOTH drive the same
+  // pending obligation between the reserve and the caller's mutation (TWO
+  // concurrent handoff drivers → duplicate provider dispatches + conflicting
+  // session transitions). The round-4 fix introduces a durable execution
+  // claim/lease on the obligation row (migration 0044): the caller acquires
+  // the claim ATOMICALLY with the reserve (one transaction), and the relay
+  // reconcile acquires the claim at entry. A failed claim returns early (NO
+  // re-mutate, NO re-dispatch). A crashed owner's lease auto-expires (the
+  // reclaim predicate `claimed_at IS NULL OR claim_expires_at < NOW()`) so
+  // the boot sweep reclaims + recovers. The 5 invariants below prevent
+  // regression of these structural properties at the source level.
+  // =========================================================================
+
+  // R4-A (round 4 — the claim primitive is on BOTH paths): the synchronous
+  // caller path (`handoff`) calls `createHandoffAndClaim` (the atomic
+  // reserve + claim in ONE transaction — closes the boot-sweep race between
+  // the reserve commit and a separate claim commit), AND the relay reconcile
+  // path (`reconcileCrossModeHandoffForExecution`) calls
+  // `claimHandoffObligation` at entry (the same serialization primitive).
+  // Both paths MUST acquire the claim BEFORE mutating — removing the claim
+  // from either path reintroduces the race on that path.
+  it('R4-A. the service uses the claim primitive on BOTH paths (handoff calls createHandoffAndClaim + reconcile calls claimHandoffObligation)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The caller path: createHandoffAndClaim is called in handoff() (the
+    // reserveAndClaim helper invokes it — the claim is the caller's
+    // serialization boundary). Removing it from the caller path
+    // reintroduces the boot-sweep race between reserve and mutation.
+    expect(serviceSrc, 'handoff() exercises createHandoffAndClaim (the caller-path claim)').toMatch(/createHandoffAndClaim\(/);
+    // The relay path: claimHandoffObligation is called in
+    // reconcileCrossModeHandoffForExecution (the reconcile's entry-point
+    // claim — a failed claim returns early before any mutate). Removing it
+    // from the relay path reintroduces the race on the relay path.
+    expect(serviceSrc, 'reconcileCrossModeHandoffForExecution() exercises claimHandoffObligation (the relay-path claim)').toMatch(/claimHandoffObligation\(/);
+  });
+
+  // R4-B (round 4 — the claim is released in a `finally` on BOTH paths):
+  // the claim is the serialization boundary; if the caller / the reconcile
+  // crashes mid-critical-section (mutate/dispatch/session throws), the claim
+  // MUST be released so the boot sweep / relay can reclaim immediately (no
+  // lease wait). A bare `releaseHandoffObligationClaim` call after the
+  // critical section (NOT in a `finally`) would leak the claim on failure
+  // (the lease would auto-expire, but that delays recovery by `claimLeaseMs`).
+  // The release is wrapped in `releaseClaimSafely` (a non-throwing wrapper
+  // so a release failure does not mask the original error) + invoked in a
+  // `finally` block. This invariant checks the `finally { ... releaseClaimSafely(
+  // }` pattern is present in BOTH method bodies.
+  it('R4-B. the claim is released in a `finally` block on BOTH paths (no leaked claim on failure)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The handoff() body: from `async handoff(` to the next method
+    // `async reconcileCrossModeHandoffForExecution(`.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    expect(handoffEnd, 'reconcile is defined after handoff').toBeGreaterThan(-1);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    // The caller-path release: a `finally` block containing a
+    // `releaseClaimSafely(` call. The pattern is `finally {` (with optional
+    // whitespace/newline) followed by ANY text up to `releaseClaimSafely(`.
+    expect(handoffBody, 'handoff() releases the claim in a `finally` block').toMatch(/finally\s*\{[\s\S]*?releaseClaimSafely\(/);
+    // There is NO bare `releaseHandoffObligationClaim(` call OUTSIDE a
+    // finally — the service routes releases through `releaseClaimSafely`
+    // (the non-throwing wrapper). A direct call would bypass the safety
+    // wrapper + could throw out of a `finally`, masking the original error.
+    expect(handoffBody, 'handoff() does NOT call releaseHandoffObligationClaim directly (always through releaseClaimSafely)').not.toMatch(/releaseHandoffObligationClaim\(/);
+
+    // The reconcile() body: from `async reconcileCrossModeHandoffForExecution(`
+    // to the next `private` method (the reconcile is followed by private
+    // helpers — `handoffComplete` is the first private method after it).
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcile is defined').toBeGreaterThan(-1);
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The relay-path release: same `finally { ... releaseClaimSafely( }`
+    // pattern.
+    expect(reconcileBody, 'reconcile() releases the claim in a `finally` block').toMatch(/finally\s*\{[\s\S]*?releaseClaimSafely\(/);
+    expect(reconcileBody, 'reconcile() does NOT call releaseHandoffObligationClaim directly').not.toMatch(/releaseHandoffObligationClaim\(/);
+  });
+
+  // R4-C (round 4 — the migration 0044 + the claim/lease columns exist):
+  // the durable claim/lease lives on the obligation row (migration 0043's
+  // `wfos_cross_mode_handoff_obligations`). Migration 0044 adds the three
+  // new columns (`claimed_at`, `claim_expires_at`, `claim_owner`) + an
+  // index on `claim_expires_at` (the reclaimable-claim work-list probe).
+  // The 0043 immutability trigger only guards `handoff_id`/`execution_id`/
+  // `created_at` (the recorded intent) — the new claim columns are FREE to
+  // mutate (like `discharged_at` — the durable execution state). NO trigger
+  // extension is needed. Dropping the migration OR removing any column
+  // breaks the claim UPDATE predicate (the conditional UPDATE would no
+  // longer fire).
+  it('R4-C. migration 0044 exists + adds the claim/lease columns (claimed_at, claim_expires_at, claim_owner)', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0044), '0044_cross_mode_handoff_claim_lease.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0044, 'utf8');
+    // ALTERs the obligations table (NOT a CREATE TABLE — the table is from
+    // migration 0043; 0044 extends it with the claim columns).
+    expect(src).toMatch(/ALTER TABLE wfos_cross_mode_handoff_obligations/);
+    // The three new claim/lease columns.
+    expect(src).toMatch(/ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ/);
+    expect(src).toMatch(/claim_expires_at TIMESTAMPTZ/);
+    expect(src).toMatch(/claim_owner TEXT/);
+  });
+
+  // R4-D (round 4 — the claim UPDATE uses the reclaim predicate): a crashed
+  // owner's lease auto-expires — the conditional UPDATE's WHERE clause
+  // includes the reclaim predicate `claimed_at IS NULL OR claim_expires_at <
+  // NOW()` so an expired lease is reclaimable by the next sweep. Replacing
+  // the conditional UPDATE with an unconditional one (or removing the
+  // `claim_expires_at < NOW()` arm) would NEVER reclaim a crashed owner
+  // (the boot sweep would see a permanently-claimed obligation + skip it).
+  // The repository source must contain this predicate verbatim.
+  it('R4-D. the claim UPDATE uses the reclaim predicate (a crashed owner\'s expired lease is reclaimable)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    // The reclaim predicate: `claimed_at IS NULL OR claim_expires_at < NOW()`.
+    // The `claimed_at IS NULL` arm lets the FIRST claim match; the
+    // `claim_expires_at < NOW()` arm lets an EXPIRED claim be reclaimed
+    // (the crash-reclaim semantic). Both arms MUST be present.
+    expect(repoSrc, 'the claim UPDATE predicate includes the reclaimable-expired-lease arm').toMatch(/claimed_at IS NULL OR claim_expires_at < NOW\(\)/);
+  });
+
+  // R4-E (round 4 — the reconcile returns early on a failed claim): the
+  // relay reconcile acquires the claim at entry + returns BEFORE any
+  // mutate/dispatch when another actor owns the obligation (the caller OR
+  // another concurrent reconcile). This is the structural prevention of two
+  // concurrent handoff drivers — the architect's round-4 required correction.
+  // The claim call MUST appear BEFORE the first `mutateAndDispatch` call in
+  // the reconcile body (reordering it after the mutate would reintroduce the
+  // race), AND there MUST be a `!claim.claimed` early-return that emits the
+  // `stage: 'claim-held'` result (NO mutate, NO dispatch). Removing the
+  // early-return OR reordering the claim after the mutate would reintroduce
+  // the race the architect identified.
+  it('R4-E. the reconcile returns early on a failed claim (NO mutate, NO dispatch when another actor owns the obligation)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The reconcile() body: from `async reconcileCrossModeHandoffForExecution(`
+    // to the next `private` method.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    expect(reconcileStart, 'reconcile is defined').toBeGreaterThan(-1);
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The claim call appears BEFORE the first mutateAndDispatch call. A
+    // future change that reorders the claim AFTER the mutate (re-introducing
+    // the race) fails this inequality.
+    const claimIdx = reconcileBody.indexOf('claimHandoffObligation(');
+    expect(claimIdx, 'reconcile calls claimHandoffObligation').toBeGreaterThan(-1);
+    const mutateIdx = reconcileBody.indexOf('mutateAndDispatch(');
+    expect(mutateIdx, 'reconcile calls mutateAndDispatch').toBeGreaterThan(-1);
+    expect(claimIdx, 'the claim is acquired BEFORE the first mutate (no race)').toBeLessThan(mutateIdx);
+    // The `!claim.claimed` early-return emits `stage: 'claim-held'` BEFORE
+    // the mutate — the structural prevention of two concurrent handoff
+    // drivers. A future change that removes the early-return (letting the
+    // reconcile proceed to the mutate even on a failed claim) fails this
+    // match.
+    expect(reconcileBody, 'the !claim.claimed branch returns { stage: \'claim-held\' } before the mutate').toMatch(/if\s*\(!claim\.claimed\)[\s\S]*?return\s*\{[\s\S]*?stage:\s*'claim-held'/);
   });
 });

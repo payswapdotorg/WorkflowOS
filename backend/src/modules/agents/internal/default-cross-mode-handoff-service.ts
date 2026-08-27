@@ -17,10 +17,15 @@
  *      native -> executionPolicy native_execution_allowed + registry native
  *      provider availability — fail-closed).
  *   7. resolve provider/model for the target.
- *   8. reserve: INSERT append-only handoff log row (previous_* snapshot +
- *      idempotency_key). Catch 23505 -> converge (same key) / reject (diff
- *      key). migration 0043's AFTER INSERT trigger writes the durable
- *      handoff obligation ATOMICALLY with this INSERT.
+ *   8. reserve + claim: INSERT append-only handoff log row (previous_*
+ *      snapshot + idempotency_key) AND claim the durable obligation in ONE
+ *      transaction (PR #46 round 4 — the claim is the serialization
+ *      boundary shared by the caller + the relay; closes the boot-sweep
+ *      race between reserve and the caller's mutation). Catch 23505 ->
+ *      converge (same key, claimed:false) / reject (diff key). migration
+ *      0043's AFTER INSERT trigger writes the durable handoff obligation
+ *      ATOMICALLY with the reserve INSERT; migration 0044 adds the claim
+ *      columns + the conditional UPDATE claim predicate.
  *   9-10. mutate record (transitionMode mode+status) THEN drive the session
  *        through the EXISTING non-terminal path THEN dispatch (provider
  *        submit) THEN updateStatus (provider outcome) — crash-safety: a crash
@@ -29,6 +34,10 @@
  *        (the agentRunRepository.findByExecutionId guard skips a second
  *        AgentRun for external->native; the ExternalExecutionProvider
  *        regenerates the package idempotently for native->external).
+ *        PR #46 round 4: the claim covers this whole critical section — a
+ *        concurrent reconcile sees a CLAIMED obligation + returns early
+ *        (NO re-mutate, NO re-dispatch). The `finally` releases the claim
+ *        (success OR failure).
  *   10b. enqueue the durable relay job (PR #46 round 3 — the concurrency fix:
  *        enqueue AFTER the mutation+dispatch+session, NOT before — a live
  *        WorkerHost that picks up the job sees a COMPLETE handoff + the
@@ -38,9 +47,14 @@
  *   12. return { executionId, handoff, record (re-fetch) }.
  *
  * CONCURRENCY: the handoff log table UNIQUE(execution_record_id) is the hard
- * fence. Two concurrent handoff requests -> the first INSERT wins; the second
- * gets a 23505 -> the service catches it -> same idempotency_key converges
- * (returns the first's result); different key -> 'already-handed-off' (409).
+ * fence against a SECOND handoff for the same execution. The durable claim/
+ * lease (migration 0044) is the serialization boundary for the
+ * mutation/session/dispatch critical section — the caller + the relay
+ * reconcile use the SAME claim primitive so a concurrent boot-sweep/relay
+ * cannot re-mutate + re-dispatch the same obligation while the caller holds
+ * the claim (PR #46 round 4 — the architect's required durable serialization
+ * boundary). A crashed owner's lease auto-expires (claim_expires_at < NOW())
+ * + the boot sweep reclaims + recovers.
  *
  * This file is private to /agents (PLAT-AC-02). It composes the EXISTING
  * boundaries — it is NOT an ExecutionService, it NEVER creates a second
@@ -97,6 +111,16 @@ import { CrossModeHandoffError } from './cross-mode-handoff.types.js';
 // reserve — the boot sweep is the backstop; mirrors the WORK-034
 // session-terminal relay's claim-time enqueue).
 import { CROSS_MODE_HANDOFF_RELAY_JOB_TYPE } from './cross-mode-handoff.types.js';
+// PR #46 round 4: the durable claim/lease owners + the default lease. The
+// caller + the relay reconcile use the SAME claim primitive (migration 0044)
+// so the mutation/session/dispatch critical section is serialized — a
+// concurrent boot-sweep/relay cannot re-mutate + re-dispatch the same
+// obligation while the caller holds the claim (the round-4 boot-sweep race).
+import {
+  CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
+  CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER,
+  CROSS_MODE_HANDOFF_DEFAULT_CLAIM_LEASE_MS,
+} from './cross-mode-handoff.types.js';
 
 /**
  * Narrow execution-policy port (DI cleanliness — the agents module does NOT
@@ -221,6 +245,17 @@ export interface DefaultCrossModeHandoffServiceDeps {
    * sweep reconciles).
    */
   readonly queue: Queue;
+  /**
+   * PR #46 round 4: the claim lease duration in milliseconds. The claim
+   * covers the caller's mutation/session/dispatch critical section (the
+   * synchronous path) + the reconcile's re-mutate/re-dispatch critical
+   * section (the relay path). A crashed owner's lease auto-expires after
+   * this duration — the boot sweep reclaims + recovers (the
+   * `claim_expires_at < NOW()` arm of the reclaim predicate). Defaults to
+   * {@link CROSS_MODE_HANDOFF_DEFAULT_CLAIM_LEASE_MS} (30s). Tests override
+   * this to a short value (e.g. 200ms) to exercise crash-reclaim quickly.
+   */
+  readonly handoffClaimLeaseMs?: number;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
 }
@@ -243,9 +278,13 @@ const EXTERNAL_TO_NATIVE_ELIGIBLE = new Set([
 
 export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   private readonly now: () => Date;
+  /** PR #46 round 4: the claim lease duration (defaults to 30s). */
+  private readonly claimLeaseMs: number;
 
   constructor(private readonly deps: DefaultCrossModeHandoffServiceDeps) {
     this.now = deps.now ?? (() => new Date());
+    this.claimLeaseMs =
+      deps.handoffClaimLeaseMs ?? CROSS_MODE_HANDOFF_DEFAULT_CLAIM_LEASE_MS;
   }
 
   async handoff(
@@ -356,16 +395,24 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       input,
     );
 
-    // 8. Reserve: INSERT the append-only handoff log row (previous_* snapshot).
-    //    PR #46 review #2: migration 0043's AFTER INSERT trigger writes the
-    //    durable handoff obligation ATOMICALLY with this INSERT (no window
-    //    where the handoff log exists but the obligation is missing). The
-    //    obligation row is the durable source of truth — a crash after reserve
-    //    leaves a pending obligation the boot sweep reconciles on the next
-    //    worker start.
+    // 8. Reserve + claim: INSERT the append-only handoff log row (previous_*
+    //    snapshot) AND claim the durable obligation in ONE transaction (PR
+    //    #46 round 4). migration 0043's AFTER INSERT trigger writes the
+    //    obligation ATOMICALLY with the INSERT; the claim UPDATE is in the
+    //    SAME transaction — a concurrent reconcile (boot sweep / relay)
+    //    cannot see the obligation until the transaction commits, at which
+    //    point the claim is already held. This closes the round-4 boot-sweep
+    //    race (a reconcile that fired between the reserve commit and a
+    //    separate claim commit could previously claim + re-mutate the same
+    //    obligation while the caller was mid-mutation). The claim is the
+    //    serialization boundary the caller + the relay SHARE — only the
+    //    claim owner may perform the mutation/session/dispatch critical
+    //    section. The obligation row is the durable source of truth — a
+    //    crash after reserve+claim leaves a pending + claimed obligation
+    //    whose lease auto-expires (the boot sweep reclaims + reconciles).
     const resultingStatus: 'handoff_ready' | 'running' =
       input.targetMode === 'external' ? 'handoff_ready' : 'running';
-    const reserved = await this.reserve({
+    const { handoff: reserved, claimed } = await this.reserveAndClaim({
       record,
       executionId,
       input,
@@ -375,6 +422,29 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       policySummary,
       actor,
     });
+
+    // PR #46 round 4: if the claim was NOT acquired (a concurrent path —
+    // the boot sweep / a live relay job — already owns the obligation, OR
+    // the reserve hit the idempotency UNIQUE + the original owner holds
+    // the claim), the caller does NOT proceed to mutate. The claim owner
+    // will complete the handoff; the caller converges by returning the
+    // current state (the obligation row is the durable source of truth).
+    // This is the structural prevention of two concurrent handoff drivers
+    // (the architect's round-4 required correction).
+    if (!claimed) {
+      const current = await this.deps.executionRecordRepository.findByExecutionId(
+        executionId,
+      );
+      this.deps.logger.info('cross-mode-handoff.claim-not-acquired', {
+        executionId,
+        handoffId: reserved.id,
+      });
+      return {
+        executionId,
+        handoff: reserved,
+        record: current ?? record,
+      };
+    }
 
     // 9-10. Mutate (transitionMode) THEN drive the session through the
     //       EXISTING non-terminal path (interrupt on native→external; resume
@@ -387,39 +457,68 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     //       transition until convergence — see crash window #3). A CAS loss
     //       (null result) is NOT an error (a concurrent path already moved
     //       the session; the convergence check re-evaluates on the next pass).
-    await this.mutateAndDispatch(
-      record,
-      executionId,
-      input,
-      provider,
-      model,
-      resultingStatus,
-      existingSession,
-    );
+    //
+    // PR #46 round 4: the claim (acquired atomically with the reserve
+    //       above) covers this whole critical section. A concurrent
+    //       reconcile that fires now sees a CLAIMED obligation → its claim
+    //       attempt fails → it returns early (NO re-mutate, NO re-dispatch).
+    //       The `finally` below releases the claim (success OR failure) so
+    //       the relay job (enqueued next) can claim + converge. A crash
+    //       between the claim + the release leaves the lease to auto-expire
+    //       (the boot sweep reclaims after `claimLeaseMs`).
+    try {
+      await this.mutateAndDispatch(
+        record,
+        executionId,
+        input,
+        provider,
+        model,
+        resultingStatus,
+        existingSession,
+      );
 
-    // 10b. PR #46 review #2 (round 2) + round 3 (the concurrency fix): the
-    //      durable relay job enqueue — AFTER the mutation + session
-    //      convergence + dispatch (NOT before). Round 3: the live WorkerHost
-    //      can consume a relay job the instant it is enqueued. Enqueueing
-    //      BEFORE the caller's synchronous mutation created a race — a live
-    //      worker could reconcile (re-mutate + re-dispatch) BETWEEN the
-    //      reserve and the caller's transitionMode, after which the caller
-    //      performed its OWN mutation + dispatch (duplicate provider
-    //      submission / conflicting session transitions). The handoff-row
-    //      UNIQUE constraint did NOT serialize these two executions (both
-    //      operated on the same already-reserved handoff row; it only fences
-    //      creation of a SECOND handoff row). Now the relay job is enqueued
-    //      ONLY AFTER the caller's synchronous state transition is safely
-    //      committed: a live worker that picks up the job sees a COMPLETE (or
-    //      near-complete) handoff + the reconcile is a no-op discharge (NOT a
-    //      competing mutation). The boot sweep remains the recovery path for a
-    //      crash between reserve and this enqueue (the obligation is pending;
-    //      the next worker start reconciles). NOT best-effort (Finding #1
-    //      round 2): the queue is REQUIRED + an enqueue failure PROPAGATES —
-    //      the handoff fails fast; the obligation row (migration 0043's
-    //      trigger, written ATOMICALLY with the reserve) is the durable source
-    //      of truth; the boot sweep reconciles on the next worker start.
-    await this.enqueueRelayJob(executionId);
+      // 10b. PR #46 review #2 (round 2) + round 3 (the concurrency fix): the
+      //      durable relay job enqueue — AFTER the mutation + session
+      //      convergence + dispatch (NOT before). Round 3: the live WorkerHost
+      //      can consume a relay job the instant it is enqueued. Enqueueing
+      //      BEFORE the caller's synchronous mutation created a race — a live
+      //      worker could reconcile (re-mutate + re-dispatch) BETWEEN the
+      //      reserve and the caller's transitionMode, after which the caller
+      //      performed its OWN mutation + dispatch (duplicate provider
+      //      submission / conflicting session transitions). The handoff-row
+      //      UNIQUE constraint did NOT serialize these two executions (both
+      //      operated on the same already-reserved handoff row; it only fences
+      //      creation of a SECOND handoff row). Now the relay job is enqueued
+      //      ONLY AFTER the caller's synchronous state transition is safely
+      //      committed: a live worker that picks up the job sees a COMPLETE (or
+      //      near-complete) handoff + the reconcile is a no-op discharge (NOT a
+      //      competing mutation). The boot sweep remains the recovery path for a
+      //      crash between reserve and this enqueue (the obligation is pending;
+      //      the next worker start reconciles). NOT best-effort (Finding #1
+      //      round 2): the queue is REQUIRED + an enqueue failure PROPAGATES —
+      //      the handoff fails fast; the obligation row (migration 0043's
+      //      trigger, written ATOMICALLY with the reserve) is the durable source
+      //      of truth; the boot sweep reconciles on the next worker start.
+      //      PR #46 round 4: the claim is STILL held at enqueue time (the
+      //      release happens in the `finally` after this). A worker that picks
+      //      up the relay job in the microsecond window between enqueue + the
+      //      finally release sees a CLAIMED obligation → its claim fails → it
+      //      returns early (NO re-mutate). The boot sweep re-enqueues on the
+      //      next worker start if that job was acked-and-gone. The durable
+      //      obligation + the boot sweep are the liveness backstop; the claim
+      //      is the correctness fence.
+      await this.enqueueRelayJob(executionId);
+    } finally {
+      // PR #46 round 4: release the claim (success OR failure). On success,
+      // the relay job just enqueued will claim + converge (find a complete
+      // handoff → discharge). On failure (mutate/dispatch/enqueue threw),
+      // the obligation stays pending + the claim is released so the boot
+      // sweep / relay can reclaim immediately (no lease wait). A crash that
+      // skips this finally leaves the lease to auto-expire (the boot sweep
+      // reclaims after `claimLeaseMs`). The release is best-effort: a
+      // failure here is logged + swallowed (the lease is the backstop).
+      await this.releaseClaimSafely(reserved.id, CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER);
+    }
 
     // 11. Audit (best-effort).
     await this.audit(record, executionId, input, reserved, actor, policySummary);
@@ -463,140 +562,157 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     );
     if (!record) return null;
 
-    let stage: 'mutate-and-dispatch' | 'dispatch-external' | 'dispatch-native' | 'session-convergence' | 'complete' = 'complete';
-
-    // Crash window #1: the mutate did not happen (record.mode !== toMode) →
-    // re-mutate + re-dispatch. Re-fetch the record + fall through to the
-    // complete-check (a single reconcile call drives the handoff to
-    // completion when the dispatch is synchronous — the external package is
-    // generated inline; the native AgentRun is created inline).
-    if (record.mode !== handoff.toMode) {
-      this.deps.logger.info('cross-mode-handoff.reconcile.re-mutate', {
+    // PR #46 round 4: claim the obligation for the reconcile critical
+    // section. The claim is the SAME primitive the synchronous caller uses
+    // (migration 0044) — only the claim owner may perform the
+    // mutation/session/dispatch critical section. A failed claim means the
+    // synchronous caller (or another concurrent reconcile) holds the
+    // obligation; the relay returns early (NO re-mutate, NO re-dispatch) —
+    // this is the structural prevention of two concurrent handoff drivers
+    // (the architect's round-4 required correction). The claim-lost return
+    // is NOT an error: the owner will complete + discharge, OR the lease
+    // auto-expires + the next boot sweep reclaims. The `finally` below
+    // releases the claim (success OR failure). A crash that skips the
+    // finally leaves the lease to auto-expire (the boot sweep reclaims).
+    const claim = await this.deps.crossModeHandoffRepository.claimHandoffObligation(
+      handoff.id,
+      CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER,
+      this.claimLeaseMs,
+    );
+    if (!claim.claimed) {
+      this.deps.logger.info('cross-mode-handoff.reconcile.claim-held', {
         executionId,
         handoffId: handoff.id,
-        currentMode: record.mode,
-        toMode: handoff.toMode,
+        activeOwner: claim.activeOwner,
       });
-      // Re-resolve the session (it may have moved since the reserve — e.g.
-      // a concurrent path, or the crash happened mid-mutate). The
-      // re-mutate's session transition is idempotent (a CAS loss means a
-      // concurrent path already moved it — log + continue).
-      const session = await this.deps.executionSessionService.getSessionForExecution(
-        executionId,
-      );
-      // Re-mutate + re-dispatch using the reserved handoff's intent.
-      const input: CrossModeHandoffInput = {
-        targetMode: handoff.toMode,
-        reason: handoff.reason ?? undefined,
-        idempotencyKey: handoff.idempotencyKey,
-      };
-      // Re-derive the resultingStatus deterministically from the toMode (the
-      // handoff log row's resultingStatus was set by the service to one of
-      // these two values; re-deriving avoids a cast on the ExecutionState).
-      const resultingStatus: 'handoff_ready' | 'running' =
-        handoff.toMode === 'external' ? 'handoff_ready' : 'running';
-      await this.mutateAndDispatch(
-        record,
-        executionId,
-        input,
-        record.provider,
-        record.model,
-        resultingStatus,
-        session,
-      );
-      stage = 'mutate-and-dispatch';
-      // Re-fetch the post-mutate+dispatch record for the complete-check.
-      record = await this.deps.executionRecordRepository.findByExecutionId(
-        executionId,
-      );
-      if (!record) return { executionId, reconciled: true, stage };
+      return { executionId, reconciled: false, stage: 'claim-held' };
     }
+    try {
+      // The ENTIRE existing round-2/3 reconcile body (re-mutate /
+      // re-dispatch / session-convergence / discharge) runs UNDER the claim
+      // — a concurrent caller / reconcile cannot interleave its own
+      // mutation/dispatch on the same obligation. The `record` local is
+      // nullable-typed (inferred from the fetch above) + narrowed by the
+      // null check; re-fetches reassign nullable → nullable naturally.
 
-    // Crash window #2: the mutate happened but the dispatch did not. Re-fetch
-    // the record's current state + re-dispatch the missing piece.
-    const targetMode = handoff.toMode;
-    if (targetMode === 'external') {
-      // native -> external: the dispatch is complete when the package is
-      // present (record.packageValue is set). Otherwise re-dispatch.
-      if (!record.packageValue) {
-        this.deps.logger.info('cross-mode-handoff.reconcile.re-dispatch', {
+      let stage: 'mutate-and-dispatch' | 'dispatch-external' | 'dispatch-native' | 'session-convergence' | 'complete' = 'complete';
+
+      // Crash window #1: the mutate did not happen (record.mode !== toMode) →
+      // re-mutate + re-dispatch. Re-fetch the record + fall through to the
+      // complete-check (a single reconcile call drives the handoff to
+      // completion when the dispatch is synchronous — the external package is
+      // generated inline; the native AgentRun is created inline).
+      if (record.mode !== handoff.toMode) {
+        this.deps.logger.info('cross-mode-handoff.reconcile.re-mutate', {
           executionId,
           handoffId: handoff.id,
-          targetMode,
+          currentMode: record.mode,
+          toMode: handoff.toMode,
         });
-        await this.dispatchExternal(record, executionId);
-        stage = stage === 'complete' ? 'dispatch-external' : stage;
+        const session = await this.deps.executionSessionService.getSessionForExecution(
+          executionId,
+        );
+        const input: CrossModeHandoffInput = {
+          targetMode: handoff.toMode,
+          reason: handoff.reason ?? undefined,
+          idempotencyKey: handoff.idempotencyKey,
+        };
+        const resultingStatus: 'handoff_ready' | 'running' =
+          handoff.toMode === 'external' ? 'handoff_ready' : 'running';
+        await this.mutateAndDispatch(
+          record,
+          executionId,
+          input,
+          record.provider,
+          record.model,
+          resultingStatus,
+          session,
+        );
+        stage = 'mutate-and-dispatch';
         record = await this.deps.executionRecordRepository.findByExecutionId(
           executionId,
         );
         if (!record) return { executionId, reconciled: true, stage };
       }
-    } else {
-      // external -> native: the dispatch is complete when an AgentRun exists
-      // OR the record reached a terminal native state (completed/failed).
-      const existingRun = await this.deps.agentRunRepository.findByExecutionId(
+
+      // Crash window #2: the mutate happened but the dispatch did not. Re-fetch
+      // the record's current state + re-dispatch the missing piece.
+      const targetMode = handoff.toMode;
+      if (targetMode === 'external') {
+        if (!record.packageValue) {
+          this.deps.logger.info('cross-mode-handoff.reconcile.re-dispatch', {
+            executionId,
+            handoffId: handoff.id,
+            targetMode,
+          });
+          await this.dispatchExternal(record, executionId);
+          stage = stage === 'complete' ? 'dispatch-external' : stage;
+          record = await this.deps.executionRecordRepository.findByExecutionId(
+            executionId,
+          );
+          if (!record) return { executionId, reconciled: true, stage };
+        }
+      } else {
+        const existingRun = await this.deps.agentRunRepository.findByExecutionId(
+          executionId,
+        );
+        const terminalNative =
+          record.status === 'completed' || record.status === 'failed';
+        if (!existingRun && !terminalNative) {
+          this.deps.logger.info('cross-mode-handoff.reconcile.re-dispatch', {
+            executionId,
+            handoffId: handoff.id,
+            targetMode,
+          });
+          await this.dispatchNative(record, executionId, record.model);
+          stage = stage === 'complete' ? 'dispatch-native' : stage;
+        }
+      }
+
+      // Crash window #3 (PR #46 review #2 round 2): the session has NOT
+      // converged. Re-resolve the session + re-attempt the transition when
+      // it has not converged. The obligation stays pending until the session
+      // converges (the complete-check now includes session convergence —
+      // see {@link handoffComplete}).
+      const sessionForConvergence = await this.deps.executionSessionService.getSessionForExecution(
         executionId,
       );
-      const terminalNative =
-        record.status === 'completed' || record.status === 'failed';
-      if (!existingRun && !terminalNative) {
-        this.deps.logger.info('cross-mode-handoff.reconcile.re-dispatch', {
+      if (sessionForConvergence && !this.sessionConverged(sessionForConvergence, record, handoff)) {
+        this.deps.logger.info('cross-mode-handoff.reconcile.re-session', {
           executionId,
           handoffId: handoff.id,
-          targetMode,
+          sessionStatus: sessionForConvergence.status,
+          toMode: handoff.toMode,
         });
-        await this.dispatchNative(record, executionId, record.model);
-        stage = stage === 'complete' ? 'dispatch-native' : stage;
+        await this.transitionSessionForHandoff(
+          sessionForConvergence,
+          handoff.toMode,
+          executionId,
+        );
+        stage = stage === 'complete' ? 'session-convergence' : stage;
       }
-    }
 
-    // Crash window #3 (PR #46 review #2 round 2): the session has NOT
-    // converged. A crash AFTER the record mutation (transitionMode) but
-    // BEFORE the session transition leaves the logical execution with
-    // mismatched record/session state — record.mode === toMode but the
-    // session is still in its pre-handoff state (e.g. `running` for a
-    // native→external handoff that should have been `interrupted`, or
-    // `interrupted` for an external→native handoff that should have been
-    // `running`). The complete-check below would otherwise discharge the
-    // obligation + leave the session mismatched INDEFINITELY. Re-resolve
-    // the session + re-attempt the transition when it has not converged.
-    // The obligation stays pending until the session converges (the
-    // complete-check now includes session convergence — see
-    // {@link handoffComplete}).
-    const sessionForConvergence = await this.deps.executionSessionService.getSessionForExecution(
-      executionId,
-    );
-    if (sessionForConvergence && !this.sessionConverged(sessionForConvergence, record, handoff)) {
-      this.deps.logger.info('cross-mode-handoff.reconcile.re-session', {
-        executionId,
-        handoffId: handoff.id,
-        sessionStatus: sessionForConvergence.status,
-        toMode: handoff.toMode,
-      });
-      await this.transitionSessionForHandoff(
-        sessionForConvergence,
-        handoff.toMode,
-        executionId,
-      );
-      stage = stage === 'complete' ? 'session-convergence' : stage;
+      // PR #46 review #2 (+ round 2): complete — discharge the durable
+      // obligation. The handoff is complete when: record.mode === toMode +
+      // the dispatch outcome is present + the session has converged. A
+      // complete handoff discharges (the boot-sweep work list drains; a
+      // repeated recovery is a no-op). An incomplete handoff leaves the
+      // obligation pending for the next pass.
+      const complete = await this.handoffComplete(record, handoff);
+      if (complete) {
+        await this.deps.crossModeHandoffRepository.dischargeHandoffObligation(handoff.id);
+        return { executionId, reconciled: false, stage: 'complete' };
+      }
+      return { executionId, reconciled: true, stage };
+    } finally {
+      // PR #46 round 4: release the claim (success OR failure). On success
+      // the obligation is discharged (the release's `discharged_at IS NULL`
+      // guard makes it a no-op — not an error). On failure the obligation
+      // stays pending + the claim is released so the next sweep can reclaim
+      // immediately. A crash that skips this finally leaves the lease to
+      // auto-expire (the boot sweep reclaims after `claimLeaseMs`).
+      await this.releaseClaimSafely(handoff.id, CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER);
     }
-
-    // PR #46 review #2 (+ round 2): complete — discharge the durable
-    // obligation. After a re-mutate+re-dispatch OR a re-dispatch OR a
-    // session-convergence re-attempt, fall through to the complete-check.
-    // The handoff is complete when: record.mode === toMode + the dispatch
-    // outcome is present + the session has converged (Finding #2 round 2).
-    // A complete handoff discharges (the boot-sweep work list drains; a
-    // repeated recovery is a no-op). An incomplete handoff leaves the
-    // obligation pending for the next pass — INCLUDING the case where the
-    // session has not converged (a transient session-transition failure is
-    // re-attempted on the next relay job redelivery or boot sweep).
-    const complete = await this.handoffComplete(record, handoff);
-    if (complete) {
-      await this.deps.crossModeHandoffRepository.dischargeHandoffObligation(handoff.id);
-      return { executionId, reconciled: false, stage: 'complete' };
-    }
-    return { executionId, reconciled: true, stage };
   }
 
   /**
@@ -1021,11 +1137,15 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
   }
 
   /**
-   * Reserve: INSERT the append-only handoff log row with the previous_*
-   * snapshot. Catch the 23505 ('cross-mode-handoff-already-exists') -> the
-   * service re-resolves convergence vs reject.
+   * PR #46 round 4: Reserve + claim in ONE call. INSERTs the append-only
+   * handoff log row (previous_* snapshot) AND claims the durable obligation
+   * atomically (via {@link CrossModeHandoffRepository.createHandoffAndClaim}).
+   * Catches the 23505 ('cross-mode-handoff-already-exists') → the service
+   * re-resolves convergence vs reject. On the idempotency-convergence path,
+   * returns `{ handoff: existing, claimed: false }` (the caller did NOT win
+   * the reserve — the original owner holds the claim or has discharged).
    */
-  private async reserve(args: {
+  private async reserveAndClaim(args: {
     record: ExecutionRecord;
     executionId: string;
     input: CrossModeHandoffInput;
@@ -1034,7 +1154,7 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     idempotencyKey: string;
     policySummary: string;
     actor: { userId: string; source: string };
-  }): Promise<CrossModeHandoffRecord> {
+  }): Promise<{ handoff: CrossModeHandoffRecord; claimed: boolean }> {
     const createInput: CreateCrossModeHandoffInput = {
       executionRecordId: args.record.id,
       fromMode: args.record.mode,
@@ -1052,7 +1172,11 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       idempotencyKey: args.idempotencyKey,
     };
     try {
-      return await this.deps.crossModeHandoffRepository.createHandoff(createInput);
+      return await this.deps.crossModeHandoffRepository.createHandoffAndClaim(
+        createInput,
+        CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
+        this.claimLeaseMs,
+      );
     } catch (err) {
       if (
         err instanceof CrossModeHandoffError &&
@@ -1064,12 +1188,17 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
             args.idempotencyKey,
           );
         if (existing) {
+          // Idempotency convergence — the caller did NOT win the reserve
+          // (the original owner's transaction committed first). Return the
+          // existing handoff + claimed:false (the caller does NOT own the
+          // claim; the original owner will complete OR the lease will expire
+          // + the boot sweep will reclaim).
           this.deps.logger.info('cross-mode-handoff.reserve.convergent', {
             executionId: args.executionId,
             idempotencyKey: args.idempotencyKey,
             handoffId: existing.id,
           });
-          return existing;
+          return { handoff: existing, claimed: false };
         }
         const existingForExecution =
           await this.deps.crossModeHandoffRepository.findByExecutionId(args.executionId);
@@ -1081,6 +1210,31 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
         }
       }
       throw err;
+    }
+  }
+
+  /**
+   * PR #46 round 4: release the claim in a non-throwing wrapper. Called in
+   * a `finally` block (success OR failure of the critical section). A
+   * failure here is logged + swallowed — the lease auto-expires as the
+   * crash backstop (the boot sweep reclaims after `claimLeaseMs`). A no-op
+   * return (false) when the obligation was discharged or the claim already
+   * expired/released is NOT logged (it is the expected post-discharge
+   * state).
+   */
+  private async releaseClaimSafely(handoffId: string, owner: string): Promise<void> {
+    try {
+      await this.deps.crossModeHandoffRepository.releaseHandoffObligationClaim(
+        handoffId,
+        owner,
+      );
+    } catch (err) {
+      this.deps.logger.error('cross-mode-handoff.claim-release-failed', {
+        handoffId,
+        owner,
+        error: (err as Error).message,
+      });
+      // The lease will auto-expire; the boot sweep reclaims.
     }
   }
 
