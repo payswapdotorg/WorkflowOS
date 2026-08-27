@@ -483,7 +483,20 @@ describe('PR #35 fix #4 — async trial lifecycle', () => {
 
     // AFTER the verified outcome, metrics exist + collectedAt is after the
     // outcome timestamp.
-    const metricsAfter = await benchmarkService.getTrialMetrics(trialId!);
+    //
+    // DE-FLAKE (the CI-load race): the terminal CLAIM sets the trial status
+    // 'completed' BEFORE the same job collects + upserts metrics
+    // (claimTerminal → collect → upsertMetrics are sequential inside
+    // finalizeTrial). Polling only the status can observe 'completed' in
+    // that sub-millisecond-to-milliseconds window and read the metrics row
+    // before it exists. Wait for the METRICS ROW (the actual downstream
+    // effect under assertion) instead of asserting it immediately — the
+    // same de-flake class as the PR #47 round-11 waitFor budget fix.
+    let metricsAfter: Awaited<ReturnType<typeof benchmarkService.getTrialMetrics>> = null;
+    await waitFor(async () => {
+      metricsAfter = await benchmarkService.getTrialMetrics(trialId!);
+      return metricsAfter !== null;
+    }, { timeoutMs: 10_000, intervalMs: 10 });
     expect(metricsAfter).not.toBeNull();
     expect(metricsAfter!.collectedAt.getTime()).toBeGreaterThanOrEqual(beforeOutcomeAt.getTime());
   });
