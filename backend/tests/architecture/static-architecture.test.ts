@@ -15033,3 +15033,337 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(service).toMatch(/PROOF 11 —/);
   });
 });
+
+// ============================================================================
+// WORK-044 — Adaptive Execution Router (§33.3/§33.4)
+//
+// The routing domain lives at src/execution-routing/ (application-layer
+// orchestrator OUTSIDE src/modules/, mirroring the §34 benchmark +
+// execution-policy pattern). It is the SELECTION layer STRICTLY BELOW the
+// WORK-043 eligibility boundary:
+//
+//   WORK-043 eligibility → eligible candidates only → WORK-044 ranking
+//   → recommend / select
+//
+// The router CONSUMES the WORK-043 contract (the execution-policy public
+// barrel), NEVER re-evaluates a hard constraint, NEVER mutates workflow
+// state, NEVER dispatches, NEVER equalizes provider capability, and NEVER
+// applies an intrinsic native/external bias. These checks prove the
+// boundary is intact.
+// ============================================================================
+
+describe('WORK-044 invariants — Adaptive Execution Router (§33.3/§33.4)', () => {
+  const ROUTING_DIR = join(BACKEND_ROOT, 'src', 'execution-routing');
+  const ROUTING_INTERNAL = join(ROUTING_DIR, 'internal');
+  const ROUTING_TYPES = join(ROUTING_DIR, 'types.ts');
+  const ROUTING_BARREL = join(ROUTING_DIR, 'index.ts');
+  const RANKING = join(ROUTING_INTERNAL, 'execution-ranking.ts');
+  const ROUTER = join(ROUTING_INTERNAL, 'adaptive-execution-router.ts');
+  const ROUTING_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'execution-routing.route.ts');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const SERVER_TS = join(BACKEND_ROOT, 'src', 'api', 'server.ts');
+  const INDEX_TS = join(BACKEND_ROOT, 'src', 'index.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readRoutingFiles(): { path: string; src: string }[] {
+    if (!existsSync(ROUTING_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(ROUTING_DIR);
+    return out;
+  }
+
+  // --- (a) the routing domain exists + is NOT a frozen module --------------
+
+  it('the execution-routing domain exists at src/execution-routing/ (index.ts + types.ts + internal/) and is NOT a frozen module', () => {
+    expect(existsSync(ROUTING_DIR), 'src/execution-routing/ must exist').toBe(true);
+    expect(existsSync(ROUTING_BARREL), 'src/execution-routing/index.ts must exist').toBe(true);
+    expect(existsSync(ROUTING_TYPES), 'src/execution-routing/types.ts must exist').toBe(true);
+    expect(existsSync(ROUTING_INTERNAL), 'src/execution-routing/internal/ must exist').toBe(true);
+    expect(existsSync(RANKING), 'the ranking function file must exist').toBe(true);
+    expect(existsSync(ROUTER), 'the router service file must exist').toBe(true);
+    expect(existsSync(join(MODULES_DIR, 'execution-routing'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'execution-routing must not be a frozen module').not.toContain('/execution-routing');
+  });
+
+  // --- (b) eligibility PRECEDES ranking (W044-AC01) -------------------------
+
+  it('eligibility precedes ranking — the router maps ONLY the consumed recommendation\'s eligibleCandidates, and the ranking seam REJECTS an ineligible verdict (fail-closed)', () => {
+    const routerSrc = stripCodeComments(readFileSync(ROUTER, 'utf8'));
+    // The ONE candidate-construction path: the eligible set ONLY.
+    expect(routerSrc, 'the router maps ONLY the eligible candidates').toMatch(
+      /recommendation\.eligibleCandidates\.map\(toRoutingCandidate\)/,
+    );
+    // The ineligible set is surfaced for TRANSPARENCY ONLY (the excluded
+    // picture) — never mapped into the ranking input.
+    expect(routerSrc, 'the excluded set feeds only the explanation').toMatch(
+      /excludedCandidates\.map\(/,
+    );
+    expect(routerSrc).not.toMatch(/excludedCandidates\.map\(toRoutingCandidate/);
+    // Defense in depth: the pure ranking seam itself refuses an ineligible
+    // verdict (a typed error — never scored, never silently skipped).
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    expect(rankingSrc).toMatch(/execution-routing-ineligible-candidate/);
+    expect(rankingSrc).toMatch(/an ineligible candidate can never be ranked/);
+  });
+
+  // --- (c) NO parallel eligibility engine (W044-AC11) -----------------------
+
+  it('NO parallel eligibility engine — the routing domain re-evaluates no hard constraint and declares no eligibility/constraint evaluator', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoutingFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      if (/implements\s+ExecutionEligibilityService/.test(text)) {
+        offenders.push(`${rel}: implements ExecutionEligibilityService`);
+      }
+      if (/\bclass\s+\w*(Eligibility|Constraint)\w*Engine\b/.test(text)) {
+        offenders.push(`${rel}: declares a parallel eligibility/constraint engine class`);
+      }
+      if (/ExecutionConstraintSet/.test(text)) {
+        offenders.push(`${rel}: references ExecutionConstraintSet (constraint sets are the WORK-043 engine\'s input — the router never sees one)`);
+      }
+      for (const family of ['evaluateQuota', 'evaluateRateLimit', 'evaluateSecurity', 'evaluateAgentPolicy', 'evaluateCapability', 'evaluateSubscription', 'evaluatePrivacy', 'evaluateAvailability', 'evaluateProject']) {
+        if (new RegExp(`\\b${family}\\s*\\(`).test(text)) {
+          offenders.push(`${rel}: re-implements the constraint evaluator ${family}`);
+        }
+      }
+      if (/blockingReasons\.push|blocks\.push\(/.test(text)) {
+        offenders.push(`${rel}: constructs eligibility blocking reasons (the WORK-043 engine\'s authority)`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+    // The ONE engine remains the WORK-033/043 service (asserted by the
+    // WORK-043 invariants); the routing domain imports its contract ONLY
+    // through the execution-policy public barrel.
+    const routerSrc = stripCodeComments(readFileSync(ROUTER, 'utf8'));
+    expect(routerSrc).toMatch(/from '\.\.\/\.\.\/execution-policy\/index\.js'/);
+  });
+
+  // --- (d) explicit ranking dimensions; NO hidden provider-specific rule (W044-AC04) ---
+
+  it('the ranking dimensions are EXPLICIT (the five documented dimensions + the documented weights + the bounded preference boost) with NO hidden provider-specific rule', () => {
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    // The five documented dimension components.
+    for (const fn of ['qualityComponent', 'reliabilityComponent', 'costComponent', 'latencyComponent', 'humanInterventionComponent', 'preferenceBoostFor', 'deriveRoutingWeights']) {
+      expect(rankingSrc, `${fn} must exist`).toMatch(new RegExp(`function ${fn}\\(`));
+    }
+    // The documented methodology is a code constant surfaced on every result.
+    expect(rankingSrc).toMatch(/ROUTING_METHODOLOGY/);
+    // NO provider-specific ranking rule: no provider name literals anywhere
+    // in the routing domain's ranking/router logic.
+    const providerLiterals = /['"`](claude|qwen|gpt|openai|anthropic|gemini|copilot|cursor|codex|aider|windsurf)['"`]/i;
+    for (const { path: p, src } of readRoutingFiles()) {
+      expect(stripCodeComments(src), `${relative(BACKEND_ROOT, p)}: no provider-name ranking literal`).not.toMatch(providerLiterals);
+    }
+  });
+
+  // --- (e) native/external PARITY (W044-AC05) -------------------------------
+
+  it('no ranking rule intrinsically prefers native or external — the candidate\'s execution mode enters the score ONLY through the explicit preference boost', () => {
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    // The dimension-component region (quality … humanIntervention) must not
+    // reference the candidate's execution mode at all (the region ends
+    // BEFORE preferenceBoostFor — the one legitimate mode reader).
+    const componentsStart = rankingSrc.indexOf('function qualityComponent');
+    const boostStart = rankingSrc.indexOf('function preferenceBoostFor');
+    const weightsStart = rankingSrc.indexOf('export function deriveRoutingWeights');
+    expect(componentsStart).toBeGreaterThan(-1);
+    expect(boostStart).toBeGreaterThan(componentsStart);
+    expect(weightsStart).toBeGreaterThan(boostStart);
+    const componentsRegion = rankingSrc.slice(componentsStart, boostStart);
+    expect(componentsRegion, 'the evidence components are mode-blind').not.toContain('executionMode');
+    expect(componentsRegion).not.toMatch(/\bmode\b/);
+    // The weight derivation is mode-blind too.
+    const weightsRegion = rankingSrc.slice(weightsStart, rankingSrc.indexOf('function compareRanked'));
+    expect(weightsRegion, 'the weight derivation is mode-blind').not.toContain('executionMode');
+    // The ONLY mode-sensitive scoring term is the bounded preference boost,
+    // driven by the caller's EXPLICIT preferences (the paired parity proofs
+    // live in tests/integration/execution-routing/execution-ranking.unit.test.ts).
+    expect(rankingSrc).toMatch(/PREFERENCE_BOOST = 0\.05/);
+  });
+
+  // --- (f) capability is NOT artificially equalized (W044-AC06) -------------
+
+  it('provider capability is never modified, truncated, or downgraded — the capability profile passes through READ-ONLY and quality uses the RAW observed score', () => {
+    const typesSrc = stripCodeComments(readFileSync(ROUTING_TYPES, 'utf8'));
+    // The input model carries the capability profile as a READ-ONLY
+    // pass-through (W044-AC06) and the routing domain never writes to it.
+    expect(typesSrc).toMatch(/capability: Readonly<Record<string, unknown>>/);
+    for (const { path: p, src } of readRoutingFiles()) {
+      expect(stripCodeComments(src), `${relative(BACKEND_ROOT, p)}: never mutates a capability profile`).not.toMatch(/capability\s*=\s*\{/);
+      expect(stripCodeComments(src), `${relative(BACKEND_ROOT, p)}: never truncates capabilities to equalize`).not.toMatch(/downgrade|truncate|suppress|capabilit.*(reduce|lower|normalize)/i);
+    }
+    // The quality component uses the RAW observed quality (the §13/§21
+    // full-capability principle): scale-to-[0,1] only — never renormalized
+    // across candidates.
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    expect(rankingSrc).toMatch(/observedQuality \/ 100/);
+  });
+
+  // --- (g) NO authority leakage (W044-AC12) ---------------------------------
+
+  it('no authority leakage — the routing domain never mutates workflow state, never authorizes, never verifies, never touches GitHub, never stores credentials, and never dispatches', () => {
+    const offenders: string[] = [];
+    for (const { path: p, src } of readRoutingFiles()) {
+      const text = stripCodeComments(src);
+      const rel = relative(BACKEND_ROOT, p);
+      if (/INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE/i.test(text)) {
+        offenders.push(`${rel}: contains SQL (the routing domain is STATELESS — no persistence of its own)`);
+      }
+      if (/wfos_workflow|wfos_executions|wfos_verification|wfos_reviews|wfos_github/i.test(text)) {
+        offenders.push(`${rel}: references an authoritative table (workflow/execution/verification/review/github state)`);
+      }
+      if (/AuthorizationService|requireProjectAuthorization/.test(text)) {
+        offenders.push(`${rel}: references authorization (the ROUTE layer authorizes; the router never does)`);
+      }
+      if (/@modules\/(github|verification|reviews|workflows)/.test(text)) {
+        offenders.push(`${rel}: imports an authority module (github/verification/reviews/workflows)`);
+      }
+      if (/\bExecutionService\b/.test(text)) {
+        offenders.push(`${rel}: references ExecutionService (the router NEVER dispatches — both modes are advisory)`);
+      }
+      if (/\.submit\(/.test(text)) {
+        offenders.push(`${rel}: calls .submit() (the caller dispatches via the existing authority — never the router)`);
+      }
+      if (/process\.env\.(?!LOG_LEVEL)[A-Z_]*(KEY|SECRET|TOKEN|PASSWORD)/.test(text)) {
+        offenders.push(`${rel}: reads a credential from the environment`);
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  // --- (h) the router consumes the WORK-043 contract (public barrel only) ---
+
+  it('the routing domain consumes the WORK-043 contract through the execution-policy PUBLIC barrel (never its internal/)', () => {
+    for (const { path: p, src } of readRoutingFiles()) {
+      const rel = relative(BACKEND_ROOT, p);
+      expect(src, `${rel}: must not import execution-policy internals`).not.toMatch(
+        /execution-policy\/internal\//,
+      );
+      const importMatch = src.match(/from\s+['"]([^'"]*execution-policy[^'"]*)['"]/);
+      if (importMatch) {
+        // The invariant: every execution-policy import targets the PUBLIC
+        // BARREL (index.js) — a domain-root file uses ../, an internal/
+        // file uses ../../; both are the barrel, and neither is internal/.
+        expect(importMatch[1], `${rel}: execution-policy imports use the public barrel`).toMatch(
+          /^(\.\.\/)+execution-policy\/index\.js$/,
+        );
+      }
+    }
+  });
+
+  // --- (i) the routing path applies preferences ONLY after eligibility (W044-AC07) ---
+
+  it('preferences are applied ONLY after hard eligibility — the routing domain never filters candidates (the eligible set is the ONLY candidate boundary)', () => {
+    const routerSrc = stripCodeComments(readFileSync(ROUTER, 'utf8'));
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    // No candidate filtering anywhere in the selection layer: the eligible
+    // set arrives from WORK-043 complete; the router ranks ALL of it.
+    expect(routerSrc, 'the router maps every eligible candidate (no filtering)').not.toContain('.filter(');
+    expect(rankingSrc, 'the ranking never drops a candidate (validation THROWS; it never filters)').not.toContain('.filter(');
+    // The preferences flow ONLY into the ranking weights + the bounded boost.
+    expect(routerSrc).toMatch(/getUserPreferences/);
+    expect(rankingSrc).toMatch(/deriveRoutingWeights\(preferences\)/);
+  });
+
+  // --- (j) deterministic total order (W044-AC03/AC14) -----------------------
+
+  it('the ranking sort ends with the documented lexicographic identity tie-break (a TOTAL order — independent of input, hash, or database ordering)', () => {
+    const rankingSrc = stripCodeComments(readFileSync(RANKING, 'utf8'));
+    expect(rankingSrc, 'the comparator chain exists').toMatch(/function compareRanked/);
+    // The FINAL fallback in the comparator is the identity comparison.
+    const comparator = rankingSrc.slice(rankingSrc.indexOf('function compareRanked'), rankingSrc.indexOf('function compareIdentity'));
+    expect(comparator, 'the comparator terminates at compareIdentity').toMatch(/return compareIdentity\(/);
+    // The identity comparison is the documented lexicographic triple.
+    const identity = rankingSrc.slice(rankingSrc.indexOf('function compareIdentity'), rankingSrc.indexOf('function identityKey'));
+    expect(identity).toMatch(/a\.provider !== b\.provider/);
+    expect(identity).toMatch(/a\.model !== b\.model/);
+    expect(identity).toMatch(/a\.executionMode !== b\.executionMode/);
+    // The methodology documents the chain.
+    expect(rankingSrc).toMatch(/total score DESC, then quality DESC, reliability DESC, cost DESC, latency DESC, human intervention DESC, then the lexicographic candidate identity/);
+  });
+
+  // --- (k) STATELESS — no parallel ledger, no routing table -----------------
+
+  it('WORK-044 adds NO persistence of its own (stateless router — no routing table, no parallel decision/usage ledger)', () => {
+    // No migration introduces a routing table.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = readFileSync(join(migrationsDir, f), 'utf8').replace(/--[^\n]*$/gm, '');
+      expect(text, `${f}: no routing/selection table`).not.toMatch(/CREATE TABLE[^\n]*(routing|router)/i);
+    }
+    // The routing domain contains no SQL at all (proven by (g)); the audit
+    // trail is the §22 decision persisted by the CONSUMED recommendation.
+    const routerSrc = stripCodeComments(readFileSync(ROUTER, 'utf8'));
+    expect(routerSrc).toMatch(/decisionId/);
+  });
+
+  // --- (l) the API surface is wired: two DISTINCT caller intents -----------
+
+  it('the routing routes are wired (server.ts + index.ts) with the two DISTINCT caller-intent endpoints, and the router is constructed in app.ts', () => {
+    const routeSrc = stripCodeComments(readFileSync(ROUTING_ROUTE, 'utf8'));
+    expect(routeSrc).toMatch(/\/work-items\/:workItemId\/execution\/routing\/recommendation/);
+    expect(routeSrc).toMatch(/\/work-items\/:workItemId\/execution\/routing\/selection/);
+    expect(routeSrc).toMatch(/recommendExecution/);
+    expect(routeSrc).toMatch(/selectExecution/);
+
+    const serverSrc = stripCodeComments(readFileSync(SERVER_TS, 'utf8'));
+    expect(serverSrc).toMatch(/executionRoutingRoutes/);
+
+    const indexSrc = stripCodeComments(readFileSync(INDEX_TS, 'utf8'));
+    expect(indexSrc).toMatch(/executionRouting:\s*\{/);
+    expect(indexSrc).toMatch(/executionRouterService/);
+
+    const appSrc = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(appSrc).toMatch(/new AdaptiveExecutionRouter\(\{/);
+    // The composition root resolves the organization scope SERVER-SIDE (the
+    // AR-043-04 lesson — no caller-supplied org scope anywhere).
+    expect(appSrc).toMatch(/resolveProjectOrganization/);
+  });
+
+  // --- (m) the regression evidence is pinned --------------------------------
+
+  it('the WORK-044 regression matrix is pinned (the ranking unit tests + the PG AC-matrix + the API tests exist and carry their AC markers)', () => {
+    const unit = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-routing', 'execution-ranking.unit.test.ts'),
+      'utf8',
+    );
+    expect(unit).toMatch(/W044-AC03\/AC14/);
+    expect(unit).toMatch(/W044-AC05/);
+    expect(unit).toMatch(/fail-closed validation/);
+
+    const pg = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-routing', 'execution-routing.integration.test.ts'),
+      'utf8',
+    );
+    expect(pg).toMatch(/W044-AC02 — hard constraints cannot be overridden by quality/);
+    expect(pg).toMatch(/W044-AC03 — deterministic ranking/);
+    expect(pg).toMatch(/W044-AC07 — preferences reorder eligible candidates only/);
+    expect(pg).toMatch(/W044-AC08 — recommendation vs automatic selection/);
+    expect(pg).toMatch(/W044-AC09 — explainability/);
+    expect(pg).toMatch(/W044-AC10 — failure-safe behavior/);
+    expect(pg).toMatch(/W044-AC13 — tenant\/project scoping/);
+    expect(pg).toMatch(/W044-AC14 — stable tie-breaking/);
+
+    const api = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-routing', 'execution-routing.api.integration.test.ts'),
+      'utf8',
+    );
+    expect(api).toMatch(/RECOMMENDATION-mode payload/);
+    expect(api).toMatch(/AUTOMATIC-SELECTION-mode payload/);
+    expect(api).toMatch(/CROSS-TENANT API key is 403/);
+  });
+});
