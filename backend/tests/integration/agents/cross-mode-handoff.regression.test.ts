@@ -744,12 +744,25 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   /**
    * Wait for a condition to hold (the WorkerHost's poll loop drains relay
    * jobs asynchronously — mirrors the session-terminal-durability test's
-   * wait pattern). Polls every 20ms up to the deadline (default 8s).
+   * wait pattern). Polls every 20ms up to the deadline (default 20s — see
+   * the CI-load note below).
    */
+  // The convergence poll budget for the WorkerHost / boot-sweep / relay
+  // tests. The historical 8s default was a CI-load flake source: the full
+  // backend suite (85 files, ~1910 tests) shares ONE PostgreSQL on the CI
+  // runner, and the async relay-job drain + the reconcile can exceed 8s
+  // under that load — observed on CI (PR #47 round 11, backend run #191:
+  // R1-#2b failed at exactly the 8090ms deadline with the record still
+  // 'running'; R1-#2a/#2b also flaked on CI in backend runs #178/#184,
+  // BEFORE round 11 existed — the same pre-existing sensitivity class as the
+  // PR #42 test-J flake de-flaked at 50da09e). 20s gives 2.5× headroom over
+  // the observed worst case; the per-test vitest timeouts of the relay /
+  // boot-sweep tests are raised to 40s to match (vitest's default 15s would
+  // otherwise cut the convergence budget off).
   async function waitFor<T>(
     fn: () => Promise<T>,
     check: (v: T) => boolean,
-    deadlineMs = 8000,
+    deadlineMs = 20_000,
   ): Promise<T> {
     const deadline = Date.now() + deadlineMs;
     let last: T;
@@ -1459,7 +1472,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // boot sweep enqueues + reconciles). This is the exact "crash between
     // reserve and the post-mutation enqueue" window the architect prescribed
     // the boot sweep for.
-    it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', async () => {
+    it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', { timeout: 40_000 }, async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // Build a service whose transitionMode crashes the FIRST time (the
       // reserve persists the handoff log row + the obligation before the
@@ -1548,7 +1561,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // R1-#2b: crash window #2 (mutate → process dies before dispatch). The
     // boot sweep + the relay re-dispatch; exactly-one AgentRun (the
     // agentRunRepository.findByExecutionId guard + the UNIQUE fence).
-    it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', async () => {
+    it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', { timeout: 40_000 }, async () => {
       const { executionId, recordId } = await createExternalRecord('handoff_ready');
       const queue = new InMemoryQueue();
       // A service wired with the queue (PR #46 round 3: the post-mutation relay
@@ -1657,7 +1670,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // R1-#2c: the boot sweep is idempotent — a repeated sweep on a COMPLETE
     // handoff discharges (no-op) + enqueues a relay job that no-ops. No
     // duplicate handoff, no duplicate dispatch.
-    it('R1-#2c. the boot sweep is idempotent — a repeated sweep on a COMPLETE handoff is a no-op (no duplicate handoff/dispatch; the obligation stays discharged)', async () => {
+    it('R1-#2c. the boot sweep is idempotent — a repeated sweep on a COMPLETE handoff is a no-op (no duplicate handoff/dispatch; the obligation stays discharged)', { timeout: 40_000 }, async () => {
       const { executionId } = await createNativeRecord('failed');
       const queue = new InMemoryQueue();
       const relayService = new DefaultCrossModeHandoffService({
@@ -1752,7 +1765,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // re-dispatch). This is the round-3 semantics: the live relay does NOT
     // race the caller (the enqueue happens after the caller's synchronous
     // work); a failed enqueue is a liveness gap, NOT a correctness gap.
-    it('R2-#1. a durable enqueue failure PROPAGATES (after the mutation+dispatch) — the handoff fails fast; the record IS mutated + dispatched; the obligation stays pending; the boot sweep reconciles → discharges', async () => {
+    it('R2-#1. a durable enqueue failure PROPAGATES (after the mutation+dispatch) — the handoff fails fast; the record IS mutated + dispatched; the obligation stays pending; the boot sweep reconciles → discharges', { timeout: 40_000 }, async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // A FailingQueue that throws on the FIRST enqueue (simulating a
       // transient enqueue failure — the durability guarantee must NOT
@@ -1884,7 +1897,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // Now the reconcile re-attempts the session transition (crash window #3)
     // + the obligation stays pending until the session converges
     // (handoffComplete includes session convergence).
-    it('R2-#2. crash after record mutate but before session transition → session stays mismatched + obligation PENDING → boot sweep reconciles → session converges → obligation discharges', async () => {
+    it('R2-#2. crash after record mutate but before session transition → session stays mismatched + obligation PENDING → boot sweep reconciles → session converges → obligation discharges', { timeout: 40_000 }, async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // Create a REAL running session (the pre-handoff state — the handoff
       // must interrupt it running → interrupted).
