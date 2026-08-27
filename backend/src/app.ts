@@ -271,7 +271,6 @@ import type { OutboxRelay } from '@platform/index.js';
 // EXTERNAL_UI_CATALOG from @modules/agents).
 import {
   DefaultExecutionPolicyService,
-  DefaultExecutionAdmissionService,
   DefaultExecutionEligibilityService,
   DefaultExecutionRecommendationService,
   DefaultExecutionTaskProfileBuilder,
@@ -280,7 +279,6 @@ import {
 } from './execution-policy/index.js';
 import type {
   ExecutionPolicyService,
-  ExecutionAdmissionPort,
 } from './execution-policy/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
@@ -1346,34 +1344,12 @@ export async function buildApp(
       acceptanceCriterionRepository: acceptanceCriterionRepository!,
       logger,
     });
-    // WORK-043 (final admission): the admission service re-evaluates the
-    // CURRENT hard constraints immediately before provider dispatch. It
-    // depends on the execution-policy service, which is constructed LATER in
-    // buildApp (the WORK-033 block — after the benchmark + agent-provider-
-    // registry sections its evidence/capability sources need). The binding
-    // is therefore LATE-BOUND through the file's established forward-
-    // reference pattern (cf. the benchmarkService closure below): the
-    // executionService holds a delegating port, and the concrete admission
-    // service is assigned in the WORK-033 block. By the time any admission
-    // evaluation fires (a request after buildApp returns), the binding is
-    // present — the same guarantee the benchmarkService closure relies on.
-    let executionAdmissionService: ExecutionAdmissionPort | undefined;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
       auditService,
       logger,
       sessionService: executionSessionService,
-      executionAdmission: {
-        admit: (task) => {
-          if (!executionAdmissionService) {
-            // Unreachable post-buildApp (the WORK-033 block assigns the
-            // binding before buildApp returns); fail closed regardless.
-            return Promise.reject(new Error('execution-admission-not-wired: the admission boundary is assigned in the WORK-033 policy block of buildApp'));
-          }
-          return executionAdmissionService.admit(task);
-        },
-      },
     });
     executionHandoffService = new PolicyGatedExecutionHandoffService({
       inner: new DefaultExecutionHandoffService({
@@ -1582,6 +1558,19 @@ export async function buildApp(
       taskProfileBuilder: executionTaskProfileBuilder,
       agentProviderRegistry: agentProviderRegistryService,
       benchmarkEvidenceProvider: executionEvidenceProvider,
+      // AR-043-04 (PR #48 round 4): the PROJECT→ORGANIZATION authority — the
+      // eligibility seam resolves the authoritative organization scope
+      // SERVER-SIDE from wfos_projects.organization_id (the projects
+      // module's repository IS the authority; no caller-supplied org id
+      // exists anywhere on the evaluation input). Without this wiring the
+      // single-candidate seam fails closed (an unresolvable scope cannot be
+      // declared unconstrained).
+      projectOrganizationResolver: {
+        resolveProjectOrganization: async (projectId: string) => {
+          const project = await projectRepository!.findById(projectId);
+          return project?.organizationId ?? null;
+        },
+      },
       // WORK-043 (§33.3): the project-scoped agent-policy external-domain
       // gate (WORK-037) feeds recommendation-time eligibility for external
       // candidates. Non-interactive by design — the ask→approval interaction
@@ -1595,14 +1584,6 @@ export async function buildApp(
     // delegating port (see the agents block above for the forward
     // reference). The org scope is resolved AUTHORITATIVELY from the
     // Project → Organization relation (never caller-supplied).
-    executionAdmissionService = new DefaultExecutionAdmissionService({
-      executionPolicyService,
-      organizationResolver: {
-        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
-      },
-      logger,
-    });
-
     // --- WORK-042: Cross-Mode Execution Handoff. ---
     // Constructed AFTER the execution-policy service (the native target gate
     // consumes getProjectPolicy().nativeExecutionAllowed) + the agent-provider-
@@ -1645,9 +1626,6 @@ export async function buildApp(
       agentRunRepository: agentRunRepository!,
       agentPolicyEvaluator: agentPolicyEngine,
       executionPolicyService,
-      organizationResolver: {
-        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
-      },
       agentProviderRegistryService,
       executionSessionService,
       agentWorkspaceService,

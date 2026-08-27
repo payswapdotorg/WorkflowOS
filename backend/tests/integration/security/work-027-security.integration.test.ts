@@ -187,7 +187,6 @@ describe('WORK-027 — execution handoff security + tenant isolation', () => {
       auditService,
       logger: stack.db.logger,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
     const executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository: executionRecordRepo,

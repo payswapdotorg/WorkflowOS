@@ -166,6 +166,18 @@ export interface DefaultExecutionPolicyServiceDeps {
   /** §31/§32: org-policy resolver (deferred persistence — §32). */
   readonly orgPolicyResolver?: OrgPolicyResolverLike;
   /**
+   * AR-043-04 (PR #48 round 4): the PROJECT→ORGANIZATION authority — the
+   * server-side source of the eligibility evaluation's organization scope.
+   * The concrete composition-root wiring adapts the projects module's
+   * ProjectRepository (wfos_projects.organization_id is authoritative:
+   * a project belongs to exactly one organization — §7/§8). OPTIONAL in the
+   * deps shape (pre-round-4 constructions keep compiling) but REQUIRED by
+   * evaluateCandidateEligibility — an unwired resolver FAILS CLOSED (the
+   * typed error) because an unresolvable organization scope cannot be
+   * declared unconstrained.
+   */
+  readonly projectOrganizationResolver?: ProjectOrganizationResolverLike;
+  /**
    * WORK-043 (§33.3): the project-scoped agent-policy external-domain gate
    * (WORK-037). Optional — when ABSENT the constraint family is INACTIVE
    * (externalDecision 'allow': this layer has no recommendation-time input,
@@ -218,6 +230,16 @@ export interface BenchmarkEvidenceProviderLike {
   historicalPerformanceForCell(projectId: string, provider: string, mode: 'native' | 'external'): Promise<import('../types.js').HistoricalPerformance>;
   /** §14: aggregate across all eligible cells for a project (for the overall recommendation evidence). */
   aggregateForProject(projectId: string): Promise<import('../types.js').HistoricalPerformance>;
+}
+
+/**
+ * AR-043-04: the PROJECT→ORGANIZATION authority port. The projects module's
+ * ProjectRepository satisfies this structurally (findById →
+ * project.organizationId); the composition root adapts it. Returns NULL when
+ * the project does not resolve (fail-closed upstream).
+ */
+export interface ProjectOrganizationResolverLike {
+  resolveProjectOrganization(projectId: string): Promise<string | null>;
 }
 
 /** §32: resolved org policy (persistence deferred; resolved via composition root). */

@@ -1536,7 +1536,6 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
-      organizationResolver: { getOrganizationId: async () => 'org-test' },
       agentProviderRegistryService: new StubAgentProviderRegistry(),
       executionSessionService: countingSessionService,
       agentWorkspaceService,
@@ -1586,7 +1585,6 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
-      organizationResolver: { getOrganizationId: async () => 'org-test' },
       agentProviderRegistryService: new StubAgentProviderRegistry(),
       // SHARED CountingSessionService — T2's interruptSession calls go through
       // the same counter as T1's (proves exactly-one interrupt regardless of

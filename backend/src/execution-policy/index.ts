@@ -99,15 +99,6 @@ export type {
   ResolvedOrgPolicy,
 } from './internal/execution-policy.types.js';
 
-// WORK-043: the admission CONTRACT types live at the agents module boundary
-// (modules/agents internal/execution.types.ts — the provider-independent
-// execution-side boundary); re-exported here for the execution-policy
-// consumers.
-export type {
-  ExecutionAdmissionResult,
-  ExecutionAdmissionPort,
-} from '@modules/agents/index.js';
-export { DefaultExecutionAdmissionService } from './internal/default-execution-admission-service.js';
 export { DefaultExecutionEligibilityService } from './internal/default-execution-eligibility-service.js';
 export { DefaultExecutionRecommendationService } from './internal/default-execution-recommendation-service.js';
 export { DefaultExecutionTaskProfileBuilder } from './internal/default-execution-task-profile-builder.js';

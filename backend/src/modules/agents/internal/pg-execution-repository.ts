@@ -14,6 +14,7 @@
  * This file is private to /agents (PLAT-AC-02).
  */
 import type { DatabaseClient } from '@platform/index.js';
+import { assertDispatchAdmission } from './dispatch-admission.js';
 import type {
   ExecutionRecord,
   ExecutionRecordRepository,
@@ -97,31 +98,58 @@ function rowToRecord(row: ExecutionRow): ExecutionRecord {
 export class PgExecutionRecordRepository implements ExecutionRecordRepository {
   constructor(private readonly db: DatabaseClient) {}
 
+  /**
+   * WORK-043 (§33.3) / AR-043-05 — THE DIRECT-PATH DISPATCH ADMISSION
+   * BOUNDARY. The execution record's creation IS the dispatch reservation:
+   * the record is created ONLY when the dispatch is admitted. The admission
+   * check ({@link assertDispatchAdmission}) runs INSIDE the creation
+   * transaction, advisory-lock-serialized per project, so two concurrent
+   * direct submissions against a one-unit limit CANNOT both be admitted —
+   * the loser's pressure derivation observes the winner's already-committed
+   * `created` reservation (within the reservation horizon) and the INSERT
+   * never happens (the typed DispatchAdmissionRejectedError propagates →
+   * HTTP 429; NO execution row, NO provider submit, NO audit event).
+   *
+   * A rejection is RETRYABLE state, not an execution failure: the quota
+   * period / rate window rolls or a concurrent dispatch's reservation
+   * completes, and the attempt can be re-submitted.
+   *
+   * No policy row / no active limits → the check is a zero-cost no-op
+   * (pre-WORK-043 deployments are unaffected).
+   */
   async create(input: CreateExecutionRecordInput): Promise<ExecutionRecord> {
-    const result = await this.db.query<ExecutionRow>(
-      `INSERT INTO wfos_executions
-         (execution_id, project_id, work_item_id, work_order_id,
-          implementation_context_id, mode, provider, model, repository_ref,
-          branch, prompt, prompt_digest, benchmark_metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING ${RECORD_COLUMNS}`,
-      [
-        input.executionId,
-        input.projectId,
-        input.workItemId,
-        input.workOrderId,
-        input.implementationContextId,
-        input.mode,
-        input.provider,
-        input.model ?? null,
-        input.repositoryRef ?? null,
-        input.branch ?? null,
-        input.prompt,
-        input.promptDigest,
-        JSON.stringify(input.benchmarkMetadata ?? {}),
-      ],
-    );
-    return rowToRecord(result.rows[0]!);
+    return this.db.transaction(async (tx) => {
+      await assertDispatchAdmission(tx, {
+        projectId: input.projectId,
+        provider: input.provider,
+        // No exclusion: this IS a NEW logical execution — the created row
+        // becomes its own reservation the moment the transaction commits.
+      });
+      const result = await tx.query<ExecutionRow>(
+        `INSERT INTO wfos_executions
+           (execution_id, project_id, work_item_id, work_order_id,
+            implementation_context_id, mode, provider, model, repository_ref,
+            branch, prompt, prompt_digest, benchmark_metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         RETURNING ${RECORD_COLUMNS}`,
+        [
+          input.executionId,
+          input.projectId,
+          input.workItemId,
+          input.workOrderId,
+          input.implementationContextId,
+          input.mode,
+          input.provider,
+          input.model ?? null,
+          input.repositoryRef ?? null,
+          input.branch ?? null,
+          input.prompt,
+          input.promptDigest,
+          JSON.stringify(input.benchmarkMetadata ?? {}),
+        ],
+      );
+      return rowToRecord(result.rows[0]!);
+    });
   }
 
   async findById(id: string): Promise<ExecutionRecord | null> {

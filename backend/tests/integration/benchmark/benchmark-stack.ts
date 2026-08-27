@@ -217,7 +217,6 @@ export async function buildBenchmarkStack(opts: {
     auditService,
     logger: logger as never,
   
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
   const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
     repository: benchmarkRepository,

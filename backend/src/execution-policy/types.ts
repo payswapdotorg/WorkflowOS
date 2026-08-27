@@ -757,14 +757,29 @@ export interface RecommendInput {
  * EXISTING execution's work item — the logical task does not change across
  * a mode handoff; §33.7). `userId` (optional — the handoff actor) resolves
  * the user-scoped subscription/access-profile constraints.
- * `organizationId` is OPTIONAL: absent → the org-scoped families (org
- * policy, the recommendation-time agent-policy gate) are INACTIVE. The
- * cross-mode handoff path (which has no org context at the service layer)
- * relies on its OWN per-execution agent-policy gate — evaluateExternalHandoff
- * — which is STRICTER (approval-aware); no coverage is lost.
+ *
+ * AR-043-04 (PR #48 round 4): the input carries NO organization id. The
+ * organization scope is resolved SERVER-SIDE from the existing project
+ * authority (wfos_projects.organization_id — the project→organization
+ * relationship is authoritative), so the org-scoped families (org policy,
+ * the recommendation-time agent-policy gate) are ACTIVE for EVERY caller —
+ * the WORK-042 handoff destination gate included — and can never be
+ * omitted, spoofed, or declared absent. An unresolvable scope fails closed.
+ *
+ * ADMISSION SEMANTICS (AR-043-05 — FROZEN): the evaluation this input drives
+ * is ADVISORY point-in-time eligibility — a snapshot verdict, NOT an
+ * admission reservation. `eligible=true` does NOT guarantee the subsequent
+ * dispatch will be admitted: the authoritative HARD ADMISSION boundary is
+ * the DISPATCH MUTATION BOUNDARY (the cross-mode handoff's
+ * beginFencedDispatch gate + the direct execution record creation —
+ * src/modules/agents/internal/dispatch-admission.ts), which re-derives the
+ * active quota/rate limits ATOMICALLY (advisory-lock-serialized per project)
+ * against the admission pressure — dispatched artifacts + in-flight
+ * reservations — at the moment of the mutation. Concurrent callers can BOTH
+ * observe `usage=0, limit=1` here and both receive `eligible=true`; the
+ * admission boundary admits EXACTLY ONE of them.
  */
 export interface CandidateEligibilityInput {
-  readonly organizationId: string;
   readonly projectId: string;
   readonly workItemId: string;
   readonly provider: string;

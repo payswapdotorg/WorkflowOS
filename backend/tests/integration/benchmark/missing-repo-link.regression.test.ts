@@ -240,7 +240,6 @@ describe('PR #35 fix v2 / Blocker C — missing repo link fails closed', () => {
     const realExecutionService = new DefaultExecutionService({
       executionRecordRepository, providers: [deterministicNativeProvider, deterministicExternalProvider], auditService, logger: logger as never,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
     countingExecutionService = new CountingExecutionService(realExecutionService);
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({

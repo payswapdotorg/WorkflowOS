@@ -165,7 +165,6 @@ describe('WORK-034 — session-aware execution integration', () => {
       logger: stack.db.logger,
       sessionService,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
   }
 

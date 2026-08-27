@@ -84,6 +84,16 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
       db,
       logger: stack.db.logger,
       repository,
+      // AR-043-04 (round 4): the REAL project→organization authority (the
+      // same adapter the composition root wires — wfos_projects.organization_
+      // id via the projects repository). The single-candidate seam resolves
+      // the organization scope SERVER-SIDE; no caller supplies it.
+      projectOrganizationResolver: {
+        resolveProjectOrganization: async (pid: string) => {
+          const project = await stack.projectRepository.findById(pid);
+          return project?.organizationId ?? null;
+        },
+      },
       eligibilityService: new DefaultExecutionEligibilityService(),
       recommendationService: new DefaultExecutionRecommendationService(),
       taskProfileBuilder: { build: () => Promise.resolve(TASK_PROFILE) },
@@ -990,7 +1000,9 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   describe('evaluateCandidateEligibility — the point-in-time seam', () => {
     it('an eligible destination verdict (no constraints active)', async () => {
       const verdict = await service.evaluateCandidateEligibility({
-        organizationId, projectId, workItemId,
+        // AR-043-04: NO organizationId — the seam resolves the org scope
+        // server-side from the project authority.
+        projectId, workItemId,
         provider: 'fake', model: 'fake-model', executionMode: 'native',
         userId,
       });
@@ -1005,7 +1017,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     it('a quota-exhausted destination verdict (the handoff gate input)', async () => {
       await service.updateProjectPolicy(projectId, { maxExecutionsPerDay: 3 });
       const verdict = await service.evaluateCandidateEligibility({
-        organizationId, projectId, workItemId,
+        projectId, workItemId,
         provider: 'external-coder', model: null, executionMode: 'external',
       });
       expect(verdict.eligibility.eligible).toBe(false);
@@ -1021,7 +1033,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
 
     it('an UNKNOWN provider → the honest configuration_missing verdict (no invented capabilities)', async () => {
       const verdict = await service.evaluateCandidateEligibility({
-        organizationId, projectId, workItemId,
+        projectId, workItemId,
         provider: 'never-configured', model: 'm', executionMode: 'native',
       });
       expect(verdict.eligibility.eligible).toBe(false);
@@ -1038,7 +1050,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         externalSecurityCeiling: 'standard',
       });
       const verdict = await service.evaluateCandidateEligibility({
-        organizationId, projectId, workItemId,
+        projectId, workItemId,
         provider: 'external-coder', model: null, executionMode: 'external',
       });
       expect(verdict.eligibility.eligible).toBe(false);
@@ -1047,6 +1059,226 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         securityClassification: 'standard',
         externalSecurityCeiling: null,
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #48 round 4 — AR-043-03 (the READ-ONLY seam) + AR-043-04 (the
+  // SERVER-SIDE organization scope). Two new projects are provisioned per
+  // test (a policy-LESS project for the read-only proof; a two-org pair for
+  // the scope proof) — no cross-test usage pollution.
+  // -------------------------------------------------------------------------
+  describe('PR #48 round 4 — AR-043-03: the eligibility seam is READ-ONLY', () => {
+    it('an eligibility evaluation against a policy-LESS project creates NO policy row (zero rows, version state untouched) — the in-memory default mirror', async () => {
+      const fresh = await stack.projectRepository.create({
+        organizationId,
+        name: 'W043 R4 Read-Only Project',
+      });
+      // BEFORE: no policy row exists for the fresh project.
+      expect(await repository.getProjectPolicy(fresh.id)).toBeNull();
+
+      // The evaluation runs (a real verdict — not a throw, not a skip)...
+      const verdict = await service.evaluateCandidateEligibility({
+        projectId: fresh.id, workItemId,
+        provider: 'fake', model: 'fake-model', executionMode: 'native',
+        userId,
+      });
+      // ...against the IN-MEMORY default mirror (the exact defaults
+      // insertDefaultProjectPolicy would create — never persisted).
+      expect(verdict.eligibility.eligible).toBe(true);
+      expect(verdict.eligibility.status).toBe('eligible');
+      expect(verdict.policyVersion).toBe(1);
+      expect(verdict.constraints.quota.monthlyMaxExecutions).toBeNull();
+      expect(verdict.constraints.security.projectClassification).toBe('standard');
+
+      // AFTER: the policy authority is UNCHANGED — zero new policy row.
+      expect(await repository.getProjectPolicy(fresh.id)).toBeNull();
+      const rows = await stack.db.client.query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM wfos_execution_policies WHERE project_id = $1`,
+        [fresh.id],
+      );
+      expect(Number(rows.rows[0]!.c)).toBe(0);
+
+      // Repeated evaluations stay read-only (no hidden lazy creation).
+      await service.evaluateCandidateEligibility({
+        projectId: fresh.id, workItemId,
+        provider: 'fake', model: 'fake-model', executionMode: 'native',
+        userId,
+      });
+      expect(await repository.getProjectPolicy(fresh.id)).toBeNull();
+
+      // CONTRAST — the WRITE path still creates the row (the proof can tell
+      // the difference): ensureProjectPolicy is the explicit policy creator.
+      const created = await service.ensureProjectPolicy(organizationId, fresh.id);
+      expect(created.projectId).toBe(fresh.id);
+      expect(await repository.getProjectPolicy(fresh.id)).not.toBeNull();
+    });
+
+    it('an evaluation against a project WITH a policy leaves the row + policyVersion UNTOUCHED (no version bump, no updated_at touch)', async () => {
+      // The main project carries a policy row by now (the recommendation
+      // describe's default insert). Capture the authoritative state.
+      const before = await repository.getProjectPolicy(projectId);
+      expect(before).not.toBeNull();
+      const beforeRow = await stack.db.client.query<{ updated_at: string }>(
+        `SELECT updated_at FROM wfos_execution_policies WHERE project_id = $1`,
+        [projectId],
+      );
+
+      const verdict = await service.evaluateCandidateEligibility({
+        projectId, workItemId,
+        provider: 'fake', model: 'fake-model', executionMode: 'native',
+        userId,
+      });
+      expect(verdict.policyVersion).toBe(before!.policyVersion);
+
+      const after = await repository.getProjectPolicy(projectId);
+      expect(after!.policyVersion).toBe(before!.policyVersion);
+      expect(after!.frozen).toBe(before!.frozen);
+      const afterRow = await stack.db.client.query<{ updated_at: string }>(
+        `SELECT updated_at FROM wfos_execution_policies WHERE project_id = $1`,
+        [projectId],
+      );
+      // The touch trigger never fired — the row was not written at all.
+      expect(new Date(afterRow.rows[0]!.updated_at).getTime()).toBe(
+        new Date(beforeRow.rows[0]!.updated_at).getTime(),
+      );
+    });
+  });
+
+  describe('PR #48 round 4 — AR-043-04: the organization scope is resolved SERVER-SIDE (two-project/org)', () => {
+    /** A second service instance with the ORG-scoped inputs wired. */
+    function buildOrgScopedService(opts: {
+      orgPolicyResolver?: { resolve(organizationId: string): Promise<unknown> };
+      agentPolicyProjectGate?: object;
+    }): DefaultExecutionPolicyService {
+      return new DefaultExecutionPolicyService({
+        db: stack.db.client,
+        logger: stack.db.logger,
+        repository,
+        projectOrganizationResolver: {
+          // The REAL project→organization authority (the app.ts adapter).
+          resolveProjectOrganization: async (pid: string) => {
+            const project = await stack.projectRepository.findById(pid);
+            return project?.organizationId ?? null;
+          },
+        },
+        eligibilityService: new DefaultExecutionEligibilityService(),
+        recommendationService: new DefaultExecutionRecommendationService(),
+        taskProfileBuilder: { build: () => Promise.resolve(TASK_PROFILE) },
+        agentProviderRegistry: {
+          getExecutionProviders: () => Promise.resolve([
+            {
+              name: 'External Provider',
+              provider: 'external-coder',
+              model: 'ext-model',
+              nativeApi: 'not-configured',
+              externalUi: 'available',
+            },
+          ]),
+          isExternalProviderSupported: () => Promise.resolve(true),
+        },
+        benchmarkEvidenceProvider: {
+          historicalPerformanceForCell: () =>
+            Promise.resolve({ sampleSize: 0, sufficient: false, observedQuality: null, ciFirstPassRate: null, verificationFirstPassRate: null, medianCorrectionCycles: null, medianTimeToVerifiedMs: null, humanInterventionCount: null, evidenceCells: [] }),
+          aggregateForProject: () =>
+            Promise.resolve({ sampleSize: 0, sufficient: false, observedQuality: null, ciFirstPassRate: null, verificationFirstPassRate: null, medianCorrectionCycles: null, medianTimeToVerifiedMs: null, humanInterventionCount: null, evidenceCells: [] }),
+        },
+        orgPolicyResolver: opts.orgPolicyResolver as never,
+        agentPolicyProjectGate: opts.agentPolicyProjectGate as never,
+      });
+    }
+
+    it('an ORG-SCOPED policy constraint makes the otherwise-resolved destination INELIGIBLE — the input carries NO organization id (the scope is derived from the project authority)', async () => {
+      const orgA = await stack.organizationRepository.create({ name: 'W043 R4 Org A (constrained)' });
+      const orgB = await stack.organizationRepository.create({ name: 'W043 R4 Org B (unconstrained)' });
+      const projectA = await stack.projectRepository.create({ organizationId: orgA.id, name: 'W043 R4 Project A' });
+      const projectB = await stack.projectRepository.create({ organizationId: orgB.id, name: 'W043 R4 Project B' });
+
+      // The org-policy resolver constrains ONLY Org A: external-coder is not
+      // org-approved there (approved_providers_only excludes it). Org B has
+      // no org policy (empty = unconstrained).
+      const svc = buildOrgScopedService({
+        orgPolicyResolver: {
+          resolve: async (orgId: string) =>
+            orgId === orgA.id
+              ? { allowedProviders: ['some-other-provider'], allowedExecutionModes: ['native', 'external'], externalExecutionAllowed: true, maximumCostCents: null, requiredPrivacyLevel: null }
+              : { allowedProviders: [], allowedExecutionModes: ['native', 'external'], externalExecutionAllowed: true, maximumCostCents: null, requiredPrivacyLevel: null },
+        },
+      });
+
+      // Project A (Org A): the external destination is INELIGIBLE through
+      // the ORG-scoped family — no caller supplied the organization; the
+      // scope came from wfos_projects.organization_id.
+      const verdictA = await svc.evaluateCandidateEligibility({
+        projectId: projectA.id, workItemId,
+        provider: 'external-coder', model: null, executionMode: 'external',
+        userId,
+      });
+      expect(verdictA.eligibility.eligible).toBe(false);
+      expect(verdictA.eligibility.status).toBe('policy_blocked');
+      expect(
+        verdictA.eligibility.blockingReasons.some(
+          (b) => b.category === 'organization' && b.constraint === 'approved_providers_only',
+        ),
+      ).toBe(true);
+
+      // Project B (Org B — same provider, same mode, same input shape): the
+      // destination is ELIGIBLE. The org scope is per-PROJECT authoritative.
+      const verdictB = await svc.evaluateCandidateEligibility({
+        projectId: projectB.id, workItemId,
+        provider: 'external-coder', model: null, executionMode: 'external',
+        userId,
+      });
+      expect(verdictB.eligibility.eligible).toBe(true);
+    });
+
+    it('the ORG-SCOPED agent-policy context is ACTIVE at the seam (an org-scoped deny blocks the external destination)', async () => {
+      const orgA = await stack.organizationRepository.create({ name: 'W043 R4 Org A (agent-policy deny)' });
+      const orgB = await stack.organizationRepository.create({ name: 'W043 R4 Org B (agent-policy allow)' });
+      const projectA = await stack.projectRepository.create({ organizationId: orgA.id, name: 'W043 R4 Project A (agent policy)' });
+      const projectB = await stack.projectRepository.create({ organizationId: orgB.id, name: 'W043 R4 Project B (agent policy)' });
+
+      // The WORK-037 project-scoped external-domain gate — wired in
+      // production (app.ts) to the AgentPolicyEngine. Deny for Org A only.
+      const svc = buildOrgScopedService({
+        agentPolicyProjectGate: {
+          evaluateExternalForProject: async (input: { organizationId: string; projectId: string }) =>
+            input.organizationId === orgA.id
+              ? { decision: 'deny', reason: 'org-scoped agent policy denies external execution', policyVersion: 3, scopeSource: 'organization' }
+              : { decision: 'allow', reason: null, policyVersion: 0, scopeSource: 'platform-default' },
+        },
+      });
+
+      const verdictA = await svc.evaluateCandidateEligibility({
+        projectId: projectA.id, workItemId,
+        provider: 'external-coder', model: null, executionMode: 'external',
+        userId,
+      });
+      expect(verdictA.eligibility.eligible).toBe(false);
+      expect(verdictA.eligibility.status).toBe('agent_policy_blocked');
+      expect(
+        verdictA.eligibility.blockingReasons.some(
+          (b) => b.category === 'agent_policy' && b.constraint === 'external_handoff_denied',
+        ),
+      ).toBe(true);
+
+      const verdictB = await svc.evaluateCandidateEligibility({
+        projectId: projectB.id, workItemId,
+        provider: 'external-coder', model: null, executionMode: 'external',
+        userId,
+      });
+      expect(verdictB.eligibility.eligible).toBe(true);
+      expect(verdictB.constraints.agentPolicy.externalDecision).toBe('allow');
+    });
+
+    it('FAIL-CLOSED: an unresolvable organization scope (an unknown project) rejects the evaluation — the scope cannot be silently declared absent', async () => {
+      await expect(
+        service.evaluateCandidateEligibility({
+          projectId: '00000000-0000-0000-0000-000000000000', workItemId,
+          provider: 'external-coder', model: null, executionMode: 'external',
+          userId,
+        }),
+      ).rejects.toThrow(/execution-policy-organization-scope-unresolvable/);
     });
   });
 });

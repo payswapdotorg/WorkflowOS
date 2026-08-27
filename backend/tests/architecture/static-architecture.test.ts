@@ -931,6 +931,14 @@ describe('WORK-002 invariants — identity/authorization module boundaries', () 
       'CrossModeHandoffError',                  // @modules/agents — the typed domain error
       'CROSS_MODE_HANDOFF_ERROR_CODES',         // @modules/agents — the stable code list
       'CROSS_MODE_HANDOFF_RELAY_JOB_TYPE',      // @modules/agents — the frozen pure-data relay job-type
+      // WORK-043 round 4 (AR-043-05): the dispatch-admission typed error
+      // (the same sanctioned exception + reasoning — a discriminated error
+      // CLASS consumers instanceof-check; it wires nothing, constructs
+      // nothing, holds only (code, message, detail)) + the frozen pure-data
+      // reservation-horizon constant (a number literal — no wiring, no
+      // credentials).
+      'DispatchAdmissionRejectedError',         // @modules/agents — the typed domain error
+      'DISPATCH_RESERVATION_HORIZON_MS',        // @modules/agents — the frozen pure-data horizon constant
     ]);
     const violations: string[] = [];
     for (const name of FROZEN_MODULE_NAMES) {
@@ -14174,10 +14182,13 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     // Fail-closed on a THROWING evaluation + the structured rejection.
     expect(src).toMatch(/handoff-ineligible-destination/);
     expect(src).toMatch(/failing closed/);
-    // WORK-043: the destination gate is mandatory and requires an authoritative
-    // Project → Organization resolution. No `not_evaluated` bypass is permitted.
-    expect(src).toMatch(/evaluateCandidateEligibility\(input:/);
-    expect(src).toMatch(/organizationResolver\.getOrganizationId\(record\.projectId\)/);
+    // PR #48 round 4 (AR-043-04): the destination gate passes NO
+    // organization id — the concrete service resolves the AUTHORITATIVE
+    // organization scope SERVER-SIDE from the project authority (the
+    // seam-side projectOrganizationResolver; see the R4-B invariant). The
+    // port seam stays OPTIONAL (pre-WORK-043 fakes still satisfy it) and
+    // the skip is recorded HONESTLY.
+    expect(src).toMatch(/not_evaluated/);
     expect(src).not.toMatch(/organizationId:\s*null/);
     // The error code is in the stable vocabulary.
     const types = stripCodeComments(readFileSync(HANDOFF_TYPES, 'utf8'));
@@ -14332,5 +14343,197 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(claimLease).toMatch(/idempotent replay preserves original dispatch timestamp/);
     expect(claimLease).toMatch(/never re-stamped/);
     expect(claimLease).toMatch(/never mutated across the whole retried-handoff interleaving/);
+  });
+
+  // =========================================================================
+  // PR #48 round 4 — AR-043-03 (the READ-ONLY seam) + AR-043-04 (the
+  // SERVER-SIDE organization scope) + AR-043-05 (the DISPATCH ADMISSION
+  // BOUNDARY). The three architectural blockers of the round-2 review.
+  // =========================================================================
+
+  // --- AR-043-03: the eligibility seam NEVER persists policy state --------
+
+  it('R4-A. evaluateCandidateEligibility is READ-ONLY — no insertDefaultProjectPolicy call inside the eligibility seam (the write path stays the ONLY policy creator)', () => {
+    const src = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    // The seam's body: from the method signature to the next method.
+    const seamStart = src.indexOf('async evaluateCandidateEligibility(');
+    expect(seamStart).toBeGreaterThan(-1);
+    const seamEnd = src.indexOf('private buildPolicySnapshot', seamStart);
+    expect(seamEnd).toBeGreaterThan(seamStart);
+    const seamBody = src.slice(seamStart, seamEnd);
+    expect(
+      seamBody,
+      'the eligibility seam must not insert policy rows (AR-043-03)',
+    ).not.toMatch(/insertDefaultProjectPolicy/);
+    expect(
+      seamBody,
+      'the missing-policy fallback evaluates against the IN-MEMORY default mirror',
+    ).toMatch(/defaultProjectPolicyRecord/);
+    // The insert remains available ONLY on the write paths (recommend —
+    // the §22 decision flow — + ensureProjectPolicy — the explicit creator).
+    const recommendStart = src.indexOf('async recommend(');
+    const recommendEnd = src.indexOf('async ensureProjectPolicy', recommendStart);
+    const recommendBody = src.slice(recommendStart, recommendEnd);
+    expect(recommendBody).toMatch(/insertDefaultProjectPolicy/);
+    const ensureStart = src.indexOf('async ensureProjectPolicy(');
+    const ensureEnd = src.indexOf('\n  }', ensureStart);
+    expect(src.slice(ensureStart, ensureEnd)).toMatch(/insertDefaultProjectPolicy/);
+  });
+
+  // --- AR-043-04: the organization scope is server-side, never supplied ---
+
+  it('R4-B. CandidateEligibilityInput carries NO organizationId — the org scope is resolved SERVER-SIDE from the project authority and can never be omitted or spoofed', () => {
+    const types = readFileSync(POLICY_TYPES, 'utf8');
+    // The interface body carries no organizationId field.
+    const inputStart = types.indexOf('export interface CandidateEligibilityInput');
+    const inputEnd = types.indexOf('}', inputStart);
+    const inputBody = types.slice(inputStart, inputEnd);
+    expect(
+      inputBody,
+      'AR-043-04: no caller-supplied organization id on the eligibility input',
+    ).not.toMatch(/organizationId/);
+    // The advisory admission-semantics contract is stated on the input's
+    // doc block (the comment window immediately above the interface).
+    const docWindow = types.slice(Math.max(0, inputStart - 1800), inputStart);
+    expect(docWindow).toMatch(/AR-043-04/);
+    expect(docWindow).toMatch(/ADMISSION SEMANTICS/);
+    expect(docWindow).toMatch(/ADVISORY point-in-time eligibility/);
+    expect(docWindow).toMatch(/admits EXACTLY ONE/);
+
+    // The resolver dep exists and the seam resolves through it.
+    const internalTypes = stripCodeComments(
+      readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8'),
+    );
+    expect(internalTypes).toMatch(/projectOrganizationResolver\?: ProjectOrganizationResolverLike/);
+    expect(internalTypes).toMatch(/resolveProjectOrganization\(projectId: string\): Promise<string \| null>/);
+    const service = stripCodeComments(readFileSync(POLICY_SERVICE, 'utf8'));
+    expect(service).toMatch(/resolveOrganizationScope/);
+    expect(service).toMatch(/execution-policy-organization-scope-unresolvable/);
+
+    // The handoff port + call site pass NO organization id.
+    const handoffSvc = stripCodeComments(readFileSync(HANDOFF_SERVICE, 'utf8'));
+    expect(handoffSvc).not.toMatch(/organizationId: null/);
+    const portStart = handoffSvc.indexOf('evaluateCandidateEligibility?(input: {');
+    const portEnd = handoffSvc.indexOf('}): Promise<{', portStart);
+    expect(handoffSvc.slice(portStart, portEnd)).not.toMatch(/organizationId/);
+
+    // The composition root wires the REAL project authority.
+    const app = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(app).toMatch(/projectOrganizationResolver:/);
+    expect(app).toMatch(/resolveProjectOrganization/);
+  });
+
+  // --- AR-043-05: the DISPATCH ADMISSION BOUNDARY -------------------------
+
+  it('R4-C. the dispatch admission boundary exists — ONE seam, crossed by BOTH dispatch mutation boundaries, advisory-lock-serialized, NO parallel usage ledger', () => {
+    const admissionPath = join(MODULES_DIR, 'agents', 'internal', 'dispatch-admission.ts');
+    const admission = readFileSync(admissionPath, 'utf8');
+    const admissionCode = stripCodeComments(admission);
+    // The seam + the serialization + the typed rejection.
+    expect(admissionCode).toMatch(/export async function assertDispatchAdmission/);
+    expect(admissionCode).toMatch(/pg_advisory_xact_lock/);
+    expect(admissionCode).toMatch(/hashtextextended/);
+    expect(admissionCode).toMatch(/class DispatchAdmissionRejectedError/);
+    expect(admissionCode).toMatch(/execution-admission-rejected/);
+    // The pressure model: the AR-043-01/02 artifact arms + the reservation
+    // arms (the OPEN dispatch gate + the horizon-bounded created row).
+    expect(admissionCode).toMatch(/dispatch_state = 'in_flight'/);
+    expect(admissionCode).toMatch(/e\.status = 'created'/);
+    expect(admissionCode).toMatch(/DISPATCH_RESERVATION_HORIZON_MS/);
+    // The exclusion: a dispatch never blocks on itself.
+    expect(admissionCode).toMatch(/excludeExecutionRecordId/);
+    // NO parallel usage ledger: the module declares no table, no column —
+    // it is pure SQL over the EXISTING authoritative structures.
+    expect(admission).not.toMatch(/CREATE TABLE/i);
+    expect(admission).not.toMatch(/ALTER TABLE/i);
+    expect(admission).not.toMatch(/CREATE INDEX/i);
+
+    // DIRECT boundary: the execution record creation crosses the gate.
+    const execRepo = stripCodeComments(
+      readFileSync(join(MODULES_DIR, 'agents', 'internal', 'pg-execution-repository.ts'), 'utf8'),
+    );
+    const createStart = execRepo.indexOf('async create(input: CreateExecutionRecordInput)');
+    const createEnd = execRepo.indexOf('async findById', createStart);
+    const createBody = execRepo.slice(createStart, createEnd);
+    expect(createBody).toMatch(/this\.db\.transaction/);
+    expect(createBody).toMatch(/assertDispatchAdmission/);
+
+    // HANDOFF boundary: beginFencedDispatch crosses the gate INSIDE the
+    // gate-open transaction, BEFORE the gate CAS.
+    const handoffRepo = stripCodeComments(
+      readFileSync(join(MODULES_DIR, 'agents', 'internal', 'pg-cross-mode-handoff-repository.ts'), 'utf8'),
+    );
+    const beginStart = handoffRepo.indexOf('async beginFencedDispatch(');
+    const beginEnd = handoffRepo.indexOf('async completeFencedDispatch', beginStart);
+    const beginBody = handoffRepo.slice(beginStart, beginEnd);
+    expect(beginBody).toMatch(/this\.db\.transaction/);
+    const admissionIdx = beginBody.indexOf('assertDispatchAdmission');
+    const casIdx = beginBody.indexOf('UPDATE wfos_cross_mode_handoff_obligations');
+    expect(admissionIdx).toBeGreaterThan(-1);
+    expect(casIdx).toBeGreaterThan(admissionIdx);
+
+    // The handoff service converts the typed rejection (BOTH arms) + the
+    // reconcile treats it as retryable (obligation PENDING, relay acks).
+    const handoffSvc = stripCodeComments(readFileSync(HANDOFF_SERVICE, 'utf8'));
+    expect(handoffSvc).toMatch(/DispatchAdmissionRejectedError/);
+    expect(handoffSvc).toMatch(/'handoff-admission-rejected'/);
+    expect(handoffSvc).toMatch(/stage: 'admission-rejected'/);
+
+    // The route mappings: BOTH rejections map to HTTP 429 (retryable).
+    const execRoute = stripCodeComments(readFileSync(EXECUTION_ROUTE, 'utf8'));
+    expect(execRoute).toMatch(/case 'handoff-admission-rejected'/);
+    expect(execRoute).toMatch(/status: 429/);
+    const workflowRoute = stripCodeComments(
+      readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8'),
+    );
+    expect(workflowRoute).toMatch(/execution-admission-rejected/);
+    expect(workflowRoute).toMatch(/429/);
+
+    // The error vocabulary includes the new code (the stable-code invariant).
+    const handoffTypes = readFileSync(HANDOFF_TYPES, 'utf8');
+    expect(handoffTypes).toMatch(/'handoff-admission-rejected'/);
+
+    // The barrel exports the typed rejection for route/consumer typing.
+    const barrel = readFileSync(join(MODULES_DIR, 'agents', 'index.ts'), 'utf8');
+    expect(barrel).toMatch(/DispatchAdmissionRejectedError/);
+  });
+
+  it('R4-D. the round-4 regressions exist with the architect\'s required scenario coverage (read-only seam, server-side org scope, the limit=1 admission races)', () => {
+    const integration = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'execution-policy', 'execution-eligibility-engine.integration.test.ts'),
+      'utf8',
+    );
+    // AR-043-03: the read-only proof.
+    expect(integration).toMatch(/AR-043-03: the eligibility seam is READ-ONLY/);
+    expect(integration).toMatch(/creates NO policy row/);
+    // AR-043-04: the two-project/org scope proof.
+    expect(integration).toMatch(/AR-043-04: the organization scope is resolved SERVER-SIDE \(two-project\/org\)/);
+    expect(integration).toMatch(/ORG-SCOPED policy constraint makes the otherwise-resolved destination INELIGIBLE/);
+    expect(integration).toMatch(/ORG-SCOPED agent-policy context is ACTIVE at the seam/);
+    expect(integration).toMatch(/unresolvable organization scope/);
+
+    const admission = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'dispatch-admission.regression.test.ts'),
+      'utf8',
+    );
+    // AR-043-05: the limit=1 two-actor races at BOTH boundaries + the
+    // cross-boundary pressure + the release semantics.
+    expect(admission).toMatch(/R4-B\. two concurrent DIRECT submissions, daily quota = 1/);
+    expect(admission).toMatch(/R4-C\. two concurrent DIRECT submissions to the SAME provider/);
+    expect(admission).toMatch(/R4-F\. two concurrent HANDOFF gate-opens/);
+    expect(admission).toMatch(/R4-D\. an OPEN handoff dispatch gate is admission pressure for the DIRECT path/);
+    expect(admission).toMatch(/R4-E\. a pre-dispatch-rejected execution releases its reservation/);
+    expect(admission).toMatch(/exactly ONE record created/);
+    expect(admission).toMatch(/exactly ONE gate opens/);
+
+    const handoff = readFileSync(
+      join(BACKEND_ROOT, 'tests', 'integration', 'agents', 'cross-mode-handoff.regression.test.ts'),
+      'utf8',
+    );
+    // The service-level end-to-end: advisory ELIGIBLE + the hard boundary
+    // rejects BEFORE the provider call, obligation PENDING.
+    expect(handoff).toMatch(/R4-#1\. advisory gate ELIGIBLE \+ a saturated window/);
+    expect(handoff).toMatch(/handoff-admission-rejected/);
+    expect(handoff).toMatch(/the obligation stays PENDING \(recoverable\)/);
   });
 });

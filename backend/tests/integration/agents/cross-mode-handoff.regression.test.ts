@@ -37,6 +37,7 @@ import { NativeExecutionProvider } from '../../../src/modules/agents/internal/na
 import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
 import { PgExecutionProviderOperationRepository } from '../../../src/modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { PgCrossModeHandoffRepository } from '../../../src/modules/agents/internal/pg-cross-mode-handoff-repository.js';
+import { EXTERNAL_UI_CATALOG } from '../../../src/modules/agents/internal/agent-provider-registry.types.js';
 import { DefaultCrossModeHandoffService } from '../../../src/modules/agents/internal/default-cross-mode-handoff-service.js';
 import type {
   CrossModeAgentProviderRegistryPort,
@@ -574,7 +575,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
-      organizationResolver: { getOrganizationId: async () => 'org-test' },
       agentProviderRegistryService: new StubAgentProviderRegistry(),
       executionSessionService,
       agentWorkspaceService,
@@ -1495,7 +1495,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1698,7 +1697,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1784,7 +1782,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1892,7 +1889,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1992,7 +1988,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2045,7 +2040,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2129,7 +2123,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService: flakySession, // throws on first interrupt
         agentWorkspaceService,
@@ -2184,7 +2177,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService, // the REAL session service (no flaky wrapper)
         agentWorkspaceService,
@@ -2349,7 +2341,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2415,7 +2406,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2815,7 +2805,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new DenyExternalAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2848,7 +2837,6 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(false), // native NOT allowed
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2873,29 +2861,29 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   // WORK-043 (§33.3) — destination RE-ELIGIBILITY (the full constraint engine
   // applied to the RESOLVED destination candidate at handoff time).
   // =========================================================================
+  /** WORK-043 (§33.3) + round 4: build a handoff service with the given
+   * execution-policy port (shared by the destination-gate + admission
+   * describes — the real repositories, the real providers). */
+  function serviceWith(policy: CrossModeExecutionPolicyPort): DefaultCrossModeHandoffService {
+    return new DefaultCrossModeHandoffService({
+      executionRecordRepository: executionRecordRepo,
+      crossModeHandoffRepository: crossModeHandoffRepo,
+      executionTaskService,
+      nativeExecutionProvider,
+      externalExecutionProvider,
+      agentRunRepository: agentRunRepo,
+      agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
+      executionPolicyService: policy,
+      agentProviderRegistryService: new StubAgentProviderRegistry(),
+      executionSessionService,
+      agentWorkspaceService,
+      auditService,
+      logger: stack.db.logger,
+      queue: new InMemoryQueue(),
+    });
+  }
+
   describe('WORK-043 destination re-eligibility', () => {
-    function serviceWith(policy: CrossModeExecutionPolicyPort): DefaultCrossModeHandoffService {
-      return new DefaultCrossModeHandoffService({
-        executionRecordRepository: executionRecordRepo,
-        crossModeHandoffRepository: crossModeHandoffRepo,
-        executionTaskService,
-        nativeExecutionProvider,
-        externalExecutionProvider,
-        agentRunRepository: agentRunRepo,
-        agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
-        executionPolicyService: policy,
-        // WORK-043 remediation: the authoritative org scope for the
-        // destination gate (a fixed test org — the verdict assertions key
-        // on the verdict, not the resolved scope).
-        organizationResolver: { getOrganizationId: async () => 'org-test' },
-        agentProviderRegistryService: new StubAgentProviderRegistry(),
-        executionSessionService,
-        agentWorkspaceService,
-        auditService,
-        logger: stack.db.logger,
-        queue: new InMemoryQueue(),
-      });
-    }
 
     // 43a: an INELIGIBLE external destination (quota-exhausted) rejects the
     // handoff BEFORE the reserve (side-effect-free) with EVERY blocking
@@ -3019,6 +3007,166 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       const dest = parsed.destinationEligibility as { status: string; eligible: boolean };
       expect(dest.status).toBe('eligible');
       expect(dest.eligible).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PR #48 round 4 — AR-043-05: the DISPATCH ADMISSION BOUNDARY at the
+  // cross-mode handoff (the architect's exact two-actor scenario,
+  // end-to-end through the REAL repository boundary).
+  //
+  //   Both actors pass the ADVISORY destination gate (eligible=true — the
+  //   stub port's verdict mirrors what the real engine returns at
+  //   usage=0/limit=N: both eligible). Both proceed to dispatch. The HARD
+  //   ADMISSION boundary — beginFencedDispatch, advisory-lock-serialized
+  //   per project, atomic with the gate-open — admits EXACTLY ONE: the
+  //   loser is 'handoff-admission-rejected' BEFORE the provider submit,
+  //   with its obligation left PENDING (recoverable by the existing
+  //   reconcile once the window frees capacity).
+  //
+  // The rate limit is set to (the project's CURRENT in-window 'zai'
+  // dispatch count + 1) so the race has exactly one unit of remaining
+  // capacity regardless of the earlier tests' dispatch fixtures.
+  // ---------------------------------------------------------------------------
+  describe('WORK-043 round 4 — the DISPATCH ADMISSION BOUNDARY (AR-043-05)', () => {
+    // The architect's scenario, single-actor form, end-to-end through the
+    // REAL repository boundary + the REAL service flow:
+    //
+    //   the ADVISORY destination gate returns eligible=true (usage 0 < the
+    //   limit — the stub port's verdict mirrors what the real engine
+    //   returns at usage=0), the window is ALREADY saturated by another
+    //   execution's dispatch, and the HARD ADMISSION boundary —
+    //   beginFencedDispatch, advisory-lock-serialized per project, atomic
+    //   with the gate-open — rejects the dispatch BEFORE the provider call
+    //   with the typed 'handoff-admission-rejected' error, leaving the
+    //   obligation PENDING for the existing reconcile/retry machinery.
+    //
+    // (The TRUE two-actor race — two independent connections, exactly one
+    // admitted — is proven at BOTH boundaries in
+    // dispatch-admission.regression.test.ts R4-B/R4-C/R4-F, the established
+    // second-client concurrency harness. This test proves the SERVICE
+    // semantics around the boundary: the error mapping, the no-provider-call
+    // guarantee, and the recoverable post-state.)
+    it('R4-#1. advisory gate ELIGIBLE + a saturated window → the dispatch is admission-rejected at the boundary BEFORE the provider call; the obligation stays PENDING (recoverable); no package is written', async () => {
+      // Seed a SATURATED per-provider window: a dispatched external
+      // execution whose package artifact is attributed to the destination
+      // provider (arm 2 of the rate-pressure derivation — the same
+      // authoritative evidence the advisory engine derives usage from).
+      const destinationProvider = EXTERNAL_UI_CATALOG[0]!.provider;
+      // Create the fixtures FIRST (before the policy row exists — the
+      // admission boundary is a no-op without active limits), then
+      // activate the limit, then hand off.
+      const seed = await createExternalRecord('handoff_ready');
+      // (createExternalRecord's package carries provider 'external' —
+      // rewrite it to the destination provider so the window pressure is
+      // attributed correctly.)
+      await stack.db.client.query(
+        `UPDATE wfos_executions
+            SET package_json = jsonb_set(package_json, '{provider}', $2::jsonb)
+          WHERE execution_id = $1`,
+        [seed.executionId, JSON.stringify(destinationProvider)],
+      );
+      const { executionId } = await createNativeRecord('failed');
+      await stack.db.client.query(
+        `INSERT INTO wfos_execution_policies
+           (organization_id, project_id, rate_limit_max_requests, rate_limit_window_seconds)
+         VALUES ($1, $2, 1, 3600)
+         ON CONFLICT (project_id) DO UPDATE SET
+           rate_limit_max_requests = EXCLUDED.rate_limit_max_requests,
+           rate_limit_window_seconds = EXCLUDED.rate_limit_window_seconds`,
+        [orgId, projectId],
+      );
+      try {
+        const policy = new VerdictExecutionPolicyService(true, { kind: 'eligible' });
+        const err = await serviceWith(policy)
+          .handoff(
+            executionId,
+            { targetMode: 'external', idempotencyKey: `r4-1-${executionId}` },
+            { userId: 'test-user', source: 'cmh-test' },
+          )
+          .catch((e) => e);
+
+        // The ADVISORY gate passed (the eligible verdict was recorded on
+        // the composed summary path BEFORE the boundary rejected).
+        expect(policy.calls).toHaveLength(1);
+        expect(policy.calls[0]!.executionMode).toBe('external');
+
+        // ...but the HARD boundary rejected the dispatch.
+        expect(err).toBeInstanceOf(CrossModeHandoffError);
+        expect((err as CrossModeHandoffError).code).toBe('handoff-admission-rejected');
+        expect((err as Error).message).toContain('rate_limit_window_exhausted');
+        expect((err as Error).message).toContain(destinationProvider);
+
+        // NO provider dispatch happened for the rejected handoff: the
+        // record is the mutated recoverable intermediate (mode=external)
+        // with NO package artifact.
+        const after = await executionRecordRepo.findByExecutionId(executionId);
+        expect(after!.mode).toBe('external');
+        expect(after!.packageValue).toBeNull();
+        // No external provider-operation ledger row was ever registered
+        // (the rejection preceded the provider submit entirely).
+        const ops = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations
+            WHERE execution_id = $1`,
+          [executionId],
+        );
+        expect(Number(ops.rows[0]!.c)).toBe(0);
+
+        // The obligation stays PENDING (recoverable): the existing
+        // reconcile re-drives the dispatch once the window frees capacity.
+        const obligation = await stack.db.client.query<{ discharged_at: string | null; dispatch_state: string | null }>(
+          `SELECT o.discharged_at, o.dispatch_state
+             FROM wfos_cross_mode_handoff_obligations o
+             JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+             JOIN wfos_executions e ON e.id = h.execution_record_id
+            WHERE e.execution_id = $1`,
+          [executionId],
+        );
+        expect(obligation.rows).toHaveLength(1);
+        expect(obligation.rows[0]!.discharged_at).toBeNull();
+        // The gate was NEVER opened (the admission check rolled back before
+        // the gate-open — no reservation leaked).
+        expect(obligation.rows[0]!.dispatch_state).toBeNull();
+
+        // The recoverable semantics: a SAME-KEY retry of the handoff
+        // converges onto the EXISTING pending obligation (the idempotent
+        // no-op — the caller retry NEVER re-drives the dispatch; the
+        // durable relay/boot-sweep machinery owns the re-drive). The
+        // obligation stays PENDING, still no package, still no provider
+        // operation — the admission rejection left the obligation in the
+        // exact state the reconcile machinery recovers from.
+        const retry = await serviceWith(new VerdictExecutionPolicyService(true, { kind: 'eligible' }))
+          .handoff(
+            executionId,
+            { targetMode: 'external', idempotencyKey: `r4-1-${executionId}` },
+            { userId: 'test-user', source: 'cmh-test' },
+          );
+        expect(retry.handoff.id).toBeTruthy();
+        const afterRetry = await executionRecordRepo.findByExecutionId(executionId);
+        expect(afterRetry!.packageValue).toBeNull();
+        const obligationAfterRetry = await stack.db.client.query<{ discharged_at: string | null }>(
+          `SELECT o.discharged_at
+             FROM wfos_cross_mode_handoff_obligations o
+             JOIN wfos_execution_mode_handoffs h ON h.id = o.handoff_id
+             JOIN wfos_executions e ON e.id = h.execution_record_id
+            WHERE e.execution_id = $1`,
+          [executionId],
+        );
+        expect(obligationAfterRetry.rows[0]!.discharged_at).toBeNull();
+        const opsAfterRetry = await stack.db.client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wfos_execution_provider_operations
+            WHERE execution_id = $1`,
+          [executionId],
+        );
+        expect(Number(opsAfterRetry.rows[0]!.c)).toBe(0);
+      } finally {
+        // Remove the admission policy row — the rest of the file's tests
+        // run with no active limits (the fast path).
+        await stack.db.client.query(
+          `DELETE FROM wfos_execution_policies WHERE project_id = $1`,
+          [projectId],
+        );
+      }
     });
   });
 });

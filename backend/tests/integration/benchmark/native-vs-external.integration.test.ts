@@ -207,7 +207,6 @@ describe('WORK-032 — native vs external execution benchmark', () => {
       auditService,
       logger: logger as never,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
 
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({

@@ -333,25 +333,52 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
    * still clear EVERY hard constraint family — capability, subscription,
    * privacy, security, quota, rate limits, agent policy, org/project
    * policy). Persists NOTHING (no §22 decision — this is not a
-   * recommendation).
+   * recommendation; PR #48 round 4 / AR-043-03: the seam is READ-ONLY —
+   * a missing policy row is evaluated against the IN-MEMORY default mirror,
+   * NEVER inserted).
+   *
+   * ADMISSION SEMANTICS (PR #48 round 4 / AR-043-05 — FROZEN): this seam is
+   * ADVISORY point-in-time eligibility. `eligible=true` is a snapshot
+   * verdict over the CURRENT constraint set + the CURRENT derived usage —
+   * it is NOT an admission reservation and NOT a dispatch guarantee. The
+   * authoritative HARD ADMISSION boundary is the DISPATCH MUTATION
+   * BOUNDARY (src/modules/agents/internal/dispatch-admission.ts — crossed
+   * atomically by the cross-mode handoff's beginFencedDispatch AND the
+   * direct execution record creation): a dispatch can be admission-rejected
+   * moments after an advisory `eligible=true` verdict (concurrent callers
+   * can both observe `usage=0, limit=1`; the admission boundary admits
+   * exactly one of them). Consumers MUST NOT treat this verdict as an
+   * admission guarantee.
+   *
+   * ORGANIZATION SCOPE (PR #48 round 4 / AR-043-04): the organization scope
+   * is RESOLVED SERVER-SIDE from the existing project authority
+   * (wfos_projects.organization_id — the project→organization relationship
+   * is authoritative). The input carries NO caller-supplied organization
+   * id: every caller — the WORK-042 handoff destination gate included —
+   * evaluates the SAME full constraint engine (org-scoped policy families
+   * + the org-scoped agent-policy context active whenever the project
+   * resolves an organization). An UNRESOLVABLE organization scope (the
+   * project authority lookup fails) FAILS CLOSED (the typed error — a
+   * scope that cannot be resolved cannot be declared unconstrained).
    */
   async evaluateCandidateEligibility(input: CandidateEligibilityInput): Promise<CandidateEligibilityResult> {
     const { projectId, workItemId, provider, model, executionMode } = input;
-    const organizationId = input.organizationId ?? null;
 
-    let policy = await this.deps.repository.getProjectPolicy(projectId);
-    if (!policy) {
-      // No policy row AND no org context (the handoff path for a project
-      // that never evaluated a recommendation): evaluate against the SAME
-      // defaults insertDefaultProjectPolicy would create (the in-memory
-      // mirror of the SQL DEFAULTs — both modes allowed, no quotas, no rate
-      // limits, standard classification). Consistency note: the handoff's
-      // native gate ALREADY fails closed on a missing policy row
-      // (nativeExecutionAllowed ?? false) BEFORE this gate runs, so the
-      // only reachable path here is an EXTERNAL destination — whose
-      // pre-WORK-043 posture (agent policy only) is exactly preserved.
-      policy = defaultProjectPolicyRecord(organizationId, projectId);
-    }
+    // AR-043-04: resolve the authoritative organization scope SERVER-SIDE
+    // from the project authority. No caller-supplied organization id exists
+    // on the input — the scope cannot be omitted or spoofed by any caller.
+    const organizationId = await this.resolveOrganizationScope(projectId);
+
+    // AR-043-03: READ-ONLY policy resolution. A missing policy row evaluates
+    // against the IN-MEMORY default mirror (the exact defaults
+    // insertDefaultProjectPolicy would create — both modes allowed, no
+    // quotas, no rate limits, standard classification). The eligibility
+    // seam NEVER persists policy state: a read/evaluation must not create
+    // missing policy rows or perturb subsequent policy resolution/versioning
+    // (the write path — ensureProjectPolicy / the recommendation path —
+    // remains the ONLY policy creator).
+    const stored = await this.deps.repository.getProjectPolicy(projectId);
+    const policy = stored ?? defaultProjectPolicyRecord(organizationId, projectId);
     const taskProfile = await this.deps.taskProfileBuilder.build(workItemId);
     const policySnapshot = this.buildPolicySnapshot(policy, policy.defaultBenchmarkMode);
 
@@ -374,16 +401,18 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     // The constraint set: the SAME families the recommendation path
     // evaluates (usage derived from the authoritative execution records; the
     // project-scoped agent-policy decision; security classification).
-    // Org-scoped families are INACTIVE without an organizationId (the
-    // handoff path's own per-execution agent-policy gate is STRICTER — no
-    // coverage lost).
-    const orgPolicy = organizationId && this.deps.orgPolicyResolver
+    // AR-043-04: the organization scope is ALWAYS resolved (server-side,
+    // above) — the org-scoped policy families and the org-scoped
+    // agent-policy context are ACTIVE at the handoff destination gate
+    // exactly as they are on the recommendation path. The handoff path's
+    // own per-execution agent-policy gate (evaluateExternalHandoff) remains
+    // the STRICTER runtime enforcement — the engine no longer relies on it
+    // for coverage.
+    const orgPolicy = this.deps.orgPolicyResolver
       ? await this.deps.orgPolicyResolver.resolve(organizationId)
       : null;
     const usage = await this.resolveUsageConstraints(policy, projectId, [provider]);
-    const agentPolicy = organizationId
-      ? await this.resolveAgentPolicyConstraint(organizationId, projectId)
-      : { externalDecision: 'allow' as const, reason: 'organization scope absent (handoff path — the per-execution agent-policy gate enforces the external domain)', policyVersion: null };
+    const agentPolicy = await this.resolveAgentPolicyConstraint(organizationId, projectId);
     // POINT-IN-TIME posture: the subscription family's "unknown subscription
     // → blocked" is the INTERACTIVE recommendation nudge (§5: the user should
     // configure their access profile). At a mode transition the question is
@@ -626,6 +655,39 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         providerWindowUsage,
       },
     };
+  }
+
+  /**
+   * AR-043-04: resolve the AUTHORITATIVE organization scope for a project —
+   * server-side, from the existing project authority
+   * (wfos_projects.organization_id). The evaluation's policy scope can never
+   * be omitted, spoofed, or declared absent by a caller: the input carries
+   * no organization id, and this resolution is the ONLY source.
+   *
+   * FAIL-CLOSED: an unresolvable scope (the project authority lookup fails
+   * or the project does not resolve an organization) throws the typed error
+   * — an organization scope that cannot be resolved cannot be declared
+   * unconstrained (the org-scoped policy families + the org-scoped
+   * agent-policy context would be silently disabled). The handoff
+   * destination gate converts the throw into its fail-closed
+   * 'handoff-ineligible-destination' rejection (an execution referencing a
+   * project that no longer resolves is a data-integrity anomaly — every
+   * wfos_executions.project_id carries an FK to wfos_projects).
+   */
+  private async resolveOrganizationScope(projectId: string): Promise<string> {
+    const resolver = this.deps.projectOrganizationResolver;
+    if (!resolver) {
+      throw new Error(
+        `execution-policy-organization-scope-unresolvable: no project organization authority is wired — the project-scoped eligibility evaluation for project ${projectId} cannot resolve the organization scope (fail-closed)`,
+      );
+    }
+    const organizationId = await resolver.resolveProjectOrganization(projectId);
+    if (!organizationId) {
+      throw new Error(
+        `execution-policy-organization-scope-unresolvable: project ${projectId} does not resolve an organization through the project authority — the org-scoped policy families cannot be evaluated (fail-closed)`,
+      );
+    }
+    return organizationId;
   }
 
   /**

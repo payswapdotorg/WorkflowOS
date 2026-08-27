@@ -48,7 +48,6 @@ import type {
   ExecutionSubmitResult,
   ExecutionTask,
   CreateExecutionRecordInput,
-  ExecutionAdmissionPort,
 } from './execution.types.js';
 import type { ExecutionSessionService } from './execution-session.types.js';
 
@@ -69,7 +68,6 @@ export interface DefaultExecutionServiceDeps {
    * execution — this service remains the single execution authority.
    */
   readonly sessionService?: ExecutionSessionService;
-  readonly executionAdmission: ExecutionAdmissionPort;
 }
 
 export class DefaultExecutionService implements ExecutionService {
@@ -137,14 +135,11 @@ export class DefaultExecutionService implements ExecutionService {
       await this.deps.sessionService.startSession(session.id);
     }
 
-    // 3. Final hard-constraint admission immediately before provider dispatch.
-    const admission = await this.deps.executionAdmission.admit(task);
-    if (!admission.admitted) {
-      const reason = admission.blockingReasons.map((b) => `${b.category}/${b.constraint}: ${b.reason}`).join('; ');
-      throw new Error(`execution-admission-denied: ${admission.reason}${reason ? ` (${reason})` : ''}`);
-    }
-
-    // 3b. Dispatch through the provider boundary.
+    // 3. Dispatch through the provider boundary. (WORK-043 round 4: the
+    // HARD ADMISSION boundary is the execution record's creation — step 1
+    // above — which crosses assertDispatchAdmission INSIDE its transaction,
+    // advisory-lock-serialized per project. A denied admission never creates
+    // the record and never reaches the provider.)
     let submission;
     try {
       submission = await provider.submit(task);

@@ -222,7 +222,6 @@ describe('PR #35 fix #4 — async trial lifecycle', () => {
       auditService,
       logger: logger as never,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,

@@ -133,6 +133,16 @@ function codedErrorBody(err: unknown): { status: number; body: Record<string, un
       // The execution is in a state that does not admit a cross-mode handoff
       // (e.g. native/completed -> external, or external/cancelled -> native).
       return { status: 409, body: { error: 'handoff-ineligible-state', message } };
+    case 'handoff-admission-rejected':
+      // WORK-043 round 4 (AR-043-05 — the dispatch admission boundary): the
+      // dispatch was NOT ADMITTED at the dispatch mutation boundary — an
+      // active project quota/rate limit would be exceeded (the advisory
+      // eligibility verdict passed earlier; the HARD boundary rejected at
+      // beginFencedDispatch, before any provider call). 429: RETRYABLE —
+      // the quota period / rate window rolls or a concurrent dispatch's
+      // reservation completes; the obligation stays PENDING for the
+      // reconcile. The message names the constraint + the usage/limit.
+      return { status: 429, body: { error: 'handoff-admission-rejected', message } };
     case 'handoff-ineligible-destination':
       // WORK-043 (§33.3): the RESOLVED destination candidate failed the full
       // constraint-engine re-eligibility (quota, rate limits, security,

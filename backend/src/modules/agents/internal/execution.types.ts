@@ -315,22 +315,6 @@ export interface ExecutionProvider {
   submit(task: ExecutionTask): Promise<ExecutionSubmission>;
 }
 
-
-/** WORK-043: final hard-constraint admission boundary before provider dispatch. */
-export interface ExecutionAdmissionResult {
-  readonly admitted: boolean;
-  readonly reason: string;
-  readonly policyVersion: number | null;
-  readonly blockingReasons: readonly {
-    readonly category: string;
-    readonly constraint: string;
-    readonly reason: string;
-  }[];
-}
-
-export interface ExecutionAdmissionPort {
-  admit(task: ExecutionTask): Promise<ExecutionAdmissionResult>;
-}
 /**
  * PR #46 round 11 (the DEFINITIVE-REJECT submission error): thrown by a
  * provider's submission seam (`startOperation`) ONLY when the provider

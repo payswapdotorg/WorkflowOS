@@ -184,7 +184,6 @@ describe('WORK-026 — ImplementationContext + start-implementation', () => {
       auditService: new DefaultAuditService(stack.db.client, stack.db.logger),
       logger: stack.db.logger,
     
-      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
     const startImplementationService = new DefaultStartImplementationService({
       executionTaskService,

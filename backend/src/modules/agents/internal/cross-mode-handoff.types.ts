@@ -549,6 +549,13 @@ export class CrossModeHandoffError extends Error {
       // destination under the current constraints; every blocking reason is
       // named in the message.
       | 'handoff-ineligible-destination'
+      // WORK-043 round 4 (AR-043-05 — the dispatch admission boundary): the
+      // dispatch was NOT ADMITTED at the mutation boundary — an active
+      // project quota/rate limit would be exceeded. The advisory
+      // eligibility verdict passed earlier; the HARD boundary rejected at
+      // beginFencedDispatch (before any provider call). The route maps it
+      // to 429 (retryable); the obligation stays PENDING for the reconcile.
+      | 'handoff-admission-rejected'
       // Internal-only: the repository's 23505 surface (the service catches +
       // re-resolves convergence; never reaches the route).
       | 'cross-mode-handoff-already-exists'
@@ -576,6 +583,13 @@ export const CROSS_MODE_HANDOFF_ERROR_CODES = [
   // WORK-043 (§33.3): the destination candidate failed the full
   // constraint-engine re-eligibility (or the evaluation failed — fail-closed).
   'handoff-ineligible-destination',
+  // WORK-043 round 4 (AR-043-05): the dispatch was NOT ADMITTED at the
+  // dispatch mutation boundary — an active project quota/rate limit would
+  // be exceeded by this dispatch (advisory eligibility passed earlier; the
+  // HARD admission boundary rejected at the gate). Retryable: the quota
+  // period / rate window rolls or a concurrent dispatch's reservation
+  // completes; the obligation stays PENDING for the reconcile.
+  'handoff-admission-rejected',
   'cross-mode-handoff-already-exists',
   'cross-mode-handoff-not-external',
 ] as const;
