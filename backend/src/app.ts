@@ -209,6 +209,7 @@ import type { AgentProviderConfigRepository } from '@modules/agents/index.js';
 import { PgExecutionRecordRepository, PgExecutionEventRepository, PgExecutionHandoffRepository, PgExecutionCallbackRepository } from './modules/agents/internal/pg-execution-repository.js';
 import { NativeExecutionProvider } from './modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from './modules/agents/internal/external-execution-provider.js';
+import { PgExecutionProviderOperationRepository } from './modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { DefaultExecutionService } from './modules/agents/internal/execution-service.js';
 import { PgExecutionSessionRepository } from './modules/agents/internal/pg-execution-session-repository.js';
 import { DefaultExecutionSessionService } from './modules/agents/internal/execution-session-service.js';
@@ -1066,6 +1067,13 @@ export async function buildApp(
     // EXISTING AgentGateway (there is no second gateway); EXTERNAL generates
     // a deterministic, secret-free handoff package (no Z.ai/ChatGPT/Claude
     // adapters yet — WORK-028/029).
+    //
+    // PR #46 round 8: the EXTERNAL provider's keyed operation registry is the
+    // DURABLE PROVIDER-OPERATION LEDGER (wfos_execution_provider_operations,
+    // migration 0048) — wired HERE at the composition root so the key →
+    // operation mapping + result survive provider-instance/process loss (the
+    // round-7 in-memory Map died with its instance; a reclaiming actor's
+    // fresh instance MUST resolve the SAME operation).
     executionRecordRepository = new PgExecutionRecordRepository(database);
     const executionEventRepository = new PgExecutionEventRepository(database);
     const executionHandoffRepository = new PgExecutionHandoffRepository(database);
@@ -1074,7 +1082,10 @@ export async function buildApp(
       agentRunRepository: agentRunRepository!,
       logger,
     });
-    const externalExecutionProvider = new ExternalExecutionProvider();
+    const externalExecutionProvider = new ExternalExecutionProvider({
+      operationStore: new PgExecutionProviderOperationRepository(database),
+      logger,
+    });
     // WORK-034: the persistent session lifecycle boundary. The execution
     // service becomes session-aware (exactly one session per execution
     // record, CAS start + turn_started, session outcomes mirror execution

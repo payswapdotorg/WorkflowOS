@@ -44,6 +44,31 @@
  * UNKEYED tasks (the mainline one-shot dispatch) keep the exact pre-round-7
  * behavior.
  *
+ * PR #46 round 8 (the EXPLICIT DEFINITION the round-8 review requires):
+ * `wfos_agent_runs` (migration 0011) IS the DURABLE NATIVE PROVIDER-OPERATION
+ * LEDGER:
+ *   - the run row IS the native provider operation (the run creation + the
+ *     adapter execution);
+ *   - `execution_id TEXT NOT NULL UNIQUE` IS the operation-key uniqueness —
+ *     the keyed native dispatch derives its operation identity from the
+ *     DURABLE EXECUTION IDENTITY, and the UNIQUE constraint is the durable
+ *     key→operation mapping (there is structurally ONE run per execution,
+ *     hence ONE native provider operation per keyed dispatch);
+ *   - the run's status/refs ARE the operation result;
+ *   - process-loss recovery is CONVERGE-ON-THE-EXISTING-RUN — a fresh
+ *     NativeExecutionProvider INSTANCE (any actor, any process) whose keyed
+ *     submit finds the run converges onto it and NEVER reaches the gateway.
+ *     The crash boundary around run creation / adapter invocation is
+ *     therefore closed by the run row's DURABILITY:
+ *       * loss BEFORE the run-creation commits — no run exists; the next
+ *         keyed dispatch creates the ONE run (the crashed actor's INSERT
+ *         rolled back with its transaction);
+ *       * loss AFTER the run-creation commits, before/during the adapter
+ *         invocation — the run EXISTS (durable, unique); every later keyed
+ *         submit converges on it (ZERO further gateway calls / adapter
+ *         invocations; the run row is the operation record whether the
+ *         crashed actor's adapter invocation ever ran).
+ *
  * This file is private to /agents (PLAT-AC-02).
  */
 import type { Logger } from '@platform/logger.js';

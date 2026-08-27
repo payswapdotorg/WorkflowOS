@@ -35,6 +35,7 @@ import {
 } from '../../../src/modules/agents/internal/pg-execution-repository.js';
 import { NativeExecutionProvider } from '../../../src/modules/agents/internal/native-execution-provider.js';
 import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
+import { PgExecutionProviderOperationRepository } from '../../../src/modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { PgCrossModeHandoffRepository } from '../../../src/modules/agents/internal/pg-cross-mode-handoff-repository.js';
 import { DefaultCrossModeHandoffService } from '../../../src/modules/agents/internal/default-cross-mode-handoff-service.js';
 import type {
@@ -387,7 +388,14 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       agentRunRepository: agentRunRepo,
       logger: stack.db.logger,
     });
-    externalExecutionProvider = new ExternalExecutionProvider();
+    // PR #46 round 8: the EXTERNAL provider's keyed operation registry is the
+    // DURABLE PROVIDER-OPERATION LEDGER (wfos_execution_provider_operations,
+    // migration 0048) — the same wiring as the composition root (app.ts). The
+    // keyed handoff dispatches in this suite resolve through the ledger.
+    externalExecutionProvider = new ExternalExecutionProvider({
+      operationStore: new PgExecutionProviderOperationRepository(db),
+      logger: stack.db.logger,
+    });
 
     const promptBuilder = new DefaultExecutionPromptBuilder();
     implementationContextBuilder = new DefaultImplementationContextBuilder(

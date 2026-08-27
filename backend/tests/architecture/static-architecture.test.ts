@@ -11169,16 +11169,17 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0047 (PR #46 round 7 — the cross-mode-handoff
-    // DURABLE DISPATCH IDEMPOTENCY KEY; 0046 is the fenced dispatch gate;
+    // The highest migration is 0048 (PR #46 round 8 — the DURABLE
+    // PROVIDER-OPERATION LEDGER; 0047 is the cross-mode-handoff durable
+    // dispatch idempotency key; 0046 is the fenced dispatch gate;
     // 0045 is the claim_epoch fencing token; 0044 is the claim/lease columns;
     // 0043 is the obligation table itself; 0042 is the WORK-042 cross-mode
-    // handoff log). WORK-040 added none (0042-0047 belong to WORK-042, not
+    // handoff log). WORK-040 added none (0042-0048 belong to WORK-042, not
     // WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-7 cross-mode-handoff durable-dispatch-idempotency-key migration, NOT a planner-owned table)').toMatch(/^0047_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-8 durable provider-operation ledger migration, NOT a planner-owned table)').toMatch(/^0048_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -13089,20 +13090,22 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(src, 'the migration adds dispatch_idempotency_key').toMatch(/ADD COLUMN IF NOT EXISTS dispatch_idempotency_key TEXT/);
   });
 
-  // R7-B (round 7 — the provider contract is DECLARED + implemented at BOTH
-  // provider boundaries): the ExecutionTask carries the dispatch idempotency
-  // key with the keyed-convergence contract; the external provider keys its
-  // operation registry on it; the native provider keys its convergence on the
-  // durable execution identity.
+  // R7-B (round 7, updated by round 8): the keyed provider-dispatch contract
+  // is DECLARED at the task level + implemented at BOTH provider boundaries.
+  // PR #46 round 8: the external provider's registry is the DURABLE
+  // PROVIDER-OPERATION LEDGER (no in-memory Map) — the keyed contract now
+  // routes through the durable store (see R8-B/R8-F).
   it('R7-B. the keyed provider-dispatch contract: the ExecutionTask declares dispatchIdempotencyKey + BOTH providers implement keyed convergence', () => {
     const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
     expect(typesSrc, 'the ExecutionTask declares the dispatch idempotency key').toMatch(/readonly dispatchIdempotencyKey\?: string \| null/);
     expect(typesSrc, 'the ExecutionProvider contract documents the keyed-convergence requirement').toMatch(/MUST CONVERGE to the SAME provider operation/);
-    // The external provider: the keyed operation registry — a same-key submit
-    // returns the REGISTERED operation, never a second generation.
+    // The external provider: the keyed submit resolves through the DURABLE
+    // provider-operation ledger store (round 8) — a keyed task without a
+    // store is a wiring error; an unkeyed (mainline) task bypasses the
+    // registry entirely (the pre-WORK-042 behavior).
     const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
-    expect(externalSrc, 'the external provider keys its registry on the dispatch key').toMatch(/task\.dispatchIdempotencyKey \?\? task\.executionId/);
-    expect(externalSrc, 'the external provider CONVERGES a same-key submit onto the registered operation').toMatch(/this\.operations\.get\(key\)/);
+    expect(externalSrc, 'the external provider keys its registry on the dispatch key').toMatch(/const key = task\.dispatchIdempotencyKey/);
+    expect(externalSrc, 'a keyed submit resolves through the DURABLE store (the ledger row is the operation)').toMatch(/store\.register\(/);
     // The native provider: the keyed convergence on the durable execution
     // identity — a keyed dispatch whose run exists NEVER reaches the gateway.
     const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
@@ -13190,30 +13193,169 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(createIdx, 'the gateway creates the run BEFORE invoking the adapter (the adapter only runs for the ONE create-winner)').toBeLessThan(adapterIdx);
   });
 
-  // R7-F (round 7 — the external convergence does NOT depend on determinism):
-  // the same-key branch returns the REGISTERED operation's stored submission
-  // (the Map entry created by the FIRST generation) — it never re-invokes the
-  // generation for a same-key submit. The architect's round-7 words: "the
-  // cross-mode architecture cannot make its correctness depend on that
-  // implementation detail [determinism]".
+  // R7-F (round 7, rewritten by round 8): the external convergence does NOT
+  // depend on determinism — and (the round-8 correction) it does NOT depend
+  // on provider-instance memory either. A same-key submit returns the
+  // REGISTERED operation's STORED submission (the durable ledger row's
+  // submission_json) — it never re-invokes the generation for a same-key
+  // replay. The architect's round-7 words: "the cross-mode architecture
+  // cannot make its correctness depend on that implementation detail
+  // [determinism]"; the round-8 words: the registry must be durable, never an
+  // in-memory Map (see R8-F).
   it('R7-F. the external provider returns the REGISTERED operation on a same-key submit (convergence independent of provider determinism)', () => {
     const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
     const submitMatch = externalSrc.match(/async submit\(task: ExecutionTask\): Promise<ExecutionSubmission> \{[\s\S]*?\n  \}/);
     expect(submitMatch, 'the external submit is defined').toBeTruthy();
     const submitSrc = submitMatch![0];
-    const getIdx = submitSrc.indexOf('this.operations.get(key)');
-    const returnIdx = submitSrc.indexOf('return registered;');
+    // The keyed branch resolves through the durable ledger store (register →
+    // converge/await/take-over → drive) — there is NO in-memory registry.
+    const registerIdx = submitSrc.indexOf('await store.register(');
     const generateIdx = submitSrc.indexOf('this.generate(task)');
-    expect(getIdx, 'the registry lookup exists').toBeGreaterThan(-1);
-    expect(returnIdx, 'the same-key branch returns the REGISTERED operation').toBeGreaterThan(-1);
-    expect(generateIdx, 'the generation call exists').toBeGreaterThan(-1);
-    // The same-key return precedes the generation call site: a converged
-    // submit NEVER reaches the generation.
-    expect(returnIdx, 'the same-key branch returns BEFORE the generation path (a converged submit never re-generates)').toBeLessThan(generateIdx);
-    // The generation registers its promise BEFORE awaiting, so a concurrent
-    // same-key submit converges onto the in-flight operation.
-    const registerIdx = submitSrc.indexOf('this.operations.set(key, operation)');
-    expect(registerIdx, 'the operation promise is registered').toBeGreaterThan(-1);
-    expect(registerIdx, 'the registration follows the generation start (concurrent same-key submits converge onto the in-flight operation)').toBeGreaterThan(generateIdx);
+    expect(registerIdx, 'the keyed submit registers through the DURABLE store first').toBeGreaterThan(-1);
+    expect(generateIdx, 'the generation call exists (the operation body — only on the OPENED/take-over path)').toBeGreaterThan(-1);
+    // The unkeyed (mainline) branch generates directly — the pre-WORK-042
+    // behavior, no registry.
+    const unkeyedIdx = submitSrc.indexOf('return this.generate(task);');
+    expect(unkeyedIdx, 'the unkeyed mainline branch generates directly (no registry)').toBeGreaterThan(-1);
+    // The replay path returns the STORED submission (the ledger row's
+    // recorded result), never a re-computed lookalike — the convergence is a
+    // CONTRACT, not a determinism accident.
+    expect(externalSrc, 'the convergence returns the STORED submission from the ledger row (the registered operation\'s result)').toMatch(/return record\.submission;/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 8 — the DURABLE PROVIDER-OPERATION LEDGER (the round-8
+  // review's blocking correction). The round-7 registry was an in-memory
+  // Map inside the ExternalExecutionProvider: convergence existed only for
+  // the lifetime of that provider instance, so a process loss between
+  // submit(K) and the outcome left nothing durable remembering that K
+  // already owned an operation — a fresh instance's submit(K) started a
+  // SECOND provider operation. The round-8 correction implements the
+  // architect's acceptable architecture:
+  //
+  //     stable dispatch key
+  //            ↓
+  //     durable provider-operation ledger
+  //            ↓
+  //     PENDING / COMPLETED / FAILED + provider operation/result
+  //            ↓
+  //     same key always resolves to the same operation
+  // -----------------------------------------------------------------------
+
+  const CROSS_MODE_MIGRATION_0048 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0048_execution_provider_operation_ledger.sql',
+  );
+  const R8_OPERATION_REPO = join(
+    AGENTS_INTERNAL, 'pg-execution-provider-operation-repository.ts',
+  );
+
+  // R8-A (round 8 — migration 0048): the durable provider-operation ledger
+  // table — idempotency_key is the PRIMARY KEY (ONE row per key — the ROW is
+  // the operation; there is structurally no second operation record), the
+  // state CHECK is the PENDING/COMPLETED/FAILED lifecycle, and
+  // submission_json is the stored operation/result.
+  it('R8-A. migration 0048 exists — the durable provider-operation ledger (PRIMARY KEY idempotency_key + PENDING/COMPLETED/FAILED CHECK + the stored result)', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0048), '0048_execution_provider_operation_ledger.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0048, 'utf8');
+    expect(src, 'the ledger table is created').toMatch(/CREATE TABLE IF NOT EXISTS wfos_execution_provider_operations/);
+    expect(src, 'the idempotency key is the PRIMARY KEY (ONE row per key — the ROW is the operation)').toMatch(/idempotency_key\s+TEXT PRIMARY KEY/);
+    expect(src, 'the state lifecycle is PENDING / COMPLETED / FAILED').toMatch(/CHECK \(state IN \('pending', 'completed', 'failed'\)\)/);
+    expect(src, 'the operation/result is stored (submission_json)').toMatch(/submission_json\s+JSONB/);
+    expect(src, 'the failure is stored (error_message)').toMatch(/error_message\s+TEXT/);
+    // The native arm's EXPLICIT DEFINITION is declared in the migration
+    // header (the run table IS the durable native ledger).
+    expect(src, 'the native durable provider-operation ledger (wfos_agent_runs) is explicitly defined').toMatch(/durable NATIVE provider-operation ledger is wfos_agent_runs/);
+  });
+
+  // R8-B (round 8): the ExternalExecutionProvider has NO in-memory operation
+  // registry — the keyed registry is the DURABLE LEDGER (the round-8 review
+  // explicitly forbade promoting the Map to a global/static cache: "the
+  // idempotency boundary must be durable").
+  it('R8-B. the external provider has NO in-memory operation registry — the keyed registry is the durable ledger store', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    expect(
+      externalSrc,
+      'NO in-memory operation Map (the round-7 registry died with its instance)',
+    ).not.toMatch(/new Map<[^>]*Promise<ExecutionSubmission>/);
+    expect(
+      externalSrc,
+      'no private operations field at all',
+    ).not.toMatch(/private readonly operations/);
+    expect(externalSrc, 'the durable ledger store is a constructor dependency').toMatch(/readonly operationStore\?: ExecutionProviderOperationStore/);
+    expect(externalSrc, 'a keyed submit WITHOUT a store fails loudly (a wiring error)').toMatch(/external-execution-operation-store-required/);
+    expect(externalSrc, 'the store dependency is imported from the durable-ledger repository module').toMatch(/pg-execution-provider-operation-repository\.js/);
+  });
+
+  // R8-C (round 8): the composition root (app.ts) wires the
+  // ExternalExecutionProvider with the durable ledger store — the production
+  // wiring can never fall into the store-less (keyed-submit-rejected) arm.
+  it('R8-C. app.ts wires the ExternalExecutionProvider with the durable provider-operation ledger store', () => {
+    const appSrc = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(appSrc, 'app.ts imports the durable ledger repository').toMatch(/PgExecutionProviderOperationRepository/);
+    expect(appSrc, 'app.ts constructs the ExternalExecutionProvider WITH the durable store').toMatch(/new ExternalExecutionProvider\(\{\s*operationStore: new PgExecutionProviderOperationRepository\(database\),/);
+  });
+
+  // R8-D (round 8): the ledger state machine is CAS-only (single conditional
+  // statements — no read-check-write): register opens-or-re-arms exactly one
+  // row, the completion is a single resolution CAS whose loser converges to
+  // the winner, and the failure is the symmetric CAS.
+  it('R8-D. the durable ledger state machine — open-or-re-arm register + the single resolution CAS + the symmetric failure CAS', () => {
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    // register: the FRESH open is an INSERT ... ON CONFLICT DO NOTHING.
+    expect(repoSrc, 'the fresh open is INSERT ... ON CONFLICT DO NOTHING (ONE row per key)').toMatch(/ON CONFLICT \(idempotency_key\) DO NOTHING/);
+    // register: a TERMINALLY FAILED row is re-armed on the SAME row (the
+    // retry-liveness arm — generation + 1, never a second row).
+    expect(repoSrc, 'the re-arm is a conditional UPDATE on state = failed (the SAME row)').toMatch(/AND state = 'failed'/);
+    expect(repoSrc, 'the re-arm increments the generation (the SAME row is re-driven)').toMatch(/generation = generation \+ 1/);
+    // complete: the single resolution CAS ('pending' → 'completed') —
+    // concurrent drivers and a late dead driver all funnel through it; the
+    // loser replays the winner's stored result.
+    expect(repoSrc, 'the completion is the resolution CAS (pending → completed)').toMatch(/AND state = 'pending'[\s\S]*?state = 'completed'|state = 'completed',[\s\S]*?AND state = 'pending'/);
+    expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$2::jsonb/);
+    // fail: the symmetric CAS (a CAS loss is a benign no-op — the row's
+    // recorded resolution stands).
+    expect(repoSrc, 'the failure is the symmetric resolution CAS').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'/);
+    // takeOver: the process-loss recovery — the recovery drive of the SAME
+    // row (generation + 1, state stays 'pending'); the CAS rejects a row
+    // that resolved in the interim (converge instead of driving).
+    expect(repoSrc, 'the take-over records the recovery drive on the SAME row (generation + 1)').toMatch(/generation = generation \+ 1,[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'/);
+    expect(repoSrc, 'the take-over port is declared (the process-loss recovery contract)').toMatch(/takeOver\(\s*idempotencyKey: string,\s*\): Promise<\{ tookOver: boolean; existing: ProviderOperationRecord \| null \}>/);
+  });
+
+  // R8-E (round 8 — the EXPLICIT native definition the review requires): the
+  // AgentRun table IS the durable native provider-operation ledger — declared
+  // in the provider contract (execution.types.ts) + the native provider, with
+  // the process-loss recovery defined as converge-on-the-existing-run.
+  it('R8-E. the EXPLICIT definition — wfos_agent_runs IS the durable native provider-operation ledger (the contract + the provider declare it)', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the contract defines the durable native provider-operation ledger').toMatch(/the durable native provider-operation ledger is[\s\S]{0,200}wfos_agent_runs/);
+    expect(typesSrc, 'the contract declares the execution_id UNIQUE as the operation-key uniqueness').toMatch(/execution_id TEXT NOT NULL\s*\*?\s*UNIQUE/);
+    const nativeSrc = readFileSync(R7_NATIVE_PROVIDER, 'utf8');
+    expect(nativeSrc, 'the native provider declares the durable ledger definition').toMatch(/IS the DURABLE NATIVE PROVIDER-OPERATION/);
+    expect(nativeSrc, 'the native provider declares the converge-on-the-existing-run process-loss recovery').toMatch(/process-loss recovery is CONVERGE-ON-THE-EXISTING-RUN/);
+  });
+
+  // R8-F (round 8 — the await-then-take-over recovery): a PENDING row whose
+  // driver died is resolved THROUGH THE SAME ROW by the recovering actor —
+  // the await (converge while in flight) followed by the take-over drive
+  // after the resolution window (process loss), with the single resolution
+  // CAS arbitrating concurrent/late drivers. Same key always resolves to the
+  // same operation — across provider instances, processes, and actors.
+  it('R8-F. the await-then-take-over recovery — a pending ledger row is resolved through the SAME row (the await converges; the window-elapsed take-over re-drives the ONE row)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    // The in-flight convergence: a PENDING row is awaited (the original
+    // submitter's liveness is irrelevant — the operation lives in the ledger).
+    expect(externalSrc, 'the PENDING row is awaited (the in-flight convergence)').toMatch(/awaitResolution/);
+    // The process-loss recovery: after the resolution window elapses, the
+    // submitter TAKES OVER the drive of the SAME row (never a second row).
+    expect(externalSrc, 'the take-over (the process-loss recovery drive of the SAME row)').toMatch(/provider-operation-takeover/);
+    // The resolution-CAS loser converges to the winner's stored result (a
+    // dead driver's late completion replays it — it never stores a second).
+    expect(externalSrc, "the CAS loser replays the winner's stored result (the late-driver convergence)").toMatch(/provider-operation-converged-late-driver/);
+    expect(externalSrc, 'a failed drive re-checks the row — a COMPLETED result still resolves the same key').toMatch(/provider-operation-converged-after-failure/);
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    expect(repoSrc, 'the store port declares the durable provider-operation ledger contract').toMatch(/export interface ExecutionProviderOperationStore/);
+    expect(repoSrc, 'the register contract documents the opened/converge semantics').toMatch(/exactly one concurrent re-arm wins/);
   });
 });

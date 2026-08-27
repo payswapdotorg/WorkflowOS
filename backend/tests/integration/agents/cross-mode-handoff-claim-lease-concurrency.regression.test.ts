@@ -90,14 +90,6 @@
  * (migration 0047's dispatch_idempotency_key, recorded atomically with the
  * gate-open + stamped on the submitted task):
  *
- *   R6-#2 (rewritten). The stall-DURING-the-dispatch interleaving now proves
- *      PROVIDER-OPERATION uniqueness: both actors' submits CONVERGE onto the
- *      SAME keyed provider operation (submitCount === 2,
- *      operationsCreated === 1, both submit keys IDENTICAL, the durable
- *      recorded key EQUAL to the provider operation key) — plus the retained
- *      round-6 DB-fence assertions (ONE authoritative outcome write; T1's
- *      late completion DISCARDED).
- *
  *   R6-#3 (updated). T1's resumed native submit now CONVERGES at the
  *      provider pre-check (the run EXISTS — the durable execution identity):
  *      NO gateway call, NO second adapter invocation; exactly ONE AgentRun
@@ -112,6 +104,82 @@
  *      never reaches the gateway) → the obligation discharges → T1's
  *      adapter resolves → T1's completion is FENCED OUT.
  *
+ * PR #46 round 8 (the DURABLE idempotency boundary — the round-8 review's
+ * blocking correction): the round-7 registry was an in-MEMORY Map inside the
+ * ExternalExecutionProvider — convergence existed only for the lifetime of
+ * that particular provider instance, and the round-7 harness SHARED the
+ * provider instance between T1 and T2, so it proved only the Map's
+ * convergence — never the architect's actual requirement:
+ *
+ *     provider instance A
+ *         ↓
+ *     operation K starts
+ *         ↓
+ *     instance A disappears
+ *         ↓
+ *     provider instance B
+ *         ↓
+ *     submit K
+ *         ↓
+ *     SAME operation
+ *
+ * The round-8 correction replaces the Map with the DURABLE PROVIDER-OPERATION
+ * LEDGER (wfos_execution_provider_operations, migration 0048 — the
+ * architect's acceptable architecture: stable dispatch key → durable
+ * provider-operation ledger → PENDING / COMPLETED / FAILED + provider
+ * operation/result → same key always resolves to the same operation), and
+ * this suite is REBUILT for provider-instance separation: T1's and T2's
+ * external providers are now DISTINCT InstrumentedExternalProvider instances
+ * on DISTINCT pg clients (no shared instance, no shared registry — exactly
+ * the round-8 harness requirement), and T2's native provider is a distinct
+ * NativeExecutionProvider on the second client:
+ *
+ *   R6-#2 (rewritten AGAIN by round 8). The stall-DURING-the-dispatch
+ *      interleaving with SEPARATE provider instances: T1's submit OPENED the
+ *      ONE durable ledger row (PENDING — the operation is in flight at T1)
+ *      and stalls INSIDE the operation body → the lease expires → T2 (a
+ *      FRESH provider instance on the SECOND client) reclaims + re-dispatches
+ *      → T2's same-key submit CONVERGES through the DURABLE LEDGER onto the
+ *      in-flight row (it awaits the row's resolution — it does NOT start a
+ *      second drive) → the provider resolves the operation (T1's drive
+ *      completes + its resolution CAS stores the ONE result) → T2's await
+ *      REPLAYS the stored result → T2 commits the ONE authoritative outcome →
+ *      T1's late completion is DISCARDED (fence loss). ONE ledger row, ONE
+ *      drive, ONE result, ONE outcome write.
+ *
+ *   R8-#1 (new — the architect's EXACT round-8 scenario, the external arm):
+ *      provider-instance + PROCESS LOSS. T1's submit OPENED the ONE durable
+ *      ledger row (PENDING) and its process DIES inside the operation body
+ *      (the drive never returns) → the lease expires → T2 (a FRESH provider
+ *      instance on the SECOND client) reclaims + re-dispatches → T2's
+ *      same-key submit finds the PENDING row, its resolution window elapses
+ *      (the dead driver will never resolve it), and it TAKES OVER the drive
+ *      of the SAME row (the recovery drive — generation 2) → the resolution
+ *      CAS stores the ONE result → T2 commits the ONE authoritative outcome →
+ *      a THIRD fresh instance's same-key submit REPLAYS the stored result
+ *      (ZERO further drives) → the DEAD driver's late completion (released at
+ *      the end) hits the resolution CAS → 0 rows → it REPLAYS the winner's
+ *      stored result → its completeFencedDispatch is fenced out. ONE durable
+ *      provider operation (ONE ledger row) for the whole interleaving.
+ *
+ *   R8-#2 (new — the native arm: the EXPLICIT round-8 definition + the
+ *      run-creation crash boundary). wfos_agent_runs (migration 0011,
+ *      execution_id UNIQUE) IS the durable native provider-operation ledger;
+ *      process loss AROUND RUN CREATION / ADAPTER INVOCATION is closed by the
+ *      run row's durability: T1's gateway creates the ONE AgentRun (the
+ *      durable operation record — through the REAL PgAgentRunRepository, the
+ *      exact create DefaultAgentGateway performs) and DIES between the
+ *      run-creation commit and the adapter invocation (ZERO adapter
+ *      invocations ever) → the lease expires → T2 (a FRESH
+ *      NativeExecutionProvider instance on the SECOND client) reclaims → the
+ *      reconcile finds the EXISTING run and CONVERGES (ZERO provider
+ *      operations from T2 — no gateway call, no adapter invocation) → the
+ *      obligation discharges (the run IS the authoritative native outcome).
+ *      A THIRD fresh native instance's keyed submit converges at the
+ *      provider pre-check onto the SAME run (NO gateway call) — the
+ *      convergence authority is the DURABLE RUN ROW, not any provider
+ *      instance's memory.
+ *
  * A fake / single-connection test is INSUFFICIENT for these invariants (the
  * architect's round-4 words): the problem is specifically database
  * transaction serialization, so the regression must use REAL PostgreSQL
@@ -124,6 +192,7 @@ import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stac
 import { PgImplementationContextRepository } from '../../../src/modules/work-items/internal/pg-implementation-context-repository.js';
 import { DefaultAgentGateway, FakeAgentAdapter } from '../../../src/modules/agents/internal/agent-gateway.js';
 import type {
+  AgentGateway,
   AgentProviderAdapter,
   AgentRequest,
   AgentExecutionResult,
@@ -133,7 +202,11 @@ import {
   PgExecutionRecordRepository,
 } from '../../../src/modules/agents/internal/pg-execution-repository.js';
 import { NativeExecutionProvider } from '../../../src/modules/agents/internal/native-execution-provider.js';
-import { ExternalExecutionProvider } from '../../../src/modules/agents/internal/external-execution-provider.js';
+import {
+  ExternalExecutionProvider,
+  type ExternalExecutionProviderOptions,
+} from '../../../src/modules/agents/internal/external-execution-provider.js';
+import { PgExecutionProviderOperationRepository } from '../../../src/modules/agents/internal/pg-execution-provider-operation-repository.js';
 import { PgCrossModeHandoffRepository } from '../../../src/modules/agents/internal/pg-cross-mode-handoff-repository.js';
 import { DefaultCrossModeHandoffService } from '../../../src/modules/agents/internal/default-cross-mode-handoff-service.js';
 import type {
@@ -169,7 +242,6 @@ import {
   newCrossModeHandoffClaimOwner,
 } from '../../../src/modules/agents/internal/cross-mode-handoff.types.js';
 import type {
-  ExecutionProvider,
   ExecutionSubmission,
   ExecutionTask,
 } from '../../../src/modules/agents/internal/execution.types.js';
@@ -300,82 +372,128 @@ class ParkableAgentAdapter implements AgentProviderAdapter {
 }
 
 /**
- * PR #46 round 4: a CountingExternalProvider that wraps the real
- * ExternalExecutionProvider + counts `submit` calls. SHARED between T1 +
- * T2 services so both paths' dispatches are visible through ONE counter
- * (the architect's invariant: ZERO duplicate dispatches — exactly one
- * submit per handoff, regardless of which actor drove it).
+ * PR #46 round 8: an InstrumentedExternalProvider — the REAL
+ * (ledger-backed) ExternalExecutionProvider instrumented at the two provider
+ * boundaries, as a SEPARATE INSTANCE per actor. The round-8 review rejected
+ * the round-7 harness precisely because it SHARED one provider instance (and
+ * therefore the in-memory Map) between T1 and T2 — the registry under test is
+ * now the DURABLE LEDGER, so every actor gets its OWN instance (on its OWN
+ * pg client), and the counters prove the invariants across instances:
  *
- * PR #46 round 6: `parkFirstSubmit` lets a test STALL T1 INSIDE its provider
- * submit (after the fenced dispatch gate was crossed, before the outcome
- * write) — the architect's stall-DURING-the-dispatch interleaving.
+ *   - `submitCount` — the number of submit ATTEMPTS on THIS instance;
+ *   - `generationCount` — the number of operation-body DRIVES on THIS
+ *     instance (the generation is the operation body — a converged submit
+ *     that replays/awaits performs ZERO drives);
+ *   - `submitKeys()` — every attempt's dispatch key;
+ *   - `inFlight` + `parkFirstGeneration` — TRUE once the FIRST drive has
+ *     reached the park point (the ledger row is OPEN + the operation body is
+ *     in flight): the round-8 crash simulations (a stall INSIDE the operation
+ *     body, and a process DEATH inside the operation body — the park gate is
+ *     only released at the end of the test, proving the dead driver's late
+ *     completion converges instead of duplicating).
  *
- * PR #46 round 7 (the provider-operation exactly-once boundary): the double
- * now models the REAL provider contract — the keyed operation registry.
- * A submit registers its provider-side OPERATION under the task's dispatch
- * idempotency key (falling back to the executionId for unkeyed tasks); a
- * SAME-KEY submit CONVERGES onto the REGISTERED operation — it awaits (and
- * returns) the FIRST operation's promise, and NO second operation is
- * created (exactly like the real ExternalExecutionProvider's registry, and
- * like a Stripe-style idempotency key at a real external platform). The
- * `parkFirstSubmit` gate parks the FIRST CREATED OPERATION (at the provider
- * — before the real generation runs), so BOTH the creator's and a
- * convergent same-key submit await the SAME parked provider-side operation:
- * the test resolves the operation at the PROVIDER (the original submitter's
- * liveness is irrelevant — the operation lives at the provider).
- *
- * The counters prove the round-7 invariant at the PROVIDER level:
- *   - `submitCount` — the number of submit ATTEMPTS (both actors' calls);
- *   - `operationsCreated` — the number of provider OPERATIONS started
- *     (unique keys) — THE provider-operation count;
- *   - `operationKeys()` — the operation identities (one key per operation).
+ * The durable-ledger row count (queried directly from
+ * wfos_execution_provider_operations) is THE provider-operation count: ONE
+ * row per key, across ALL instances.
  */
-class CountingExternalProvider implements ExecutionProvider {
-  readonly name = 'external';
-  readonly mode = 'external' as const;
+class InstrumentedExternalProvider extends ExternalExecutionProvider {
   private _submitCount = 0;
-  private _operationsCreated = 0;
+  private _generationCount = 0;
   private readonly _submitKeys: string[] = [];
-  private readonly operations = new Map<string, Promise<ExecutionSubmission>>();
-  private parkGate: Promise<void> | null = null;
-  constructor(private readonly real: ExternalExecutionProvider) {}
-  /** Park the FIRST CREATED provider operation on the supplied gate (rounds 6+7 — the mid-dispatch stall). */
-  parkFirstSubmit(gate: Promise<void>): void {
-    this.parkGate = gate;
+  private readonly parkGate: Promise<void> | undefined;
+  private parked = false;
+  private parkedOnce = false;
+  constructor(
+    options: ExternalExecutionProviderOptions & {
+      parkFirstGeneration?: Promise<void>;
+    } = {},
+  ) {
+    const { parkFirstGeneration, ...providerOptions } = options;
+    super(providerOptions);
+    this.parkGate = parkFirstGeneration;
   }
-  async submit(task: ExecutionTask): Promise<ExecutionSubmission> {
-    const key = task.dispatchIdempotencyKey ?? task.executionId;
-    this._submitCount++;
-    this._submitKeys.push(key);
-    const registered = this.operations.get(key);
-    if (registered) {
-      // Round 7 — CONVERGE: the SAME provider operation (awaited when still
-      // in flight). NO second operation is created.
-      return registered;
-    }
-    this._operationsCreated++;
-    const operation = (async () => {
-      // The operation lives at the PROVIDER: the park gate (when armed)
-      // stalls the OPERATION ITSELF (before the generation), not the
-      // submitter — a convergent same-key submit awaits the same resolution.
-      if (this.parkGate) {
-        const gate = this.parkGate;
-        this.parkGate = null;
-        await gate;
-      }
-      return this.real.submit(task);
-    })();
-    this.operations.set(key, operation);
-    return operation;
-  }
-  /** The number of `submit` calls so far (both actors' attempts). */
+  /** TRUE once the FIRST drive reached the park point (the operation body in flight). */
+  get inFlight(): boolean { return this.parked; }
+  /** The number of `submit` calls on THIS instance (the submit attempts). */
   get submitCount(): number { return this._submitCount; }
-  /** The number of provider OPERATIONS created (unique dispatch keys) — proves exactly-one operation. */
-  get operationsCreated(): number { return this._operationsCreated; }
-  /** The operation identities created so far (one key per operation). */
-  operationKeys(): string[] { return [...this.operations.keys()]; }
-  /** EVERY submit attempt's key, in order — proves both actors submitted under the SAME key. */
+  /** The number of operation-body DRIVES on THIS instance. */
+  get generationCount(): number { return this._generationCount; }
+  /** EVERY submit attempt's key on THIS instance, in order. */
   submitKeys(): string[] { return [...this._submitKeys]; }
+  override async submit(task: ExecutionTask): Promise<ExecutionSubmission> {
+    this._submitCount++;
+    this._submitKeys.push(task.dispatchIdempotencyKey ?? task.executionId);
+    return super.submit(task);
+  }
+  protected override async generate(
+    task: ExecutionTask,
+  ): Promise<ExecutionSubmission> {
+    this._generationCount++;
+    if (this.parkGate && !this.parkedOnce) {
+      this.parkedOnce = true;
+      this.parked = true;
+      await this.parkGate;
+      this.parked = false;
+    }
+    return super.generate(task);
+  }
+}
+
+/**
+ * PR #46 round 8 (R8-#2): a gateway double that reproduces
+ * DefaultAgentGateway.execute's FIRST DURABLE step — the AgentRun creation
+ * through the REAL PgAgentRunRepository with the exact fields the gateway
+ * persists — and then DIES: the gateway call parks on the supplied gate
+ * (released as a rejection at the end of the test). This is the crash window
+ * BETWEEN the run-creation COMMIT and the adapter invocation: the run row
+ * EXISTS (the durable native provider-operation record is OPEN), the adapter
+ * was NEVER invoked, and the gateway never finalizes the run — the deepest
+ * process-loss point around run creation.
+ */
+class CrashAfterRunCreationGateway {
+  private _runCreated = false;
+  constructor(
+    private readonly runRepo: PgAgentRunRepository,
+    private readonly gate: Promise<never>,
+  ) {}
+  /** TRUE once the AgentRun row was created (the durable operation record is open). */
+  get runCreated(): boolean { return this._runCreated; }
+  async execute(request: AgentRequest): Promise<AgentExecutionResult> {
+    // The exact create DefaultAgentGateway performs (agent-gateway.ts) — the
+    // run row IS the durable native provider-operation record.
+    await this.runRepo.create({
+      executionId: request.executionId,
+      workItemId: request.workItemId,
+      workOrderId: request.workOrderId,
+      architectureVersionId: request.architectureVersionId,
+      provider: request.provider,
+      configuration: request.configuration,
+      repositoryRef: request.repositoryRef,
+      branch: request.branch,
+      maxRetries: 3,
+    });
+    this._runCreated = true;
+    // The process DIES here — between the run-creation commit and the adapter
+    // invocation. The rejection (when the test releases the gate) models the
+    // dead process's in-flight gateway call failing on its connection loss.
+    await this.gate;
+    throw new Error('crash-after-run-creation: the gateway process died');
+  }
+}
+
+/**
+ * PR #46 round 8 (R8-#2): a counting gateway wrapper — proves a THIRD fresh
+ * native provider instance's keyed submit NEVER reaches the gateway (it
+ * converges at the provider pre-check onto the durable run row).
+ */
+class CountingGateway {
+  private _executeCount = 0;
+  constructor(private readonly real: AgentGateway) {}
+  get executeCount(): number { return this._executeCount; }
+  async execute(request: AgentRequest): Promise<AgentExecutionResult> {
+    this._executeCount++;
+    return this.real.execute(request);
+  }
 }
 
 /**
@@ -607,7 +725,7 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
   }
 }
 
-describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, + the KEYED provider-dispatch exactly-once boundary (real PostgreSQL two-actor concurrency)', () => {
+describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round 8 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, the KEYED provider-dispatch exactly-once boundary, + the DURABLE provider-operation ledger (real PostgreSQL two-actor concurrency with provider-instance separation)', () => {
   let stack: TestAuthStack;
   let second: { client: DatabaseClient; close: () => Promise<void> } | undefined;
 
@@ -617,7 +735,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
   let contextRepo: PgImplementationContextRepository;
   let executionTaskService: DefaultExecutionTaskService;
   let nativeExecutionProvider: NativeExecutionProvider;
-  let countingExternalProvider: CountingExternalProvider;
+  let externalProviderT1: InstrumentedExternalProvider;
+  let externalProviderT2: InstrumentedExternalProvider;
+  let t2NativeExecutionProvider: NativeExecutionProvider;
   let auditService: DefaultAuditService;
   let sessionRepo: PgExecutionSessionRepository;
   let executionSessionService: DefaultExecutionSessionService;
@@ -657,6 +777,14 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     contextRepo = new PgImplementationContextRepository(db);
     auditService = new DefaultAuditService(db, stack.db.logger);
 
+    // PR #46 round 8: open the SECOND independent pg.Client (T2) EARLY — the
+    // per-actor provider instances below are built on their OWN clients
+    // (provider-instance separation: T1's external provider + T2's external
+    // provider are DISTINCT instances on DISTINCT connections, exactly the
+    // round-8 harness requirement — the round-7 harness shared ONE instance
+    // and therefore only proved its in-memory Map).
+    second = stack.db.createSecondClient ? await stack.db.createSecondClient() : undefined;
+
     // The native execution provider (real NativeExecutionProvider against the
     // deterministic FakeAgentAdapter — the SAME setup the cross-mode-handoff
     // regression test uses). PR #46 round 7: the fakeAgent is hoisted to the
@@ -670,7 +798,32 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
       agentRunRepository: agentRunRepo,
       logger: stack.db.logger,
     });
-    countingExternalProvider = new CountingExternalProvider(new ExternalExecutionProvider());
+    // PR #46 round 8: T2's native provider — a FRESH NativeExecutionProvider
+    // instance on the SECOND client (its own gateway + its own run repository):
+    // the native convergence authority must be the DURABLE RUN ROW
+    // (wfos_agent_runs — the durable native provider-operation ledger), never
+    // provider-instance state. The gateway still invokes the SHARED fakeAgent
+    // adapter so the adapter-invocation count remains a single global counter.
+    t2NativeExecutionProvider = new NativeExecutionProvider({
+      agentGateway: new DefaultAgentGateway(second!.client, stack.db.logger, [fakeAgent], 3),
+      agentRunRepository: new PgAgentRunRepository(second!.client),
+      logger: stack.db.logger,
+    });
+    // PR #46 round 8: the external providers — DISTINCT instrumented instances
+    // of the REAL (ledger-backed) ExternalExecutionProvider per actor, each
+    // with its own durable-ledger store on its OWN client. The keyed registry
+    // under test is the DURABLE PROVIDER-OPERATION LEDGER
+    // (wfos_execution_provider_operations, migration 0048) — the same-key
+    // convergence across these instances is proven through the ledger, never
+    // through shared instance state.
+    externalProviderT1 = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(db),
+      logger: stack.db.logger,
+    });
+    externalProviderT2 = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+    });
 
     const promptBuilder = new DefaultExecutionPromptBuilder();
     implementationContextBuilder = new DefaultImplementationContextBuilder(
@@ -785,10 +938,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     workOrderId = workOrder.id;
     const ctx = await implementationContextBuilder.build(workItem.id);
     sharedContextId = ctx.id;
-
-    // Open the SECOND independent pg.Client (T2) against the same schema
-    // (mirrors the persistence-fence-concurrency test's setup).
-    second = stack.db.createSecondClient ? await stack.db.createSecondClient() : undefined;
+    // (The SECOND independent pg.Client (T2) was opened EARLY in this
+    // beforeEach — the round-8 per-actor provider instances are built on it;
+    // see the setup above.)
   });
 
   afterEach(async () => {
@@ -868,8 +1020,51 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     return Number(res.rows[0]?.c ?? 0);
   }
 
-  /** Build a T1 (caller-path) service on T1's client, sharing the counting
-   *  providers. The optional hooks (`willMutate` / `onFirstRenew` /
+  /** PR #46 round 8: read the DURABLE PROVIDER-OPERATION LEDGER rows for an
+   *  execution (wfos_execution_provider_operations) — THE provider-operation
+   *  count across ALL provider instances (ONE row per key — the row IS the
+   *  operation). */
+  async function readProviderOperations(
+    executionId: string,
+  ): Promise<Array<{ idempotencyKey: string; state: string; generation: number; submissionJson: string | null }>> {
+    const res = await stack.db.client.query<{
+      idempotency_key: string; state: string; generation: number;
+      submission_json: string | null;
+    }>(
+      `SELECT idempotency_key, state, generation, submission_json::text AS submission_json
+       FROM wfos_execution_provider_operations WHERE execution_id = $1`,
+      [executionId],
+    );
+    return res.rows.map((r) => ({
+      idempotencyKey: r.idempotency_key,
+      state: r.state,
+      generation: Number(r.generation),
+      submissionJson: r.submission_json,
+    }));
+  }
+
+  /** PR #46 round 8: count the AgentRun rows for an execution — the durable
+   *  native provider-operation ledger's row count (ONE run = ONE native
+   *  provider operation). */
+  async function countAgentRuns(executionId: string): Promise<number> {
+    const res = await stack.db.client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM wfos_agent_runs WHERE execution_id = $1`,
+      [executionId],
+    );
+    return Number(res.rows[0]?.c ?? 0);
+  }
+
+  /** PR #46 round 8: the TOTAL external submit attempts across BOTH actors'
+   *  provider instances (T1's + T2's) — the actor-agnostic submit count. */
+  function totalExternalSubmits(): number {
+    return externalProviderT1.submitCount + externalProviderT2.submitCount;
+  }
+
+  /** Build a T1 (caller-path) service on T1's client. PR #46 round 8: T1's
+   *  EXTERNAL provider is its OWN InstrumentedExternalProvider instance
+   *  (externalProviderT1 — T1's client + its own durable-ledger store): NO
+   *  provider instance is shared with T2 (the round-8 harness requirement).
+   *  The optional hooks (`willMutate` / `onFirstRenew` /
    *  `willEnterDispatchGate` / `onDispatchGateEntered`) wrap T1's
    *  `crossModeHandoffRepository` in a `HookedHandoffRepository` so the test
    *  can run T2 BETWEEN T1's reserve+claim and T1's mutate (willMutate), park
@@ -884,7 +1079,10 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
    *  wired into T2's wrapper when passed to buildT2Service). The optional
    *  `nativeProvider` (round 7) OVERRIDES the suite-level native provider
    *  (e.g. a gateway wired to a ParkableAgentAdapter — an actor that stalls
-   *  INSIDE the adapter, the deepest provider-operation point). */
+   *  INSIDE the adapter, the deepest provider-operation point). The optional
+   *  `externalProvider` (round 8) OVERRIDES the suite-level T1 external
+   *  provider (e.g. an instance whose first operation drive PARKS — the
+   *  mid-operation stall/death simulations). */
   function buildT1Service(opts: {
     willMutate?: () => Promise<void>;
     onFirstRenew?: () => Promise<void>;
@@ -894,6 +1092,7 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     heartbeatMs?: number;
     stats?: DispatchGateStats;
     nativeProvider?: NativeExecutionProvider;
+    externalProvider?: InstrumentedExternalProvider;
   } = {}): DefaultCrossModeHandoffService {
     const hasHooks =
       opts.willMutate || opts.onFirstRenew ||
@@ -912,7 +1111,7 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
       crossModeHandoffRepository: repo,
       executionTaskService,
       nativeExecutionProvider: opts.nativeProvider ?? nativeExecutionProvider,
-      externalExecutionProvider: countingExternalProvider,
+      externalExecutionProvider: opts.externalProvider ?? externalProviderT1,
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
@@ -934,14 +1133,23 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     });
   }
 
-  /** Build a T2 (relay-path) service on the SECOND client, sharing the
-   *  counting providers (so T2's dispatch/session calls are visible through
-   *  the SAME counters as T1's). T2's repos use `second.client`; the
-   *  underlying session row + record row are in the SHARED schema (both
-   *  clients point to the same schema). The optional `stats` is the SHARED
-   *  dispatch-gate counter object (the SAME object wired into T1's wrapper —
-   * R6 asserts exactly ONE authoritative outcome write across BOTH actors). */
-  function buildT2Service(opts: { stats?: DispatchGateStats } = {}): DefaultCrossModeHandoffService {
+  /** Build a T2 (relay-path) service on the SECOND client. PR #46 round 8:
+   *  T2's providers are its OWN instances on the SECOND client —
+   *  externalProviderT2 (a distinct InstrumentedExternalProvider with its own
+   *  durable-ledger store) + t2NativeExecutionProvider (a distinct
+   *  NativeExecutionProvider with its own gateway + run repository): NO
+   *  provider instance is shared with T1 (the round-8 harness requirement —
+   *  the convergence authority must be the DURABLE LEDGERS, never shared
+   *  instance state). The optional `stats` is the SHARED dispatch-gate counter
+   *  object (the SAME object wired into T1's wrapper — R6 asserts exactly ONE
+   *  authoritative outcome write across BOTH actors). The optional
+   *  `externalProvider` (round 8) OVERRIDES the suite-level T2 external
+   *  provider (e.g. an instance with a SHORT resolution window — the
+   *  process-loss take-over simulation). */
+  function buildT2Service(opts: {
+    stats?: DispatchGateStats;
+    externalProvider?: InstrumentedExternalProvider;
+  } = {}): DefaultCrossModeHandoffService {
     if (!second) throw new Error('T2 second client is not open (isRealPg=false?)');
     const t2RecordRepo = new PgExecutionRecordRepository(second.client);
     const t2HandoffRepo = opts.stats
@@ -951,8 +1159,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
       executionRecordRepository: t2RecordRepo,
       crossModeHandoffRepository: t2HandoffRepo,
       executionTaskService,
-      nativeExecutionProvider,
-      externalExecutionProvider: countingExternalProvider,
+      nativeExecutionProvider: t2NativeExecutionProvider,
+      externalExecutionProvider: opts.externalProvider ?? externalProviderT2,
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
@@ -1020,8 +1228,10 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
 
     // THE ARCHITECT'S EXACT INVARIANT: ZERO duplicate dispatches + ZERO
     // duplicate session transitions. Only T1 dispatched + interrupted (T2's
-    // first attempt returned early; T2's retry was a no-op discharge).
-    expect(countingExternalProvider.submitCount, 'ZERO duplicate dispatches — only T1 dispatched (T2 was claim-held then no-op discharge)').toBe(1);
+    // first attempt returned early; T2's retry was a no-op discharge). PR #46
+    // round 8: the submit count spans BOTH actors' provider instances
+    // (T1's + T2's — distinct instances, one durable ledger).
+    expect(totalExternalSubmits(), 'ZERO duplicate dispatches — only T1 dispatched (T2 was claim-held then no-op discharge)').toBe(1);
     expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions — only T1 interrupted (T2 was claim-held then no-op discharge)').toBe(1);
 
     // Exactly ONE handoff log row (no duplicate — no concurrent driver).
@@ -1113,8 +1323,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
 
     // T2 dispatched exactly once (the re-dispatch). T2 interrupted the
     // session exactly once (the session transition). NO duplicate from T1
-    // (T1 crashed before mutating).
-    expect(countingExternalProvider.submitCount, 'T2 dispatched exactly once (the re-dispatch after reclaim)').toBe(1);
+    // (T1 crashed before mutating). PR #46 round 8: the submit count spans
+    // BOTH actors' provider instances (distinct instances, one ledger).
+    expect(totalExternalSubmits(), 'T2 dispatched exactly once (the re-dispatch after reclaim)').toBe(1);
     expect(countingSessionService.interruptCount, 'T2 interrupted the session exactly once (the transition after reclaim)').toBe(1);
 
     // The boot sweep reclaimed + recovered: the obligation DISCHARGED.
@@ -1422,8 +1633,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     expect(t2MidFlight, 'T2\'s mid-flight reconcile returned a result').toBeDefined();
     expect(t2MidFlight!.stage, 'T2\'s mid-flight reclaim FAILED (claim-held — the heartbeat kept the lease live)').toBe('claim-held');
 
-    // ZERO duplicate dispatches / session transitions: only T1's.
-    expect(countingExternalProvider.submitCount, 'ZERO duplicate dispatches — only T1 dispatched (T2 was claim-held mid-flight)').toBe(1);
+    // ZERO duplicate dispatches / session transitions: only T1's. PR #46
+    // round 8: the submit count spans BOTH actors' provider instances.
+    expect(totalExternalSubmits(), 'ZERO duplicate dispatches — only T1 dispatched (T2 was claim-held mid-flight)').toBe(1);
     expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions — only T1 interrupted').toBe(1);
 
     // T1 COMPLETED the handoff (the lease survived the whole critical
@@ -1510,8 +1722,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     // THE ARCHITECT'S INVARIANT: ZERO duplicate dispatches + ZERO duplicate
     // session transitions under the stall-then-reclaim interleaving — only
     // T2 dispatched + interrupted (T1 aborted at the fence BEFORE its
-    // mutate).
-    expect(countingExternalProvider.submitCount, 'ZERO duplicate dispatches — only T2 dispatched (T1 aborted at the fence check)').toBe(1);
+    // mutate). PR #46 round 8: the submit count spans BOTH actors' provider
+    // instances.
+    expect(totalExternalSubmits(), 'ZERO duplicate dispatches — only T2 dispatched (T1 aborted at the fence check)').toBe(1);
     expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions — only T2 interrupted (T1 aborted at the fence check)').toBe(1);
 
     // T2's completed state is INTACT despite T1's late critical-section
@@ -1709,8 +1922,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     // THE ARCHITECT'S ROUND-6 INVARIANT: T1 performed NO provider operation —
     // exactly ONE submit total (T2's). The pre-call fence check passing was
     // NOT sufficient protection on its own (round-5's hole); the atomic gate
-    // crossing is what stops T1.
-    expect(countingExternalProvider.submitCount, 'ZERO provider calls from T1 — the gated boundary aborted it BEFORE the submit (exactly one submit: T2\'s)').toBe(1);
+    // crossing is what stops T1. PR #46 round 8: the submit count spans BOTH
+    // actors' provider instances (distinct instances, one durable ledger).
+    expect(totalExternalSubmits(), 'ZERO provider calls from T1 — the gated boundary aborted it BEFORE the submit (exactly one submit: T2\'s)').toBe(1);
     expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s — committed through the fenced completion)').toBe(1);
     expect(stats.beginCount, 'exactly ONE gate crossing (T2\'s — T1\'s begin affected 0 rows)').toBe(1);
 
@@ -1738,48 +1952,61 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
   });
 
   // =========================================================================
-  // R6-#2 (REWRITTEN by round 7 — the provider-operation exactly-once
-  // boundary). The architect's round-7 review rejected the original R6-#2
-  // framing ("both actors submit — the CALL is not the authoritative
-  // operation"): the DB outcome being singular does NOT make the PROVIDER
-  // OPERATION exactly-once. The stall-DURING-the-dispatch interleaving now
-  // runs under the round-7 keyed-provider contract:
+  // R6-#2 (REWRITTEN by round 8 — the DURABLE provider-operation ledger, with
+  // PROVIDER-INSTANCE SEPARATION). The round-8 review rejected the round-7
+  // harness precisely on this test: it SHARED the counting provider instance
+  // between T1 and T2, so operationsCreated === 1 proved only the in-memory
+  // Map converged — never that a FRESH provider instance resolves the SAME
+  // operation. The stall-DURING-the-dispatch interleaving now runs with T1's
+  // and T2's external providers as DISTINCT instances on DISTINCT clients,
+  // converging through the DURABLE LEDGER (wfos_execution_provider_operations,
+  // migration 0048):
   //
-  //   T1 claims (epoch N) → T1 crosses the dispatch gate → T1's submit
-  //   STARTS the provider operation (keyed cross-mode-dispatch-<handoffId>)
-  //   + stalls INSIDE it (heartbeat dead) → the lease expires → T2 reclaims
-  //   (epoch N+1) → T2 takes over the in-flight gate + re-dispatches → T2's
-  //   same-key submit CONVERGES onto T1's IN-FLIGHT provider operation (NO
-  //   second operation — the registry returns the REGISTERED operation,
-  //   awaited while in flight) → the provider resolves the operation (the
-  //   original submitter's liveness is IRRELEVANT — the operation lives at
-  //   the provider) → BOTH actors observe the SAME submission → T2's
-  //   completeFencedDispatch commits the ONE authoritative outcome → T1's
-  //   completeFencedDispatch affects 0 rows (DISCARDED — fence loss).
+  //   T1 claims (epoch N) → T1 crosses the dispatch gate → T1's submit OPENED
+  //   the ONE durable ledger row under the handoff-derived key (PENDING — the
+  //   operation is in flight at T1) and stalls INSIDE the operation body
+  //   (heartbeat dead) → the lease expires → T2 reclaims (epoch N+1) + takes
+  //   over the in-flight gate + re-dispatches through a FRESH provider
+  //   instance (T2's, on the SECOND client) → T2's same-key submit CONVERGES
+  //   through the ledger onto the in-flight row (it awaits the row's durable
+  //   resolution — NO second drive, NO second row) → the provider resolves
+  //   the operation (T1's parked drive completes → its resolution CAS stores
+  //   the ONE result) → T2's await REPLAYS the STORED result (both actors
+  //   observe the SAME submission) → T2's completeFencedDispatch commits the
+  //   ONE authoritative outcome → T1's completeFencedDispatch affects 0 rows
+  //   (DISCARDED — fence loss).
   //
-  // THE ROUND-7 INVARIANT (proven at the PROVIDER level, not merely the DB
-  // level): submitCount === 2 (both actors' attempts) but
-  // operationsCreated === 1 (ONE provider operation), BOTH attempts under
-  // the SAME idempotency key (submitKeys[0] === submitKeys[1]), and the
-  // durable dispatch_idempotency_key recorded on the obligation row EQUALS
-  // that provider operation key.
+  // THE ROUND-8 INVARIANT (proven at the DURABLE-LEDGER level, across DISTINCT
+  // provider instances): ONE ledger row for the key (the row IS the operation
+  // — there is structurally no second row), exactly ONE operation-body drive
+  // (T1's — T2's converged submit performed ZERO drives), both submits under
+  // the SAME handoff-derived key, and the durable dispatch_idempotency_key
+  // recorded on the obligation row EQUALS the ledger row's key.
   // =========================================================================
-  it('R6-#2 (round 7). a stalled owner\'s ALREADY-STARTED provider operation is CONVERGED onto — not duplicated: both actors\' submits converge on the SAME idempotency key + ONE provider operation (T2 completes the ONE authoritative outcome; T1\'s resumed completion is DISCARDED)', async () => {
+  it('R6-#2 (round 8). a stalled owner\'s ALREADY-STARTED provider operation is CONVERGED onto through the DURABLE LEDGER — not duplicated: a FRESH provider instance (T2, second client) converges on the SAME key + ONE ledger row + ONE drive (T2 completes the ONE authoritative outcome; T1\'s resumed completion is DISCARDED)', async () => {
     const { executionId, recordId } = await createNativeRecord('failed');
     const { sessionId } = await createRunningSession(executionId);
     const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
-    const t2Service = buildT2Service({ stats });
 
-    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat. T1's provider submit
-    // STARTS the keyed provider operation + PARKS IT AT THE PROVIDER (the
-    // operation is in flight; T1 awaits it; the outcome write has NOT run).
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat, dispatching through a
+    // provider instance whose FIRST operation drive PARKS INSIDE the operation
+    // body (after the ledger row was OPENED — the operation is in flight; the
+    // resolution CAS has not run). A LONG resolution window on T2's provider
+    // below keeps T2's converged submit AWAITING the row (the in-flight
+    // convergence arm — T2 must NOT re-drive while the original drive is
+    // merely stalled, not dead).
     let resolveSubmit!: () => void;
     const submitGate = new Promise<void>((r) => { resolveSubmit = r; });
-    countingExternalProvider.parkFirstSubmit(submitGate);
+    const t1Provider = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkFirstGeneration: submitGate,
+    });
     const t1Service = buildT1Service({
       leaseMs: 150,
       heartbeatMs: 60_000,
       stats,
+      externalProvider: t1Provider,
     });
 
     let t1Error: unknown;
@@ -1795,48 +2022,72 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
       }
     })();
 
-    // Wait until T1 is stalled INSIDE its in-flight provider operation
-    // (submitCount === 1, ONE operation created), then let the 150ms lease
-    // expire while T1 is stalled (no heartbeat renews).
-    await waitFor(() => countingExternalProvider.submitCount >= 1, 5000);
+    // Wait until T1 is stalled INSIDE its in-flight operation (the ledger row
+    // is OPEN + PENDING, the operation body is parked), then let the 150ms
+    // lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => t1Provider.inFlight, 5000);
+    const rowsAtStall = await readProviderOperations(executionId);
+    expect(rowsAtStall.length, 'T1 OPENED exactly ONE durable provider-operation ledger row').toBe(1);
+    expect(rowsAtStall[0]!.state, 'the operation is IN FLIGHT (the ledger row is PENDING — the outcome is not yet known)').toBe('pending');
+    expect(t1Provider.generationCount, 'T1 started exactly ONE operation drive').toBe(1);
     await delay(300);
-    expect(countingExternalProvider.operationsCreated, 'T1 started exactly ONE provider operation').toBe(1);
 
     // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
     // window #2 (record.mode === external, packageValue missing — T1's
     // outcome write never ran) → T2's re-dispatch TAKES OVER the in-flight
     // gate (dispatch_epoch N < N+1 — the monotonic take-over arm) → T2's
-    // SAME-KEY submit CONVERGES onto T1's IN-FLIGHT provider operation (the
-    // registry returns the REGISTERED operation — NO second operation is
-    // created; T2 awaits the same provider-side resolution). T2's reconcile
-    // therefore runs as a background promise — it parks inside the same
-    // operation until the provider resolves it.
+    // SAME-KEY submit runs through a FRESH provider instance on the SECOND
+    // client → the DURABLE LEDGER converges it onto the PENDING row (the
+    // registry is the ledger — NOT any instance's memory): T2 AWAITS the
+    // row's resolution (a LONG window — T1's drive is stalled, not dead; NO
+    // second drive is started). T2's reconcile therefore runs as a background
+    // promise — it parks inside the ledger await until T1's drive resolves.
+    const t2Provider = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 30_000,
+      operationPollIntervalMs: 10,
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: t2Provider });
     let t2Result: { stage?: string } | undefined;
     const t2Promise = (async () => {
       t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
     })();
-    await waitFor(() => countingExternalProvider.submitCount >= 2, 5000);
+    await waitFor(() => t2Provider.submitCount >= 1, 5000);
 
-    // THE ROUND-7 INVARIANT, asserted MID-FLIGHT (T1's operation still
-    // unresolved, both actors inside the dispatch): BOTH actors submitted
-    // (2 attempts) — but exactly ONE provider operation exists, and BOTH
-    // attempts carried the SAME durable idempotency key (the handoff-derived
-    // key — the architect's "both attempts converge on the SAME provider
-    // operation idempotency key").
-    expect(countingExternalProvider.submitCount, 'both actors\' submit ATTEMPTS ran (the reclaiming owner re-dispatched mid-flight)').toBe(2);
-    expect(countingExternalProvider.operationsCreated, 'exactly ONE provider operation — T2\'s same-key submit CONVERGED onto T1\'s in-flight operation (NO second operation started)').toBe(1);
-    const submitKeys = countingExternalProvider.submitKeys();
-    expect(submitKeys.length, 'two submit attempts recorded').toBe(2);
-    expect(submitKeys[0], 'both attempts used the SAME durable idempotency key (the handoff identity — stable across owners/epochs/reclaims)').toBe(submitKeys[1]);
-    expect(submitKeys[0], 'the key is the handoff-derived dispatch key').toMatch(/^cross-mode-dispatch-/);
+    // THE ROUND-8 INVARIANT, asserted MID-FLIGHT (T1's drive still parked, T2
+    // inside the ledger await): both actors submitted (2 attempts across TWO
+    // DISTINCT provider instances) — but exactly ONE durable ledger row +
+    // exactly ONE operation drive (T1's — T2's converged submit performed
+    // ZERO drives), and BOTH attempts carried the SAME handoff-derived key.
+    expect(t1Provider.submitCount + t2Provider.submitCount, 'both actors\' submit ATTEMPTS ran (across DISTINCT provider instances — the reclaiming owner re-dispatched mid-flight)').toBe(2);
+    expect(t1Provider.generationCount + t2Provider.generationCount, 'exactly ONE operation drive — T2\'s same-key submit CONVERGED through the DURABLE LEDGER onto the in-flight row (NO second drive started)').toBe(1);
+    expect(t2Provider.generationCount, 'T2\'s fresh instance performed ZERO drives (it awaits the in-flight operation through the ledger)').toBe(0);
+    const t1Keys = t1Provider.submitKeys();
+    const t2Keys = t2Provider.submitKeys();
+    expect(t1Keys.length + t2Keys.length, 'two submit attempts recorded').toBe(2);
+    expect(t1Keys[0], 'both attempts used the SAME durable idempotency key (the handoff identity — stable across owners/epochs/reclaims/INSTANCES)').toBe(t2Keys[0]);
+    expect(t1Keys[0], 'the key is the handoff-derived dispatch key').toMatch(/^cross-mode-dispatch-/);
+    const rowsMid = await readProviderOperations(executionId);
+    expect(rowsMid.length, 'still exactly ONE durable provider operation (ONE ledger row — across BOTH instances)').toBe(1);
+    expect(rowsMid[0]!.state, 'the ONE operation is still IN FLIGHT (T2 awaits; no second operation exists)').toBe('pending');
 
-    // The PROVIDER resolves the operation (the original submitter's liveness
-    // is irrelevant — the operation lives at the provider, exactly like a
-    // Stripe-style idempotency key whose request outlives the client
-    // connection). Both actors' submits return the SAME submission.
+    // The PROVIDER resolves the operation (T1's parked drive completes → its
+    // resolution CAS stores the ONE result — the original submitter's
+    // liveness is irrelevant, the operation lives in the DURABLE LEDGER).
+    // T2's await then REPLAYS the STORED result.
     resolveSubmit();
     await t2Promise;
-    expect(t2Result!.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, converged onto the ONE provider operation, + completed the handoff').toBe('complete');
+    expect(t2Result!.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, converged onto the ONE durable provider operation, + completed the handoff').toBe('complete');
+
+    // The ledger after resolution: ONE row, COMPLETED, with the ONE stored
+    // result (T1's drive stored it; T2 replayed it — the same key always
+    // resolves to the same operation/result).
+    const rowsAfter = await readProviderOperations(executionId);
+    expect(rowsAfter.length, 'still exactly ONE durable provider operation for the whole interleaving').toBe(1);
+    expect(rowsAfter[0]!.state, 'the ONE operation COMPLETED (the resolution CAS stored the ONE result)').toBe('completed');
+    expect(rowsAfter[0]!.submissionJson, 'the operation result is durably stored (replayed by every later same-key submit)').not.toBeNull();
+    expect(t1Provider.generationCount + t2Provider.generationCount, 'still exactly ONE operation drive for the whole interleaving (T2 replayed; it never drove)').toBe(1);
 
     // Capture T2's authoritative outcome (the record state after T2's
     // completion) — T1's resumed dispatch must NOT disturb it.
@@ -1847,33 +2098,32 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     expect(afterT2!.packageValue).not.toBeNull();
     expect(afterT2!.expiresAt).not.toBeNull();
 
-    // T1 resumes: its already-started submit returns the SAME (converged)
-    // operation's submission, then T1's completeFencedDispatch evaluates the
-    // fence — the lease is T2's (and the obligation is discharged) → 0 rows
-    // → the transaction ROLLS BACK — NO outcome write. T1 aborts
-    // 'claim-fence-lost'.
+    // T1 resumes: its parked drive completes + its resolution CAS already
+    // stored the ONE result (it was the ONLY driver), so its submit returns
+    // the SAME (stored) submission — then T1's completeFencedDispatch
+    // evaluates the fence — the lease is T2's (and the obligation is
+    // discharged) → 0 rows → the transaction ROLLS BACK — NO outcome write.
+    // T1 aborts 'claim-fence-lost'.
     await t1Promise;
     expect(t1Error, 'T1\'s resumed handoff FAILED with the fence-lost error (the discarded already-started dispatch)').toBeInstanceOf(CrossModeHandoffError);
     expect((t1Error as CrossModeHandoffError).code, 'T1\'s already-started dispatch was fenced out at the atomic completion').toBe('claim-fence-lost');
 
-    // THE ROUND-7 INVARIANT, final: exactly ONE provider operation
-    // (operationsCreated === 1 — never a second), ONE authoritative outcome
-    // write (completeTrueCount === 1 — T2's), T1's completion DISCARDED
-    // (completeFalseCount === 1 — 0 rows, rollback), and the DURABLE key
-    // recorded on the obligation row (migration 0047 — atomic with the
-    // gate-open) EQUALS the provider operation's key.
-    expect(countingExternalProvider.operationsCreated, 'exactly ONE provider operation for the whole interleaving (the round-7 exactly-once side-effect boundary)').toBe(1);
-    expect(countingExternalProvider.operationKeys().length, 'one operation identity').toBe(1);
-    expect(countingExternalProvider.operationKeys()[0], 'the operation key is the handoff-derived dispatch key').toBe(submitKeys[0]);
+    // THE ROUND-8 INVARIANT, final: exactly ONE durable provider operation
+    // (ONE ledger row — never a second, across DISTINCT provider instances),
+    // ONE operation drive, ONE authoritative outcome write (T2's), T1's
+    // completion DISCARDED (0 rows, rollback), and the DURABLE key recorded
+    // on the obligation row (migration 0047 — atomic with the gate-open)
+    // EQUALS the ledger operation's key.
+    expect((await readProviderOperations(executionId)).length, 'exactly ONE durable provider operation (ONE ledger row — the row IS the operation)').toBe(1);
     expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write committed (T2\'s — the fenced completion)').toBe(1);
     expect(stats.completeFalseCount, 'T1\'s already-started dispatch outcome was DISCARDED (0 rows — no second authoritative outcome write)').toBe(1);
     expect(stats.beginCount, 'the gate was crossed by BOTH actors (T1 opened it; T2 took it over — the monotonic take-over arm)').toBe(2);
     const gateAfter = await readDispatchGate(executionId);
-    expect(gateAfter.dispatchKey, 'the DURABLE dispatch idempotency key recorded atomically with the gate-open EQUALS the provider operation key (the same logical operation identity)').toBe(submitKeys[0]);
+    expect(gateAfter.dispatchKey, 'the DURABLE dispatch idempotency key recorded atomically with the gate-open EQUALS the ledger operation key (the same logical operation identity)').toBe(t1Keys[0]);
 
     // T2's authoritative outcome is INTACT — T1's late completion wrote
     // NOTHING (the package + expiresAt are byte-identical to T2's — both
-    // actors observed the SAME converged operation).
+    // actors observed the SAME converged operation result).
     const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
     expect(afterT1!.packageValue, 'T2\'s package is INTACT (the converged operation\'s package — T1\'s completion never wrote)').toEqual(afterT2!.packageValue);
     expect(afterT1!.expiresAt?.getTime(), 'T2\'s expires_at is INTACT').toBe(afterT2!.expiresAt?.getTime());
@@ -1893,7 +2143,11 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
   });
 
   // =========================================================================
-  // R6-#3 (updated by round 7 — the provider-level keyed convergence). The
+  // R6-#3 (updated by round 7 — the provider-level keyed convergence; round 8
+  // adds provider-instance separation: T2's native dispatch now runs through
+  // a FRESH NativeExecutionProvider instance on the SECOND client, so T1's
+  // resumed keyed submit converging at its OWN instance's pre-check proves
+  // the authority is the DURABLE RUN ROW, not shared instance state). The
   // architect's round-6 interleaving on the NATIVE path: T1 claims (epoch N)
   // → T1 passes the pre-call fence + CROSSES the dispatch gate → T1 stalls
   // between the gate + the gateway submit (heartbeat dead) → the lease
@@ -2127,6 +2381,365 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 — the
     expect(afterT1!.id).toBe(recordId);
     expect(afterT1!.mode).toBe('native');
     expect(afterT1!.status, 'T1\'s late completion wrote NOTHING (no clobber — the fence discarded it)').toBe('running');
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchKey, 'the DURABLE dispatch idempotency key is recorded on the obligation row (migration 0047)').toMatch(/^cross-mode-dispatch-/);
+  });
+
+  // =========================================================================
+  // R8-#1 (round 8 — the architect's EXACT required regression, the external
+  // arm): PROVIDER-INSTANCE + PROCESS LOSS around the keyed provider
+  // operation. The round-8 review's blocking scenario:
+  //
+  //     T1    submit(K) → provider operation starts → provider process dies
+  //     T2    reclaim handoff → new provider instance → submit(K) →
+  //           [round 7: the Map is empty → SECOND provider operation]
+  //
+  // The round-8 correction makes the registry the DURABLE PROVIDER-OPERATION
+  // LEDGER, so the interleaving now runs as:
+  //
+  //   T1 claims (epoch N) → T1 crosses the dispatch gate → T1's submit OPENED
+  //   the ONE ledger row under the handoff-derived key (PENDING) → T1's
+  //   process DIES inside the operation body (the drive never returns — the
+  //   gate stays in_flight at T1's epoch, heartbeat dead) → the lease expires
+  //   → T2 reclaims (epoch N+1) + takes over the in-flight gate + re-dispatches
+  //   through a FRESH provider instance (T2's, on the SECOND client) → T2's
+  //   same-key submit finds the PENDING row (the durable registry — the row K
+  //   ALREADY OWNS) → its resolution window elapses (the dead driver will
+  //   never resolve it) → T2 TAKES OVER the drive of the SAME row (the
+  //   recovery drive — generation 2 on the ONE row) → the resolution CAS
+  //   stores the ONE result → T2's completeFencedDispatch commits the ONE
+  //   authoritative outcome → the obligation discharges → a THIRD fresh
+  //   instance's same-key submit REPLAYS the stored result (ZERO drives) →
+  //   the DEAD driver's late completion (released at the end) hits the
+  //   resolution CAS → 0 rows → it REPLAYS the winner's stored result → its
+  //   completeFencedDispatch is fenced out (0 rows).
+  //
+  // THE ROUND-8 INVARIANT: ONE durable provider operation (ONE ledger row —
+  // the row T1 OPENED, resolved through by T2's recovery drive) for the whole
+  // interleaving, ONE stored result, ONE authoritative outcome write; the
+  // same key resolves to the SAME operation through every instance.
+  // =========================================================================
+  it('R8-#1. PROVIDER-INSTANCE + PROCESS LOSS — instance A opens operation K + dies mid-operation; instance B (T2, second client) resolves THE SAME durable ledger operation (the take-over drive of the SAME row); instance C replays the stored result with ZERO drives; the dead driver\'s late completion replays + is fenced out', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat, dispatching through
+    // provider INSTANCE A (client 1) whose FIRST operation drive PARKS inside
+    // the operation body and is NOT released until the very end of the test —
+    // T1's "process" is DEAD from the system's perspective (its drive will
+    // never resolve on its own; the heartbeat is dead; the lease expires).
+    let killDeadDriver!: (reason: Error) => void;
+    const deathGate = new Promise<void>((_, reject) => { killDeadDriver = reject; });
+    const providerA = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+      parkFirstGeneration: deathGate,
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r8-process-loss-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is DEAD-inside-the-operation (the ledger row is OPEN +
+    // PENDING, the operation body parked forever), then let the 150ms lease
+    // expire (no heartbeat renews).
+    await waitFor(() => providerA.inFlight, 5000);
+    await delay(300);
+    const rowsAtDeath = await readProviderOperations(executionId);
+    expect(rowsAtDeath.length, 'instance A OPENED exactly ONE durable provider-operation ledger row before dying').toBe(1);
+    expect(rowsAtDeath[0]!.state, 'the operation A opened is IN FLIGHT (PENDING — the outcome is UNCERTAIN at A\'s death)').toBe('pending');
+    expect(rowsAtDeath[0]!.generation, 'the row is at generation 1 (A\'s original drive)').toBe(1);
+    expect(providerA.generationCount, 'A drove the operation exactly once (the drive is parked/dead)').toBe(1);
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) → crash
+    // window #2 → T2's re-dispatch takes over the in-flight gate + submits
+    // through a FRESH provider instance (B) on the SECOND client with a SHORT
+    // resolution window (150ms — the dead driver will never resolve the row).
+    // B's same-key submit finds the PENDING row (the DURABLE registry — K
+    // already owns an operation), the window elapses, and B TAKES OVER the
+    // drive of the SAME row: the recovery generation runs + the resolution
+    // CAS stores the ONE result. T2 then completes the ONE authoritative
+    // outcome through the fence + the obligation discharges.
+    const providerB = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(second!.client),
+      logger: stack.db.logger,
+      operationResolutionWindowMs: 150,
+      operationPollIntervalMs: 10,
+    });
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease, took over the in-flight gate, resolved THE SAME durable operation (the recovery drive), + completed the handoff').toBe('complete');
+
+    // THE ROUND-8 INVARIANT: still ONE durable provider operation (ONE ledger
+    // row — the row instance A OPENED; B's recovery resolved THE SAME row,
+    // generation 2: the original drive + the recovery drive of ONE operation,
+    // never a second operation record). B's submit observed the row's stored
+    // result.
+    const rowsAfterRecovery = await readProviderOperations(executionId);
+    expect(rowsAfterRecovery.length, 'ONE durable provider operation (ONE ledger row) — instance B resolved THE SAME operation instance A opened (NO second operation)').toBe(1);
+    expect(rowsAfterRecovery[0]!.state, 'the ONE operation COMPLETED (B\'s recovery drive resolved it through the CAS)').toBe('completed');
+    expect(rowsAfterRecovery[0]!.generation, 'generation 2 — the SAME row was re-driven by the recovery take-over (A\'s original drive + B\'s recovery drive of ONE operation)').toBe(2);
+    expect(rowsAfterRecovery[0]!.submissionJson, 'the ONE operation\'s result is durably stored').not.toBeNull();
+    expect(providerB.generationCount, 'B drove the recovery generation exactly once').toBe(1);
+    expect(providerA.generationCount, 'A\'s dead drive is STILL parked (it never resolved on its own)').toBe(1);
+    expect(stats.completeTrueCount, 'exactly ONE authoritative outcome write (T2\'s — through the fenced completion)').toBe(1);
+
+    // T2's authoritative outcome + the discharged obligation.
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(afterT2!.packageValue, 'T2\'s outcome holds the ONE operation\'s stored package').not.toBeNull();
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+    const gateAfter = await readDispatchGate(executionId);
+    expect(gateAfter.dispatchState, 'the dispatch gate is COMPLETED (at T2\'s epoch)').toBe('completed');
+    expect(gateAfter.dispatchKey, 'the durable dispatch key EQUALS the ledger operation key').toBe(rowsAfterRecovery[0]!.idempotencyKey);
+    expect(gateAfter.dispatchKey, 'the key is the handoff-derived dispatch key').toMatch(/^cross-mode-dispatch-/);
+
+    // A THIRD provider instance (C — another FRESH instance): the same key
+    // resolves to the SAME stored operation — a PURE REPLAY (ZERO drives).
+    // This is the "same key always resolves to the same operation" proof
+    // across yet another instance boundary.
+    const providerC = new InstrumentedExternalProvider({
+      operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+      logger: stack.db.logger,
+    });
+    const recordForTask = await executionRecordRepo.findByExecutionId(executionId);
+    const builtTask = await executionTaskService.build({
+      workItemId: recordForTask!.workItemId,
+      mode: 'external',
+      provider: recordForTask!.provider,
+      model: recordForTask!.model,
+      executionId,
+      implementationContextId: recordForTask!.implementationContextId,
+    });
+    const replaySubmission = await providerC.submit({
+      ...builtTask.task,
+      dispatchIdempotencyKey: gateAfter.dispatchKey!,
+    });
+    expect(providerC.submitCount, 'instance C submitted once').toBe(1);
+    expect(providerC.generationCount, 'instance C performed ZERO drives — the same key REPLAYED the SAME stored operation (convergence through the DURABLE ledger, not any instance\'s memory)').toBe(0);
+    const storedSubmission = JSON.parse(rowsAfterRecovery[0]!.submissionJson!) as {
+      package: Record<string, unknown>;
+      expiresAt: string;
+    };
+    expect(replaySubmission.package, 'the replayed submission is the STORED operation result (byte-identical package)').toEqual(storedSubmission.package);
+    expect(replaySubmission.expiresAt?.toISOString(), 'the replayed expiry is the STORED operation result\'s expiry').toBe(storedSubmission.expiresAt);
+
+    // The DEAD driver's LATE completion (A's parked drive finally fails — the
+    // dead process's in-flight call): A's drive threw, but the row already
+    // holds the ONE COMPLETED result — the provider's convergence check
+    // returns the STORED result (the row is the authority — A's local failure
+    // is irrelevant to the operation's recorded outcome) → A's
+    // completeFencedDispatch evaluates the fence → 0 rows (the lease is T2's
+    // + the obligation is discharged) → ROLLBACK — NO outcome write → T1
+    // aborts 'claim-fence-lost'. NO second result, NO second operation.
+    killDeadDriver(new Error('simulated process death — the dead driver\'s in-flight operation body failed'));
+    await t1Promise;
+    expect(t1Error, 'T1 (the dead driver, late) FAILED with the fence-lost error (its converged completion was discarded)').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'the dead driver\'s late completion was fenced out (NO second authoritative write)').toBe('claim-fence-lost');
+    expect(stats.completeFalseCount, 'the dead driver\'s late completion affected 0 rows + was DISCARDED').toBe(1);
+    expect(providerA.generationCount, 'still exactly ONE drive on instance A (the operation was NOT re-issued)').toBe(1);
+
+    // FINAL: still ONE ledger row, COMPLETED, with the ONE stored result —
+    // byte-identical to before the dead driver's late completion (the late
+    // completion changed NOTHING).
+    const rowsFinal = await readProviderOperations(executionId);
+    expect(rowsFinal.length, 'FINAL: exactly ONE durable provider operation for the whole interleaving').toBe(1);
+    expect(rowsFinal[0]!.state).toBe('completed');
+    expect(rowsFinal[0]!.generation).toBe(2);
+    expect(rowsFinal[0]!.submissionJson, 'the ONE stored result is UNCHANGED by the dead driver\'s late completion').toBe(rowsAfterRecovery[0]!.submissionJson);
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.packageValue, 'T2\'s authoritative package is INTACT (the dead driver\'s late completion wrote NOTHING)').toEqual(afterT2!.packageValue);
+    expect(afterT1!.status).toBe('handoff_ready');
+    // Exactly ONE session transition (T1's pre-dispatch interrupt — T2's
+    // reconcile found it converged + skipped).
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions').toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+    expect(afterSession!.status).toBe('interrupted');
+  });
+
+  // =========================================================================
+  // R8-#2 (round 8 — the native arm: the EXPLICIT DEFINITION + the
+  // run-creation crash boundary). The round-8 review accepts the native
+  // convergence keyed on the execution identity + the AgentRun UNIQUE "only
+  // if we explicitly define the AgentRun as the durable native
+  // provider-operation ledger and prove the remaining crash boundary,
+  // particularly process loss around run creation / adapter invocation".
+  //
+  // The definition (declared in execution.types.ts + the native provider +
+  // migration 0048's header): wfos_agent_runs (migration 0011,
+  // `execution_id TEXT NOT NULL UNIQUE`) IS the durable native
+  // provider-operation ledger — the run row IS the native provider operation
+  // (the run creation + the adapter execution the gateway performs only
+  // AFTER its own run-creation succeeded), the execution_id UNIQUE IS the
+  // operation-key uniqueness, and the run's status/refs ARE the operation
+  // result. The crash boundary proof:
+  //
+  //   T1 claims (epoch N) → T1 crosses the dispatch gate → T1's keyed submit
+  //   reaches the gateway → the gateway CREATES the ONE AgentRun (the durable
+  //   operation record — committed through the REAL PgAgentRunRepository) →
+  //   T1's process DIES between the run-creation commit and the adapter
+  //   invocation (the gateway call never returns; the adapter is NEVER
+  //   invoked) → the lease expires → T2 reclaims (epoch N+1) through a FRESH
+  //   NativeExecutionProvider instance on the SECOND client → the reconcile
+  //   finds the EXISTING run (the durable ledger — the operation ALREADY
+  //   owns its record) and CONVERGES: ZERO provider operations from T2 (no
+  //   gateway call, no adapter invocation) → the obligation discharges (the
+  //   run IS the authoritative native outcome — handoffComplete's
+  //   existing-run rule) → a THIRD fresh native instance's keyed submit
+  //   converges at the provider pre-check onto the SAME run (NO gateway
+  //   call) → T1's dead gateway call eventually fails (released at the end)
+  //   → the provider's collision-recovery CONVERGES to the existing run →
+  //   T1's completeFencedDispatch is fenced out (0 rows).
+  //
+  // THE ROUND-8 NATIVE INVARIANT: exactly ONE AgentRun (ONE durable native
+  // provider operation), ZERO adapter invocations from ANY actor (the crash
+  // happened before T1's adapter invocation; T2 and the third instance never
+  // reached the gateway), ONE discharged obligation.
+  // =========================================================================
+  it('R8-#2. the native durable provider-operation ledger (wfos_agent_runs) — process loss BETWEEN run creation + adapter invocation: a FRESH native instance (T2, second client) converges on the ONE run with ZERO provider operations; a THIRD fresh instance converges at the provider pre-check; the dead driver\'s late gateway failure converges + is fenced out', async () => {
+    const { executionId, recordId } = await createExternalRecord();
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat, dispatching through
+    // a NATIVE provider whose gateway DIES right after the run creation —
+    // the crash window BETWEEN the run-creation commit and the adapter
+    // invocation (the deepest run-creation crash point: the durable operation
+    // record EXISTS, the side-effecting adapter never ran).
+    let killDeadGateway!: (reason: Error) => void;
+    const deathGate = new Promise<never>((_, reject) => { killDeadGateway = reject; });
+    const crashGateway = new CrashAfterRunCreationGateway(agentRunRepo, deathGate);
+    const t1NativeProvider = new NativeExecutionProvider({
+      agentGateway: crashGateway,
+      agentRunRepository: agentRunRepo,
+      logger: stack.db.logger,
+    });
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      nativeProvider: t1NativeProvider,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'native', idempotencyKey: `r8-native-run-creation-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is dead-inside-the-gateway-call (the ONE AgentRun row is
+    // DURABLY created; the adapter was never invoked), then let the 150ms
+    // lease expire (no heartbeat renews).
+    await waitFor(() => crashGateway.runCreated, 5000);
+    await delay(300);
+    expect(await countAgentRuns(executionId), 'the ONE AgentRun exists (the durable native provider-operation record — created before the crash)').toBe(1);
+    expect(fakeAgent.getCallCount(), 'the adapter was NEVER invoked (the crash happened between the run creation + the adapter invocation)').toBe(0);
+
+    // T2 (the boot sweep) reclaims the expired lease (epoch N+1) through a
+    // FRESH NativeExecutionProvider instance on the SECOND client → crash
+    // window #2 (record.mode === native, the AgentRun EXISTS) → the
+    // reconcile's existing-run check finds the durable operation record +
+    // CONVERGES WITHOUT ANY PROVIDER OPERATION (no gateway call, no adapter
+    // invocation — T2 is PREVENTED from starting a second operation) → the
+    // obligation discharges (the run IS the authoritative native outcome).
+    const t2Service = buildT2Service({ stats });
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease + converged on the EXISTING run (ZERO provider operations from the fresh instance) + discharged').toBe('complete');
+
+    // THE ROUND-8 NATIVE INVARIANT: still ONE run (the durable operation T1
+    // opened); ZERO adapter invocations from ANY actor; T2 never reached the
+    // gateway (it converged at the reconcile's existing-run check).
+    expect(await countAgentRuns(executionId), 'still exactly ONE AgentRun (ONE durable native provider operation — no second was ever started)').toBe(1);
+    expect(fakeAgent.getCallCount(), 'ZERO adapter invocations from ANY actor (T1 died before its invocation; T2 + the third instance below converge without the gateway)').toBe(0);
+    expect(stats.beginCount, 'only T1 crossed the dispatch gate (T2 converged at the reconcile level — ZERO provider operations)').toBe(1);
+    expect(stats.completeTrueCount, 'no authoritative outcome write from T2 (the run IS the outcome — handoffComplete\'s existing-run rule)').toBe(0);
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+
+    // A THIRD actor — ANOTHER fresh NativeExecutionProvider instance whose
+    // KEYED submit hits the provider pre-check: the run EXISTS (the durable
+    // ledger) → CONVERGES to the SAME run (NO gateway call, NO adapter
+    // invocation). The convergence authority is the DURABLE RUN ROW, never
+    // provider-instance state — the same operation resolves through every
+    // instance.
+    const countingGatewayC = new CountingGateway(
+      new DefaultAgentGateway(stack.db.client, stack.db.logger, [fakeAgent], 3),
+    );
+    const providerC = new NativeExecutionProvider({
+      agentGateway: countingGatewayC,
+      agentRunRepository: agentRunRepo,
+      logger: stack.db.logger,
+    });
+    const recordForTask = await executionRecordRepo.findByExecutionId(executionId);
+    const builtTask = await executionTaskService.build({
+      workItemId: recordForTask!.workItemId,
+      mode: 'native',
+      provider: 'fake',
+      model: 'test-model',
+      executionId,
+      implementationContextId: recordForTask!.implementationContextId,
+    });
+    const gateState = await readDispatchGate(executionId);
+    const submissionC = await providerC.submit({
+      ...builtTask.task,
+      dispatchIdempotencyKey: gateState.dispatchKey!,
+    });
+    const theRun = await agentRunRepo.findByExecutionId(executionId);
+    expect(theRun, 'the ONE run exists').not.toBeNull();
+    expect(submissionC.agentRunId, 'the third fresh instance CONVERGED onto the SAME run (the durable ledger — the same operation across instances)').toBe(theRun!.id);
+    expect(countingGatewayC.executeCount, 'the third instance NEVER reached the gateway (converged at the provider pre-check)').toBe(0);
+    expect(fakeAgent.getCallCount(), 'still ZERO adapter invocations').toBe(0);
+    expect(await countAgentRuns(executionId), 'still exactly ONE AgentRun').toBe(1);
+
+    // The DEAD driver's LATE gateway failure (T1's dead in-flight call
+    // finally fails — released at the end): the provider's
+    // collision-recovery re-check finds the EXISTING non-failed run → it
+    // CONVERGES to the same operation (the run row is the authority) → T1's
+    // completeFencedDispatch evaluates the fence → 0 rows (the obligation is
+    // discharged) → T1 aborts 'claim-fence-lost'. NO second operation, NO
+    // outcome write.
+    killDeadGateway(new Error('simulated process death — the dead driver\'s in-flight gateway call failed'));
+    await t1Promise;
+    expect(t1Error, 'T1 (the dead driver, late) FAILED with the fence-lost error (its converged completion was discarded)').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'the dead driver\'s late completion was fenced out (NO second authoritative write)').toBe('claim-fence-lost');
+    expect(stats.completeFalseCount, 'the dead driver\'s late completion affected 0 rows + was DISCARDED').toBe(1);
+
+    // FINAL: ONE run, ZERO adapter invocations, the record NOT clobbered (the
+    // run lifecycle owns the execution from here — a stuck run is the
+    // gateway\'s own lifecycle concern, out of WORK-042's dispatch scope),
+    // the durable dispatch key recorded.
+    expect(await countAgentRuns(executionId), 'FINAL: exactly ONE AgentRun (ONE durable native provider operation for the whole interleaving)').toBe(1);
+    expect(fakeAgent.getCallCount(), 'FINAL: ZERO adapter invocations ever (the crash preceded T1\'s invocation; every later actor converged)').toBe(0);
+    const afterT1 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT1!.id).toBe(recordId);
+    expect(afterT1!.mode).toBe('native');
+    expect(afterT1!.status, 'T1\'s late completion wrote NOTHING (no clobber — the fence discarded it; the run row IS the authoritative native outcome)').toBe('running');
     const gateAfter = await readDispatchGate(executionId);
     expect(gateAfter.dispatchKey, 'the DURABLE dispatch idempotency key is recorded on the obligation row (migration 0047)').toMatch(/^cross-mode-dispatch-/);
   });

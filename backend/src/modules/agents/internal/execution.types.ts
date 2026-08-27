@@ -124,11 +124,38 @@ export interface ExecutionTask {
    * dispatch may never depend on provider determinism/purity: the provider
    * must return the REGISTERED operation, not a re-computed lookalike.
    *
-   * Native mode: the durable operation identity is the EXECUTION identity —
-   * `wfos_agent_runs.execution_id` is UNIQUE, so a keyed native dispatch whose
-   * run already exists CONVERGES to that run (no gateway call, no second
-   * adapter invocation). Absent/null (the mainline one-shot dispatch): the
-   * provider's pre-WORK-042 behavior applies unchanged.
+   * PR #46 round 8 (the DURABLE idempotency boundary): the keyed operation
+   * registry is DURABLE — it survives provider-instance loss, process loss,
+   * and reclaim-driven re-dispatch by any other actor. A same-key submit
+   * through a FRESH provider instance resolves to the SAME operation the
+   * original instance opened:
+   *
+   *   - EXTERNAL mode: the durable provider-operation ledger is
+   *     `wfos_execution_provider_operations` (migration 0048). The ledger ROW
+   *     IS the operation (idempotency_key PRIMARY KEY — ONE row per key);
+   *     its states are PENDING / COMPLETED / FAILED + the stored
+   *     operation/result (submission_json — replayed by every later same-key
+   *     submit). A PENDING row whose driver died is resolved THROUGH THE SAME
+   *     ROW by the recovering actor (the await-then-take-over): the single
+   *     resolution CAS stores exactly one result, and a dead driver's late
+   *     completion affects 0 rows and replays the winner's stored result.
+   *
+   *   - NATIVE mode: the durable native provider-operation ledger is
+   *     `wfos_agent_runs` (migration 0011 — `execution_id TEXT NOT NULL
+   *     UNIQUE`). The run row IS the native provider operation (the run
+   *     creation + the adapter execution the gateway performs only AFTER its
+   *     own run-creation succeeded); the execution_id UNIQUE IS the
+   *     operation-key uniqueness (the keyed native dispatch derives its
+   *     operation identity from the durable execution identity), and the
+   *     run's status/refs ARE the operation result. Process-loss recovery on
+   *     the native path is CONVERGE-ON-THE-EXISTING-RUN: a keyed submit whose
+   *     run already exists NEVER reaches the gateway (no second run
+   *     creation, no second adapter invocation) — around run creation /
+   *     adapter invocation, the run row is the durable record whether the
+   *     crashed actor's adapter invocation ever ran.
+   *
+   * Absent/null (the mainline one-shot dispatch): the provider's pre-WORK-042
+   * behavior applies unchanged (a direct generation/dispatch, no registry).
    */
   readonly dispatchIdempotencyKey?: string | null;
 }
@@ -175,6 +202,23 @@ export interface ExecutionSubmission {
  * A future non-pure provider (WORK-028/029 real external platforms) MUST
  * implement the key through the platform's own idempotency mechanism — the
  * architecture does NOT rely on provider determinism.
+ *
+ * PR #46 round 8 (the DURABLE idempotency boundary): the keyed operation
+ * registry is DURABLE — it lives in PostgreSQL, NOT in provider-instance
+ * memory. The same key resolves to the same operation across provider
+ * instances, processes, and actors:
+ *
+ *   - external — the DURABLE PROVIDER-OPERATION LEDGER
+ *     (`wfos_execution_provider_operations`, migration 0048): the ROW is the
+ *     operation (ONE per key — PRIMARY KEY), PENDING / COMPLETED / FAILED +
+ *     the stored result; same key always resolves to the same operation.
+ *     An in-process Map registry is FORBIDDEN (it dies with the instance).
+ *
+ *   - native — `wfos_agent_runs` (migration 0011) IS the durable native
+ *     provider-operation ledger: `execution_id` UNIQUE is the operation-key
+ *     uniqueness, the run row is the operation + its result, and a keyed
+ *     submit whose run exists converges (never a second gateway/adapter
+ *     call).
  */
 export interface ExecutionProvider {
   readonly name: string;
