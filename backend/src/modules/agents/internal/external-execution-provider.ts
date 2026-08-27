@@ -84,6 +84,33 @@
  * → take-over → re-submit/resolve-by-identity), never a second operation
  * silently opened under the same key.
  *
+ * PR #46 round 11 (the SUBMISSION-ERROR TAXONOMY — the review's blocker:
+ * an ambiguous startOperation failure was terminalized as FAILED): a
+ * submission error proves NOTHING about whether the provider accepted the
+ * operation unless the provider says so. An external request can be
+ * accepted remotely and then lose its response (a timeout, a connection
+ * reset, process death) — the row was 'pending', the provider operation
+ * may EXIST, yet the old catch unconditionally wrote terminal FAILED,
+ * closing the key forever while every later same-key submission replayed a
+ * failure the provider never reported (the provider's idempotency-by-key
+ * guarantee could never again be used to converge — WorkflowOS itself
+ * closed the key). The taxonomy:
+ *
+ *   - DEFINITIVE REJECT — the typed ProviderOperationRejectedError: the
+ *     provider PROVABLY refused the operation and guarantees NO operation
+ *     exists for the key (no side effect can ever occur). The ONLY
+ *     submission error that may terminally fail the key, through the
+ *     ledger's definitive-reject transition ('pending' @ the driver's
+ *     generation → 'failed');
+ *   - ACCEPTANCE UNKNOWN — every other submission error: the row REMAINS
+ *     'pending' (recoverable — the provider's key→operation mapping is the
+ *     authority), the keyed submit fails closed with the typed
+ *     submission-outcome-unknown error, and the SAME-KEY RETRY re-submits
+ *     and CONVERGES through the provider's idempotency-by-key dedup,
+ *     attaches the returned identity, and resolves the ONE operation.
+ *
+ * THE DATABASE NEVER CLOSES A KEY ON AN AMBIGUOUS SUBMISSION ERROR.
+ *
  * UNKEYED tasks (the mainline one-shot dispatch — the
  * DefaultExecutionService path) keep the exact pre-WORK-042 behavior: a
  * direct generation with NO ledger (each mainline execution dispatches
@@ -92,6 +119,7 @@
  * This file is private to /agents (PLAT-AC-02).
  */
 import type { Logger } from '@platform/logger.js';
+import { ProviderOperationRejectedError } from './execution.types.js';
 import type {
   ExecutionProvider,
   ExecutionSubmission,
@@ -244,7 +272,8 @@ export class ExternalExecutionProvider implements ExecutionProvider {
 
   /**
    * DRIVE the ONE ledger operation for the key as the ACTIVE driver of
-   * `generation`. The protocol (round 10 — the SUBMIT-THEN-ATTACH ordering):
+   * `generation`. The protocol (round 10 — the SUBMIT-THEN-ATTACH ordering;
+   * round 11 — the submission-error taxonomy):
    *
    *   - The row resolved → converge (replay / the stored failure).
    *   - The row's generation moved on → this driver is STALE: yield (the
@@ -260,6 +289,15 @@ export class ExternalExecutionProvider implements ExecutionProvider {
    *     key→operation mapping is the authority), durably ATTACH the returned
    *     identity (the CAS: 'pending' → 'started' @ THIS generation), then
    *     resolve the CONFIRMED operation by its identity.
+   *
+   * A submission FAILURE (round 11) is classified by WHAT THE ERROR PROVES:
+   * the typed ProviderOperationRejectedError is a DEFINITIVE REJECT (the
+   * provider guarantees no operation exists — terminal FAILED allowed);
+   * every other submission error is ACCEPTANCE-UNKNOWN (the provider may
+   * have accepted the operation and lost the response) — the row REMAINS
+   * 'pending' and recoverable, and the keyed submit fails closed with the
+   * typed outcome-unknown error (never a terminal FAILED: the same-key
+   * retry converges through the provider's idempotency-by-key dedup).
    */
   private async attemptDrive(
     store: ExecutionProviderOperationStore,
@@ -306,10 +344,44 @@ export class ExternalExecutionProvider implements ExecutionProvider {
     try {
       handle = await this.startOperation(key, task);
     } catch (err) {
-      // The submission FAILED (the provider never confirmed an operation):
-      // the failed attempt terminally fails the key (round 9 semantics —
-      // one key, one terminal result; the failure is a KNOWN outcome).
-      return this.failDrive(store, key, task, generation, err);
+      if (err instanceof ProviderOperationRejectedError) {
+        // DEFINITIVE REJECT (PR #46 round 11 — the submission-error
+        // taxonomy): the provider PROVABLY REFUSED the operation and
+        // guarantees NO operation exists for the key (no side effect can
+        // ever occur). This is the ONLY submission error that may
+        // terminally fail the key — the pending row's single terminal-
+        // failure path is the ledger's definitive-reject transition.
+        return this.failDrive(
+          store, key, task, generation, err, 'definitive-reject',
+        );
+      }
+      // ACCEPTANCE UNKNOWN (PR #46 round 11 — the review's blocker): a
+      // transport failure (a timeout, a connection reset, a LOST RESPONSE,
+      // process death...) proves NOTHING about whether the provider
+      // accepted the operation — the provider may have accepted it, and the
+      // operation may exist and succeed remotely. The row REMAINS 'pending'
+      // (the row claims nothing; the provider's key→operation mapping is
+      // the authority): the key stays RECOVERABLE — the same-key retry
+      // re-submits and CONVERGES through the provider's idempotency-by-key
+      // dedup, attaches the returned identity, and resolves the ONE
+      // operation. NEVER a terminal FAILED from an ambiguous error: that
+      // would close the key while the provider operation may exist and
+      // succeed — every later same-key submission would replay a failure
+      // the provider never reported, and the provider's idempotency-by-key
+      // guarantee could never again be used to converge because WorkflowOS
+      // itself closed the key.
+      this.logger?.warn(
+        'execution.external.provider-operation-submission-outcome-unknown',
+        {
+          idempotencyKey: key,
+          executionId: task.executionId,
+          generation,
+          error: (err as Error).message,
+        },
+      );
+      throw new Error(
+        `external-execution-submission-outcome-unknown: the submission for provider operation ${key} (execution ${task.executionId}) failed ambiguously (${(err as Error).message}) — the provider may have accepted the operation; the ledger row stays pending and the same-key retry converges through the provider's idempotency-by-key dedup`,
+      );
     }
     const attached = await store.attachOperation(key, generation, handle);
     if (!attached) {
@@ -362,7 +434,9 @@ export class ExternalExecutionProvider implements ExecutionProvider {
       const submission = await this.resolveOperation(handle, task);
       return await this.settle(store, key, task, generation, submission);
     } catch (err) {
-      return this.failDrive(store, key, task, generation, err);
+      return this.failDrive(
+        store, key, task, generation, err, 'resolution-failure',
+      );
     }
   }
 
@@ -408,9 +482,19 @@ export class ExternalExecutionProvider implements ExecutionProvider {
   }
 
   /**
-   * Record a failed drive through the GENERATION-FENCED failure CAS. If the
-   * CAS wins, the failure is the operation's terminal outcome. If it loses,
-   * this driver's generation is STALE (superseded by a take-over): its
+   * Record a failed drive through the GENERATION-FENCED failure CAS. The
+   * `outcome` discriminator names WHICH failure transition this is (PR #46
+   * round 11 — the submission-error taxonomy):
+   *
+   *   - 'definitive-reject' — the provider PROVABLY refused the submission
+   *     (the typed ProviderOperationRejectedError; the row is 'pending'):
+   *     the ledger's DEFINITIVE-REJECT transition is the ONLY way an
+   *     unconfirmed submission may terminally fail the key;
+   *   - 'resolution-failure' — a CONFIRMED operation's resolution failed
+   *     (the row is 'started').
+   *
+   * If the CAS wins, the failure is the operation's terminal outcome. If it
+   * loses, this driver's generation is STALE (superseded by a take-over): its
    * failure is structurally DISCARDED — it can never defeat the active
    * recovery generation — and the driver converges to the row's recorded or
    * eventual outcome instead (a COMPLETED row still resolves the same key;
@@ -422,8 +506,20 @@ export class ExternalExecutionProvider implements ExecutionProvider {
     task: ExecutionTask,
     generation: number,
     err: unknown,
+    outcome: 'definitive-reject' | 'resolution-failure',
   ): Promise<DriveOutcome> {
-    await store.fail(key, generation, (err as Error).message);
+    const message = (err as Error).message;
+    if (outcome === 'definitive-reject') {
+      // The DEFINITIVE-REJECT CAS ('pending' @ THIS generation → 'failed'):
+      // legal ONLY because the provider PROVED no operation exists for the
+      // key — an AMBIGUOUS submission error NEVER reaches this transition
+      // (the row stays 'pending' and recoverable instead).
+      await store.reject(key, generation, message);
+    } else {
+      // The resolution-failure CAS ('started' @ THIS generation →
+      // 'failed') — the confirmed operation's resolution failure.
+      await store.fail(key, generation, message);
+    }
     const row = await store.get(key);
     if (row && row.state === 'completed' && row.submission) {
       this.logger?.info(
@@ -510,9 +606,10 @@ export class ExternalExecutionProvider implements ExecutionProvider {
   }
 
   /**
-   * PR #46 round 10 (the IDEMPOTENT PROVIDER-SUBMISSION seam): SUBMIT the
-   * ONE provider operation for the key — the operation's entry into the
-   * provider's own operation space. THE CONTRACT — startOperation(key) MUST
+   * PR #46 round 10 (the IDEMPOTENT PROVIDER-SUBMISSION seam) + round 11
+   * (the SUBMISSION-ERROR TAXONOMY): SUBMIT the ONE provider operation for
+   * the key — the operation's entry into the provider's own operation
+   * space. THE CONTRACT — startOperation(key) MUST
    * BE IDEMPOTENT BY KEY: invoking it again for a key that already owns a
    * provider operation MUST CONVERGE onto that ONE operation (returning its
    * identity), NEVER start a second one — exactly like a platform idempotency
@@ -525,13 +622,26 @@ export class ExternalExecutionProvider implements ExecutionProvider {
    *     (the PROVIDER's key→operation mapping is the authority, never the
    *     ledger row — the database never infers a start from a persisted
    *     intended identity).
+   *
+   * THE ERROR CONTRACT (round 11 — DEFINITIVE REJECT vs ACCEPTANCE UNKNOWN):
+   * throw the typed {@link ProviderOperationRejectedError} ONLY when the
+   * provider PROVABLY refused the operation (it guarantees NO operation
+   * exists for the key — no side effect can ever occur; terminal FAILED is
+   * allowed). EVERY other thrown error is treated as ACCEPTANCE-UNKNOWN
+   * (a timeout, a connection reset, a lost response — the provider may have
+   * accepted the operation): the ledger row stays 'pending' and recoverable,
+   * and the same-key retry converges through the idempotency-by-key dedup
+   * above. NEVER throw the typed reject for an ambiguous failure — the key
+   * would close while the provider operation may exist and succeed.
+   *
    * The DEFAULT provider's submission is a PURE derivation (no side
    * effects), so re-submission trivially converges; the durable identity of
    * the (pure) operation is derived from the key. A platform-backed provider
    * (WORK-028/029) submits the operation to the platform keyed by the
    * operation key (the platform dedupes) and returns the platform's durable
    * operation identity. Protected so tests can instrument/park the
-   * submission crash points (before/after the provider accepted).
+   * submission crash points (before/after the provider accepted) and
+   * simulate ambiguous acceptances + definitive rejects.
    */
   protected async startOperation(
     idempotencyKey: string,

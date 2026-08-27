@@ -13325,11 +13325,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // starting).
     expect(repoSrc, 'the completion is the generation-fenced resolution CAS that REQUIRES started (the lifecycle gate)').toMatch(/state = 'completed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'started'\s+AND generation = \$2/);
     expect(repoSrc, 'the completion stores the submission result').toMatch(/submission_json = \$3::jsonb/);
-    // fail (round 10): the symmetric GENERATION-FENCED CAS accepting EITHER
-    // non-terminal state (a failed submission attempt or a failed
-    // resolution may each terminally fail the key; a stale generation's
-    // failure is structurally discarded).
-    expect(repoSrc, 'the failure is the symmetric generation-fenced CAS accepting pending OR started').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state IN \('pending', 'started'\)\s+AND generation = \$2/);
+    // fail (round 11 — the SUBMISSION-ERROR TAXONOMY): the symmetric
+    // GENERATION-FENCED CAS is now the CONFIRMED operation's
+    // resolution-failure transition ONLY ('started' @ THIS generation →
+    // 'failed'); the unconfirmed-submission arm ('pending' → 'failed') moved
+    // to the DEFINITIVE-REJECT gate (reject) — an AMBIGUOUS submission error
+    // can never terminally fail a pending row.
+    expect(repoSrc, 'the failure is the generation-fenced CAS requiring started (the confirmed operation\'s resolution failure — round 11)').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'started'\s+AND generation = \$2/);
+    // reject (round 11 — the DEFINITIVE-REJECT gate): the ONLY
+    // 'pending' → 'failed' transition.
+    expect(repoSrc, 'the DEFINITIVE-REJECT CAS is the ONLY pending → failed transition (the definitive-reject gate)').toMatch(/state = 'failed',[\s\S]*?WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    expect(repoSrc, 'no failure transition accepts BOTH non-terminal states (the round-10 pending-OR-started fail shape is gone)').not.toMatch(/WHERE idempotency_key = \$1\s+AND state IN \('pending', 'started'\)\s+AND generation = \$2/);
     // takeOver (round 10): the process-loss recovery from EITHER
     // non-terminal state — the recovery drive of the SAME row, RETURNING
     // the NEW GENERATION TOKEN (the fencing token).
@@ -13714,5 +13720,143 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     const suiteSrc = readFileSync(suitePath, 'utf8');
     expect(suiteSrc, 'the drive counter (generate entries) exists on the instrumented double').toMatch(/get driveCount/);
     expect(suiteSrc, 'a keyed regression asserts ZERO drives (the keyed path never runs the body seam)').toMatch(/driveCount[\s\S]{0,200}toBe\(0\)/);
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #46 round 11 — the SUBMISSION-ERROR TAXONOMY (the round-11 review's
+  // blocker: an ambiguous startOperation failure was terminalized as FAILED,
+  // closing the key while the provider operation may EXIST and succeed —
+  // every later same-key submission then replayed a failure the provider
+  // never reported, and the provider's idempotency-by-key guarantee could
+  // never again be used to converge). The required distinction:
+  //   DEFINITIVE_REJECT (the typed ProviderOperationRejectedError) →
+  //     terminal FAILED is allowed;
+  //   AMBIGUOUS / ACCEPTANCE_UNKNOWN (every other submission error) →
+  //     remain recoverable → same-key retry → provider deduplication/
+  //     convergence → attach the returned identity → resolve.
+  // THE DATABASE NEVER CLOSES A KEY ON AN AMBIGUOUS SUBMISSION ERROR.
+  // -----------------------------------------------------------------------
+
+  // R11-A (round 11 — the typed definitive-reject contract): the
+  // ProviderOperationRejectedError class exists in the provider contract,
+  // with the taxonomy stated (definitive reject vs acceptance unknown) on
+  // the class AND on the ExecutionProvider interface.
+  it('R11-A. the typed ProviderOperationRejectedError contract — the class exists + the DEFINITIVE-REJECT vs ACCEPTANCE-UNKNOWN taxonomy is stated on the class and the provider interface', () => {
+    const typesSrc = readFileSync(join(AGENTS_INTERNAL, 'execution.types.ts'), 'utf8');
+    expect(typesSrc, 'the typed definitive-reject error class is exported from the provider contract').toMatch(/export class ProviderOperationRejectedError extends Error/);
+    expect(typesSrc, 'the class doc states the guarantee: NO operation exists for the key').toMatch(/guarantees NO operation\s*\n?\s*\*?\s*exists for the key/);
+    expect(typesSrc, 'the class doc states it is the ONLY submission error that may terminally fail a pending row').toMatch(/the ONLY\s*\n?\s*\*?\s*submission error that may terminally fail a 'pending'/);
+    expect(typesSrc, 'the class doc states the acceptance-unknown counterpart (never throw the typed reject for an ambiguous failure)').toMatch(/NEVER throw the typed reject for an ambiguous failure/);
+    expect(typesSrc, 'the ExecutionProvider contract states the round-11 taxonomy').toMatch(/PR #46 round 11 \(the SUBMISSION-ERROR TAXONOMY/);
+    expect(typesSrc, 'the contract states DEFINITIVE REJECT vs ACCEPTANCE UNKNOWN').toMatch(/DEFINITIVE REJECT vs\s*\n?\s*\*?\s*ACCEPTANCE UNKNOWN/);
+    expect(typesSrc, 'the contract states the never-close-on-ambiguity principle').toMatch(/THE DATABASE NEVER CLOSES A\s*\n?\s*\*?\s*KEY ON AN AMBIGUOUS SUBMISSION ERROR/);
+  });
+
+  // R11-B (round 11 — the architect's REQUIRED static invariant): an
+  // ambiguous submission error NEVER unconditionally calls fail. The
+  // submission catch's FIRST statement is the definitive-reject instanceof
+  // branch; every other error rethrows the typed outcome-unknown error with
+  // the row left pending; the round-10 unconditional catch→failDrive shape
+  // is structurally GONE from the submission boundary.
+  it('R11-B. NO ambiguous submission error unconditionally calls fail — the submission catch branches on the typed definitive reject FIRST + rethrows the typed outcome-unknown error for everything else (the row stays pending)', () => {
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    expect(externalSrc, 'the provider imports the typed definitive-reject error').toMatch(/import \{ ProviderOperationRejectedError \} from '\.\/execution\.types\.js'/);
+    // Extract the submission-boundary region: from the startOperation call
+    // through the attach that follows it (the catch sits between them).
+    const submitIdx = externalSrc.indexOf('handle = await this.startOperation(key, task);');
+    const attachIdx = externalSrc.indexOf('const attached = await store.attachOperation(key, generation, handle);');
+    expect(submitIdx, 'the submission call exists in the drive').toBeGreaterThan(-1);
+    expect(attachIdx, 'the attach follows the submission (the submit-then-attach ordering)').toBeGreaterThan(submitIdx);
+    const submissionRegion = externalSrc.slice(submitIdx, attachIdx);
+    // The catch's FIRST statement is the definitive-reject instanceof
+    // branch — an ambiguous error can never fall straight into a fail.
+    expect(submissionRegion, 'the submission catch opens with the definitive-reject instanceof branch').toMatch(/\} catch \(err\) \{\s*\n\s*if \(err instanceof ProviderOperationRejectedError\) \{/);
+    const instanceofIdx = submissionRegion.indexOf('if (err instanceof ProviderOperationRejectedError)');
+    const failDriveIdx = submissionRegion.indexOf('this.failDrive(');
+    expect(instanceofIdx, 'the instanceof gate exists in the submission catch').toBeGreaterThan(-1);
+    expect(failDriveIdx, 'failDrive is called ONLY inside the definitive-reject branch').toBeGreaterThan(instanceofIdx);
+    expect(submissionRegion, 'the definitive-reject branch passes the outcome discriminator').toMatch(/'definitive-reject'/);
+    // The ambiguous arm: the typed outcome-unknown rethrow (the row stays
+    // pending — recoverable).
+    expect(submissionRegion, 'the AMBIGUOUS arm rethrows the typed outcome-unknown error').toMatch(/external-execution-submission-outcome-unknown/);
+    expect(submissionRegion, 'the AMBIGUOUS arm states the row stays pending + the same-key retry converges').toMatch(/ledger row stays pending and the same-key retry converges/);
+    // The round-10 unconditional shape (a catch that goes straight to
+    // failDrive) is GONE from the submission boundary.
+    expect(submissionRegion, 'NO unconditional catch → failDrive in the submission boundary (the round-11 blocker)').not.toMatch(/catch \(err\) \{\s*\n\s*(\/\/[^\n]*\n\s*)*return this\.failDrive\(/);
+    // The observability log for the ambiguous outcome exists.
+    expect(externalSrc, 'the submission-outcome-unknown observability log exists').toMatch(/provider-operation-submission-outcome-unknown/);
+    // The startOperation seam's ERROR CONTRACT states the taxonomy.
+    const seamMatch = externalSrc.match(/protected async startOperation\([\s\S]*?\n  \}/);
+    expect(seamMatch, 'the startOperation seam is defined').toBeTruthy();
+    expect(externalSrc, 'the seam doc states the ERROR CONTRACT (definitive reject vs acceptance unknown)').toMatch(/THE ERROR CONTRACT \(round 11 — DEFINITIVE REJECT vs ACCEPTANCE UNKNOWN\)/);
+    expect(externalSrc, 'the seam doc states NEVER throw the typed reject for an ambiguous failure').toMatch(/NEVER throw the typed reject for an ambiguous failure/);
+  });
+
+  // R11-C (round 11 — the repository's DEFINITIVE-REJECT gate): the ledger
+  // state machine itself enforces the taxonomy — reject is the ONLY
+  // 'pending' → 'failed' transition (pending-only; generation-fenced), fail
+  // is the started-only resolution-failure transition, and the drive wires
+  // the definitive-reject branch EXCLUSIVELY through store.reject.
+  it('R11-C. the repository DEFINITIVE-REJECT gate — reject is the ONLY pending → failed transition (pending-only, generation-fenced); fail is started-only; the drive wires the reject branch exclusively through store.reject', () => {
+    const repoSrc = readFileSync(R8_OPERATION_REPO, 'utf8');
+    // The reject port exists with the round-11 contract.
+    expect(repoSrc, 'the reject port is declared').toMatch(/reject\(idempotencyKey: string, generation: number, error: string\): Promise<void>;/);
+    expect(repoSrc, 'the reject port declares itself the ONLY pending → failed transition').toMatch(/the ONLY 'pending' →\s*\n?\s*\*?\s*'failed' transition/);
+    expect(repoSrc, 'the reject port states the round-11 rule (an AMBIGUOUS submission failure must NEVER reach it)').toMatch(/AMBIGUOUS submission failure[\s\S]{0,120}must NEVER\s*\n?\s*\*?\s*reach this transition/);
+    // The implementation: reject requires 'pending' @ the generation.
+    const rejectMatch = repoSrc.match(/async reject\([\s\S]*?\n  \}/);
+    expect(rejectMatch, 'the reject implementation exists').toBeTruthy();
+    expect(rejectMatch![0], 'reject CASes on state = pending (the pending-only gate)').toMatch(/WHERE idempotency_key = \$1\s+AND state = 'pending'\s+AND generation = \$2/);
+    // fail requires 'started' (the confirmed operation's resolution failure).
+    const failMatchImpl = repoSrc.match(/async fail\([\s\S]*?\n  \}/);
+    expect(failMatchImpl, 'the fail implementation exists').toBeTruthy();
+    expect(failMatchImpl![0], 'fail CASes on state = started (the started-only gate — a pending row is structurally unreachable)').toMatch(/WHERE idempotency_key = \$1\s+AND state = 'started'\s+AND generation = \$2/);
+    // The provider's failDrive discriminates the two outcomes and wires
+    // reject EXCLUSIVELY to the definitive-reject branch.
+    const externalSrc = readFileSync(R7_EXTERNAL_PROVIDER, 'utf8');
+    const failDriveMatch = externalSrc.match(/private async failDrive\([\s\S]*?\n  \}/);
+    expect(failDriveMatch, 'failDrive is defined').toBeTruthy();
+    expect(failDriveMatch![0], 'failDrive carries the outcome discriminator').toMatch(/outcome: 'definitive-reject' \| 'resolution-failure'/);
+    expect(failDriveMatch![0], "the definitive-reject branch calls store.reject (the pending row's ONLY terminal-failure path)").toMatch(/store\.reject\(key, generation, message\)/);
+    expect(failDriveMatch![0], 'the resolution-failure branch calls store.fail (the started row)').toMatch(/store\.fail\(key, generation, message\)/);
+    const branchIdx = failDriveMatch![0].indexOf("outcome === 'definitive-reject'");
+    const rejectIdx = failDriveMatch![0].indexOf('store.reject(key, generation, message)');
+    const failIdx = failDriveMatch![0].indexOf('store.fail(key, generation, message)');
+    expect(branchIdx, 'the discriminator branch exists').toBeGreaterThan(-1);
+    expect(rejectIdx, 'store.reject is called inside the definitive-reject branch (before the else)').toBeGreaterThan(branchIdx);
+    expect(failIdx, 'store.fail is the else branch (after reject)').toBeGreaterThan(rejectIdx);
+  });
+
+  // R11-D (round 11 — the regressions): the ambiguous-acceptance regression
+  // (the review's required scenario), the definitive-reject arm, and the
+  // repository taxonomy proofs all exist in the real-PostgreSQL concurrency
+  // suite — with the doubles' ambiguity gates + the round-11 semantics
+  // asserted in the updated round-10 tails.
+  it('R11-D. the round-11 regressions exist — the AMBIGUOUS-ACCEPTANCE regression (accept → response lost → pending → same-key retry converges → ONE effect), the DEFINITIVE-REJECT arm, + the repository taxonomy proofs', () => {
+    const suitePath = join(
+      BACKEND_ROOT, 'tests', 'integration', 'agents',
+      'cross-mode-handoff-claim-lease-concurrency.regression.test.ts',
+    );
+    const suiteSrc = readFileSync(suitePath, 'utf8');
+    // The three round-11 regressions.
+    expect(suiteSrc, 'R11-#1 — THE AMBIGUOUS ACCEPTANCE (the review\'s required regression)').toMatch(/R11-#1\. THE AMBIGUOUS ACCEPTANCE/);
+    expect(suiteSrc, 'R11-#2 — the DEFINITIVE-REJECT arm').toMatch(/R11-#2\. the DEFINITIVE-REJECT arm/);
+    expect(suiteSrc, 'R11-#3 — the repository taxonomy proofs').toMatch(/R11-#3\. the repository TAXONOMY proofs/);
+    // The required scenario's discriminating assertions.
+    expect(suiteSrc, 'the ambiguous acceptance asserts the ledger REMAINS PENDING (never failed)').toMatch(/the ambiguous submission error leaves the ledger PENDING/);
+    expect(suiteSrc, 'the ambiguous acceptance asserts EXACTLY ONE external side effect').toMatch(/EXACTLY ONE external side effect across the ambiguous acceptance/);
+    expect(suiteSrc, 'the ambiguous acceptance asserts the provider returns the SAME operation identity').toMatch(/the provider returns the SAME operation identity/);
+    // The doubles' round-11 gates.
+    expect(suiteSrc, 'the loseResponseAfterAccept gate (the lost response AFTER the platform accepted)').toMatch(/loseResponseAfterAccept/);
+    expect(suiteSrc, 'the definitiveReject gate (the typed refusal — NO operation exists)').toMatch(/definitiveReject/);
+    expect(suiteSrc, 'the double throws the TYPED reject (the definitive-refusal simulation)').toMatch(/new ProviderOperationRejectedError\(/);
+    // The updated round-10 tails assert the round-11 semantics (an
+    // ambiguous simulated-death error fails the dispatch WITHOUT any
+    // terminal ledger write).
+    expect(suiteSrc, 'the R10-#1/#2 tails document the ROUND-11 semantics').toMatch(/T1\'s late tail \(ROUND-11 semantics\)/);
+    expect(suiteSrc, 'the tails assert the typed outcome-unknown error is surfaced').toMatch(/toContain\(\'submission-outcome-unknown\'\)/);
+    // The suite header documents the round-11 layer.
+    expect(suiteSrc, 'the suite header documents the round-11 taxonomy').toMatch(/PR #46 ROUND 11 \(the SUBMISSION-ERROR TAXONOMY/);
+    expect(suiteSrc, 'the suite describe includes round 11').toMatch(/round 10 \+ round 11/);
   });
 });

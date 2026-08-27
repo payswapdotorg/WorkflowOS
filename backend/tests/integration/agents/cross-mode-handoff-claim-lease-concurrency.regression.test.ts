@@ -298,6 +298,53 @@
  *      typed unresolved error (N3 — never a manufactured completion, never a
  *      second run; the execution_id UNIQUE is the ledger authority).
  *
+ * PR #46 ROUND 11 (the SUBMISSION-ERROR TAXONOMY — definitive reject vs
+ * acceptance unknown). The round-11 review found the round-10 drive
+ * terminalized EVERY startOperation failure as FAILED — but an external
+ * request can be accepted remotely and then lose its response (a timeout, a
+ * connection reset, process death): the provider operation may EXIST (and
+ * succeed) while the ledger closed the key as failed, so every later
+ * same-key submission replayed a failure the provider never reported and
+ * the provider's idempotency-by-key guarantee could never again be used to
+ * converge (WorkflowOS itself closed the key). The taxonomy — a submission
+ * error proves NOTHING about whether the provider accepted the operation
+ * unless the provider says so:
+ *
+ *   - DEFINITIVE REJECT (the typed ProviderOperationRejectedError): the
+ *      provider PROVABLY refused + guarantees NO operation exists for the
+ *      key — terminal FAILED is allowed, through the ledger's
+ *      DEFINITIVE-REJECT transition (the ONLY 'pending' → 'failed' path);
+ *   - ACCEPTANCE UNKNOWN (every other submission error): the row REMAINS
+ *      'pending' (recoverable); the keyed submit fails closed with the
+ *      typed submission-outcome-unknown error; the SAME-KEY RETRY
+ *      re-submits and CONVERGES through the provider's idempotency-by-key
+ *      dedup, attaches the returned identity, and resolves the ONE
+ *      operation. THE DATABASE NEVER CLOSES A KEY ON AN AMBIGUOUS
+ *      SUBMISSION ERROR.
+ *
+ *   R11-#1 (the review's required regression — THE AMBIGUOUS ACCEPTANCE):
+ *      the provider ACCEPTS the operation (the side effect happens; the
+ *      outcome lands on the platform) but the RESPONSE IS LOST (the
+ *      submission throws an ambiguous plain error) → the ledger REMAINS
+ *      'pending' (NOT failed) → the takeover/retry with the SAME key → the
+ *      provider returns the SAME operation identity (the dedup converges)
+ *      → EXACTLY ONE external side effect → the terminal result is
+ *      recorded. (Round 10's R10-#1/#2 tails are ALSO updated: an ambiguous
+ *      simulated-death error now fails the dispatch 'handoff-dispatch-failed'
+ *      WITHOUT any terminal ledger write.)
+ *
+ *   R11-#2 (the DEFINITIVE-REJECT arm): the typed reject → terminal FAILED
+ *      IS recorded @ generation 1 (the only legal pending-row failure) →
+ *      ZERO platform operations/effects (the provider refused) → a later
+ *      same-key submit surfaces the STORED failure with ZERO submissions
+ *      (key immutability for the reject arm).
+ *
+ *   R11-#3 (the repository taxonomy proofs): reject is the pending-ONLY
+ *      gate (a started row's reject hits 0 rows; a wrong generation hits 0
+ *      rows); fail is the started-ONLY gate (a PENDING row's fail hits 0
+ *      rows — the ambiguous-submission guard is STRUCTURAL: an unconfirmed
+ *      submission has NO resolution-failure path at all).
+ *
  * A fake / single-connection test is INSUFFICIENT for these invariants (the
  * architect's round-4 words): the problem is specifically database
  * transaction serialization, so the regression must use REAL PostgreSQL
@@ -364,6 +411,7 @@ import type {
   ExecutionSubmission,
   ExecutionTask,
 } from '../../../src/modules/agents/internal/execution.types.js';
+import { ProviderOperationRejectedError } from '../../../src/modules/agents/internal/execution.types.js';
 import type { AgentPolicyExternalDecision } from '../../../src/modules/agents/internal/agent-policy.types.js';
 import type { AgentPolicyHandoffEvaluator } from '../../../src/modules/agents/internal/policy-gated-handoff-service.js';
 
@@ -639,24 +687,35 @@ class InstrumentedExternalProvider extends ExternalExecutionProvider {
 }
 
 /**
- * PR #46 round 9 + round 10 (R10-#2/#3): a SIDE-EFFECTING external provider
- * double — the architect's "genuinely side-effecting provider" proof. The
- * IDEMPOTENT-BY-KEY SUBMISSION (startOperation) performs a REAL, ONCE-ONLY
- * side effect: it submits the "platform operation" whose outcome lands on the
- * shared PLATFORM map (the external system's durable state — it survives the
- * driver's process death, exactly like a real platform). THE PLATFORM'S
- * key→operation mapping is the idempotency authority: a re-submission for a
- * key that already owns a platform operation CONVERGES onto it (returns the
- * same identity, performs NO second effect) — exactly like a platform
- * idempotency key. The recovery seam (resolveOperation) is a STATUS FETCH on
- * that map — it NEVER re-submits. The beforeEffect/afterEffect death gates
- * model the process death on either side of the provider's acceptance:
+ * PR #46 round 9 + round 10 (R10-#2/#3) + round 11 (R11-#1/#2): a
+ * SIDE-EFFECTING external provider double — the architect's "genuinely
+ * side-effecting provider" proof. The IDEMPOTENT-BY-KEY SUBMISSION
+ * (startOperation) performs a REAL, ONCE-ONLY side effect: it submits the
+ * "platform operation" whose outcome lands on the shared PLATFORM map (the
+ * external system's durable state — it survives the driver's process death,
+ * exactly like a real platform). THE PLATFORM'S key→operation mapping is the
+ * idempotency authority: a re-submission for a key that already owns a
+ * platform operation CONVERGES onto it (returns the same identity, performs
+ * NO second effect) — exactly like a platform idempotency key. The recovery
+ * seam (resolveOperation) is a STATUS FETCH on that map — it NEVER
+ * re-submits. The gates model the provider-boundary failure points:
  *   - beforeEffect: die BEFORE the platform accepted (the re-submission is
  *     the FIRST execution — matrix row 1);
  *   - afterEffect: die AFTER the platform accepted, BEFORE the ledger attach
  *     (the re-submission CONVERGES — matrix row 2, THE round-10 hole: the
  *     ledger row is 'pending' with NO handle and claims NOTHING, yet the
- *     operation EXISTS at the provider).
+ *     operation EXISTS at the provider);
+ *   - loseResponseAfterAccept (ROUND 11 — THE AMBIGUOUS ACCEPTANCE): the
+ *     platform ACCEPTS the operation (the side effect happens; the outcome
+ *     lands on the platform) but the RESPONSE IS LOST — the submission call
+ *     throws an AMBIGUOUS plain error (a connection reset after the accept).
+ *     NOT a definitive reject: the provider did NOT refuse the operation —
+ *     it accepted it and the response never arrived. The ledger row stays
+ *     'pending' (recoverable); the same-key re-submission CONVERGES;
+ *   - definitiveReject (ROUND 11 — THE DEFINITIVE REJECT): the platform
+ *     REFUSES the operation — the typed ProviderOperationRejectedError (it
+ *     guarantees NO operation exists for the key; nothing lands on the
+ *     platform). Terminal FAILED is legal for exactly this error.
  */
 class SideEffectingExternalProvider extends ExternalExecutionProvider {
   private _submissionCount = 0;
@@ -668,6 +727,8 @@ class SideEffectingExternalProvider extends ExternalExecutionProvider {
       beforeEffect?: Promise<never>;
       afterEffect?: Promise<never>;
       parkAtResolve?: Promise<void>;
+      loseResponseAfterAccept?: boolean;
+      definitiveReject?: boolean;
     },
     /** The shared "platform" state (the external system — survives process death). */
     private readonly platform: Map<string, ExecutionSubmission>,
@@ -685,6 +746,15 @@ class SideEffectingExternalProvider extends ExternalExecutionProvider {
     task: ExecutionTask,
   ): Promise<string> {
     this._submissionCount++;
+    if (this.gates.definitiveReject) {
+      // ROUND 11 — THE DEFINITIVE REJECT: the platform REFUSES the operation
+      // — it guarantees NO operation exists for the key (no side effect,
+      // NOTHING lands on the platform map). The typed error is the ONLY
+      // submission error that may terminally fail the ledger key.
+      throw new ProviderOperationRejectedError(
+        'simulated definitive provider reject — the platform refused the operation (NO operation exists for the key)',
+      );
+    }
     // The platform's own operation-identity space (the idempotency key the
     // platform dedupes on).
     const handle = `platform-operation:${idempotencyKey}`;
@@ -710,6 +780,21 @@ class SideEffectingExternalProvider extends ExternalExecutionProvider {
         // the ledger row is still 'pending' with NO handle — the row claims
         // NOTHING about the provider).
         await this.gates.afterEffect;
+      }
+      if (this.gates.loseResponseAfterAccept) {
+        // ROUND 11 — THE AMBIGUOUS ACCEPTANCE (the review's blocker): the
+        // platform ACCEPTED the operation (the side effect happened; the
+        // outcome is on the platform map) but the RESPONSE IS LOST — the
+        // submission call fails with an AMBIGUOUS plain error (a connection
+        // reset after the accept). This is NOT a definitive reject: the
+        // operation EXISTS at the provider. The ledger row must STAY
+        // 'pending' (recoverable) — the same-key re-submission converges
+        // onto the ONE platform operation. Fires only on the ACCEPTING
+        // submission (a re-submission for the existing operation converges
+        // normally below).
+        throw new Error(
+          'simulated connection reset AFTER the platform accepted the operation — the response was lost (NOT a definitive reject: the operation EXISTS at the provider)',
+        );
       }
     }
     // A re-submission for an EXISTING platform operation CONVERGES: the same
@@ -1027,7 +1112,7 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
   }
 }
 
-describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round 8 + round 9 + round 10 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, the KEYED provider-dispatch exactly-once boundary, the DURABLE provider-operation ledger, the GENERATION-FENCED takeover protocol, + the IDEMPOTENT-SUBMISSION + NATIVE-LIFECYCLE-CONVERGENCE boundary (real PostgreSQL two-actor concurrency with provider-instance separation)', () => {
+describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round 8 + round 9 + round 10 + round 11 — the durable cross-mode-handoff claim/lease, the unique-owner/heartbeat/epoch-fence lease semantics, the FENCED DISPATCH boundary, the KEYED provider-dispatch exactly-once boundary, the DURABLE provider-operation ledger, the GENERATION-FENCED takeover protocol, the IDEMPOTENT-SUBMISSION + NATIVE-LIFECYCLE-CONVERGENCE boundary, + the SUBMISSION-ERROR TAXONOMY (definitive reject vs acceptance unknown — the database never closes a key on an ambiguous submission error) (real PostgreSQL two-actor concurrency with provider-instance separation)', () => {
   let stack: TestAuthStack;
   let second: { client: DatabaseClient; close: () => Promise<void> } | undefined;
 
@@ -3440,12 +3525,14 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     const store = new PgExecutionProviderOperationRepository(second!.client);
 
     // ---------------- THE FAILED ARM ----------------
+    // (Round 11: a pending row's terminal failure is the DEFINITIVE-REJECT
+    // transition — store.reject — the ONLY 'pending' → 'failed' path.)
     const failedKey = `r9-immutability-failed-${executionId}`;
     const opened = await store.register({
       idempotencyKey: failedKey, provider: 'external', executionId, mode: 'external',
     });
     expect(opened.opened, 'a FRESH key OPENS the ONE row (generation 1)').toBe(true);
-    await store.fail(failedKey, 1, 'terminal provider failure — the operation failed');
+    await store.reject(failedKey, 1, 'terminal provider failure — the operation failed');
     const failedRow = await store.get(failedKey);
     expect(failedRow!.state).toBe('failed');
     expect(failedRow!.generation).toBe(1);
@@ -3467,8 +3554,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(rejectedTakeover.generation).toBeNull();
 
     // Even the CORRECT generation cannot re-resolve a terminal row (the CAS
-    // requires state='pending').
-    await store.fail(failedKey, 1, 'a second failure attempt on a terminal row');
+    // requires a non-terminal state).
+    await store.reject(failedKey, 1, 'a second failure attempt on a terminal row');
     expect((await store.get(failedKey))!.errorMessage, 'the terminal result is IMMUTABLE').toBe('terminal provider failure — the operation failed');
 
     // The provider-level replay: a same-key submit through a FRESH instance
@@ -3531,12 +3618,12 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     await store.register({
       idempotencyKey: pendingKey, provider: 'external', executionId, mode: 'external',
     });
-    await store.fail(pendingKey, 7, 'a wrong generation can NEVER resolve');
+    await store.reject(pendingKey, 7, 'a wrong generation can NEVER resolve');
     expect((await store.get(pendingKey))!.state, 'a WRONG generation resolved NOTHING (the row stays pending)').toBe('pending');
     const takeover = await store.takeOver(pendingKey);
     expect(takeover.tookOver, 'the pending row is taken over').toBe(true);
     expect(takeover.generation, 'takeOver RETURNS the NEW GENERATION TOKEN (the fencing token)').toBe(2);
-    await store.fail(pendingKey, 1, 'stale generation fail');
+    await store.reject(pendingKey, 1, 'stale generation fail');
     expect((await store.get(pendingKey))!.state, 'the STALE generation\'s failure hit 0 rows (structurally discarded)').toBe('pending');
     expect((await store.get(pendingKey))!.errorMessage).toBeNull();
     expect((await store.complete(pendingKey, 1, submission)).completed, 'the STALE generation\'s success hit 0 rows').toBe(false);
@@ -3825,15 +3912,22 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(afterT2!.status).toBe('handoff_ready');
     expect(await countDischargedObligations(executionId)).toBe(1);
 
-    // T1's late tail: its dead submission rejects → the failed attempt's
-    // generation-fenced fail CAS hits 0 rows (generation 1 is stale — the row
-    // is completed @ generation 2) → the convergence check replays the
-    // winner's stored result → T1's completeFencedDispatch is fenced out.
+    // T1's late tail (ROUND-11 semantics): its dead submission rejects with
+    // an AMBIGUOUS error (simulated process death — a plain Error, NOT the
+    // typed definitive reject). The ambiguous submission error NEVER reaches
+    // the fail CAS — no terminal write is even attempted: the keyed submit
+    // fails closed with the typed outcome-unknown error, the dispatch fails
+    // 'handoff-dispatch-failed', and T1 never reaches completeFencedDispatch
+    // (its gate stays in flight at its epoch — the reclaiming owner T2
+    // already took it over + completed). The row + the ONE authoritative
+    // outcome are untouched by T1's ambiguous failure. STILL exactly ONE
+    // side effect.
     killDeadDriver(new Error('simulated process death before the provider accepted the submission'));
     await t1Promise;
     expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
-    expect((t1Error as CrossModeHandoffError).code).toBe('claim-fence-lost');
-    expect(stats.completeFalseCount).toBe(1);
+    expect((t1Error as CrossModeHandoffError).code, 'the AMBIGUOUS submission error fails the dispatch (fail closed — NEVER a terminal ledger write)').toBe('handoff-dispatch-failed');
+    expect((t1Error as Error).message, 'the typed outcome-unknown error is surfaced (the same-key retry converges through the provider dedup)').toContain('submission-outcome-unknown');
+    expect(stats.completeFalseCount, 'T1 never completed a dispatch — its completeFencedDispatch was never reached').toBe(0);
 
     // FINAL: ONE row, COMPLETED @ generation 2, ONE platform operation (T2's
     // first execution), ONE authoritative outcome.
@@ -3952,14 +4046,20 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     expect(afterT2!.status).toBe('handoff_ready');
     expect(await countDischargedObligations(executionId)).toBe(1);
 
-    // T1's late tail: its dead submission rejects → the stale fail CAS hits
-    // 0 rows → the convergence check replays the winner's stored result →
-    // fenced out. STILL exactly ONE side effect.
+    // T1's late tail (ROUND-11 semantics): its dead submission rejects with
+    // an AMBIGUOUS error (simulated process death — a plain Error, NOT the
+    // typed definitive reject — the platform HAD accepted the operation).
+    // The ambiguous submission error NEVER reaches the fail CAS — no
+    // terminal write is even attempted: the keyed submit fails closed with
+    // the typed outcome-unknown error, the dispatch fails
+    // 'handoff-dispatch-failed', and T1 never reaches
+    // completeFencedDispatch. STILL exactly ONE side effect.
     killDeadDriver(new Error('simulated process death after the platform accepted the operation'));
     await t1Promise;
     expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
-    expect((t1Error as CrossModeHandoffError).code).toBe('claim-fence-lost');
-    expect(stats.completeFalseCount).toBe(1);
+    expect((t1Error as CrossModeHandoffError).code, 'the AMBIGUOUS submission error fails the dispatch (fail closed — NEVER a terminal ledger write)').toBe('handoff-dispatch-failed');
+    expect((t1Error as Error).message, 'the typed outcome-unknown error is surfaced (the same-key retry converges through the provider dedup)').toContain('submission-outcome-unknown');
+    expect(stats.completeFalseCount, 'T1 never completed a dispatch — its completeFencedDispatch was never reached').toBe(0);
     expect(providerA.effectCount + providerB.effectCount, 'FINAL: the side effect happened EXACTLY ONCE across the crash window + the takeover + the converging re-submission + the late failure').toBe(1);
     expect(providerA.submissionCount + providerB.submissionCount, 'TWO submissions (the crashed one + the CONVERGING re-submission) — ONE effect: the provider boundary is the idempotency authority').toBe(2);
 
@@ -4313,5 +4413,302 @@ describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 + round 6 + round 7 + round
     const record = await executionRecordRepo.findByExecutionId(executionId);
     expect(record!.mode).toBe('native');
     expect(record!.status, 'the record keeps the mutated intermediate state (no terminal outcome manufactured for a stuck run)').toBe('running');
+  });
+
+  // =========================================================================
+  // PR #46 round 11 — the SUBMISSION-ERROR TAXONOMY regressions (the
+  // round-11 review's blocker: an ambiguous startOperation failure was
+  // terminalized as FAILED, closing the key while the provider operation may
+  // EXIST and succeed — every later same-key submission then replayed a
+  // failure the provider never reported). The required distinction:
+  //
+  //   DEFINITIVE_REJECT (the typed ProviderOperationRejectedError)
+  //      → terminal FAILED is allowed;
+  //   AMBIGUOUS / ACCEPTANCE_UNKNOWN (every other submission error)
+  //      → remain recoverable → same-key retry → provider deduplication/
+  //        convergence → attach the returned identity → resolve.
+  //
+  // THE DATABASE NEVER CLOSES A KEY ON AN AMBIGUOUS SUBMISSION ERROR.
+  // =========================================================================
+
+  it('R11-#1. THE AMBIGUOUS ACCEPTANCE — the provider ACCEPTS the operation + the RESPONSE IS LOST (the submission throws an ambiguous plain error — NOT a definitive reject): the ledger REMAINS PENDING (never failed), the takeover/retry with the SAME key re-submits, the provider returns the SAME operation identity (the dedup CONVERGES), EXACTLY ONE external side effect happens, + the terminal result is recorded', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // The shared "platform" (the external system's durable state — the ONLY
+    // thing that survives T1's ambiguous failure).
+    const platform = new Map<string, ExecutionSubmission>();
+
+    // T1: its provider instance (A) submits the platform operation — the
+    // platform ACCEPTS it (the SIDE EFFECT happens ONCE, the outcome lands
+    // on the platform) — and then the RESPONSE IS LOST: the submission call
+    // throws an AMBIGUOUS plain error (a connection reset after the accept).
+    // This is NOT a definitive reject: the provider did NOT refuse the
+    // operation — it accepted it and the response never arrived. THE
+    // ROUND-11 BLOCKER'S EXACT SEQUENCE: the ledger row is 'pending' @
+    // generation 1 with NO handle; the provider operation EXISTS.
+    const providerA = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 10_000,
+        operationPollIntervalMs: 10,
+      },
+      { loseResponseAfterAccept: true },
+      platform,
+    );
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r11-ambiguous-acceptance-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+    await t1Promise;
+
+    // THE ROUND-11 INVARIANT #1: the AMBIGUOUS submission error did NOT
+    // terminalize the key. The row is STILL 'pending' (NOT failed — round 10
+    // wrote terminal FAILED here, closing the key while the provider
+    // operation EXISTS); the dispatch failed closed with the typed
+    // outcome-unknown error (the obligation stays pending; the same-key
+    // retry converges).
+    expect(providerA.submissionCount, 'T1 submitted exactly once (the platform ACCEPTED)').toBe(1);
+    expect(providerA.effectCount, 'the provider ACCEPTED the operation — the SIDE EFFECT happened ONCE (the operation EXISTS at the provider)').toBe(1);
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'the ambiguous submission error fails the dispatch (fail closed — the obligation stays pending)').toBe('handoff-dispatch-failed');
+    expect((t1Error as Error).message, 'the typed outcome-unknown error is surfaced').toContain('submission-outcome-unknown');
+    const rowsAfterAmbiguity = await readProviderOperations(executionId);
+    expect(rowsAfterAmbiguity.length).toBe(1);
+    expect(rowsAfterAmbiguity[0]!.state, 'THE ROUND-11 BLOCKER: the ambiguous submission error leaves the ledger PENDING — the key is NOT closed (round 10 wrote terminal FAILED here while the provider operation EXISTS)').toBe('pending');
+    expect(rowsAfterAmbiguity[0]!.generation).toBe(1);
+    expect(rowsAfterAmbiguity[0]!.handle, 'NO handle — the attach never ran (the response was lost before the identity returned)').toBeNull();
+    expect(rowsAfterAmbiguity[0]!.errorMessage, 'NO terminal failure was recorded — the provider never reported a failure').toBeNull();
+    expect(platform.size, 'the operation EXISTS at the platform (the external system holds it)').toBe(1);
+
+    // Let T1's 150ms claim lease expire (T1's dispatch already failed — the
+    // gate stays in flight at T1's epoch; the obligation stays pending).
+    await delay(300);
+
+    // T2: a FRESH provider instance on the SECOND client, sharing ONLY the
+    // platform. The TAKEOVER/RETRY with the SAME key: the 'pending' row is
+    // taken over (generation 2 — the fencing token) + RE-SUBMITTED — the
+    // IDEMPOTENT-BY-KEY submission CONVERGES onto the ONE platform operation
+    // (the provider returns the SAME operation identity) → the identity is
+    // attached → the ONE operation is resolved → the terminal result is
+    // recorded.
+    const providerB = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(second!.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 150,
+        operationPollIntervalMs: 10,
+      },
+      {},
+      platform,
+    );
+    const t2Service = buildT2Service({ stats, externalProvider: providerB });
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed, took over (generation 2), RE-SUBMITTED (converging onto the ONE platform operation), + completed').toBe('complete');
+
+    // THE ROUND-11 INVARIANT #2: the same-key retry CONVERGED — the provider
+    // returned the SAME operation identity, NO second effect happened, and
+    // the terminal result was recorded. The provider's idempotency-by-key
+    // guarantee REMAINED USABLE precisely because the ambiguous error never
+    // closed the key.
+    expect(providerB.submissionCount, 'T2 RE-SUBMITTED exactly once (the pending row claims nothing — the recovery safely re-submits)').toBe(1);
+    expect(providerB.effectCount, 'the re-submission CONVERGED onto the EXISTING platform operation — NO second effect (the idempotent-by-key contract)').toBe(0);
+    expect(providerB.resolveCount, 'T2 resolved the CONFIRMED operation by identity exactly once (a status fetch on the platform)').toBe(1);
+    expect(providerA.effectCount, 'the SIDE EFFECT happened exactly ONCE (T1\'s accepting submission — the only one FOREVER)').toBe(1);
+    expect(providerA.effectCount + providerB.effectCount, 'EXACTLY ONE external side effect across the ambiguous acceptance + the lost response + the takeover + the converging re-submission').toBe(1);
+    expect(providerA.submissionCount + providerB.submissionCount, 'TWO submissions (the ambiguously-accepted one + the CONVERGING re-submission) — ONE effect').toBe(2);
+    expect(stats.completeTrueCount).toBe(1);
+
+    const rowsAfterRecovery = await readProviderOperations(executionId);
+    expect(rowsAfterRecovery.length).toBe(1);
+    expect(rowsAfterRecovery[0]!.state, 'the terminal result is recorded').toBe('completed');
+    expect(rowsAfterRecovery[0]!.generation, 'generation 2 — the take-over fencing token').toBe(2);
+    const thePlatformHandle = [...platform.keys()][0]!;
+    expect(platform.size, 'the platform holds EXACTLY ONE operation').toBe(1);
+    expect(rowsAfterRecovery[0]!.handle, 'the recorded identity is the provider\'s SAME operation identity — the re-submission CONVERGED onto it (the provider returned the SAME identity)').toBe(thePlatformHandle);
+    expect(rowsAfterRecovery[0]!.submissionJson, 'the ONE stored result is the PLATFORM outcome (the ONE the ambiguously-lost submission produced — never a duplicate, never a manufactured failure)').toContain('platform-operation-outcome');
+    const afterT2 = await executionRecordRepo.findByExecutionId(executionId);
+    expect(afterT2!.id).toBe(recordId);
+    expect(afterT2!.mode).toBe('external');
+    expect(afterT2!.status).toBe('handoff_ready');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+  });
+
+  it('R11-#2. the DEFINITIVE-REJECT arm — the typed ProviderOperationRejectedError (the provider PROVABLY refused; NO operation exists): terminal FAILED IS recorded @ generation 1 (the only legal pending-row failure), ZERO platform operations/effects ever happen, + a later same-key submit surfaces the STORED failure with ZERO submissions (key immutability for the reject arm)', async () => {
+    const { executionId } = await createNativeRecord('failed');
+    const stats: DispatchGateStats = { beginCount: 0, completeTrueCount: 0, completeFalseCount: 0 };
+
+    // The shared "platform" — the provider will REFUSE the operation, so it
+    // must stay EMPTY forever (no operation, no side effect).
+    const platform = new Map<string, ExecutionSubmission>();
+
+    // T1: its provider instance (A) DEFINITIVELY REJECTS the submission —
+    // the typed ProviderOperationRejectedError (the platform guarantees NO
+    // operation exists for the key). This is the ONLY submission error that
+    // may terminally fail the key.
+    const providerA = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(stack.db.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 10_000,
+        operationPollIntervalMs: 10,
+      },
+      { definitiveReject: true },
+      platform,
+    );
+    const t1Service = buildT1Service({
+      leaseMs: 150,
+      heartbeatMs: 60_000,
+      stats,
+      externalProvider: providerA,
+    });
+
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r11-definitive-reject-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+    await t1Promise;
+
+    // The DEFINITIVE-REJECT arm: terminal FAILED is ALLOWED (the provider
+    // PROVED no operation exists — no side effect can ever occur).
+    expect(providerA.submissionCount, 'T1 submitted exactly once (the provider refused it)').toBe(1);
+    expect(providerA.effectCount, 'ZERO side effects — the provider REFUSED the operation (NO operation exists)').toBe(0);
+    expect(platform.size, 'the platform holds NO operation (the refusal guarantee)').toBe(0);
+    expect(t1Error).toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'the definitive reject fails the dispatch').toBe('handoff-dispatch-failed');
+    expect((t1Error as Error).message, 'the provider\'s definitive rejection surfaces (the stored terminal failure)').toContain('definitive provider reject');
+    const rowsAfterReject = await readProviderOperations(executionId);
+    expect(rowsAfterReject.length).toBe(1);
+    expect(rowsAfterReject[0]!.state, 'DEFINITIVE_REJECT → terminal FAILED is ALLOWED (the provider guarantees no operation exists)').toBe('failed');
+    expect(rowsAfterReject[0]!.generation).toBe(1);
+    expect(rowsAfterReject[0]!.handle).toBeNull();
+    expect(rowsAfterReject[0]!.errorMessage, 'the ONE terminal result is the provider\'s definitive rejection').toContain('definitive provider reject');
+
+    // The replay leg (key immutability for the reject arm): a later
+    // same-key submit surfaces the STORED failure with ZERO submissions —
+    // a terminally rejected operation is a KNOWN outcome (no second
+    // operation under the same key).
+    const gateState = await readDispatchGate(executionId);
+    expect(gateState.dispatchKey, 'the dispatch key was recorded with the gate-open (the same logical handoff identity)').toBeTruthy();
+    const recordForTask = await executionRecordRepo.findByExecutionId(executionId);
+    const builtTask = await executionTaskService.build({
+      workItemId: recordForTask!.workItemId,
+      mode: 'external',
+      provider: recordForTask!.provider,
+      model: recordForTask!.model,
+      executionId,
+      implementationContextId: recordForTask!.implementationContextId,
+    });
+    const replayProvider = new SideEffectingExternalProvider(
+      {
+        operationStore: new PgExecutionProviderOperationRepository(second!.client),
+        logger: stack.db.logger,
+        operationResolutionWindowMs: 150,
+        operationPollIntervalMs: 10,
+      },
+      {},
+      platform,
+    );
+    await expect(
+      replayProvider.submit({ ...builtTask.task, dispatchIdempotencyKey: gateState.dispatchKey! }),
+      'a same-key submit against the terminally rejected operation surfaces the STORED failure',
+    ).rejects.toThrow(/definitive provider reject/);
+    expect(replayProvider.submissionCount, 'ZERO submissions — the rejected key never starts a new operation').toBe(0);
+    expect(replayProvider.effectCount, 'ZERO effects FOREVER (the provider refused; no operation exists)').toBe(0);
+    expect(replayProvider.resolveCount, 'ZERO resolutions').toBe(0);
+    expect(platform.size, 'the platform STILL holds NO operation').toBe(0);
+    expect(stats.completeTrueCount, 'NO authoritative outcome write (the dispatch failed)').toBe(0);
+  });
+
+  it('R11-#3. the repository TAXONOMY proofs — reject is the pending-ONLY definitive-reject gate (a started row\'s reject hits 0 rows; a wrong generation hits 0 rows) + fail is the started-ONLY resolution-failure gate (a PENDING row\'s fail hits 0 rows — the ambiguous-submission guard is STRUCTURAL: an unconfirmed submission has NO resolution-failure path at all)', async () => {
+    const { executionId } = await createNativeRecord('failed');
+    const store = new PgExecutionProviderOperationRepository(second!.client);
+
+    // ---------------- THE REJECT GATE (pending → failed ONLY) ----------------
+    const rejectKey = `r11-reject-gate-${executionId}`;
+    await store.register({
+      idempotencyKey: rejectKey, provider: 'external', executionId, mode: 'external',
+    });
+    // A WRONG generation can never reject (the generation fence).
+    await store.reject(rejectKey, 7, 'a wrong generation can NEVER resolve');
+    expect((await store.get(rejectKey))!.state, 'a WRONG generation rejected NOTHING (the row stays pending)').toBe('pending');
+    // The CORRECT generation rejects the pending row — the ONLY
+    // 'pending' → 'failed' transition (the definitive-reject gate).
+    await store.reject(rejectKey, 1, 'the provider definitively refused the operation');
+    const rejectedRow = await store.get(rejectKey);
+    expect(rejectedRow!.state, 'the DEFINITIVE-REJECT CAS transitions the pending row to failed').toBe('failed');
+    expect(rejectedRow!.generation).toBe(1);
+    expect(rejectedRow!.errorMessage).toBe('the provider definitively refused the operation');
+    // A terminal row is unreachable by either transition.
+    await store.reject(rejectKey, 1, 'a second reject attempt on a terminal row');
+    await store.fail(rejectKey, 1, 'a fail attempt on a terminal row');
+    expect((await store.get(rejectKey))!.errorMessage, 'the terminal result is IMMUTABLE').toBe('the provider definitively refused the operation');
+
+    // ---------------- THE FAIL GATE (started → failed ONLY) ----------------
+    const failKey = `r11-fail-gate-${executionId}`;
+    await store.register({
+      idempotencyKey: failKey, provider: 'external', executionId, mode: 'external',
+    });
+    // THE STRUCTURAL AMBIGUOUS-SUBMISSION GUARD: a PENDING row's fail hits
+    // 0 rows — the unconfirmed submission has NO resolution-failure path at
+    // all. (Round 10 accepted 'pending' OR 'started' here; the round-11
+    // taxonomy splits them: only the DEFINITIVE-REJECT gate may close a
+    // pending key.)
+    await store.fail(failKey, 1, 'a resolution failure cannot touch an UNCONFIRMED row');
+    const pendingAfterFail = await store.get(failKey);
+    expect(pendingAfterFail!.state, 'fail REQUIRES started — a pending row is structurally unreachable (the ambiguous-submission guard)').toBe('pending');
+    expect(pendingAfterFail!.errorMessage, 'nothing was written to the pending row').toBeNull();
+    // Attach (the provider-confirmed start) — and NOW the resolution
+    // failure lands on the started row.
+    expect(await store.attachOperation(failKey, 1, `external-package:${failKey}`)).toBe(true);
+    await store.fail(failKey, 1, 'the confirmed operation\'s resolution failed');
+    const failedRow = await store.get(failKey);
+    expect(failedRow!.state, 'the STARTED row\'s resolution failure terminally fails the key').toBe('failed');
+    expect(failedRow!.errorMessage).toBe('the confirmed operation\'s resolution failed');
+
+    // ---------------- THE CROSS GATES (each transition is state-narrow) ----------------
+    const mixedKey = `r11-mixed-gate-${executionId}`;
+    await store.register({
+      idempotencyKey: mixedKey, provider: 'external', executionId, mode: 'external',
+    });
+    expect(await store.attachOperation(mixedKey, 1, `external-package:${mixedKey}`)).toBe(true);
+    // A STARTED row's reject hits 0 rows (reject is the pending-only gate —
+    // a confirmed operation cannot be "un-submitted").
+    await store.reject(mixedKey, 1, 'a definitive reject cannot touch a STARTED row');
+    const startedRow = await store.get(mixedKey);
+    expect(startedRow!.state, 'the started row is untouched by the reject gate').toBe('started');
+    expect(startedRow!.errorMessage).toBeNull();
+    // A stale generation's reject also hits 0 rows (the generation fence on
+    // the definitive-reject transition).
+    await store.reject(mixedKey, 99, 'a stale generation reject');
+    expect((await store.get(mixedKey))!.state, 'the stale generation\'s reject hit 0 rows').toBe('started');
+    expect((await store.get(mixedKey))!.errorMessage).toBeNull();
   });
 });

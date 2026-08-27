@@ -290,11 +290,53 @@ export interface ExecutionSubmission {
  * awaited until terminal; a stuck run fails closed; a keyed submit never
  * manufactures a completed submission from a non-terminal run and never
  * starts a second run.
+ *
+ * PR #46 round 11 (the SUBMISSION-ERROR TAXONOMY — DEFINITIVE REJECT vs
+ * ACCEPTANCE UNKNOWN): a submission error proves NOTHING about whether the
+ * provider accepted the operation unless the provider says so. A submission
+ * failure may terminally fail the ledger key ONLY when the provider
+ * PROVABLY refused the operation — the typed
+ * {@link ProviderOperationRejectedError} (the provider guarantees NO
+ * operation exists for the key, so no side effect can ever occur). EVERY
+ * other submission error (a timeout, a connection reset, a lost response,
+ * process death...) is ACCEPTANCE-UNKNOWN: the provider may have accepted
+ * the operation (and it may exist and succeed remotely) — the ledger row
+ * stays 'pending' (recoverable), the same-key retry re-submits and CONVERGES
+ * through the provider's idempotency-by-key dedup, the returned identity is
+ * attached, and the ONE operation is resolved. THE DATABASE NEVER CLOSES A
+ * KEY ON AN AMBIGUOUS SUBMISSION ERROR: terminalizing it would replay a
+ * failure the provider never reported while the real operation may still
+ * succeed — the provider's idempotency-by-key guarantee could never again be
+ * used to converge, because WorkflowOS itself closed the key.
  */
 export interface ExecutionProvider {
   readonly name: string;
   readonly mode: ExecutionMode;
   submit(task: ExecutionTask): Promise<ExecutionSubmission>;
+}
+
+/**
+ * PR #46 round 11 (the DEFINITIVE-REJECT submission error): thrown by a
+ * provider's submission seam (`startOperation`) ONLY when the provider
+ * PROVABLY refused the operation — the provider guarantees NO operation
+ * exists for the key, so no side effect can ever occur. This is the ONLY
+ * submission error that may terminally fail a 'pending' provider-operation
+ * ledger row (through the ledger's definitive-reject transition).
+ *
+ * Every OTHER submission error is ACCEPTANCE-UNKNOWN (the provider may have
+ * accepted the operation; the response was lost to a timeout, a connection
+ * reset, or process death): the ledger row MUST remain 'pending' and
+ * recoverable — the same-key retry re-submits and CONVERGES through the
+ * provider's idempotency-by-key dedup. An ambiguous error MUST NEVER be
+ * thrown as this type: NEVER throw the typed reject for an ambiguous failure
+ * (that would close the key while the provider operation may exist and
+ * succeed).
+ */
+export class ProviderOperationRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderOperationRejectedError';
+  }
 }
 
 /**

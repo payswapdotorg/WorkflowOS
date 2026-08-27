@@ -1,5 +1,5 @@
 /**
- * WORK-042 (PR #46 round 9 + round 10): the GENERATION-FENCED,
+ * WORK-042 (PR #46 round 9 + round 10 + round 11): the GENERATION-FENCED,
  * LIFECYCLE-EXPLICIT provider-operation ledger — PostgreSQL persistence for
  * the keyed external dispatch boundary (`wfos_execution_provider_operations`
  * — migrations 0048 + 0049 + 0050).
@@ -22,6 +22,20 @@
  *     attachOperation(key, gen, H)   ← CAS: 'pending' → 'started', recorded
  *        ↓                               ONLY AFTER the provider confirmed
  *     resolveOperation(H, task) → one terminal result
+ *
+ * THE ROUND-11 CORRECTION (the SUBMISSION-ERROR TAXONOMY): the round-10
+ * drive terminalized EVERY startOperation failure as FAILED — but an
+ * external request can be accepted remotely and then lose its response
+ * (timeout, connection reset, process death): the provider operation may
+ * EXIST (and succeed) while the ledger closed the key as failed, so every
+ * later same-key submission replayed a failure the provider never reported
+ * and the provider's idempotency-by-key guarantee could never again be used
+ * to converge. A pending row (the submission unconfirmed — the row claims
+ * NOTHING about the provider) can therefore reach 'failed' ONLY through the
+ * DEFINITIVE-REJECT transition, which the drive enters exclusively for the
+ * typed ProviderOperationRejectedError (the provider PROVABLY refused the
+ * operation and guarantees NO operation exists for the key). THE DATABASE
+ * NEVER CLOSES A KEY ON AN AMBIGUOUS SUBMISSION ERROR.
  *
  * THE STATE MACHINE (CAS-only, like the obligation-gate discipline of rounds
  * 4-6 — single conditional statements, no read-check-write):
@@ -48,10 +62,21 @@
  *     operation"). Only the ACTIVE driver's generation can resolve.
  *
  *   fail(key, generation, error): the symmetric generation-fenced CAS
- *     ('pending' OR 'started' @ THIS generation → 'failed', error stored) —
- *     a failed submission attempt (never confirmed) or a failed resolution
- *     (confirmed) may each terminally fail the key. A CAS loss is a benign
- *     no-op: the row's recorded resolution stands.
+ *     ('started' @ THIS generation → 'failed', error stored) — a CONFIRMED
+ *     operation's resolution failure. A CAS loss is a benign no-op: the
+ *     row's recorded resolution stands. (Round 11: the 'pending' arm moved
+ *     to reject — an unconfirmed submission can only terminally fail through
+ *     the DEFINITIVE-REJECT gate below.)
+ *
+ *   reject(key, generation, error): the DEFINITIVE-REJECT CAS ('pending' @
+ *     THIS generation → 'failed', error stored) — the ONLY 'pending' →
+ *     'failed' transition. Legal ONLY for a provider definitive reject (the
+ *     typed ProviderOperationRejectedError — the provider guarantees NO
+ *     operation exists for the key, so no side effect can ever occur). An
+ *     AMBIGUOUS submission failure (acceptance unknown) must NEVER reach
+ *     this transition: the row stays 'pending' (recoverable — the same-key
+ *     re-submission converges through the provider's idempotency-by-key
+ *     dedup). (Round 11.)
  *
  *   takeOver(key): the process-loss recovery CAS — 'pending' OR 'started' →
  *     same state @ generation + 1, RETURNING the NEW GENERATION TOKEN (the
@@ -202,15 +227,35 @@ export interface ExecutionProviderOperationStore {
 
   /**
    * Resolve the operation with a failure — the symmetric GENERATION-FENCED
-   * CAS ('pending' OR 'started' @ `generation` → 'failed', the error stored).
-   * A failed SUBMISSION attempt (never confirmed — 'pending') or a failed
-   * RESOLUTION (confirmed — 'started') may each terminally fail the key. A
-   * CAS loss (the generation is stale, or another driver resolved the row) is
-   * a benign no-op: the row's recorded resolution stands; the stale driver's
+   * CAS ('started' @ `generation` → 'failed', the error stored). PR #46
+   * round 11: this is the CONFIRMED operation's resolution-failure
+   * transition (the row is 'started' — the provider confirmed the ONE
+   * operation exists); the unconfirmed-submission arm ('pending' → 'failed')
+   * moved to {@link reject} (the DEFINITIVE-REJECT gate — an AMBIGUOUS
+   * submission failure must never terminally fail a pending row). A CAS
+   * loss (the generation is stale, or another driver resolved the row) is a
+   * benign no-op: the row's recorded resolution stands; the stale driver's
    * failure is structurally DISCARDED (it can never defeat the active
    * generation).
    */
   fail(idempotencyKey: string, generation: number, error: string): Promise<void>;
+
+  /**
+   * PR #46 round 11 (the DEFINITIVE-REJECT gate — the ONLY 'pending' →
+   * 'failed' transition): terminally fail an UNCONFIRMED submission. Legal
+   * ONLY for a provider DEFINITIVE REJECT — the typed
+   * `ProviderOperationRejectedError` (the provider PROVABLY refused the
+   * operation and guarantees NO operation exists for the key, so no side
+   * effect can ever occur). An AMBIGUOUS submission failure (a timeout, a
+   * connection reset, a lost response — ACCEPTANCE UNKNOWN) must NEVER
+   * reach this transition: the row stays 'pending' (recoverable — the
+   * same-key re-submission converges through the provider's
+   * idempotency-by-key dedup, attaches the returned identity, and resolves
+   * the ONE operation). THE DATABASE NEVER CLOSES A KEY ON AN AMBIGUOUS
+   * SUBMISSION ERROR. A CAS loss (a wrong generation, a terminal row, or a
+   * row that has since been attached as 'started') is a benign no-op.
+   */
+  reject(idempotencyKey: string, generation: number, error: string): Promise<void>;
 
   /**
    * PR #46 round 9 (the process-loss recovery; round 10: BOTH non-terminal
@@ -440,15 +485,17 @@ export class PgExecutionProviderOperationRepository
     generation: number,
     error: string,
   ): Promise<void> {
-    // The symmetric GENERATION-FENCED CAS ('pending' OR 'started' @ THIS
-    // generation → 'failed'). PR #46 round 10: a failed SUBMISSION attempt
-    // (never confirmed — 'pending') or a failed RESOLUTION (confirmed —
-    // 'started') may each terminally fail the key. A CAS loss is a benign
-    // no-op — the row's recorded resolution stands; a STALE generation's
-    // failure is structurally DISCARDED (it can never defeat the active
-    // recovery generation: the round-8 review's blocking interleaving
-    // "takeover → stale FAIL → new generation SUCCESS" is impossible by
-    // construction).
+    // The symmetric GENERATION-FENCED CAS ('started' @ THIS generation →
+    // 'failed'). PR #46 round 11: this is the CONFIRMED operation's
+    // resolution-failure transition — the row is 'started' (the provider
+    // confirmed the ONE operation exists; its identity is recorded). A CAS
+    // loss is a benign no-op — the row's recorded resolution stands; a STALE
+    // generation's failure is structurally DISCARDED (it can never defeat
+    // the active recovery generation: the round-8 review's blocking
+    // interleaving "takeover → stale FAIL → new generation SUCCESS" is
+    // impossible by construction). The unconfirmed-submission arm ('pending'
+    // → 'failed') lives exclusively in reject() below — the round-11
+    // DEFINITIVE-REJECT gate.
     await this.db.query(
       `UPDATE wfos_execution_provider_operations
           SET state = 'failed',
@@ -456,7 +503,38 @@ export class PgExecutionProviderOperationRepository
               updated_at = NOW(),
               completed_at = NOW()
         WHERE idempotency_key = $1
-          AND state IN ('pending', 'started')
+          AND state = 'started'
+          AND generation = $2`,
+      [idempotencyKey, generation, error],
+    );
+  }
+
+  async reject(
+    idempotencyKey: string,
+    generation: number,
+    error: string,
+  ): Promise<void> {
+    // PR #46 round 11 — the DEFINITIVE-REJECT CAS ('pending' @ THIS
+    // generation → 'failed'): the ONLY 'pending' → 'failed' transition in
+    // the ledger. Legal ONLY for a provider definitive reject (the typed
+    // ProviderOperationRejectedError — the provider PROVABLY refused the
+    // operation and guarantees NO operation exists for the key, so no side
+    // effect can ever occur). An AMBIGUOUS submission failure (acceptance
+    // unknown — the provider may have accepted the operation and lost the
+    // response) must NEVER reach this transition: the row stays 'pending'
+    // and recoverable, and the same-key re-submission converges through the
+    // provider's idempotency-by-key dedup. THE DATABASE NEVER CLOSES A KEY
+    // ON AN AMBIGUOUS SUBMISSION ERROR. A CAS loss (a wrong generation, a
+    // terminal row, or a row since attached as 'started') is a benign
+    // no-op — 0 rows affected, the row's state stands.
+    await this.db.query(
+      `UPDATE wfos_execution_provider_operations
+          SET state = 'failed',
+              error_message = $3,
+              updated_at = NOW(),
+              completed_at = NOW()
+        WHERE idempotency_key = $1
+          AND state = 'pending'
           AND generation = $2`,
       [idempotencyKey, generation, error],
     );
