@@ -25,7 +25,7 @@ The intended improvement is to move architectural enforcement earlier and make i
 
 ### 4.1 Architecture Assertion
 
-An Architecture Assertion is a versioned rule attached to an immutable ArchitectureVersion. It describes a condition that must remain true for implementations governed by that version.
+An Architecture Assertion is a versioned architectural rule owned by `/architecture` and attached to an immutable ArchitectureVersion. It describes a condition that must remain true for implementations governed by that version.
 
 Each assertion has:
 
@@ -38,28 +38,26 @@ Each assertion has:
 - `detectorConfig`
 - `createdAt`
 
-Assertions are configuration/metadata owned by `/architecture`; execution of an assertion is not architecture ownership duplication.
+The `/architecture` module remains the sole authority for architecture definitions. Assertion evaluation does not create a second architecture authority.
 
-### 4.2 Checkpoint
+### 4.2 Architecture Checkpoint
 
-A Checkpoint is an evaluation of a set of Architecture Assertions against a concrete implementation snapshot.
+An Architecture Checkpoint is a conformance evaluation executed by an application capability against a concrete implementation snapshot and an immutable ArchitectureVersion.
 
-A checkpoint records:
+The checkpoint orchestrator is not a workflow authority and owns no lifecycle transitions.
 
-- governed Work Item
-- architecture version
-- implementation revision / commit
-- assertion set used
-- individual assertion results
-- overall status: `passed | passed_with_advisories | blocked | inconclusive`
-- detector/evaluation evidence
-- execution timestamp
+Checkpoint results and their evaluation evidence are persisted through the existing `/verification` authority so there is no parallel evidence store. A checkpoint references the governed Work Item, ArchitectureVersion, implementation revision, assertion set, detector results, and final conformance outcome.
 
-Checkpoint records are evidence, not workflow state. `/verification` remains the authority for verification evidence semantics; architecture checkpoint evidence is a specialized architecture-conformance result that can be consumed by workflow gating.
+The result vocabulary is:
 
-### 4.3 Drift finding
+- `passed`
+- `passed_with_advisories`
+- `blocked`
+- `inconclusive`
 
-A failed blocking assertion produces an Architecture Drift finding. Findings never silently rewrite architecture. They either block the governed transition or require an explicit Architecture Change Request when the implementation is intentionally incompatible with the current frozen version.
+### 4.3 Architecture Drift finding
+
+A failed blocking assertion produces an Architecture Drift finding/evidence result. Findings never silently rewrite architecture. They either block the governed transition or require an explicit Architecture Change Request when the implementation is intentionally incompatible with the current version.
 
 ## 5. Lifecycle placement
 
@@ -67,31 +65,31 @@ Checkpoints are gates/obligations associated with existing lifecycle states rath
 
 ### Architecture readiness
 
-Before implementation assignment, verify that the Work Item has a valid immutable architecture version and that all required assertions for that version are resolvable.
+Before implementation assignment, verify that the Work Item has a valid immutable ArchitectureVersion and that all required assertions for that version are resolvable.
 
 ### Work Order checkpoint
 
-Before an implementation agent starts, evaluate the Work Order's stated implementation scope against architecture assertions that can be evaluated without code.
+Before an implementation agent starts, evaluate the Work Order's declared implementation scope against assertions that can be evaluated without source changes.
 
 ### Implementation checkpoints
 
-During `IMPLEMENTING`, checkpoints may run after defined progress boundaries or explicit agent commits. Blocking failures stop further progress until corrected or an Architecture Change Request is opened.
+During `IMPLEMENTING`, checkpoints may run at explicit progress boundaries, approved agent commits, or policy-selected intervals. Blocking failures prevent further implementation progress until corrected or an Architecture Change Request is opened.
 
 ### PR checkpoint
 
-Before `PR_OPEN`, the implementation revision must pass all blocking architectural assertions applicable to the Work Item.
+Before `PR_OPEN`, the candidate implementation revision must pass all applicable blocking architectural assertions.
 
-### Verification checkpoint
+### Verification-entry checkpoint
 
-Before or at entry to `VERIFYING`, re-evaluate architecture against the exact revision that will be verified. This prevents verification from validating an implementation that has drifted after the last architecture check.
+Before or at entry to `VERIFYING`, architecture conformance is re-evaluated against the exact revision that will be verified. This prevents verification from validating an implementation that drifted after the last architecture checkpoint.
 
 ### Architect review
 
-`ARCHITECT_REVIEW` remains the final semantic authority. Mechanical checkpoints narrow the review space; they do not replace the architect's judgment about architectural adequacy or intentional evolution.
+`ARCHITECT_REVIEW` remains the final semantic authority. Mechanical checkpoints reduce the architect's review burden; they do not replace architectural judgment.
 
 ## 6. Architecture impact profile
 
-Every Work Item receives a derived architecture-impact profile from its scope and declared changes.
+Every Work Item receives a derived architecture-impact profile from its scope and declared change surface.
 
 Suggested levels:
 
@@ -99,7 +97,7 @@ Suggested levels:
 - `MEDIUM`: module/internal behavior or data changes; pre-implementation + PR checkpoints.
 - `HIGH`: authority boundaries, public interfaces, workflow/execution/security boundaries, or schema changes; readiness + pre-implementation + implementation + PR + verification checkpoints.
 
-Impact controls checkpoint frequency and required assertion classes. It does not change the underlying architecture rules.
+Impact controls checkpoint frequency and required assertion classes. It does not alter the architecture rules themselves.
 
 ## 7. Detector model
 
@@ -112,7 +110,7 @@ Detectors are specialized evaluators behind a common conformance interface. Init
 - workflow-transition detector
 - runtime configuration detector
 
-A detector may report `pass`, `fail`, `inconclusive`, or `not_applicable`. An `inconclusive` blocking assertion is fail-closed at a lifecycle gate unless the assertion explicitly declares that inconclusive evaluation is advisory.
+A detector may report `pass`, `fail`, `inconclusive`, or `not_applicable`. An `inconclusive` blocking assertion fails closed at a lifecycle gate unless the assertion explicitly declares that inconclusive evaluation is advisory.
 
 Detectors read authoritative state through existing public contracts and must not create parallel domain truth.
 
@@ -142,9 +140,9 @@ new assertion set
 
 Every checkpoint must be traceable to:
 
-`ArchitectureVersion → WorkItem → implementation revision → assertions → detector results → checkpoint result`
+`ArchitectureVersion → WorkItem → implementation revision → assertion set → detector results → verification evidence → checkpoint result`
 
-The result must be durable and immutable once finalized. A later checkpoint never overwrites an earlier checkpoint; it creates another evidence record for the new implementation revision.
+Checkpoint evidence is stored through the existing `/verification` authority and is immutable once finalized. A later checkpoint never overwrites an earlier result; it creates another revision-bound result.
 
 ## 10. Self-hosting rule
 
@@ -168,13 +166,15 @@ Continuous mid-implementation checkpoints should be enabled for `HIGH` impact wo
 The design is successful when:
 
 - a known architectural violation can be detected before PR creation;
-- the same assertion produces a durable, revision-bound result;
+- the same assertion produces a durable, immutable, revision-bound result through `/verification`;
 - the workflow engine remains the only lifecycle authority;
-- architecture changes create a new immutable architecture version;
-- checkpoint failures can block progression without mutating workflow state directly;
+- architecture changes create a new immutable ArchitectureVersion;
+- checkpoint failures can block progression without directly mutating workflow state;
 - intentional architecture changes have a clean, auditable escape path;
 - WorkflowOS can use this machinery to govern its own implementation without becoming the unchecked authority for changing its foundational architecture.
 
 ## 13. Compatibility with the frozen architecture
 
-This is an additive governance capability. It preserves the frozen authority rules and the forward architecture direction: immutable architecture versions remain authoritative, all lifecycle modes continue to use the same Work Item → Work Order → Execution → Verification → Review machinery, maintenance and development remain in the unified pipeline, and architecture drift becomes an explicit governed signal rather than an informal review discovery.
+This is a proposed next-version evolution, not a retroactive rewrite of the frozen v1.0 rules. It preserves the existing authority model and extends it with machine-readable architecture assertions plus checkpoint evaluation. The existing lifecycle remains the same Work Item → Work Order → Execution → Verification → Review → Merge/Release machinery, while architecture conformance becomes an explicit gate around that lifecycle.
+
+Any change to frozen module ownership, workflow semantics, or other protected v1.0 rules still requires the existing Architecture Change Request path and a new immutable architecture version.
