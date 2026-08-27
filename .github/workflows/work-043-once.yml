@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   remediate:
-    if: ${{ !contains(github.event.head_commit.message, '[WORK-043-REMEDIATED]') && github.event.head_commit.message != 'chore(WORK-043): add one-shot remediation runner' }}
+    if: ${{ !contains(github.event.head_commit.message, '[WORK-043-REMEDIATED]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
