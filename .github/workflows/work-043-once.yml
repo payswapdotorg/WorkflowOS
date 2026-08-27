@@ -21,7 +21,19 @@ jobs:
         working-directory: backend
         run: bun install --frozen-lockfile
       - name: Apply
-        run: python3 scripts/work-043-remediate.py
+        run: |
+          python3 scripts/work-043-remediate.py
+          git show e76078844e95511c389cc456a3c36b9c920d3bac:backend/tests/architecture/static-architecture.test.ts > backend/tests/architecture/static-architecture.test.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('backend/tests/architecture/static-architecture.test.ts')
+          s = p.read_text()
+          old = """    // The port seam is OPTIONAL (pre-WORK-043 fakes still satisfy it) and\n    // the skip is recorded HONESTLY.\n    expect(src).toMatch(/not_evaluated/);\n"""
+          new = """    // WORK-043: the destination gate is mandatory and requires an authoritative\n    // Project → Organization resolution. No `not_evaluated` bypass is permitted.\n    expect(src).toMatch(/evaluateCandidateEligibility\\(input:/);\n    expect(src).toMatch(/organizationResolver\\.getOrganizationId\\(record\\.projectId\\)/);\n    expect(src).not.toMatch(/organizationId:\\s*null/);\n"""
+          if old not in s:
+              raise SystemExit('stale WORK-043 invariant anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
       - name: Typecheck
         working-directory: backend
         run: |
@@ -34,7 +46,7 @@ jobs:
           fi
       - name: Lint
         working-directory: backend
-        run: bunx eslint src/execution-policy src/modules/agents/internal/execution-service.ts src/modules/agents/internal/default-cross-mode-handoff-service.ts src/app.ts tests/integration/execution-policy/execution-admission.regression.test.ts
+        run: bunx eslint src/execution-policy src/modules/agents/internal/execution-service.ts src/modules/agents/internal/default-cross-mode-handoff-service.ts src/app.ts tests/integration/execution-policy/execution-admission.regression.test.ts tests/architecture/static-architecture.test.ts
       - name: Admission regression
         working-directory: backend
         run: bunx vitest run tests/integration/execution-policy/execution-admission.regression.test.ts
