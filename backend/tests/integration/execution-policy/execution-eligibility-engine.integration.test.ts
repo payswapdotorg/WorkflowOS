@@ -186,6 +186,27 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     );
     const ctx = await contextBuilder.build(workItem.id);
     contextId = ctx.id;
+
+    // The access profiles every recommend() call in this file needs (the §5
+    // interactive subscription posture) — upserted ONCE in the outer scope so
+    // the AR-043-02 end-to-end describe (which runs before the recommendation
+    // describe) can call recommend() too.
+    await service.upsertAccessProfile(organizationId, userId, {
+      provider: 'fake',
+      plan: 'pro',
+      codingAgent: 'ready',
+      externalUi: 'unverified',
+      nativeApi: 'ready',
+      statusSource: 'verified',
+    });
+    await service.upsertAccessProfile(organizationId, userId, {
+      provider: 'external-coder',
+      plan: 'pro',
+      codingAgent: 'ready',
+      externalUi: 'ready',
+      nativeApi: 'unverified',
+      statusSource: 'verified',
+    });
   });
 
   afterAll(async () => {
@@ -232,16 +253,23 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
    * Insert a NATIVE-DISPATCHED execution: the AgentRun ledger row (created
    * by the gateway BEFORE the adapter invocation — a FAILED run still
    * proves the provider operation initiated). This is the durable native
-   * provider-operation record the dispatch predicate probes.
+   * provider-operation record; the run row's OWN provider column is the
+   * dispatch attribution (immutable — updateSuccess/updateFailed never
+   * touch it) and the run row's OWN created_at is the dispatch event time.
    */
-  async function insertNativeDispatch(provider: string, runStatus: 'success' | 'failed' | 'in_progress'): Promise<{ id: string; executionId: string }> {
+  async function insertNativeDispatch(provider: string, runStatus: 'success' | 'failed' | 'in_progress', runCreatedAt?: Date): Promise<{ id: string; executionId: string }> {
     const record = await insertExecution(provider, 'native');
-    await stack.db.client.query(
-      `INSERT INTO wfos_agent_runs (execution_id, work_item_id, work_order_id, provider, status)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [record.executionId, workItemId, workOrderId, provider, runStatus],
-    );
+    await insertRunRow(record.executionId, provider, runStatus, runCreatedAt);
     return record;
+  }
+
+  /** The AgentRun ledger row (optionally back-dated for window-edge proofs). */
+  async function insertRunRow(executionId: string, provider: string, status: string, createdAt?: Date): Promise<void> {
+    await stack.db.client.query(
+      `INSERT INTO wfos_agent_runs (execution_id, work_item_id, work_order_id, provider, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))`,
+      [executionId, workItemId, workOrderId, provider, status, createdAt ?? null],
+    );
   }
 
   /** A minimal valid ExternalExecutionPackage (the dispatch artifact). */
@@ -289,28 +317,134 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   }
 
   /**
-   * Insert a CROSS-MODE HANDED-OFF execution carrying BOTH dispatch
-   * artifacts: dispatched externally first (package_json), then handed off
-   * to native (mode mutated to 'native' + provider 'fake' — the same
-   * transitionMode shape the cross-mode handoff service uses — and the
-   * keyed native dispatch created the AgentRun row). It must count
-   * EXACTLY ONCE, attributed to the record's CURRENT provider ('fake').
+   * Insert the append-only cross-mode handoff LOG row — the exact shape the
+   * handoff service writes at reservation time (wfos_execution_mode_handoffs;
+   * UNIQUE(execution_record_id) + UNIQUE(idempotency_key); immutable).
    */
-  async function insertHandedOffRecord(): Promise<{ id: string; executionId: string }> {
-    const record = await insertExternalDispatch('external-coder');
+  async function insertHandoffLogRow(
+    executionRowId: string,
+    opts: {
+      fromMode: 'native' | 'external';
+      toMode: 'native' | 'external';
+      previousStatus: string;
+      resultingStatus: string;
+      previousPackage: ExternalExecutionPackage | null;
+    },
+  ): Promise<void> {
+    await stack.db.client.query(
+      `INSERT INTO wfos_execution_mode_handoffs
+         (execution_record_id, from_mode, to_mode, reason, actor, source,
+          previous_status, resulting_status, previous_agent_run_id,
+          previous_external_session_ref, previous_package_json, authorized,
+          policy_decision, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [
+        executionRowId, opts.fromMode, opts.toMode, 'fixture', 'test', 'api',
+        opts.previousStatus, opts.resultingStatus, null, null,
+        opts.previousPackage ? JSON.stringify(opts.previousPackage) : null,
+        true, null, `fixture-handoff-${++execCount}`,
+      ],
+    );
+  }
+
+  /**
+   * Insert a CROSS-MODE HANDED-OFF execution (native -> external): the full
+   * durable end state of the WORK-042 flow — the native phase's AgentRun
+   * ledger row (dispatch 1, attributed to `fromProvider`), the append-only
+   * handoff log row (native→external), the transitionMode mutate
+   * (mode=external + provider=`toProvider`), and the external phase's
+   * package outcome write (dispatch 2, attributed to `toProvider` — the
+   * package is self-describing). TWO provider dispatches, TWO providers.
+   */
+  async function insertNativeToExternalHandoff(
+    fromProvider = 'fake',
+    toProvider = 'external-coder',
+  ): Promise<{ id: string; executionId: string }> {
+    const record = await insertExecution(fromProvider, 'native');
+    await insertRunRow(record.executionId, fromProvider, 'failed');
+    await insertHandoffLogRow(record.id, {
+      fromMode: 'native',
+      toMode: 'external',
+      previousStatus: 'failed',
+      resultingStatus: 'handoff_ready',
+      previousPackage: null,
+    });
+    const mutated = await executionRecordRepo.transitionMode(record.id, {
+      mode: 'external',
+      status: 'handoff_ready',
+      provider: toProvider,
+      model: `${toProvider}-model`,
+    });
+    expect(mutated).not.toBeNull();
+    await executionRecordRepo.updateStatus(record.id, {
+      status: 'handoff_ready',
+      packageValue: fixturePackage(record.executionId, toProvider),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    return record;
+  }
+
+  /**
+   * Insert a CROSS-MODE HANDED-OFF execution (external -> native): the full
+   * durable end state — the external phase's direct dispatch (the package
+   * on the row), the append-only handoff log row (external→native) whose
+   * previous_package_json snapshots the external package, the
+   * transitionMode mutate (mode=native + provider=`toProvider` — COALESCE
+   * RETAINS the external package on the row), and the native phase's
+   * AgentRun ledger row (provider=`toProvider`). The external dispatch is
+   * attributed through the LOG SNAPSHOT (the row's retained package
+   * belongs to a handed-off-away phase — mode='native' excludes it from
+   * the current-phase arm).
+   */
+  async function insertExternalToNativeHandoff(
+    fromProvider = 'external-coder',
+    toProvider = 'fake',
+  ): Promise<{ id: string; executionId: string }> {
+    const record = await insertExecution(fromProvider, 'external');
+    const pkg = fixturePackage(record.executionId, fromProvider);
+    await executionRecordRepo.updateStatus(record.id, {
+      status: 'handoff_ready',
+      packageValue: pkg,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await insertHandoffLogRow(record.id, {
+      fromMode: 'external',
+      toMode: 'native',
+      previousStatus: 'handoff_ready',
+      resultingStatus: 'running',
+      previousPackage: pkg,
+    });
     const mutated = await executionRecordRepo.transitionMode(record.id, {
       mode: 'native',
       status: 'running',
-      provider: 'fake',
-      model: 'fake-model',
+      provider: toProvider,
+      model: `${toProvider}-model`,
     });
     expect(mutated).not.toBeNull();
-    await stack.db.client.query(
-      `INSERT INTO wfos_agent_runs (execution_id, work_item_id, work_order_id, provider, status)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [record.executionId, workItemId, workOrderId, 'fake', 'in_progress'],
-    );
+    await insertRunRow(record.executionId, toProvider, 'in_progress');
     return record;
+  }
+
+  /**
+   * Insert a BACK-DATED external dispatch: an execution row created at
+   * 2000-01-01 (outside every modern window) carrying the package artifact
+   * — the direct external path's dispatch is anchored at the row's creation
+   * (the row is created immediately before the synchronous submit).
+   */
+  async function insertOldExternalDispatch(provider: string): Promise<string> {
+    const executionId = `wf-w043-${++execCount}`;
+    await stack.db.client.query(
+      `INSERT INTO wfos_executions
+         (execution_id, project_id, work_item_id, work_order_id, implementation_context_id,
+          mode, provider, model, status, prompt, prompt_digest, package_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'external', $6, $7, 'handoff_ready', $8, $9, $10, '2000-01-01T00:00:00Z')`,
+      [
+        executionId, projectId, workItemId, workOrderId, contextId,
+        provider, `${provider}-model`, `p-${executionId}`, `d-${executionId}`,
+        JSON.stringify(fixturePackage(executionId, provider)),
+      ],
+    );
+    return executionId;
   }
 
   // -------------------------------------------------------------------------
@@ -423,83 +557,198 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   });
 
   // -------------------------------------------------------------------------
-  // 3. usage derivation — the AR-043-01 DISPATCH PREDICATE
+  // 3a. usage derivation — NON-DISPATCHED records never count (AR-043-01)
+  //     (runs FIRST: the dispatched-records describes below accumulate on
+  //     these rows — the clean-zero proofs need an empty dispatched state)
   // -------------------------------------------------------------------------
-  describe('usage derivation — countProjectDispatchesSince (the AR-043-01 dispatch predicate)', () => {
+  describe('usage derivation — non-dispatched records never count (AR-043-01)', () => {
     // The trailing window covering every fixture (the rate-limit shape).
     const ancient = new Date(Date.UTC(2000, 0, 1));
 
-    it('a created execution WITHOUT dispatch → NOT counted (either mode)', async () => {
+    it('a created execution WITHOUT dispatch → NOT counted (either mode, either model)', async () => {
       // The records exist — but existence is not dispatch: no AgentRun
-      // ledger row, no persisted package. They must NOT consume window
-      // capacity (the pre-fix defect counted them).
+      // ledger row, no persisted package. They must NOT consume quota or
+      // window capacity (the pre-fix defect counted them).
       await insertExecution('fake', 'native');
       await insertExecution('external-coder', 'external');
 
-      const projectWide = await repository.countProjectDispatchesSince(projectId, null, ancient);
-      expect(projectWide).toBe(0);
-      const fakeScoped = await repository.countProjectDispatchesSince(projectId, 'fake', ancient);
-      expect(fakeScoped).toBe(0);
-      const externalScoped = await repository.countProjectDispatchesSince(projectId, 'external-coder', ancient);
-      expect(externalScoped).toBe(0);
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(0);
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(0);
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(0);
     });
 
     it('rejected before dispatch → NOT counted (the provider-submit failure shape)', async () => {
       // status 'failed' with failureStage 'provider-submit' — the attempt
       // died BEFORE the provider boundary (no run row / no package was ever
       // written). A failure that never reached the provider is not a
-      // dispatch and must not count against either family.
+      // dispatch and must not count against either usage model.
       const native = await insertExecution('fake', 'native');
       await rejectBeforeDispatch(native.id);
       const external = await insertExecution('external-coder', 'external');
       await rejectBeforeDispatch(external.id);
 
-      const projectWide = await repository.countProjectDispatchesSince(projectId, null, ancient);
-      expect(projectWide).toBe(0);
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(0);
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(0);
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 3b. AR-043-02 — per-provider dispatch accounting for cross-mode
+  //     handoffs: the MINIMAL scenario, proven end-to-end (the architect's
+  //     four-line table). Runs before the accumulation describes so the
+  //     project carries exactly ONE dispatched execution: the handed-off
+  //     record itself.
+  // -------------------------------------------------------------------------
+  describe('AR-043-02 — cross-mode per-provider dispatch accounting (the minimal scenario, end-to-end)', () => {
+    const ancient = new Date(Date.UTC(2000, 0, 1));
+
+    it('native A dispatch + external B handoff → A window = 1, B window = 1 — and BOTH providers are blocked at limit 1', async () => {
+      // The handed-off execution dispatched TWICE — natively to A ('fake')
+      // and externally to B ('external-coder'). The row's current provider
+      // is B; the pre-fix defect counted the ROW once and attributed it
+      // ONLY to B, leaving A's window understated (AR-043-02).
+      await insertNativeToExternalHandoff('fake', 'external-coder');
+
+      // The architect's table, lines 1-2: each ACTUAL dispatch lands in the
+      // window of the provider that dispatched it.
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(1);
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(1);
+
+      // The table's blocked lines: with limit 1, each provider's NEXT
+      // dispatch is blocked (used >= max) — A because its window already
+      // holds the native dispatch, B because its window already holds the
+      // external dispatch. BOTH candidates rate_limited, BEFORE ranking.
+      await service.updateProjectPolicy(projectId, {
+        rateLimitMaxRequests: 1,
+        rateLimitWindowSeconds: 3_600,
+      });
+      const recommendation = await service.recommend({
+        organizationId, projectId, workItemId, userId,
+      });
+      expect(recommendation.eligibleCandidates).toEqual([]);
+      expect(recommendation.recommendedCandidate).toBeNull();
+      for (const provider of ['fake', 'external-coder']) {
+        const excluded = recommendation.excludedCandidates.find((c) => c.provider === provider);
+        expect(excluded, `${provider} must be excluded`).toBeDefined();
+        expect(excluded!.eligibility.eligible).toBe(false);
+        expect(excluded!.eligibility.status).toBe('rate_limited');
+        expect(excluded!.eligibility.blockingReasons.some((b) => b.constraint === 'rate_limit_window_exhausted')).toBe(true);
+      }
+      await service.updateProjectPolicy(projectId, {
+        rateLimitMaxRequests: null,
+        rateLimitWindowSeconds: null,
+      });
     });
 
-    it('an actual NATIVE dispatch → counted (the AgentRun ledger row; a FAILED run still dispatched)', async () => {
+    it('the same handed-off execution is ONE logical execution → ONE unit of quota', async () => {
+      // QUOTA's unit is the LOGICAL EXECUTION (max_executions_per_month/
+      // day): the two dispatch phases consume ONE quota unit together —
+      // the QUOTA and RATE-LIMIT usage models are DISTINCT (AR-043-02).
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(1); // NOT 2 — one logical execution
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 3c. usage derivation — dispatched records: LOGICAL EXECUTIONS (quota)
+  //     vs PROVIDER DISPATCH EVENTS (rate). Accumulates on the records
+  //     created above (the suite convention — documented running totals).
+  // -------------------------------------------------------------------------
+  describe('usage derivation — dispatched records: logical executions (quota) vs provider dispatch events (rate)', () => {
+    const ancient = new Date(Date.UTC(2000, 0, 1));
+    // A recent trailing window (the rate-limit shape) — every fixture below
+    // is created NOW except the explicit back-dated window-edge ones.
+    const recent = new Date(Date.now() - 60_000);
+
+    it('an actual NATIVE dispatch → one provider dispatch event (the AgentRun ledger row; a FAILED run still dispatched)', async () => {
       // The gateway creates the run row BEFORE the adapter invocation —
       // one dispatch succeeded, one FAILED AT THE PROVIDER. Both initiated
-      // the provider operation; both consume provider capacity; both count.
+      // the provider operation; both consume provider capacity; both count
+      // in 'fake''s window. Quota grows by TWO logical executions.
       await insertNativeDispatch('fake', 'success');
       await insertNativeDispatch('fake', 'failed');
 
-      const projectWide = await repository.countProjectDispatchesSince(projectId, null, ancient);
-      expect(projectWide).toBe(2);
-      const fakeScoped = await repository.countProjectDispatchesSince(projectId, 'fake', ancient);
-      expect(fakeScoped).toBe(2); // both native dispatches on 'fake'
-      const externalScoped = await repository.countProjectDispatchesSince(projectId, 'external-coder', ancient);
-      expect(externalScoped).toBe(0);
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(3); // 1 handed-off + 2 native
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(3); // 1 handoff native phase + 2 native dispatches
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(1); // only the handoff's external phase
     });
 
-    it('an actual EXTERNAL dispatch → counted (the persisted package artifact)', async () => {
+    it('an actual EXTERNAL dispatch → one provider dispatch event (the persisted package artifact)', async () => {
       await insertExternalDispatch('external-coder');
 
-      const projectWide = await repository.countProjectDispatchesSince(projectId, null, ancient);
-      expect(projectWide).toBe(3);
-      const externalScoped = await repository.countProjectDispatchesSince(projectId, 'external-coder', ancient);
-      expect(externalScoped).toBe(1);
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(4);
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(2);
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(3);
     });
 
-    it('a dispatched execution counts EXACTLY ONCE — a cross-mode handed-off record carrying BOTH artifacts', async () => {
-      // The handed-off record has package_json (its external phase) AND an
-      // AgentRun row (its native phase). The OR predicate must still count
-      // the ROW once — and the provider attribution is the record's
-      // CURRENT provider ('fake').
-      await insertHandedOffRecord();
+    it('REVERSE cross-mode handoff (external B → native A): the external dispatch is attributed through the log snapshot, counted EXACTLY ONCE', async () => {
+      // The external phase's package is RETAINED on the row (transitionMode
+      // COALESCE) but the row's mode is now 'native' — the current-phase
+      // arm must SKIP it and the handed-off-away arm must count it from the
+      // append-only log's previous_package_json: exactly one event for
+      // 'external-coder' (never two), plus one native event for 'fake'.
+      await insertExternalToNativeHandoff('external-coder', 'fake');
 
-      const projectWide = await repository.countProjectDispatchesSince(projectId, null, ancient);
-      expect(projectWide).toBe(4); // NOT 5 — one logical execution, one count
-      const fakeScoped = await repository.countProjectDispatchesSince(projectId, 'fake', ancient);
-      expect(fakeScoped).toBe(3); // 2 native + the handed-off record (now provider 'fake')
-      const externalScoped = await repository.countProjectDispatchesSince(projectId, 'external-coder', ancient);
-      expect(externalScoped).toBe(1); // unchanged — attribution follows the current provider
+      const quota = await repository.countProjectDispatchedExecutionsSince(projectId, ancient);
+      expect(quota).toBe(5); // ONE logical execution — not 2
+      const externalWindow = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalWindow).toBe(3); // EXACTLY ONCE via the log snapshot
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeWindow).toBe(4);
     });
 
-    it('the usage is tenant-scoped (another project counts 0)', async () => {
-      const otherProject = await repository.countProjectDispatchesSince('00000000-0000-0000-0000-000000000000', null, ancient);
-      expect(otherProject).toBe(0);
+    it('a dispatch event falls out of the window by ITS OWN event time (native: the run row creation — not the execution row creation)', async () => {
+      // The execution row is created NOW, but its AgentRun ledger row is
+      // back-dated to 2000: the dispatch EVENT happened then, so a recent
+      // window excludes it while an ancient window includes it. (The quota
+      // still counts the logical execution — the row was created this
+      // period and it dispatched.)
+      await insertNativeDispatch('fake', 'success', new Date(Date.UTC(2000, 0, 1)));
+
+      const quotaThisMonth = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
+      expect(quotaThisMonth).toBe(6);
+      const fakeRecent = await repository.countProjectProviderDispatchesSince(projectId, 'fake', recent);
+      expect(fakeRecent).toBe(4); // the back-dated run is OUTSIDE
+      const fakeAncient = await repository.countProjectProviderDispatchesSince(projectId, 'fake', ancient);
+      expect(fakeAncient).toBe(5); // the event exists — its OWN time gates it
+    });
+
+    it('a back-dated external dispatch (direct path) also falls out of the window by its own event time (the row creation)', async () => {
+      // The direct external path anchors its dispatch at the row's creation
+      // (created immediately before the synchronous submit): a row created
+      // in 2000 carrying the package is outside every modern window.
+      await insertOldExternalDispatch('external-coder');
+
+      const externalRecent = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', recent);
+      expect(externalRecent).toBe(3);
+      const externalAncient = await repository.countProjectProviderDispatchesSince(projectId, 'external-coder', ancient);
+      expect(externalAncient).toBe(4);
+      // The quota period (this month) excludes it too — created in 2000.
+      const quotaThisMonth = await repository.countProjectDispatchedExecutionsSince(projectId, recent);
+      expect(quotaThisMonth).toBe(6);
+    });
+
+    it('the usage is tenant-scoped (another project counts 0 in both models)', async () => {
+      const otherProject = '00000000-0000-0000-0000-000000000000';
+      const quota = await repository.countProjectDispatchedExecutionsSince(otherProject, ancient);
+      expect(quota).toBe(0);
+      const fakeWindow = await repository.countProjectProviderDispatchesSince(otherProject, 'fake', ancient);
+      expect(fakeWindow).toBe(0);
     });
   });
 
@@ -508,32 +757,16 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   // -------------------------------------------------------------------------
   describe('recommend() — the pre-ranking hard filter (end-to-end)', () => {
     // The INTERACTIVE recommendation path keeps §5 semantics (an unknown
-    // subscription blocks) — the user configures their access profiles
-    // first (exactly what the WORK-033 regression suite models).
-    beforeAll(async () => {
-      await service.upsertAccessProfile(organizationId, userId, {
-        provider: 'fake',
-        plan: 'pro',
-        codingAgent: 'ready',
-        externalUi: 'unverified',
-        nativeApi: 'ready',
-        statusSource: 'verified',
-      });
-      await service.upsertAccessProfile(organizationId, userId, {
-        provider: 'external-coder',
-        plan: 'pro',
-        codingAgent: 'ready',
-        externalUi: 'ready',
-        nativeApi: 'unverified',
-        statusSource: 'verified',
-      });
-    });
+    // subscription blocks) — the access profiles were upserted in the
+    // outer beforeAll (the user configured them — exactly what the
+    // WORK-033 regression suite models).
 
     it('an exhausted monthly quota EXCLUDES every candidate with the structured quota_exhausted reason', async () => {
-      // Quota 3, usage 4 — the FOUR DISPATCHED executions above (the six
-      // non-dispatched records — created or rejected-before-dispatch —
-      // never count).
-      await service.updateProjectPolicy(projectId, { maxExecutionsPerMonth: 3 });
+      // Quota 5, usage 6 — the SIX DISPATCHED LOGICAL EXECUTIONS above (the
+      // non-dispatched records — created or rejected-before-dispatch — and
+      // the back-dated 2000 row never count; each cross-mode handed-off
+      // record is ONE logical execution despite its two dispatch phases).
+      await service.updateProjectPolicy(projectId, { maxExecutionsPerMonth: 5 });
       const recommendation = await service.recommend({
         organizationId, projectId, workItemId, userId,
       });
@@ -548,7 +781,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         ).toBe(true);
       }
       expect(recommendation.recommendedCandidate).toBeNull();
-      // Raising the quota re-admits the candidates (usage 4 < 10).
+      // Raising the quota re-admits the candidates (usage 6 < 10).
       await service.updateProjectPolicy(projectId, { maxExecutionsPerMonth: 10 });
       const lifted = await service.recommend({ organizationId, projectId, workItemId, userId });
       expect(lifted.eligibleCandidates.length).toBeGreaterThan(0);
@@ -577,12 +810,17 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     });
 
     it('a per-provider rate limit excludes ONLY the exhausted provider', async () => {
-      // 3 DISPATCHES on 'fake' (two native + the handed-off record) in any
-      // window; limit 2 → 'fake' excluded, 'external-coder' (1 dispatch)
-      // eligible. The six non-dispatched records never consume window
-      // capacity — counting them was the AR-043-01 defect.
+      // 4 DISPATCH EVENTS on 'fake' in the window (its two native
+      // dispatches + the native phase of EACH cross-mode handoff) and 3 on
+      // 'external-coder' (its direct dispatch + the external phase of EACH
+      // handoff) — the two handed-off records contribute to BOTH
+      // providers' windows (AR-043-02: each actual dispatch attributed to
+      // the provider that dispatched it). Limit 4 → 'fake' (4 >= 4)
+      // excluded, 'external-coder' (3 < 4) eligible. The back-dated events
+      // and the non-dispatched records consume no window capacity —
+      // counting them was the AR-043-01 defect.
       await service.updateProjectPolicy(projectId, {
-        rateLimitMaxRequests: 2,
+        rateLimitMaxRequests: 4,
         rateLimitWindowSeconds: 3_600,
       });
       const recommendation = await service.recommend({ organizationId, projectId, workItemId, userId });

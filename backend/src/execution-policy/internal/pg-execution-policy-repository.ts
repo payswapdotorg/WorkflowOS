@@ -144,13 +144,9 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
   // ---------------------------------------------------------------- usage (WORK-043)
 
   /**
-   * WORK-043 (§33.3) — the quota/rate-limit USAGE query (AR-043-01: the
-   * per-provider sliding-window limit counts DISPATCHES, not mere execution
-   * rows). Counts the project's executions whose PROVIDER DISPATCH ACTUALLY
-   * INITIATED since `since`, optionally scoped to one provider (the
-   * per-provider rate-limit window), via the explicit DISPATCH PREDICATE
-   * over the EXISTING authoritative records (NO parallel usage ledger — no
-   * dual-write, no drift):
+   * The AR-043-01 DISPATCH PREDICATE — shared by both usage queries. A
+   * logical execution row counts as EXECUTED only when a durable
+   * provider-dispatch artifact exists:
    *
    *   dispatched(e) :=
    *     EXISTS (SELECT 1 FROM wfos_agent_runs r
@@ -165,8 +161,7 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
    *     and consumed provider capacity. A pre-dispatch rejection (no model,
    *     no adapter) leaves NO run row and does not count. execution_id is
    *     UNIQUE on wfos_agent_runs → structurally one run per logical
-   *     execution (the existing ledger's exactly-once behavior is reused,
-   *     not duplicated).
+   *     execution.
    *   - EXTERNAL arm — package_json IS the external dispatch artifact: it is
    *     persisted ONLY by the dispatch-outcome writes (the execution
    *     service's handoff_ready path and the cross-mode
@@ -177,45 +172,129 @@ export class PgExecutionPolicyRepository implements ExecutionPolicyRepository {
    *   - The predicate is deliberately MODE-INDEPENDENT (the artifact
    *     disjunction): a cross-mode handoff mutates mode BEFORE the target
    *     dispatch, so a mode-gated predicate would misclassify in-flight and
-   *     failed handoffs. A record carrying BOTH artifacts (a handed-off
-   *     execution) still counts EXACTLY ONCE — the count is per execution
-   *     row, and the provider attribution is the record's (current)
-   *     provider.
-   *
-   * Returns NULL when the query fails: an ACTIVE quota/rate limit whose
-   * usage cannot be resolved fails CLOSED in the evaluator.
+   *     failed handoffs.
    */
-  async countProjectDispatchesSince(
+  private static readonly DISPATCHED_PREDICATE = `EXISTS (
+        SELECT 1 FROM wfos_agent_runs r
+         WHERE r.execution_id = e.execution_id
+      )
+      OR e.package_json IS NOT NULL`;
+
+  /**
+   * WORK-043 (§33.3) — QUOTA usage (AR-043-02): counts the project's LOGICAL
+   * EXECUTIONS since `since` — ONE per execution row that actually
+   * dispatched (the AR-043-01 predicate above), project-wide and
+   * deliberately NOT provider-attributed: the policy columns are
+   * max_executions_per_month / max_executions_per_day — the quota's unit is
+   * the LOGICAL EXECUTION, so a cross-mode handed-off execution (two
+   * provider dispatch phases — a native AgentRun row AND an external
+   * package) consumes exactly ONE unit of quota. No parallel usage ledger:
+   * the count is derived from the authoritative records at evaluation time.
+   *
+   * Returns NULL when the query fails: an ACTIVE quota whose usage cannot
+   * be resolved fails CLOSED in the evaluator.
+   */
+  async countProjectDispatchedExecutionsSince(
     projectId: string,
-    provider: string | null,
     since: Date,
   ): Promise<number | null> {
     try {
-      // AR-043-01 — the dispatch predicate: a row counts ONLY when a durable
-      // provider-dispatch artifact exists (an AgentRun ledger row — native —
-      // or the ExternalExecutionPackage — external). A merely-created
-      // record, a pre-dispatch rejection, or an attempt that failed before
-      // provider submission is NOT a dispatch and must not consume
-      // quota/window capacity.
-      const dispatched = `EXISTS (
-            SELECT 1 FROM wfos_agent_runs r
-             WHERE r.execution_id = e.execution_id
-          )
-          OR e.package_json IS NOT NULL`;
       const res = await this.db.query<{ c: number }>(
-        provider != null
-          ? `SELECT COUNT(*)::int AS c
-               FROM wfos_executions e
-              WHERE e.project_id = $1
-                AND e.provider = $2
-                AND e.created_at >= $3
-                AND (${dispatched})`
-          : `SELECT COUNT(*)::int AS c
-               FROM wfos_executions e
-              WHERE e.project_id = $1
-                AND e.created_at >= $2
-                AND (${dispatched})`,
-        provider != null ? [projectId, provider, since] : [projectId, since],
+        `SELECT COUNT(*)::int AS c
+           FROM wfos_executions e
+          WHERE e.project_id = $1
+            AND e.created_at >= $2
+            AND (${PgExecutionPolicyRepository.DISPATCHED_PREDICATE})`,
+        [projectId, since],
+      );
+      return Number(res.rows[0]?.c ?? 0);
+    } catch {
+      // Unresolvable usage — the evaluator's fail-closed posture handles it.
+      return null;
+    }
+  }
+
+  /**
+   * WORK-043 (§33.3) — RATE-LIMIT usage (AR-043-02): counts the project's
+   * PROVIDER DISPATCH EVENTS since `since` for `provider` — each ACTUAL
+   * dispatch attributed to the provider that dispatched it, never to the
+   * execution row's (mutable, current) provider. The unit is the DISPATCH
+   * EVENT (rate_limit_max_requests per sliding window), so a cross-mode
+   * handed-off execution contributes ONE event to EACH provider that
+   * actually dispatched. Three arms over the EXISTING authoritative
+   * artifacts (NO parallel usage ledger — no dual-write, no drift):
+   *
+   *   1. NATIVE events — one per wfos_agent_runs ledger row, attributed to
+   *      the run row's OWN provider (immutable — updateSuccess/updateFailed
+   *      never touch it). Event time = the run row's created_at (the row is
+   *      created immediately BEFORE the adapter invocation — the dispatch
+   *      initiation). A FAILED run still dispatched.
+   *   2. EXTERNAL events (the CURRENT external phase) — one per package
+   *      artifact on the execution row, attributed to the package's OWN
+   *      `provider` field (ExternalExecutionPackage is self-describing).
+   *      Event time = the handoff-log row's creation (a native->external
+   *      handoff dispatches right after the log row is reserved) or, with no
+   *      handoff, the execution row's creation (the direct external path
+   *      submits synchronously immediately after creating the row).
+   *   3. EXTERNAL events (a HANDED-OFF-AWAY external phase) — one per
+   *      previous_package_json snapshot in the append-only
+   *      wfos_execution_mode_handoffs log (to_mode = 'native'), attributed
+   *      to the snapshot package's OWN `provider` field. Event time = the
+   *      execution row's creation: a handed-off-away external phase implies
+   *      the execution was CREATED external (at most one handoff per
+   *      execution — the log's UNIQUE(execution_record_id)), so the row's
+   *      creation is that external dispatch's time anchor.
+   *
+   * Arms 2 and 3 are MUTUALLY EXCLUSIVE per external dispatch: arm 2
+   * requires mode = 'external' (the current phase) while arm 3 requires
+   * to_mode = 'native' (the phase was handed off away — transitionMode's
+   * COALESCE RETAINS the prior package on the row, so the row's package
+   * would otherwise be invisible after the handoff). Every external
+   * dispatch is therefore counted EXACTLY ONCE, from exactly one arm.
+   */
+  async countProjectProviderDispatchesSince(
+    projectId: string,
+    provider: string,
+    since: Date,
+  ): Promise<number | null> {
+    try {
+      const res = await this.db.query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+           FROM (
+                  -- (1) NATIVE dispatch events: the AgentRun ledger row's
+                  --     OWN provider + OWN creation time.
+                  SELECT 1
+                    FROM wfos_agent_runs r
+                    JOIN wfos_executions e ON e.execution_id = r.execution_id
+                   WHERE e.project_id = $1
+                     AND r.provider = $2
+                     AND r.created_at >= $3
+                  UNION ALL
+                  -- (2) EXTERNAL dispatch events — the CURRENT external
+                  --     phase's package artifact (self-describing provider).
+                  SELECT 1
+                    FROM wfos_executions e
+                    LEFT JOIN wfos_execution_mode_handoffs h
+                           ON h.execution_record_id = e.id
+                   WHERE e.project_id = $1
+                     AND e.mode = 'external'
+                     AND e.package_json IS NOT NULL
+                     AND e.package_json->>'provider' = $2
+                     AND COALESCE(h.created_at, e.created_at) >= $3
+                  UNION ALL
+                  -- (3) EXTERNAL dispatch events — the HANDED-OFF-AWAY
+                  --     external phase's package snapshot in the append-only
+                  --     handoff log.
+                  SELECT 1
+                    FROM wfos_execution_mode_handoffs h
+                    JOIN wfos_executions e ON e.id = h.execution_record_id
+                   WHERE e.project_id = $1
+                     AND h.to_mode = 'native'
+                     AND h.previous_package_json IS NOT NULL
+                     AND h.previous_package_json->>'provider' = $2
+                     AND e.created_at >= $3
+                ) dispatch_events`,
+        [projectId, provider, since],
       );
       return Number(res.rows[0]?.c ?? 0);
     } catch {

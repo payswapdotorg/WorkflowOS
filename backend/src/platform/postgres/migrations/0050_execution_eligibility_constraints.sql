@@ -19,9 +19,9 @@
 --                   sliding window, evaluated PER PROVIDER over the
 --                   DISPATCHES within the trailing window.
 --
--- The usage derivation applies the AR-043-01 DISPATCH PREDICATE over the
--- EXISTING authoritative records (usage counts provider DISPATCHES, never
--- mere execution-row existence):
+-- The usage derivation (AR-043-01 + AR-043-02) applies the DISPATCH
+-- PREDICATE over the EXISTING authoritative records — usage never counts
+-- mere execution-row existence:
 --
 --     dispatched(e) :=
 --       EXISTS (SELECT 1 FROM wfos_agent_runs r
@@ -37,12 +37,32 @@
 --     persisted ONLY after ExternalExecutionProvider.submit() succeeded
 --     (the handoff_ready outcome write / the fenced cross-mode dispatch
 --     completion); a rejected-before-dispatch attempt leaves it NULL.
---   - A record carrying BOTH artifacts (a cross-mode handed-off execution)
---     counts EXACTLY ONCE — the count is per execution row.
 --
--- created execution without dispatch        → NOT counted
--- rejected before dispatch                  → NOT counted
--- actual provider dispatch                  → counted exactly once
+-- AR-043-02 — the two usage models are DISTINCT (the unit differs):
+--
+--   QUOTA usage        = LOGICAL EXECUTIONS — ONE per execution row that
+--                        dispatched (project-wide; the
+--                        max_executions_per_month/day unit). A cross-mode
+--                        handed-off execution is ONE logical execution →
+--                        ONE unit of quota.
+--   RATE-LIMIT usage   = PROVIDER DISPATCH EVENTS — each ACTUAL dispatch
+--                        attributed to the provider that dispatched it
+--                        (the rate_limit_max_requests unit, per sliding
+--                        window): the AgentRun row's OWN provider (native
+--                        — immutable) + the package artifact's OWN
+--                        provider field (external — ExternalExecution-
+--                        Package is self-describing), including a handed-
+--                        off-away external phase's snapshot in the
+--                        append-only wfos_execution_mode_handoffs log.
+--                        A cross-mode handed-off execution contributes ONE
+--                        event to EACH provider that dispatched.
+--
+-- created execution without dispatch        → NOT counted (either model)
+-- rejected before dispatch                  → NOT counted (either model)
+-- actual provider dispatch                  → quota: once per LOGICAL
+--                                              execution; rate: once per
+--                                              PROVIDER (the dispatching
+--                                              provider's own window)
 --
 --   SECURITY      — security_classification (the project's data
 --                   classification) + external_security_ceiling (the maximum
@@ -54,12 +74,13 @@
 -- (§33.3) — never quality scores. They hard-block candidates; they never
 -- participate in ranking.
 --
--- The usage query (project + provider + created_at over wfos_executions,
--- plus the dispatch-predicate probe — wfos_agent_runs.execution_id carries
--- its own UNIQUE index, package_json is a direct column test) gets a
--- covering index on the driving columns — every eligibility evaluation
--- (recommendation AND the WORK-042 handoff destination gate) runs it against
--- the trailing window / quota periods.
+-- The usage queries (the quota count over wfos_executions + the dispatch
+-- predicate probe — wfos_agent_runs.execution_id carries its own UNIQUE
+-- index, package_json is a direct column test; the rate count over the
+-- same records + the append-only handoff log, attributed per artifact)
+-- get a covering index on the driving columns — every eligibility
+-- evaluation (recommendation AND the WORK-042 handoff destination gate)
+-- runs them against the trailing window / quota periods.
 
 -- ============================================================================
 -- §33.3 quota + rate-limit + security columns on the project policy

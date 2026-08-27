@@ -535,16 +535,29 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
 
   /**
    * WORK-043 (§33.3): resolve the QUOTA + RATE-LIMIT usage from the
-   * AUTHORITATIVE execution records (wfos_executions + wfos_agent_runs via
-   * the repository's countProjectDispatchesSince — the AR-043-01 dispatch
-   * predicate; NO parallel usage ledger). Usage counts provider DISPATCHES
-   * (an AgentRun ledger row — native — or the persisted external package),
-   * never mere execution-row existence: a created-without-dispatch record
-   * or a rejected-before-dispatch attempt consumed no provider capacity and
-   * must not consume quota/window capacity. Period boundaries are UTC
-   * calendar boundaries; the rate window is the trailing sliding window.
-   * Any UNRESOLVABLE usage (query failure → null) stays null — the
-   * evaluator fails CLOSED while the corresponding constraint is active.
+   * AUTHORITATIVE execution records (wfos_executions + wfos_agent_runs +
+   * wfos_execution_mode_handoffs via the repository's two derivation
+   * seams — NO parallel usage ledger). AR-043-02 — the two usage models
+   * are DISTINCT:
+   *
+   *   QUOTA     — the project's LOGICAL EXECUTIONS (one per execution row
+   *               that dispatched; project-wide). A cross-mode handed-off
+   *               execution is ONE logical execution → ONE quota unit.
+   *   RATE-LIMIT — PROVIDER DISPATCH EVENTS per provider (each ACTUAL
+   *               dispatch attributed to the provider that dispatched it:
+   *               the AgentRun ledger row's OWN provider — native; the
+   *               package artifact's OWN provider field — external,
+   *               including a handed-off-away external phase's snapshot).
+   *               A cross-mode handed-off execution contributes ONE event
+   *               to EACH provider that dispatched.
+   *
+   * Neither model ever counts mere execution-row existence: a
+   * created-without-dispatch record or a rejected-before-dispatch attempt
+   * consumed no provider capacity and must not consume quota/window
+   * capacity (the AR-043-01 proofs). Period boundaries are UTC calendar
+   * boundaries; the rate window is the trailing sliding window. Any
+   * UNRESOLVABLE usage (query failure → null) stays null — the evaluator
+   * fails CLOSED while the corresponding constraint is active.
    */
   private async resolveUsageConstraints(
     policy: ProjectPolicyRecord,
@@ -558,16 +571,17 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     const quotaActive = policy.maxExecutionsPerMonth != null || policy.maxExecutionsPerDay != null;
     const rateActive = policy.rateLimitMaxRequests != null && policy.rateLimitWindowSeconds != null;
 
-    // Quota usage — resolved ONLY while a quota is active (no constraint →
+    // Quota usage — LOGICAL EXECUTIONS (one per dispatched execution row,
+    // project-wide), resolved ONLY while a quota is active (no constraint →
     // no query → usage 0; the evaluator's quota family is inactive anyway).
     let monthlyUsed: number | null = 0;
     let dailyUsed: number | null = 0;
     if (quotaActive) {
       const monthly = policy.maxExecutionsPerMonth != null
-        ? await this.deps.repository.countProjectDispatchesSince(projectId, null, monthStart)
+        ? await this.deps.repository.countProjectDispatchedExecutionsSince(projectId, monthStart)
         : 0;
       const daily = policy.maxExecutionsPerDay != null
-        ? await this.deps.repository.countProjectDispatchesSince(projectId, null, dayStart)
+        ? await this.deps.repository.countProjectDispatchedExecutionsSince(projectId, dayStart)
         : 0;
       // A failure on EITHER period check fails the whole quota family
       // closed (the constraint cannot be verified).
@@ -575,16 +589,18 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
       dailyUsed = daily;
     }
 
-    // Rate-window usage per provider — resolved ONLY while a limit is
-    // active, and only for the providers under evaluation. ONE failed
-    // provider query nulls the WHOLE map (systemic failure → fail closed
-    // for every provider under the active limit).
+    // Rate-window usage — PROVIDER DISPATCH EVENTS per provider (each
+    // actual dispatch attributed to the provider that dispatched it),
+    // resolved ONLY while a limit is active, and only for the providers
+    // under evaluation. ONE failed provider query nulls the WHOLE map
+    // (systemic failure → fail closed for every provider under the active
+    // limit).
     let providerWindowUsage: Readonly<Record<string, number>> | null = {};
     if (rateActive && policy.rateLimitWindowSeconds != null) {
       const windowStart = new Date(now.getTime() - policy.rateLimitWindowSeconds * 1000);
       const map: Record<string, number> = {};
       for (const provider of providers) {
-        const used = await this.deps.repository.countProjectDispatchesSince(projectId, provider, windowStart);
+        const used = await this.deps.repository.countProjectProviderDispatchesSince(projectId, provider, windowStart);
         if (used == null) {
           providerWindowUsage = null;
           break;

@@ -62,26 +62,51 @@ export interface ExecutionPolicyRepository {
   listDecisions(workItemId: string, limit?: number): Promise<ExecutionPolicyDecisionRecord[]>;
 
   // --- WORK-043 (§33.3): quota / rate-limit usage derivation ---
+  //
+  // AR-043-02 — the two usage models are DISTINCT (the shared
+  // one-predicate-for-both seam conflated them):
+  //
+  //   quota usage
+  //     → LOGICAL EXECUTIONS (the max_executions_per_month/day unit —
+  //       one per execution row that dispatched, project-wide)
+  //   rate-limit usage
+  //     → PROVIDER DISPATCH EVENTS (the rate_limit_max_requests unit —
+  //       each actual dispatch attributed to the provider that
+  //       dispatched it, per sliding window)
+  //
+  // Both are derived at evaluation time from the EXISTING authoritative
+  // records through the AR-043-01 DISPATCH PREDICATE — NO parallel usage
+  // ledger:
+  //
+  //   dispatched(e) := EXISTS (a wfos_agent_runs row for e.execution_id)
+  //                    OR e.package_json IS NOT NULL
+  //
+  // An AgentRun ledger row is the durable native provider-operation record
+  // (created by the gateway BEFORE the adapter invocation — a failed run
+  // still dispatched); package_json is the external dispatch artifact
+  // (persisted only after ExternalExecutionProvider.submit succeeded). A
+  // merely-created record, a pre-dispatch rejection, or an attempt that
+  // failed before provider submission is NOT a dispatch — it never counts
+  // in EITHER model. NULL = the usage is unresolvable → an ACTIVE
+  // quota/rate limit FAILS CLOSED in the evaluator.
   /**
-   * AR-043-01 — counts the project's PROVIDER DISPATCHES since `since`
-   * (optionally provider-scoped — the per-provider rate-limit window),
-   * through the explicit DISPATCH PREDICATE over the EXISTING authoritative
-   * records (no parallel usage ledger):
-   *
-   *   dispatched(e) := EXISTS (a wfos_agent_runs row for e.execution_id)
-   *                    OR e.package_json IS NOT NULL
-   *
-   * An AgentRun ledger row is the durable native provider-operation record
-   * (created by the gateway BEFORE the adapter invocation — a failed run
-   * still dispatched); package_json is the external dispatch artifact
-   * (persisted only after ExternalExecutionProvider.submit succeeded). A
-   * merely-created record, a pre-dispatch rejection, or an attempt that
-   * failed before provider submission is NOT a dispatch — it never counts.
-   * A record carrying BOTH artifacts (a cross-mode handed-off execution)
-   * counts EXACTLY ONCE. NULL = the usage is unresolvable → an ACTIVE
-   * quota/rate limit FAILS CLOSED in the evaluator.
+   * QUOTA usage — the project's LOGICAL EXECUTIONS since `since` (one per
+   * execution row that actually dispatched — the AR-043-01 predicate;
+   * project-wide, NOT provider-attributed). A cross-mode handed-off
+   * execution (two dispatch phases) is ONE logical execution: exactly ONE
+   * unit of quota.
    */
-  countProjectDispatchesSince(projectId: string, provider: string | null, since: Date): Promise<number | null>;
+  countProjectDispatchedExecutionsSince(projectId: string, since: Date): Promise<number | null>;
+  /**
+   * RATE-LIMIT usage — the project's PROVIDER DISPATCH EVENTS since `since`
+   * for `provider`: each ACTUAL dispatch counted once and attributed to the
+   * provider that dispatched it (the AgentRun ledger row's OWN provider —
+   * native; the ExternalExecutionPackage's OWN provider field — external,
+   * including a handed-off-away external phase's snapshot in the append-only
+   * handoff log). A cross-mode handed-off execution contributes ONE event
+   * to EACH provider that dispatched.
+   */
+  countProjectProviderDispatchesSince(projectId: string, provider: string, since: Date): Promise<number | null>;
 }
 
 /**

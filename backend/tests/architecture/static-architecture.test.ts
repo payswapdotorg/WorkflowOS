@@ -13603,10 +13603,11 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(offenders, offenders.join('\n')).toEqual([]);
   });
 
-  // --- (b) NO parallel usage ledger — usage DERIVED from the authoritative
-  //         records THROUGH the AR-043-01 dispatch predicate ---------------
+  // --- (b) NO parallel usage ledger — the two DISTINCT usage models
+  //         (AR-043-02): quota = LOGICAL EXECUTIONS; rate-limit = PROVIDER
+  //         DISPATCH EVENTS attributed to the dispatching provider --------
 
-  it('NO parallel usage ledger — quota/rate usage counts provider DISPATCHES via the AR-043-01 predicate over the authoritative records', () => {
+  it('NO parallel usage ledger — quota counts LOGICAL EXECUTIONS, rate limits count PROVIDER DISPATCH EVENTS via the authoritative artifacts (AR-043-01 + AR-043-02)', () => {
     // Migration 0050 adds NO table (ALTER + INDEX only).
     const migration = stripCodeComments(readFileSync(MIGRATION_0050, 'utf8'));
     expect(migration, 'migration 0050 must not create a usage/quota table').not.toMatch(/CREATE TABLE/i);
@@ -13618,22 +13619,38 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
         /CREATE TABLE[^\n]*(usage|quota)/i,
       );
     }
-    // The usage query reads wfos_executions (the authoritative source) and
-    // applies the AR-043-01 DISPATCH PREDICATE: a row counts ONLY when a
-    // durable provider-dispatch artifact exists —
+    // The usage queries read the AUTHORITATIVE records and apply the
+    // AR-043-01 DISPATCH PREDICATE: a row counts ONLY when a durable
+    // provider-dispatch artifact exists —
     //   NATIVE:   an AgentRun ledger row (wfos_agent_runs IS the durable
     //             native provider-operation ledger, PR #46 round 8 — the
     //             gateway creates the run BEFORE the adapter invocation)
     //   EXTERNAL: the persisted ExternalExecutionPackage (package_json —
     //             written only after ExternalExecutionProvider.submit
-    //             succeeded)
+    //             succeeded), including a handed-off-away external phase's
+    //             snapshot in the append-only handoff log
     const repoSrc = stripCodeComments(readFileSync(POLICY_REPO, 'utf8'));
-    expect(repoSrc, 'the usage query counts wfos_executions').toMatch(/FROM wfos_executions e/);
+    expect(repoSrc, 'the usage queries count wfos_executions').toMatch(/FROM wfos_executions e/);
     expect(repoSrc, 'the dispatch predicate probes the AgentRun ledger').toMatch(
       /FROM wfos_agent_runs r[\s\S]{0,120}r\.execution_id = e\.execution_id/,
     );
     expect(repoSrc, 'the dispatch predicate probes the external package artifact').toMatch(
       /e\.package_json IS NOT NULL/,
+    );
+    // AR-043-02 — the RATE-LIMIT query attributes EACH actual dispatch to
+    // the provider that dispatched it (NEVER the execution row's mutable
+    // current provider):
+    //   native events   → the AgentRun row's OWN provider (immutable)
+    //   external events → the package artifact's OWN provider field
+    //                     (ExternalExecutionPackage is self-describing)
+    expect(repoSrc, 'native dispatch events attribute to the run row provider').toMatch(
+      /r\.provider = \$2/,
+    );
+    expect(repoSrc, 'external dispatch events attribute to the package provider field').toMatch(
+      /package_json->>'provider' = \$2/,
+    );
+    expect(repoSrc, 'the handed-off-away external phase attributes through the log snapshot').toMatch(
+      /h\.to_mode = 'native'[\s\S]{0,120}h\.previous_package_json IS NOT NULL/,
     );
     // AR-043-01 regression pin: the BARE execution-row count (existence +
     // created_at only — counting executions that never dispatched) must NOT
@@ -13644,11 +13661,24 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     ).not.toMatch(
       /FROM wfos_executions\s+WHERE project_id = \$1 AND provider = \$2 AND created_at >= \$3/,
     );
-    // The repository port exposes the derivation seam (named for what it
-    // counts — DISPATCHES) + the fail-closed NULL contract.
+    // AR-043-02 regression pin: attributing the ROW count to the execution
+    // row's CURRENT provider (one row → one provider) understates the
+    // handed-off-from provider's window — each ACTUAL dispatch belongs to
+    // the provider that dispatched it.
+    expect(
+      repoSrc,
+      'usage must NOT be attributed to the execution row current provider (AR-043-02: each actual dispatch belongs to the provider that dispatched it)',
+    ).not.toMatch(/e\.provider = \$\d/);
+    // The repository port exposes the TWO DISTINCT derivation seams (the
+    // AR-043-02 usage-model split: quota = logical executions; rate =
+    // provider dispatch events) + the fail-closed NULL contract.
     const internalTypes = readFileSync(join(EXEC_POLICY_INTERNAL, 'execution-policy.types.ts'), 'utf8');
-    expect(internalTypes).toMatch(/countProjectDispatchesSince/);
+    expect(internalTypes, 'the quota seam (logical executions)').toMatch(/countProjectDispatchedExecutionsSince/);
+    expect(internalTypes, 'the rate seam (provider dispatch events)').toMatch(/countProjectProviderDispatchesSince/);
+    expect(internalTypes, 'the conflated single seam must not reappear (AR-043-02)').not.toMatch(/countProjectDispatchesSince/);
     expect(internalTypes).not.toMatch(/countProjectExecutionsSince/);
+    expect(internalTypes, 'the AR-043-02 unit distinction is documented').toMatch(/LOGICAL EXECUTIONS/);
+    expect(internalTypes).toMatch(/PROVIDER DISPATCH EVENTS/);
     expect(internalTypes).toMatch(/NULL = the usage\s*\*?\s*is unresolvable/);
     expect(internalTypes).toMatch(/DISPATCH PREDICATE/);
   });
@@ -13851,11 +13881,21 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     );
     // AR-043-01: the PG suite must create BOTH dispatched and non-dispatched
     // execution records and prove the distinction.
-    expect(integration).toMatch(/countProjectDispatchesSince/);
+    // AR-043-02: the suite must prove the per-provider split — each ACTUAL
+    // dispatch attributed to the provider that dispatched it, including
+    // cross-mode handoffs in BOTH directions (the architect's four-line
+    // proof table + the reverse-direction log-snapshot attribution).
+    expect(integration).toMatch(/countProjectDispatchedExecutionsSince/);
+    expect(integration).toMatch(/countProjectProviderDispatchesSince/);
     expect(integration).toMatch(/WITHOUT dispatch → NOT counted/);
     expect(integration).toMatch(/rejected before dispatch → NOT counted/);
     expect(integration).toMatch(/FAILED run still dispatched/);
     expect(integration).toMatch(/EXACTLY ONCE/);
+    expect(integration).toMatch(/A window = 1, B window = 1/);
+    expect(integration).toMatch(/blocked at limit 1/);
+    expect(integration).toMatch(/REVERSE cross-mode handoff/);
+    expect(integration).toMatch(/previous_package_json/);
+    expect(integration).toMatch(/falls out of the window by ITS OWN event time/);
     expect(integration).toMatch(/an exhausted monthly quota EXCLUDES every candidate/);
     expect(integration).toMatch(/an UNKNOWN provider → the honest configuration_missing verdict/);
 
