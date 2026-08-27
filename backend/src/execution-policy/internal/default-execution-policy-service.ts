@@ -250,7 +250,7 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
         input.maxTimeToPrMs !== undefined ? input.maxTimeToPrMs : existing.maxTimeToPrMs,
       );
       // WORK-043 (§33.3): validate the merged quota / rate-limit / security
-      // fields (clean domain errors; migration 0050's CHECKs are the
+      // fields (clean domain errors; migration 0051's CHECKs are the
       // backstop — the same two-boundary pattern).
       validateWork043PolicyFields({
         maxExecutionsPerMonth: input.maxExecutionsPerMonth !== undefined ? input.maxExecutionsPerMonth : existing.maxExecutionsPerMonth,
@@ -790,7 +790,7 @@ export function validateBenchmarkModeConstraint(
 
 /**
  * WORK-043 (§33.3): validate the merged quota / rate-limit / security fields
- * at the POLICY BOUNDARY (clean domain errors; migration 0050's CHECK
+ * at the POLICY BOUNDARY (clean domain errors; migration 0051's CHECK
  * constraints are the DB backstop — the same two-boundary pattern as the
  * constrained-mode validation):
  *
@@ -876,7 +876,7 @@ function computeAvailability(
  * row exists AND no organization context is available to create one (the
  * cross-mode handoff path for a project that never evaluated a
  * recommendation). Both modes allowed, no quotas, no rate limits, standard
- * classification — the exact defaults migration 0026 + 0050 define.
+ * classification — the exact defaults migration 0026 + 0051 define.
  */
 function defaultProjectPolicyRecord(
   organizationId: string | null,

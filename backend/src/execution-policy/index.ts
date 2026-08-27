@@ -123,6 +123,6 @@ export { DefaultExecutionPolicyService } from './internal/default-execution-poli
 // route layer's 400 mapping + direct testing.
 export { validateBenchmarkModeConstraint } from './internal/default-execution-policy-service.js';
 // WORK-043 (§33.3): the quota / rate-limit / security field validation (the
-// same policy-boundary pattern — clean domain errors; migration 0050's CHECKs
+// same policy-boundary pattern — clean domain errors; migration 0051's CHECKs
 // are the DB backstop). Exported for the route layer's 400 mapping + tests.
 export { validateWork043PolicyFields } from './internal/default-execution-policy-service.js';

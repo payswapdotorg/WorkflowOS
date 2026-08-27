@@ -70,11 +70,36 @@
  *         invocations; the run row is the operation record whether the
  *         crashed actor's adapter invocation ever ran).
  *   The native ledger's mechanics are deliberately DIFFERENT from the
- *   external ledger's (PR #46 round 9): the native convergence authority is
+ *   external ledger's (PR #46 round 10): the native convergence authority is
  *   the UNIQUE constraint on the durable execution identity +
  *   converge-on-the-existing-run, NOT the external ledger's generation
- *   fencing + resolution CAS + operation-identity protocol. Both arms have
+ *   fencing + resolution CAS + idempotent-submission protocol. Both arms have
  *   a durable operation ledger; they do not share one mechanism.
+ *
+ * PR #46 round 10 (the NATIVE LIFECYCLE CONVERGENCE correction): EXISTING ≠
+ * COMPLETED. `AgentRun.status` is a LIFECYCLE (pending | in_progress | success
+ * | failed | cancelled), and the round-9 convergeToRun() mapped every
+ * non-failed status to 'completed' — so an existing IN-PROGRESS run was
+ * reported as a COMPLETED submission, letting the handoff service converge
+ * the dispatch as successful while the underlying run was still executing
+ * (and could still later FAIL — the manufactured success would have already
+ * converged the handoff). The round-10 correction preserves the AgentRun
+ * lifecycle across the convergence boundary:
+ *
+ *   - an existing run in a TERMINAL state converges directly: success → a
+ *     completed submission; failed/cancelled → a failed submission;
+ *   - an existing run in a NON-TERMINAL state (pending / in_progress) is
+ *     AWAITED — awaitExistingRunTerminal() observes the durable run (polling
+ *     the run repository) until it reaches a terminal state — the keyed
+ *     submit then returns the TERMINAL outcome ("terminal success/failure of
+ *     the existing run is eventually reflected"), NEVER a manufactured
+ *     completion;
+ *   - a run that stays non-terminal past the await window (a stuck run —
+ *     e.g. the driver died mid-adapter and the run row is orphaned) fails
+ *     CLOSED with a typed error: the keyed submit NEVER manufactures a
+ *     completed outcome from the mere existence of the ledger row, and NEVER
+ *     starts a second run (the execution_id UNIQUE is the ledger authority —
+ *     there is structurally ONE run per execution).
  *
  * This file is private to /agents (PLAT-AC-02).
  */
@@ -90,13 +115,34 @@ export interface NativeExecutionProviderDeps {
   readonly agentGateway: AgentGateway;
   readonly agentRunRepository: AgentRunRepository;
   readonly logger: Logger;
+  /**
+   * PR #46 round 10: how long a keyed submit awaits an existing
+   * NON-TERMINAL AgentRun (pending/in_progress) before failing closed with
+   * the typed unresolved-run error. The existing run may genuinely still be
+   * executing (the original owner's adapter is alive). Defaults to 60s.
+   * Configurable so tests can exercise the await/timeout paths without
+   * sleeping.
+   */
+  readonly existingRunResolutionWindowMs?: number;
+  /**
+   * PR #46 round 10: the poll interval of the existing-run await loop.
+   * Defaults to 100ms.
+   */
+  readonly existingRunPollIntervalMs?: number;
 }
 
 export class NativeExecutionProvider implements ExecutionProvider {
   readonly name = 'native';
   readonly mode = 'native' as const;
 
-  constructor(private readonly deps: NativeExecutionProviderDeps) {}
+  private readonly existingRunResolutionWindowMs: number;
+  private readonly existingRunPollIntervalMs: number;
+
+  constructor(private readonly deps: NativeExecutionProviderDeps) {
+    this.existingRunResolutionWindowMs =
+      deps.existingRunResolutionWindowMs ?? 60_000;
+    this.existingRunPollIntervalMs = deps.existingRunPollIntervalMs ?? 100;
+  }
 
   async submit(task: ExecutionTask): Promise<ExecutionSubmission> {
     if (!task.model) {
@@ -112,6 +158,10 @@ export class NativeExecutionProvider implements ExecutionProvider {
     // happened (the original owner's dispatch is in flight at the gateway,
     // a taken-over dispatch created the run, or this is a crash retry):
     // CONVERGE to that run — NO gateway call, NO second adapter invocation.
+    // PR #46 round 10: the convergence PRESERVES THE RUN LIFECYCLE — an
+    // existing non-terminal run (pending/in_progress) is AWAITED until
+    // terminal (never reported as completed), and a stuck run fails closed
+    // (see convergeToRun).
     if (task.dispatchIdempotencyKey) {
       const existing = await this.deps.agentRunRepository.findByExecutionId(
         task.executionId,
@@ -156,14 +206,19 @@ export class NativeExecutionProvider implements ExecutionProvider {
     } catch (err) {
       // PR #46 round 7 (the provider-operation exactly-once boundary): a
       // keyed dispatch whose gateway call failed re-checks the operation
-      // identity — a run that NOW exists and is NOT failed means the provider
-      // operation ALREADY happened under the same durable execution identity
-      // (our run-creation collided on the wfos_agent_runs.execution_id UNIQUE
+      // identity — a run that NOW exists means the provider operation
+      // ALREADY happened under the same durable execution identity (our
+      // run-creation collided on the wfos_agent_runs.execution_id UNIQUE
       // with a concurrent/taken-over dispatch — our adapter NEVER ran — or
-      // the gateway persisted a non-failed run before the error): CONVERGE to
-      // it instead of propagating. A FAILED/CANCELLED run means the operation
-      // ran and failed — propagate so the caller's failure handling records
-      // the authoritative failure outcome through the fence.
+      // the gateway persisted the run before the error): CONVERGE to it
+      // instead of propagating. PR #46 round 10: the convergence PRESERVES
+      // the run lifecycle — a FAILED/CANCELLED run is the operation's
+      // terminal failure (propagated by convergeToRun so the caller's
+      // failure handling records the authoritative failure outcome through
+      // the fence); a NON-TERMINAL run (pending/in_progress — e.g. the
+      // winner's adapter still executing, or an orphaned run whose driver
+      // died) is AWAITED until terminal, and a stuck run fails closed with
+      // the typed unresolved error — NEVER a manufactured completion.
       if (task.dispatchIdempotencyKey) {
         const run = await this.deps.agentRunRepository.findByExecutionId(
           task.executionId,
@@ -220,35 +275,104 @@ export class NativeExecutionProvider implements ExecutionProvider {
   }
 
   /**
-   * PR #46 round 7: build the CONVERGED submission for an existing AgentRun —
-   * the dispatch-level outcome of a keyed dispatch whose provider operation
-   * already happened under the same durable execution identity (mirrors the
-   * cross-mode service's existing-run converge semantics: a non-failed run
-   * means "the run owns the execution" → the dispatch outcome is
-   * 'completed' + the run binding; a failed/cancelled run reports 'failed'
-   * so the caller records the authoritative failure through the fence).
+   * PR #46 round 7 + round 10: build the CONVERGED submission for an existing
+   * AgentRun — the dispatch-level outcome of a keyed dispatch whose provider
+   * operation already happened under the same durable execution identity.
+   *
+   * PR #46 round 10 (THE LIFECYCLE CORRECTION — existing ≠ completed): ONLY
+   * TERMINAL run statuses map directly — success → a completed submission;
+   * failed/cancelled → a failed submission (the caller records the
+   * authoritative failure through the fence). A NON-TERMINAL run
+   * (pending/in_progress) is AWAITED until terminal
+   * ({@link awaitExistingRunTerminal}) — "terminal success/failure of the
+   * existing run is eventually reflected" — and a run that stays
+   * non-terminal past the await window FAILS CLOSED: this method NEVER
+   * manufactures `status: 'completed'` from the mere existence of the ledger
+   * row, and the keyed submit NEVER starts a second run.
    */
-  private convergeToRun(
+  private async convergeToRun(
     task: ExecutionTask,
     run: AgentRun,
     via: 'pre-check' | 'collision-recovery',
-  ): ExecutionSubmission {
+  ): Promise<ExecutionSubmission> {
+    // The lifecycle gate: a non-terminal run is awaited, never reported.
+    const terminal =
+      run.status === 'success' ||
+      run.status === 'failed' ||
+      run.status === 'cancelled';
+    let converged = run;
+    if (!terminal) {
+      converged = await this.awaitExistingRunTerminal(task, run, via);
+    }
     this.deps.logger.info('execution.native.dispatch-converged', {
       executionId: task.executionId,
-      agentRunId: run.id,
-      runStatus: run.status,
+      agentRunId: converged.id,
+      runStatus: converged.status,
       via,
       dispatchIdempotencyKey: task.dispatchIdempotencyKey,
     });
-    const failed = run.status === 'failed' || run.status === 'cancelled';
+    const failed =
+      converged.status === 'failed' || converged.status === 'cancelled';
     return {
       executionId: task.executionId,
       provider: task.provider,
       mode: 'native',
       status: failed ? 'failed' : 'completed',
-      agentRunId: run.id,
-      startedAt: run.startedAt,
-      completedAt: run.completedAt ?? undefined,
+      agentRunId: converged.id,
+      startedAt: converged.startedAt,
+      completedAt: converged.completedAt ?? undefined,
     };
+  }
+
+  /**
+   * PR #46 round 10: AWAIT an existing NON-TERMINAL AgentRun (pending /
+   * in_progress) until it reaches a TERMINAL state — the explicit
+   * await/reconcile path that observes the durable AgentRun instead of
+   * treating the row's existence as the operation's successful outcome.
+   * The run may genuinely still be executing (the original owner's adapter
+   * is alive; a UNIQUE-collision loser converges onto the winner's in-flight
+   * operation). Polls the run repository until terminal.
+   *
+   * FAILS CLOSED when the await window elapses without a terminal state (a
+   * stuck run — e.g. the driver died mid-adapter and the run row is
+   * orphaned): the typed error makes the dispatch fail honestly (the
+   * obligation stays pending; a later reconcile retries the convergence —
+   * or the run lifecycle itself resolves). NEVER a manufactured completion,
+   * NEVER a second run (the execution_id UNIQUE is the ledger authority).
+   */
+  private async awaitExistingRunTerminal(
+    task: ExecutionTask,
+    run: AgentRun,
+    via: 'pre-check' | 'collision-recovery',
+  ): Promise<AgentRun> {
+    this.deps.logger.info('execution.native.dispatch-converge-await-existing-run', {
+      executionId: task.executionId,
+      agentRunId: run.id,
+      runStatus: run.status,
+      via,
+      resolutionWindowMs: this.existingRunResolutionWindowMs,
+    });
+    const deadline = Date.now() + this.existingRunResolutionWindowMs;
+    for (;;) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.existingRunPollIntervalMs),
+      );
+      const fresh = await this.deps.agentRunRepository.findByExecutionId(
+        task.executionId,
+      );
+      if (
+        fresh &&
+        (fresh.status === 'success' ||
+          fresh.status === 'failed' ||
+          fresh.status === 'cancelled')
+      ) {
+        return fresh;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `native-execution-existing-run-unresolved: the existing AgentRun ${run.id} for execution ${task.executionId} is still '${fresh?.status ?? run.status}' (non-terminal) after ${this.existingRunResolutionWindowMs}ms — EXISTING ≠ COMPLETED: AgentRun is the durable native operation ledger, and a keyed submit NEVER manufactures a completed outcome from a non-terminal run and NEVER starts a second run (the execution_id UNIQUE is the ledger authority); the dispatch fails closed — retry the convergence later`,
+        );
+      }
+    }
   }
 }

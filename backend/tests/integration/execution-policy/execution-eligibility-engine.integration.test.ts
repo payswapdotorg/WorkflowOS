@@ -7,7 +7,7 @@
  * PgExecutionPolicyRepository + the real DefaultExecutionEligibilityService
  * + the real DefaultExecutionPolicyService with stubbed non-policy deps):
  *
- *   1. migration 0050 — the new policy columns + the DB CHECK backstops
+ *   1. migration 0051 — the new policy columns + the DB CHECK backstops
  *      (rate limit requires BOTH halves; the classification ladder is
  *      closed; quotas are non-negative).
  *   2. policy CRUD round-trip for the new fields + the policy-boundary
@@ -487,9 +487,9 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
   }
 
   // -------------------------------------------------------------------------
-  // 1. migration 0050 — the columns + the DB CHECK backstops
+  // 1. migration 0051 — the columns + the DB CHECK backstops
   // -------------------------------------------------------------------------
-  describe('migration 0050 — policy columns + CHECK backstops', () => {
+  describe('migration 0051 — policy columns + CHECK backstops', () => {
     it('the new columns exist with the documented defaults', async () => {
       await repository.insertDefaultProjectPolicy(organizationId, projectId);
       const policy = await repository.getProjectPolicy(projectId);
