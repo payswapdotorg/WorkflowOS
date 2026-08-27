@@ -1,6 +1,7 @@
 /**
- * PR #46 round 4 — the durable execution claim/lease for the cross-mode-
- * handoff obligation: REAL PostgreSQL two-actor concurrency regression.
+ * PR #46 round 4 + round 5 — the durable execution claim/lease for the
+ * cross-mode-handoff obligation: REAL PostgreSQL two-actor concurrency
+ * regression.
  *
  * The architect's round-4 review of the round-3 commit (`cd88d9f` — the
  * post-mutation relay enqueue) established that the round-3 reorder closed
@@ -12,15 +13,28 @@
  * two executions (both operated on the same already-reserved handoff row;
  * it only fenced creation of a SECOND handoff row).
  *
- * The round-4 fix introduces a durable execution claim/lease on the
+ * The round-4 fix introduced a durable execution claim/lease on the
  * obligation row itself (migration 0044), shared by the synchronous caller
  * + the relay reconcile. The claim is the serialization boundary — only
  * the claim owner may perform the mutation/session/dispatch critical
  * section. A crashed owner's lease auto-expires (`claim_expires_at < NOW()`)
  * so the boot sweep reclaims + recovers.
  *
- * This file proves the serialization is REAL by exercising TWO concurrent
- * `pg.Client` connections against the same schema:
+ * PR #46 round 5 (the lease-ownership + lease-expiry fixes): the round-5
+ * review found two lease-correctness holes in the round-4 implementation:
+ * (1) the claim owner was a FIXED per-role string shared by every
+ * invocation of that role — an old invocation's `finally` release could
+ * clear a NEW owner's live claim after an expiry+reclaim under the same
+ * owner string; (2) the fixed 30s lease had NO renewal/fencing — a critical
+ * section longer than the lease let a second actor reclaim while the first
+ * was still executing. The round-5 fix: unique per-invocation owners
+ * (`<role-prefix>:<uuid>`), the claim_epoch fencing token (migration 0045),
+ * the heartbeat renewal covering the whole critical section, phase-boundary
+ * fence checks, and the epoch-fenced discharge.
+ *
+ * This file proves the serialization + the lease semantics are REAL by
+ * exercising TWO concurrent `pg.Client` connections against the same
+ * schema:
  *
  *   R4-#1. T1 caller claims → T2 reconcile CANNOT dispatch concurrently
  *      (the claim-held early return — NO mutate, NO dispatch) → T1
@@ -38,6 +52,31 @@
  *      calls on the same obligation, exactly one wins. T1 claims → T2's
  *      claim fails (T1 holds a live claim) → T1 releases → T2's retry
  *      succeeds (reclaimed after release).
+ *
+ *   R5-#1. The architect's EXACT round-5 five-step regression: T1 claims
+ *      with owner A (unique, caller role) → the lease expires → T2 (the
+ *      SAME role) reclaims with owner B → T1's LATE release CANNOT clear
+ *      T2's claim → a THIRD actor cannot acquire the still-live T2 claim.
+ *      Also proves T1's stale renewal fails (the fence check) while T2's
+ *      live renewal succeeds.
+ *
+ *   R5-#2. The heartbeat renewal covers the ENTIRE critical section: T1's
+ *      critical section outlives the lease (a slow dispatch — parked
+ *      mid-section) with the heartbeat active → T2's mid-flight reclaim
+ *      FAILS (the lease never expired under the live heartbeating owner) →
+ *      T1 completes → ZERO duplicate dispatches / session transitions.
+ *
+ *   R5-#3. The stalled-owner abort: T1's heartbeat is SUPPRESSED + its
+ *      short lease expires while it is parked mid-critical-section → T2
+ *      reclaims + completes + discharges → T1 resumes → its next fence
+ *      check FAILS (owner/epoch mismatch) → T1 aborts with
+ *      'claim-fence-lost' BEFORE any mutation/dispatch → ZERO duplicate
+ *      dispatches / session transitions under the exact
+ *      stall-then-reclaim interleaving.
+ *
+ *   R5-#4. The discharge is epoch-fenced: after T2 reclaims (a new epoch),
+ *      T1's stale-epoch discharge is REJECTED (0 rows — the obligation
+ *      stays pending) while T2's live-epoch discharge succeeds.
  *
  * A fake / single-connection test is INSUFFICIENT for these invariants (the
  * architect's round-4 words): the problem is specifically database
@@ -83,9 +122,11 @@ import type {
   CrossModeHandoffRecord,
   CrossModeHandoffRepository,
 } from '../../../src/modules/agents/internal/cross-mode-handoff.types.js';
+import { CrossModeHandoffError } from '../../../src/modules/agents/internal/cross-mode-handoff.types.js';
 import {
-  CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
-  CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER,
+  CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX,
+  CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX,
+  newCrossModeHandoffClaimOwner,
 } from '../../../src/modules/agents/internal/cross-mode-handoff.types.js';
 import type {
   ExecutionProvider,
@@ -100,6 +141,31 @@ const isRealPg = !!process.env.WORKFLOWOS_DATABASE_URL && process.env.WORKFLOWOS
 /** A promise that resolves after `ms` milliseconds. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Poll `predicate` every 10ms until it holds (throws after `timeoutMs`). */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error('waitFor: the condition was not met before the timeout');
+    }
+    await delay(10);
+  }
+}
+
+/**
+ * PR #46 round 5: narrow a claim result to the claimed branch + return its
+ * fencing epoch (the test FAILS if the claim did not succeed — vitest's
+ * expect() does not narrow TypeScript unions).
+ */
+function assertClaimed(
+  claim: { claimed: true; claimEpoch: number } | { claimed: false; activeOwner: string | null },
+): number {
+  if (!claim.claimed) {
+    throw new Error(`assertClaimed: the claim did not succeed (activeOwner=${claim.activeOwner})`);
+  }
+  return claim.claimEpoch;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,23 +279,30 @@ class CountingSessionService implements CrossModeExecutionSessionPort {
 }
 
 /**
- * PR #46 round 4: a HookedHandoffRepository that wraps T1's
- * PgCrossModeHandoffRepository + fires a `willMutate` hook AFTER
- * `createHandoffAndClaim` succeeds with `claimed:true` +
- * `owner === CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER` (the caller-path claim).
- * The hook fires AFTER the reserve+claim transaction commits (so T1 holds
- * the live claim) + BEFORE T1's `mutateAndDispatch` runs (T1 continues
- * synchronously after the hook resolves). The hook starts T2's
- * `reconcileCrossModeHandoffForExecution(executionId)` on the SECOND client
- * + awaits it — T2's reconcile tries to claim → fails (T1 holds) → returns
- * `{ stage: 'claim-held' }` (NO mutate, NO dispatch). This proves the
- * architect's invariant: a concurrent reconcile CANNOT re-mutate + re-
- * dispatch while the caller holds the claim.
+ * PR #46 round 4 + round 5: a HookedHandoffRepository that wraps T1's
+ * PgCrossModeHandoffRepository + fires hooks for the two-actor tests:
+ *
+ *   - `willMutate`: fires AFTER `createHandoffAndClaim` succeeds with
+ *     `claimed:true` + a caller-role owner (the unique round-5 owner string
+ *     starts with the caller role PREFIX) + BEFORE T1's mutateAndDispatch
+ *     runs. Used by R4-#1 (T2's claim-held early return) + R5-#3 (the
+ *     stalled-owner abort: T1 parks at the hook with its heartbeat
+ *     SUPPRESSED while T2 reclaims).
+ *   - `onFirstRenew`: fires ONCE after the FIRST successful
+ *     `renewHandoffObligationClaim` (the first phase-boundary fence check —
+ *     i.e. T1 is INSIDE the critical section with its heartbeat alive).
+ *     Used by R5-#2 (the heartbeat liveness: T1 parks mid-section; the
+ *     heartbeat keeps renewing; T2's reclaim fails).
+ *
+ * All other calls (including the round-5 `renewHandoffObligationClaim`
+ * heartbeat renewals) forward to the real repository.
  */
 class HookedHandoffRepository implements CrossModeHandoffRepository {
+  private renewHookFired = false;
   constructor(
     private readonly real: CrossModeHandoffRepository,
     private readonly willMutate?: () => Promise<void>,
+    private readonly onFirstRenew?: () => Promise<void>,
   ) {}
   async createHandoff(input: CreateCrossModeHandoffInput): Promise<CrossModeHandoffRecord> {
     return this.real.createHandoff(input);
@@ -238,12 +311,18 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
     input: CreateCrossModeHandoffInput,
     owner: string,
     leaseMs: number,
-  ): Promise<{ handoff: CrossModeHandoffRecord; claimed: boolean }> {
+  ): Promise<
+    | { handoff: CrossModeHandoffRecord; claimed: true; claimEpoch: number }
+    | { handoff: CrossModeHandoffRecord; claimed: false; claimEpoch: null }
+  > {
     const result = await this.real.createHandoffAndClaim(input, owner, leaseMs);
     // Fire the hook ONLY when the caller-path claim succeeds (the
-    // serialization boundary is held by T1). T2's reconcile started inside
-    // this hook will fail its own claim attempt + return early.
-    if (result.claimed && owner === CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER) {
+    // serialization boundary is held by T1). The owner is now a UNIQUE
+    // per-invocation string — match by the caller role PREFIX.
+    if (
+      result.claimed &&
+      owner.startsWith(`${CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX}:`)
+    ) {
       if (this.willMutate) await this.willMutate();
     }
     return result;
@@ -252,11 +331,40 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
     handoffId: string,
     owner: string,
     leaseMs: number,
-  ): Promise<{ claimed: true } | { claimed: false; activeOwner: string | null }> {
+  ): Promise<
+    | { claimed: true; claimEpoch: number }
+    | { claimed: false; activeOwner: string | null }
+  > {
     return this.real.claimHandoffObligation(handoffId, owner, leaseMs);
   }
-  async releaseHandoffObligationClaim(handoffId: string, owner: string): Promise<boolean> {
-    return this.real.releaseHandoffObligationClaim(handoffId, owner);
+  async renewHandoffObligationClaim(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const renewed = await this.real.renewHandoffObligationClaim(
+      handoffId,
+      owner,
+      claimEpoch,
+      leaseMs,
+    );
+    // Fire the renew hook ONCE after the first successful renewal (T1 is
+    // inside the critical section — the heartbeat is alive). The hook must
+    // NOT fire on subsequent heartbeat renewals (it would park on every
+    // beat) — the `renewHookFired` guard makes it a one-shot.
+    if (renewed && !this.renewHookFired) {
+      this.renewHookFired = true;
+      if (this.onFirstRenew) await this.onFirstRenew();
+    }
+    return renewed;
+  }
+  async releaseHandoffObligationClaim(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean> {
+    return this.real.releaseHandoffObligationClaim(handoffId, owner, claimEpoch);
   }
   async findByExecutionId(executionId: string): Promise<CrossModeHandoffRecord | null> {
     return this.real.findByExecutionId(executionId);
@@ -267,12 +375,16 @@ class HookedHandoffRepository implements CrossModeHandoffRepository {
   async listPendingHandoffObligations() {
     return this.real.listPendingHandoffObligations();
   }
-  async dischargeHandoffObligation(handoffId: string): Promise<boolean> {
-    return this.real.dischargeHandoffObligation(handoffId);
+  async dischargeHandoffObligation(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean> {
+    return this.real.dischargeHandoffObligation(handoffId, owner, claimEpoch);
   }
 }
 
-describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff claim/lease (real PostgreSQL two-actor concurrency)', () => {
+describe.skipIf(!isRealPg)('PR #46 round 4 + round 5 — the durable cross-mode-handoff claim/lease + the unique-owner/heartbeat/epoch-fence lease semantics (real PostgreSQL two-actor concurrency)', () => {
   let stack: TestAuthStack;
   let second: { client: DatabaseClient; close: () => Promise<void> } | undefined;
 
@@ -526,13 +638,23 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
   }
 
   /** Build a T1 (caller-path) service on T1's client, sharing the counting
-   *  providers. The optional `willMutate` hook wraps T1's
+   *  providers. The optional `willMutate` / `onFirstRenew` hooks wrap T1's
    *  `crossModeHandoffRepository` in a `HookedHandoffRepository` so the test
-   *  can run T2's reconcile BETWEEN T1's reserve+claim and T1's mutate. */
-  function buildT1Service(opts: { willMutate?: () => Promise<void> } = {}): DefaultCrossModeHandoffService {
-    const repo: CrossModeHandoffRepository = opts.willMutate
-      ? new HookedHandoffRepository(crossModeHandoffRepo, opts.willMutate)
-      : crossModeHandoffRepo;
+   *  can run T2 BETWEEN T1's reserve+claim and T1's mutate (willMutate) or
+   *  park T1 INSIDE the critical section after the first fence check
+   *  (onFirstRenew). The optional `leaseMs` / `heartbeatMs` configure the
+   *  round-5 lease + heartbeat (a huge heartbeatMs SUPPRESSES the heartbeat
+   *  — simulating a stalled owner whose renewals stopped). */
+  function buildT1Service(opts: {
+    willMutate?: () => Promise<void>;
+    onFirstRenew?: () => Promise<void>;
+    leaseMs?: number;
+    heartbeatMs?: number;
+  } = {}): DefaultCrossModeHandoffService {
+    const repo: CrossModeHandoffRepository =
+      opts.willMutate || opts.onFirstRenew
+        ? new HookedHandoffRepository(crossModeHandoffRepo, opts.willMutate, opts.onFirstRenew)
+        : crossModeHandoffRepo;
     return new DefaultCrossModeHandoffService({
       executionRecordRepository: executionRecordRepo,
       crossModeHandoffRepository: repo,
@@ -551,6 +673,12 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
       // drains it — the tests check the handoff result + the obligation state
       // directly, not the relay delivery).
       queue: new InMemoryQueue(),
+      // PR #46 round 5: configurable lease + heartbeat for the lease-semantics
+      // regressions (R5-#2 uses a short lease with the DEFAULT heartbeat to
+      // prove liveness; R5-#3 uses a short lease with a SUPPRESSED heartbeat
+      // to prove the fence abort).
+      ...(opts.leaseMs !== undefined ? { handoffClaimLeaseMs: opts.leaseMs } : {}),
+      ...(opts.heartbeatMs !== undefined ? { handoffClaimHeartbeatMs: opts.heartbeatMs } : {}),
     });
   }
 
@@ -679,7 +807,9 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
     // T1 "crashes" after reserve+claim: directly call
     // `crossModeHandoffRepo.createHandoffAndClaim(...)` with a SHORT 200ms
     // lease (simulate the caller's reserve+claim with NO subsequent
-    // mutate/release — the process died mid-critical-section). The
+    // mutate/release — the process died mid-critical-section). PR #46 round
+    // 5: the owner is a UNIQUE per-invocation identity (the caller role
+    // prefix + a UUID — the same composition the service uses). The
     // createInput is built from the record (mirrors the service's
     // reserveAndClaim build).
     const record = await executionRecordRepo.findByExecutionId(executionId);
@@ -702,10 +832,13 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
     };
     const claimResult = await crossModeHandoffRepo.createHandoffAndClaim(
       createInput,
-      CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
+      newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX),
       200, // short 200ms lease — the crash-reclaim window
     );
     expect(claimResult.claimed, 'T1 acquired the claim (200ms lease) before "crashing"').toBe(true);
+    // PR #46 round 5: the claim also minted the fencing epoch (migration
+    // 0045) — a positive token identifying THIS lease.
+    expect(claimResult.claimEpoch, 'the crashed claim minted a fencing epoch (claim_epoch)').toBeGreaterThan(0);
     expect(await countPendingObligations(executionId)).toBe(1);
 
     // The record is STILL native (T1 never mutated).
@@ -772,6 +905,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
     // Reset the obligation to PENDING + UNCLAIMED + the record to native
     // (so T2's reconcile, if it could claim, would re-mutate). This isolates
     // the claim-UPDATE serialization from the service-level handoff state.
+    // PR #46 round 5: also reset claim_epoch to 0 (a fresh fencing-token
+    // baseline for the direct claim calls below).
     await stack.db.client.query(
       `UPDATE wfos_executions SET status = 'failed', mode = 'native', agent_run_id = NULL, external_session_ref = NULL, package_json = NULL, expires_at = NULL, updated_at = NOW() WHERE id = $1`,
       [recordId],
@@ -781,7 +916,8 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
          SET discharged_at = NULL,
              claimed_at = NULL,
              claim_expires_at = NULL,
-             claim_owner = NULL
+             claim_owner = NULL,
+             claim_epoch = 0
        WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
       [recordId],
     );
@@ -795,50 +931,386 @@ describe.skipIf(!isRealPg)('PR #46 round 4 — the durable cross-mode-handoff cl
     const handoffId = handoffIdRes.rows[0]!.id;
 
     // T1 (client1 repo) claims — succeeds (the obligation is unclaimed +
-    // pending). The 30s lease keeps T1's claim live.
+    // pending). PR #46 round 5: T1's owner is a UNIQUE per-invocation
+    // identity (caller role prefix + UUID) + the claim mints the fencing
+    // epoch. The 30s lease keeps T1's claim live.
     const t1Repo = crossModeHandoffRepo; // T1's repo (on stack.db.client)
+    const t1Owner = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX);
     const t1Claim1 = await t1Repo.claimHandoffObligation(
       handoffId,
-      CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
+      t1Owner,
       30_000,
     );
     expect(t1Claim1.claimed, 'T1 (client1) acquired the claim (unclaimed + pending)').toBe(true);
+    const t1Epoch = assertClaimed(t1Claim1);
+    expect(t1Epoch, 'T1\'s claim minted a fencing epoch').toBeGreaterThan(0);
 
     // T2 (client2 repo) claims WHILE T1 holds a live claim — FAILS. The
     // conditional UPDATE's WHERE clause `discharged_at IS NULL AND
     // (claimed_at IS NULL OR claim_expires_at < NOW())` does NOT match (T1
-    // holds a live, non-expired claim). The `activeOwner` is T1's owner
-    // identifier (the diagnostics read).
+    // holds a live, non-expired claim). PR #46 round 5: the `activeOwner`
+    // diagnostics read is T1's EXACT unique owner string (the caller role
+    // prefix + T1's invocation UUID).
     const t2Repo = new PgCrossModeHandoffRepository(second!.client);
+    const t2Owner = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX);
     const t2Claim1 = await t2Repo.claimHandoffObligation(
       handoffId,
-      CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER,
+      t2Owner,
       30_000,
     );
     expect(t2Claim1.claimed, 'T2 (client2) could NOT claim while T1 holds a live claim (DB-level serialization)').toBe(false);
     if (!t2Claim1.claimed) {
-      expect(t2Claim1.activeOwner, 'T2\'s diagnostics read T1\'s owner identifier (cross-mode-handoff-caller)').toBe(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER);
+      expect(t2Claim1.activeOwner, 'T2\'s diagnostics read T1\'s EXACT unique owner (the caller prefix + T1\'s invocation UUID)').toBe(t1Owner);
+      expect(t2Claim1.activeOwner, 'the active owner is a unique per-invocation identity (round 5), NOT the bare role constant').toMatch(new RegExp(`^${CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX}:[0-9a-f-]{36}$`));
     }
 
-    // T1 releases the claim (the `finally` block in production).
+    // T1 releases the claim (the `finally` block in production). PR #46
+    // round 5: the release is guarded by the EXACT lease identity (owner +
+    // epoch) — T1 captured both at claim time.
     const t1Release = await t1Repo.releaseHandoffObligationClaim(
       handoffId,
-      CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER,
+      t1Owner,
+      t1Epoch,
     );
-    expect(t1Release, 'T1 released the claim (the owner-guarded release succeeded)').toBe(true);
+    expect(t1Release, 'T1 released the claim (the owner+epoch-guarded release succeeded)').toBe(true);
 
     // T2 retries — succeeds (the claim is now free + the reclaim predicate
     // matches). The conditional UPDATE serializes: T2's claim matches
-    // because T1's release set claimed_at=NULL.
+    // because T1's release set claimed_at=NULL. PR #46 round 5: T2's claim
+    // mints the NEXT fencing epoch (strictly greater than T1's — tokens
+    // are never reused across leases).
     const t2Claim2 = await t2Repo.claimHandoffObligation(
       handoffId,
-      CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER,
+      t2Owner,
       30_000,
     );
     expect(t2Claim2.claimed, 'T2 reclaimed the claim after T1 released (the reclaim predicate matched)').toBe(true);
+    const t2Epoch = assertClaimed(t2Claim2);
+    expect(t2Epoch, 'T2\'s reclaim minted a strictly-greater fencing epoch (monotonic tokens)').toBe(t1Epoch + 1);
 
     // Cleanup: release T2's claim so the obligation is clean for the next
     // test (the schema is per-test, but this is defensive).
-    await t2Repo.releaseHandoffObligationClaim(handoffId, CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER);
+    await t2Repo.releaseHandoffObligationClaim(handoffId, t2Owner, t2Epoch);
+  });
+
+  // =========================================================================
+  // Shared round-5 helper: drive ONE complete caller-path handoff, then reset
+  // the record + the obligation to PENDING + UNCLAIMED + native (mirrors the
+  // R4-#3 reset) so the direct claim/release/renew/discharge calls below
+  // operate on a fresh, controllable obligation.
+  // =========================================================================
+  async function setupPendingUnclaimedObligation(
+    idempotencyPrefix: string,
+  ): Promise<{ executionId: string; recordId: string; handoffId: string }> {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const t1Service = buildT1Service();
+    await t1Service.handoff(
+      executionId,
+      { targetMode: 'external', idempotencyKey: `${idempotencyPrefix}-${executionId}` },
+      { userId: 'test-user', source: 'cmh-test' },
+    );
+    // Reset: the record back to native/failed + the obligation back to
+    // pending + unclaimed + epoch 0 (the fresh fencing-token baseline).
+    await stack.db.client.query(
+      `UPDATE wfos_executions SET status = 'failed', mode = 'native', agent_run_id = NULL, external_session_ref = NULL, package_json = NULL, expires_at = NULL, updated_at = NOW() WHERE id = $1`,
+      [recordId],
+    );
+    await stack.db.client.query(
+      `UPDATE wfos_cross_mode_handoff_obligations
+         SET discharged_at = NULL,
+             claimed_at = NULL,
+             claim_expires_at = NULL,
+             claim_owner = NULL,
+             claim_epoch = 0
+       WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
+      [recordId],
+    );
+    const handoffIdRes = await stack.db.client.query<{ id: string }>(
+      `SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1`,
+      [recordId],
+    );
+    return { executionId, recordId, handoffId: handoffIdRes.rows[0]!.id };
+  }
+
+  // =========================================================================
+  // R5-#1. The architect's EXACT round-5 five-step regression: T1 claims with
+  // owner A → the lease expires → T2 (the SAME role) reclaims with owner B →
+  // T1's LATE release CANNOT clear T2's claim → a THIRD actor cannot acquire
+  // the still-live T2 claim. Plus: T1's stale renewal FAILS (the fence
+  // check) while T2's live renewal succeeds.
+  // =========================================================================
+  it('R5-#1. unique lease owners — T1\'s late release CANNOT clear T2\'s same-role reclaimed claim; a third actor cannot acquire the live claim; the stale owner cannot renew', async () => {
+    const { executionId, handoffId } = await setupPendingUnclaimedObligation('r5-owner');
+    const t2Repo = new PgCrossModeHandoffRepository(second!.client);
+
+    // STEP 1 — T1 claims with owner A (a UNIQUE per-invocation identity of
+    // the CALLER role; a SHORT 150ms lease so the test can expire it).
+    const ownerA = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX);
+    const claimA = await crossModeHandoffRepo.claimHandoffObligation(handoffId, ownerA, 150);
+    expect(claimA.claimed, 'step 1: T1 claimed with owner A (unique, caller role)').toBe(true);
+    const epochA = assertClaimed(claimA);
+    expect(epochA, 'step 1: T1\'s claim minted fencing epoch N').toBeGreaterThan(0);
+
+    // STEP 2 — the lease expires.
+    await delay(200);
+
+    // STEP 3 — T2 (the SAME role — the caller role, NOT the relay role)
+    // reclaims the expired lease with owner B. Under the round-4 shared
+    // per-role owner string this reclaim would leave claim_owner UNCHANGED
+    // (owner A === owner B) — the exact hole the round-5 review identified.
+    const ownerB = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX);
+    const claimB = await t2Repo.claimHandoffObligation(handoffId, ownerB, 30_000);
+    expect(claimB.claimed, 'step 3: T2 (the SAME role) reclaimed the expired lease with owner B').toBe(true);
+    const epochB = assertClaimed(claimB);
+    expect(epochB, 'step 3: T2\'s reclaim minted the NEXT fencing epoch (N + 1)').toBe(epochA + 1);
+
+    // STEP 4 — T1's LATE release (its `finally` finally ran after the stall)
+    // CANNOT clear T2's claim: the release is guarded by the EXACT lease
+    // identity (owner A + epoch N ≠ owner B + epoch N+1).
+    const lateRelease = await crossModeHandoffRepo.releaseHandoffObligationClaim(
+      handoffId,
+      ownerA,
+      epochA,
+    );
+    expect(lateRelease, 'step 4: T1\'s late release was a NO-OP (could not clear T2\'s claim)').toBe(false);
+    const claimState = await stack.db.client.query<{ claim_owner: string | null; claim_epoch: string | number }>(
+      `SELECT claim_owner, claim_epoch FROM wfos_cross_mode_handoff_obligations WHERE handoff_id = $1`,
+      [handoffId],
+    );
+    expect(claimState.rows[0]!.claim_owner, 'step 4: T2\'s claim is INTACT (owner B still holds it)').toBe(ownerB);
+    expect(Number(claimState.rows[0]!.claim_epoch), 'step 4: T2\'s fencing epoch is INTACT').toBe(epochB);
+
+    // STEP 5 — a THIRD actor cannot acquire the still-live T2 claim.
+    const ownerC = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX);
+    const claimC = await crossModeHandoffRepo.claimHandoffObligation(handoffId, ownerC, 30_000);
+    expect(claimC.claimed, 'step 5: the third actor could NOT acquire T2\'s live claim').toBe(false);
+    if (!claimC.claimed) {
+      expect(claimC.activeOwner, 'step 5: the diagnostics read T2\'s exact unique owner').toBe(ownerB);
+    }
+
+    // The STALE owner cannot renew (its phase-boundary fence check fails —
+    // the conditional renewal matches 0 rows under owner A + epoch N) while
+    // the LIVE owner's renewal succeeds.
+    const staleRenew = await crossModeHandoffRepo.renewHandoffObligationClaim(
+      handoffId,
+      ownerA,
+      epochA,
+      30_000,
+    );
+    expect(staleRenew, 'the stale owner (T1/owner A/epoch N) cannot renew — the fence check fails').toBe(false);
+    const liveRenew = await t2Repo.renewHandoffObligationClaim(
+      handoffId,
+      ownerB,
+      epochB,
+      30_000,
+    );
+    expect(liveRenew, 'the live owner (T2/owner B/epoch N+1) renews successfully').toBe(true);
+
+    // Cleanup: release T2's claim (defensive — the schema is per-test).
+    await t2Repo.releaseHandoffObligationClaim(handoffId, ownerB, epochB);
+    expect(await countPendingObligations(executionId)).toBe(1);
+  });
+
+  // =========================================================================
+  // R5-#2. The heartbeat renewal covers the ENTIRE critical section: T1's
+  // critical section outlives the lease (parked mid-section after the first
+  // fence check — the "slow provider dispatch") with the heartbeat ACTIVE →
+  // T2's mid-flight reclaim FAILS (a live owner's lease never expires) → T1
+  // completes → ZERO duplicate dispatches / session transitions. This is the
+  // round-5 second blocker's fix: the lease no longer relies on being longer
+  // than the critical section.
+  // =========================================================================
+  it('R5-#2. the heartbeat keeps a LIVE owner\'s lease alive across a critical section LONGER than the lease (T2\'s mid-flight reclaim fails)', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    const t2Service = buildT2Service();
+
+    let firstRenewSeen = false;
+    let t2MidFlight: { stage?: string } | undefined;
+    const onFirstRenew = async () => {
+      firstRenewSeen = true;
+      // T1 is INSIDE the critical section (the first phase-boundary fence
+      // check just renewed the lease) + the heartbeat timer is ALIVE. Park
+      // for 3x the lease — WITHOUT the heartbeat this park would forfeit
+      // the claim (the round-5 second blocker); WITH the heartbeat
+      // (lease/3) the lease is renewed continuously.
+      await delay(900);
+      // T2 (the boot sweep / a live relay) tries to reclaim mid-flight —
+      // MUST FAIL: the heartbeat renewed the lease (claim_expires_at is in
+      // the future).
+      t2MidFlight = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+      // Park again (the total critical section ≈ 3.4x the lease).
+      await delay(900);
+    };
+    // A SHORT 600ms lease with the DEFAULT heartbeat (600/3 = 200ms): the
+    // critical section (~1.8s+) legitimately outlives the lease.
+    const t1Service = buildT1Service({ onFirstRenew, leaseMs: 600 });
+
+    await t1Service.handoff(
+      executionId,
+      { targetMode: 'external', idempotencyKey: `r5-heartbeat-${executionId}` },
+      { userId: 'test-user', source: 'cmh-test' },
+    );
+
+    // T1 reached the mid-critical-section fence check.
+    expect(firstRenewSeen, 'T1 parked INSIDE the critical section (the first fence check ran)').toBe(true);
+    // T2's mid-flight reclaim FAILED — the heartbeat kept the lease live.
+    expect(t2MidFlight, 'T2\'s mid-flight reconcile returned a result').toBeDefined();
+    expect(t2MidFlight!.stage, 'T2\'s mid-flight reclaim FAILED (claim-held — the heartbeat kept the lease live)').toBe('claim-held');
+
+    // ZERO duplicate dispatches / session transitions: only T1's.
+    expect(countingExternalProvider.submitCount, 'ZERO duplicate dispatches — only T1 dispatched (T2 was claim-held mid-flight)').toBe(1);
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions — only T1 interrupted').toBe(1);
+
+    // T1 COMPLETED the handoff (the lease survived the whole critical
+    // section): the record is external + packaged + the session interrupted.
+    const after = await executionRecordRepo.findByExecutionId(executionId);
+    expect(after!.id).toBe(recordId);
+    expect(after!.mode).toBe('external');
+    expect(after!.status).toBe('handoff_ready');
+    expect(after!.packageValue).not.toBeNull();
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+    expect(afterSession!.status).toBe('interrupted');
+
+    // T2's retry (T1 completed + released) converges + discharges.
+    const t2Retry = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Retry.stage, 'T2\'s retry converged + discharged after T1 released').toBe('complete');
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+  });
+
+  // =========================================================================
+  // R5-#3. The stalled-owner abort: T1's heartbeat is SUPPRESSED + its short
+  // lease expires while it is parked mid-critical-section (the exact
+  // round-5 second-blocker interleaving: T1 owns lease → critical section >
+  // lease → T2 reclaims → T1 still executing) → T2 reclaims + completes +
+  // discharges → T1 resumes → its next fence check FAILS (owner/epoch
+  // mismatch) → T1 aborts with 'claim-fence-lost' BEFORE any mutation or
+  // dispatch → ZERO duplicate dispatches / session transitions + T2's
+  // completed state is INTACT despite T1's late release (a no-op).
+  // =========================================================================
+  it('R5-#3. a STALLED owner (heartbeat suppressed) loses the fence — T2 reclaims + completes; T1\'s resume ABORTS at the fence check (zero duplicate side effects)', async () => {
+    const { executionId, recordId } = await createNativeRecord('failed');
+    const { sessionId } = await createRunningSession(executionId);
+    // T2 uses the DEFAULT lease/heartbeat — its reclaim + its whole critical
+    // section run normally.
+    const t2Service = buildT2Service();
+
+    // T1: a SHORT 150ms lease + a SUPPRESSED heartbeat (a 60s interval — no
+    // renewal fires during the test: the "stalled owner" whose heartbeat
+    // died). T1 parks at the willMutate hook (AFTER its reserve+claim,
+    // BEFORE its mutate) on a gate the test controls.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((r) => { resolveGate = r; });
+    let t1AtGate = false;
+    const willMutate = async () => {
+      t1AtGate = true;
+      await gate;
+    };
+    const t1Service = buildT1Service({ willMutate, leaseMs: 150, heartbeatMs: 60_000 });
+
+    // T1 starts its handoff asynchronously + parks at the gate.
+    let t1Error: unknown;
+    const t1Promise = (async () => {
+      try {
+        await t1Service.handoff(
+          executionId,
+          { targetMode: 'external', idempotencyKey: `r5-stall-${executionId}` },
+          { userId: 'test-user', source: 'cmh-test' },
+        );
+      } catch (err) {
+        t1Error = err;
+      }
+    })();
+
+    // Wait until T1 is parked at the gate (after its reserve+claim), then
+    // let the 150ms lease expire while T1 is stalled (no heartbeat renews).
+    await waitFor(() => t1AtGate, 5000);
+    await delay(250);
+
+    // T2 (the boot sweep) reclaims the expired lease + drives the handoff
+    // to completion (re-mutate + re-dispatch + session + discharge).
+    const t2Result = await t2Service.reconcileCrossModeHandoffForExecution(executionId) as { stage?: string };
+    expect(t2Result.stage, 'T2 reclaimed the expired lease + completed the handoff').toBe('complete');
+
+    // T1 resumes: its first phase-boundary fence check (before the record
+    // mutate) FAILS — the renewal's owner+epoch predicate matches 0 rows
+    // (T2 reclaimed under a new unique owner + epoch). T1 aborts with
+    // 'claim-fence-lost' BEFORE any mutation or dispatch.
+    resolveGate();
+    await t1Promise;
+    expect(t1Error, 'T1\'s resumed handoff FAILED with the fence-lost error').toBeInstanceOf(CrossModeHandoffError);
+    expect((t1Error as CrossModeHandoffError).code, 'T1 aborted with claim-fence-lost (the stale-owner fence)').toBe('claim-fence-lost');
+
+    // THE ARCHITECT'S INVARIANT: ZERO duplicate dispatches + ZERO duplicate
+    // session transitions under the stall-then-reclaim interleaving — only
+    // T2 dispatched + interrupted (T1 aborted at the fence BEFORE its
+    // mutate).
+    expect(countingExternalProvider.submitCount, 'ZERO duplicate dispatches — only T2 dispatched (T1 aborted at the fence check)').toBe(1);
+    expect(countingSessionService.interruptCount, 'ZERO duplicate session transitions — only T2 interrupted (T1 aborted at the fence check)').toBe(1);
+
+    // T2's completed state is INTACT despite T1's late critical-section
+    // attempt + its `finally` release (the owner+epoch-guarded release was
+    // a NO-OP — it could not disturb the discharged obligation).
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
+    const after = await executionRecordRepo.findByExecutionId(executionId);
+    expect(after!.id).toBe(recordId);
+    expect(after!.mode).toBe('external');
+    expect(after!.status).toBe('handoff_ready');
+    expect(after!.packageValue).not.toBeNull();
+    const afterSession = await executionSessionService.getSessionForExecution(executionId);
+    expect(afterSession!.id).toBe(sessionId);
+    expect(afterSession!.status).toBe('interrupted');
+  });
+
+  // =========================================================================
+  // R5-#4. The discharge is epoch-fenced at the DB: after T2 reclaims (a new
+  // epoch), T1's stale-epoch discharge is REJECTED (0 rows — the obligation
+  // stays pending; the stale actor cannot complete the authoritative
+  // obligation transition) while T2's live-epoch discharge succeeds.
+  // =========================================================================
+  it('R5-#4. the discharge is epoch-fenced — the STALE owner\'s discharge is rejected (the obligation stays pending); the LIVE owner\'s discharge succeeds', async () => {
+    const { executionId, handoffId } = await setupPendingUnclaimedObligation('r5-discharge');
+    const t2Repo = new PgCrossModeHandoffRepository(second!.client);
+
+    // T1 claims (a SHORT 150ms lease) — fencing epoch N.
+    const ownerA = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX);
+    const claimA = await crossModeHandoffRepo.claimHandoffObligation(handoffId, ownerA, 150);
+    expect(claimA.claimed, 'T1 claimed (epoch N)').toBe(true);
+    const epochA = assertClaimed(claimA);
+
+    // The lease expires; T2 reclaims — fencing epoch N+1.
+    await delay(200);
+    const ownerB = newCrossModeHandoffClaimOwner(CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX);
+    const claimB = await t2Repo.claimHandoffObligation(handoffId, ownerB, 30_000);
+    expect(claimB.claimed, 'T2 reclaimed the expired lease (epoch N+1)').toBe(true);
+    const epochB = assertClaimed(claimB);
+    expect(epochB).toBe(epochA + 1);
+
+    // T1 (the STALE owner) attempts the epoch-fenced discharge — REJECTED
+    // (0 rows: the WHERE clause requires T1's exact owner+epoch, which the
+    // reclaim replaced). Even if T1's phase-boundary fence check raced, the
+    // DB-level fence still rejects the authoritative transition.
+    const staleDischarge = await crossModeHandoffRepo.dischargeHandoffObligation(
+      handoffId,
+      ownerA,
+      epochA,
+    );
+    expect(staleDischarge, 'the STALE owner\'s discharge was REJECTED (epoch-fenced)').toBe(false);
+    // The obligation is STILL pending — the stale actor did NOT complete it.
+    expect(await countPendingObligations(executionId), 'the obligation is STILL pending (the stale actor could not discharge)').toBe(1);
+    expect(await countDischargedObligations(executionId)).toBe(0);
+
+    // T2 (the LIVE lease holder) discharges — succeeds.
+    const liveDischarge = await t2Repo.dischargeHandoffObligation(
+      handoffId,
+      ownerB,
+      epochB,
+    );
+    expect(liveDischarge, 'the LIVE owner\'s discharge succeeded (the exact owner+epoch matched)').toBe(true);
+    expect(await countDischargedObligations(executionId)).toBe(1);
+    expect(await countPendingObligations(executionId)).toBe(0);
   });
 });

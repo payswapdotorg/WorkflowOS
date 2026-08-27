@@ -43,6 +43,10 @@ import type {
   ExecutionState,
   ExternalExecutionPackage,
 } from './execution.types.js';
+// PR #46 round 5: the unique per-invocation claim owner generator (the
+// lease-identity fix — the persisted claim_owner must identify the
+// INDIVIDUAL lease holder, not merely its role).
+import { randomUUID } from 'node:crypto';
 
 /**
  * The directional label of a cross-mode handoff. Derived from
@@ -187,13 +191,19 @@ export interface CrossModeHandoffRepository {
    * round-4 boot-sweep race (a reconcile that fired between the reserve
    * commit and a separate claim commit could previously claim + re-mutate).
    *
-   * Returns `{ handoff, claimed: true }` on the happy path (the obligation
-   * is freshly created by the trigger, so the claim UPDATE always matches
-   * within the transaction). On a 23505 UNIQUE violation, the transaction
-   * rolls back (claim not applied) + the error is mapped to
+   * PR #46 round 5: the `owner` MUST be a unique per-invocation identity
+   * ({@link newCrossModeHandoffClaimOwner}) — never a shared role constant.
+   * The claim increments `claim_epoch` (the fencing token) + the returned
+   * `claimEpoch` identifies THIS lease: the caller uses it for the heartbeat
+   * renewal + the `finally` release.
+   *
+   * Returns `{ handoff, claimed: true, claimEpoch }` on the happy path (the
+   * obligation is freshly created by the trigger, so the claim UPDATE always
+   * matches within the transaction). On a 23505 UNIQUE violation, the
+   * transaction rolls back (claim not applied) + the error is mapped to
    * 'cross-mode-handoff-already-exists' — the service re-queries for
-   * idempotent convergence (returning `{ handoff: existing, claimed: false }`).
-   * The caller MUST release the claim via
+   * idempotent convergence (returning `{ handoff: existing, claimed: false,
+   * claimEpoch: null }`). The caller MUST release the claim via
    * {@link releaseHandoffObligationClaim} after its critical section
    * (success OR failure — the lease auto-expires as a crash backstop).
    */
@@ -201,7 +211,10 @@ export interface CrossModeHandoffRepository {
     input: CreateCrossModeHandoffInput,
     owner: string,
     leaseMs: number,
-  ): Promise<{ handoff: CrossModeHandoffRecord; claimed: boolean }>;
+  ): Promise<
+    | { handoff: CrossModeHandoffRecord; claimed: true; claimEpoch: number }
+    | { handoff: CrossModeHandoffRecord; claimed: false; claimEpoch: null }
+  >;
   /**
    * PR #46 round 4: claim an EXISTING obligation for the reconcile critical
    * section (the relay / boot-sweep path). A single conditional UPDATE
@@ -210,26 +223,65 @@ export interface CrossModeHandoffRepository {
    * is the reclaim predicate — only one actor's UPDATE matches (PostgreSQL
    * row-locks the obligation row for the duration of the conflicting UPDATE;
    * the second actor's WHERE re-evaluates after the first commits + sees a
-   * claimed row → 0 rows). Returns `{ claimed: true }` on success or
-   * `{ claimed: false, activeOwner }` when another actor holds a live claim
-   * (the reconcile returns early — NO mutate, NO dispatch — preventing two
-   * concurrent handoff drivers). A crashed owner's expired lease is
+   * claimed row → 0 rows). Returns `{ claimed: true, claimEpoch }` on success
+   * or `{ claimed: false, activeOwner }` when another actor holds a live
+   * claim (the reconcile returns early — NO mutate, NO dispatch — preventing
+   * two concurrent handoff drivers). A crashed owner's expired lease is
    * reclaimable (the `claim_expires_at < NOW()` arm).
+   *
+   * PR #46 round 5: the `owner` MUST be a unique per-invocation identity
+   * ({@link newCrossModeHandoffClaimOwner}). Every claim — fresh OR reclaim
+   * — increments `claim_epoch`; the returned `claimEpoch` is the fencing
+   * token for THIS lease (used by the heartbeat renewal
+   * {@link renewHandoffObligationClaim} + the fenced discharge
+   * {@link dischargeHandoffObligation}).
    */
   claimHandoffObligation(
     handoffId: string,
     owner: string,
     leaseMs: number,
-  ): Promise<{ claimed: true } | { claimed: false; activeOwner: string | null }>;
+  ): Promise<
+    | { claimed: true; claimEpoch: number }
+    | { claimed: false; activeOwner: string | null }
+  >;
   /**
-   * PR #46 round 4: release the claim (clear claimed_at/claim_expires_at/
-   * claim_owner). Called by the caller + the reconcile in a `finally` block
-   * after their critical section (success OR failure). The `claim_owner`
-   * guard ensures only the owner can release (defensive). A no-op when the
-   * obligation was discharged (the `discharged_at IS NULL` guard) or the
-   * claim already expired/released — both return false (not an error).
+   * PR #46 round 5 (the lease-expiry fix): renew the claim lease — the
+   * HEARTBEAT. A conditional UPDATE guarded by `claim_owner = $owner AND
+   * claim_epoch = $epoch` extending `claim_expires_at`. Returns TRUE when
+   * this lease still owns the claim (the lease was extended); FALSE when the
+   * lease was RECLAIMED by another actor (owner/epoch mismatch — the fencing
+   * check fails) or the obligation was discharged. The service renews every
+   * lease/3 while the critical section runs (a LIVE owner's lease cannot
+   * expire mid-flight) + at every side-effect phase boundary (the explicit
+   * fence check: a STALLED owner learns it lost the fence + aborts before
+   * further mutations/dispatch). A renewal of an expired-but-unreclaimed
+   * lease is legitimate (the owner is alive again + no other actor took it);
+   * a concurrent renew/reclaim pair is serialized by the row lock (exactly
+   * one matches).
    */
-  releaseHandoffObligationClaim(handoffId: string, owner: string): Promise<boolean>;
+  renewHandoffObligationClaim(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    leaseMs: number,
+  ): Promise<boolean>;
+  /**
+   * PR #46 round 4 + round 5: release the claim (clear claimed_at/
+   * claim_expires_at/claim_owner). Called by the caller + the reconcile in a
+   * `finally` block after their critical section (success OR failure). The
+   * `claim_owner` + `claim_epoch` guard ensures ONLY the individual lease
+   * holder can release — a stale invocation (whose lease expired + was
+   * reclaimed under a NEW unique owner + epoch) can NEVER clear the new
+   * owner's live claim. A no-op (false, not an error) when the obligation
+   * was discharged (the `discharged_at IS NULL` guard) or the claim was
+   * already reclaimed/released. The epoch is intentionally NOT reset —
+   * fencing tokens are never reused across leases.
+   */
+  releaseHandoffObligationClaim(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean>;
   /** Find the (at most one) handoff row for an execution's record UUID. */
   findByExecutionId(executionId: string): Promise<CrossModeHandoffRecord | null>;
   /** Find a handoff row by its idempotency key (convergence check). */
@@ -245,33 +297,75 @@ export interface CrossModeHandoffRepository {
    */
   listPendingHandoffObligations(): Promise<readonly PendingCrossModeHandoff[]>;
   /**
-   * PR #46 review #2: idempotently discharge a cross-mode-handoff obligation
-   * (set discharged_at). Called by the reconciliation when it confirms the
-   * handoff is complete. A repeated discharge is a no-op (the obligation is
-   * append-only; only the discharge column changes).
+   * PR #46 review #2 + round 5 (the epoch fence): idempotently discharge a
+   * cross-mode-handoff obligation (set discharged_at). Called by the
+   * reconciliation when it confirms the handoff is complete. PR #46 round 5:
+   * the discharge is FENCED by the claim owner + epoch
+   * (`claim_owner = $owner AND claim_epoch = $epoch` in the WHERE clause) —
+   * ONLY the live lease holder can discharge. A STALE owner (whose lease
+   * expired + was reclaimed under a new owner/epoch) affects 0 rows → false:
+   * it cannot complete the authoritative obligation transition even if its
+   * phase-boundary fence check raced. A repeated discharge by the same lease
+   * is a no-op (false; the `discharged_at IS NULL` guard). The obligation is
+   * append-only — only the discharge column changes (the immutability
+   * trigger on wfos_cross_mode_handoff_obligations enforces this).
    */
-  dischargeHandoffObligation(handoffId: string): Promise<boolean>;
+  dischargeHandoffObligation(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean>;
 }
 
 /**
- * PR #46 round 4: the durable claim owner identifiers. The synchronous
- * caller uses {@link CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER}; the relay
- * reconcile uses {@link CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER}. Distinguishing
- * the owner makes the claim-lost diagnostics + the release guard explicit
- * (only the owner can release its own claim). The claim/lease columns +
- * the conditional UPDATE are the serialization boundary — see migration
- * 0044 + {@link CrossModeHandoffRepository.claimHandoffObligation}.
+ * PR #46 round 4 + round 5: the durable claim owner ROLE PREFIXES. The
+ * synchronous caller path composes its owner from
+ * {@link CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX}; the relay reconcile
+ * path composes its owner from
+ * {@link CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX}.
+ *
+ * PR #46 round 5 (the lease-ownership fix): these constants are PREFIXES,
+ * NOT complete owner identities. The persisted `claim_owner` must identify
+ * the INDIVIDUAL LEASE HOLDER, not merely its role — every invocation
+ * composes a unique owner via {@link newCrossModeHandoffClaimOwner}
+ * (`<role-prefix>:<uuid>`). With a reclaimable lease, a fixed per-role
+ * owner string was UNSAFE: an old invocation could outlive its expired
+ * lease, a new invocation of the SAME role could reclaim under the SAME
+ * owner string, and the old invocation's owner-guarded `finally` release
+ * would then clear the NEW owner's live claim (the serialization boundary
+ * was gone). Unique per-invocation owners make a stale release structurally
+ * unable to clear a newer owner's claim (different owner strings), and the
+ * role prefix is retained purely for diagnostics.
  */
-export const CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER = 'cross-mode-handoff-caller';
-export const CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER = 'cross-mode-handoff-relay';
+export const CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-caller';
+export const CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-relay';
+
+/**
+ * PR #46 round 5: generate a UNIQUE claim owner for ONE logical invocation
+ * of the handoff critical section (the caller path or the relay reconcile
+ * path). The returned owner is `<rolePrefix>:<randomUUID>` — the role prefix
+ * is diagnostics-only; the UUID identifies the individual lease holder.
+ *
+ * The service MUST capture the generated owner ONCE at the beginning of the
+ * critical section and reuse the EXACT value for the claim, the fence
+ * checks (renewal), and the `finally` release — see migration 0045 + the
+ * `claim_epoch` fencing token for the full lease-ownership model.
+ */
+export function newCrossModeHandoffClaimOwner(rolePrefix: string): string {
+  return `${rolePrefix}:${randomUUID()}`;
+}
 
 /**
  * PR #46 round 4: the default claim lease duration (30s). The caller's
  * critical section is ms-scale (mutate + dispatch + session + enqueue),
- * but 30s covers a slow provider dispatch. A crashed owner's lease
- * auto-expires after this duration — the boot sweep reclaims + recovers.
- * Tests override this via `DefaultCrossModeHandoffServiceDeps.handoffClaimLeaseMs`
- * to exercise crash-reclaim quickly.
+ * but 30s covers a slow provider dispatch. PR #46 round 5: the lease no
+ * longer relies on being longer than the critical section — the heartbeat
+ * renewal (every lease/3) keeps a LIVE owner's lease from expiring
+ * mid-flight, and the epoch fence rejects a STALLED owner's authoritative
+ * mutations after a reclaim. A crashed owner's lease auto-expires after
+ * this duration — the boot sweep reclaims + recovers. Tests override this
+ * via `DefaultCrossModeHandoffServiceDeps.handoffClaimLeaseMs` to exercise
+ * crash-reclaim + fence-loss quickly.
  */
 export const CROSS_MODE_HANDOFF_DEFAULT_CLAIM_LEASE_MS = 30_000;
 
@@ -343,6 +437,12 @@ export class CrossModeHandoffError extends Error {
       | 'handoff-policy-approval-required'
       | 'native-provider-unavailable'
       | 'handoff-dispatch-failed'
+      // PR #46 round 5: the claim/lease fence was lost mid-critical-section
+      // (the lease expired + another actor reclaimed it while this actor was
+      // stalled). The stale actor aborts BEFORE further mutations/dispatch;
+      // the route maps it to 409 (a concurrent actor owns the obligation —
+      // the client can retry + converge on the owner's completed state).
+      | 'claim-fence-lost'
       // Internal-only: the repository's 23505 surface (the service catches +
       // re-resolves convergence; never reaches the route).
       | 'cross-mode-handoff-already-exists'
@@ -366,6 +466,7 @@ export const CROSS_MODE_HANDOFF_ERROR_CODES = [
   'handoff-policy-approval-required',
   'native-provider-unavailable',
   'handoff-dispatch-failed',
+  'claim-fence-lost',
   'cross-mode-handoff-already-exists',
   'cross-mode-handoff-not-external',
 ] as const;

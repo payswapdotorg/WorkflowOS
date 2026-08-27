@@ -11169,14 +11169,14 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const migrations = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    // The highest migration is 0044 (PR #46 round 4 — the cross-mode-handoff
-    // durable claim/lease columns on the obligation table; 0043 is the
-    // obligation table itself; 0042 is the WORK-042 cross-mode handoff log).
-    // WORK-040 added none (0042/0043/0044 belong to WORK-042, not WORK-040).
+    // The highest migration is 0045 (PR #46 round 5 — the cross-mode-handoff
+    // claim_epoch fencing token; 0044 is the claim/lease columns; 0043 is
+    // the obligation table itself; 0042 is the WORK-042 cross-mode handoff
+    // log). WORK-040 added none (0042-0045 belong to WORK-042, not WORK-040).
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-4 cross-mode-handoff claim/lease migration, NOT a planner-owned table)').toMatch(/^0044_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the PR #46 round-5 cross-mode-handoff claim-epoch fencing migration, NOT a planner-owned table)').toMatch(/^0045_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -11875,6 +11875,10 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
     '0044_cross_mode_handoff_claim_lease.sql',
   );
+  const CROSS_MODE_MIGRATION_0045 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0045_cross_mode_handoff_claim_epoch.sql',
+  );
   const AGENTS_BARREL = join(MODULES_DIR, 'agents', 'index.ts');
   const PG_EXECUTION_REPO = join(AGENTS_INTERNAL, 'pg-execution-repository.ts');
   const EXECUTION_ROUTE = join(SRC_ROOT, 'api', 'routes', 'execution.route.ts');
@@ -12350,9 +12354,11 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     expect(repoSrc, 'dischargeHandoffObligation is implemented').toMatch(/async dischargeHandoffObligation\(/);
     expect(repoSrc, 'the discharge UPDATE sets discharged_at').toMatch(/SET discharged_at = NOW\(\)/);
     // The service discharges the obligation when the reconcile confirms
-    // completion (the boot-sweep work list drains).
+    // completion (the boot-sweep work list drains). PR #46 round 5: the
+    // discharge call carries the EXACT lease identity (the unique
+    // per-invocation owner + the fencing epoch) — the epoch-fenced discharge.
     const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
-    expect(serviceSrc, 'the service discharges the obligation on completion').toMatch(/dischargeHandoffObligation\(handoff\.id\)/);
+    expect(serviceSrc, 'the service discharges the obligation on completion (epoch-fenced by the lease identity)').toMatch(/dischargeHandoffObligation\(\s*handoff\.id,\s*lease\.owner,\s*lease\.claimEpoch,?\s*\)/);
   });
 
   // R1-E (finding #2 + round 3): the service enqueues the durable relay job
@@ -12721,5 +12727,193 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // reconcile proceed to the mutate even on a failed claim) fails this
     // match.
     expect(reconcileBody, 'the !claim.claimed branch returns { stage: \'claim-held\' } before the mutate').toMatch(/if\s*\(!claim\.claimed\)[\s\S]*?return\s*\{[\s\S]*?stage:\s*'claim-held'/);
+  });
+
+  // =========================================================================
+  // PR #46 round 5 (the lease-ownership + lease-expiry fixes). The round-5
+  // review found two lease-correctness holes in the round-4 claim/lease:
+  //
+  //   1. the claim owner was a FIXED per-role string shared by EVERY
+  //      invocation of that role — with a reclaimable lease, an old
+  //      invocation could outlive its expired lease, a new invocation of the
+  //      same role could reclaim under the SAME owner string, and the old
+  //      invocation's `finally` release would then clear the NEW owner's
+  //      live claim (the serialization boundary was gone);
+  //   2. the fixed 30s lease had NO renewal + NO fencing — a critical
+  //      section legitimately longer than the lease let a second actor
+  //      reclaim while the first was STILL EXECUTING (both then performed
+  //      the provider dispatch + session transitions).
+  //
+  // The fix: unique per-invocation owners (`<role-prefix>:<uuid>`), the
+  // claim_epoch fencing token (migration 0045), the heartbeat renewal
+  // covering the whole critical section, phase-boundary fence checks, and
+  // the epoch-fenced discharge. The 7 invariants below prevent regression of
+  // these structural properties at the source level.
+  // =========================================================================
+
+  // R5-A (round 5 — the claim owner is a UNIQUE per-invocation identity):
+  // both critical-section entry points compose their owner from the role
+  // PREFIX + a random UUID via newCrossModeHandoffClaimOwner — NEVER the
+  // bare role constant (two invocations of the same role must NEVER share
+  // an owner, or a stale invocation's owner-guarded release could clear a
+  // newer owner's live claim).
+  it('R5-A. the claim owner is a unique per-invocation identity on BOTH paths (role prefix + UUID via newCrossModeHandoffClaimOwner)', () => {
+    const typesSrc = readFileSync(CROSS_MODE_TYPES, 'utf8');
+    // The generator: composes the role prefix + a random UUID.
+    expect(typesSrc, 'newCrossModeHandoffClaimOwner is defined').toMatch(/export function newCrossModeHandoffClaimOwner\(rolePrefix: string\): string \{/);
+    expect(typesSrc, 'the owner generator composes a random UUID (unique per invocation)').toMatch(/export function newCrossModeHandoffClaimOwner\(rolePrefix: string\): string \{[\s\S]*?randomUUID\(\)/);
+    // The role constants are documented as PREFIXES.
+    expect(typesSrc, 'the caller role prefix constant exists').toMatch(/CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-caller'/);
+    expect(typesSrc, 'the relay role prefix constant exists').toMatch(/CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX = 'cross-mode-handoff-relay'/);
+
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    expect(handoffStart, 'handoff is defined').toBeGreaterThan(-1);
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    // The caller path composes its owner from the prefix + UUID.
+    expect(handoffBody, 'handoff() composes a unique per-invocation caller owner').toMatch(/newCrossModeHandoffClaimOwner\(\s*CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX/);
+    // The caller NEVER passes a bare role constant as the claim owner.
+    expect(handoffBody, 'handoff() does NOT pass a bare role constant to the claim').not.toMatch(/createHandoffAndClaim\(\s*createInput,\s*CROSS_MODE_HANDOFF_CALLER_CLAIM_OWNER_PREFIX\s*,/);
+
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    // The relay path composes its owner from the prefix + UUID.
+    expect(reconcileBody, 'reconcile() composes a unique per-invocation relay owner').toMatch(/newCrossModeHandoffClaimOwner\(\s*CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX/);
+    // The relay NEVER passes a bare role constant as the claim owner.
+    expect(reconcileBody, 'reconcile() does NOT pass a bare role constant to the claim').not.toMatch(/claimHandoffObligation\(\s*handoff\.id,\s*CROSS_MODE_HANDOFF_RELAY_CLAIM_OWNER_PREFIX\s*,/);
+  });
+
+  // R5-B (round 5 — the heartbeat renewal covers the ENTIRE critical
+  // section): a live owner's lease cannot expire mid-flight. The service
+  // starts a lease guard (startClaimLease — a heartbeat timer renewing every
+  // claimLeaseMs/3) after a successful claim on BOTH paths + stops it in the
+  // `finally` (before the release, so no renewal can race the release).
+  it('R5-B. the heartbeat lease guard covers the whole critical section on BOTH paths (started after the claim, stopped in the finally)', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // The heartbeat interval default: claimLeaseMs / 3.
+    expect(serviceSrc, 'the heartbeat interval derives from the lease (claimLeaseMs / 3)').toMatch(/Math\.max\(1, Math\.floor\(this\.claimLeaseMs \/ 3\)\)/);
+    expect(serviceSrc, 'the handoffClaimHeartbeatMs dep exists (tests can suppress the heartbeat to simulate a stalled owner)').toMatch(/readonly handoffClaimHeartbeatMs\?: number/);
+    // The guard renews through the repository primitive.
+    expect(serviceSrc, 'the lease guard renews via renewHandoffObligationClaim').toMatch(/renewHandoffObligationClaim\(/);
+
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    expect(handoffBody, 'handoff() starts the lease guard after the claim').toMatch(/startClaimLease\(/);
+    expect(handoffBody, 'handoff() stops the heartbeat in the finally (before the release)').toMatch(/finally\s*\{[\s\S]*?lease\.stop\(\)[\s\S]*?releaseClaimSafely\(/);
+
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'reconcile() starts the lease guard after the claim').toMatch(/startClaimLease\(/);
+    expect(reconcileBody, 'reconcile() stops the heartbeat in the finally (before the release)').toMatch(/finally\s*\{[\s\S]*?lease\.stop\(\)[\s\S]*?releaseClaimSafely\(/);
+  });
+
+  // R5-C (round 5 — the fencing-token column exists): migration 0045 adds
+  // claim_epoch BIGINT NOT NULL DEFAULT 0 to the obligation table. Every
+  // claim increments it; the renewal + the discharge + the release are all
+  // guarded by it. Dropping the migration breaks the fence predicates.
+  it('R5-C. migration 0045 exists + adds the claim_epoch fencing token', () => {
+    expect(existsSync(CROSS_MODE_MIGRATION_0045), '0045_cross_mode_handoff_claim_epoch.sql must exist').toBe(true);
+    const src = readFileSync(CROSS_MODE_MIGRATION_0045, 'utf8');
+    expect(src, 'the migration ALTERs the obligations table').toMatch(/ALTER TABLE wfos_cross_mode_handoff_obligations/);
+    expect(src, 'the migration adds the claim_epoch fencing column').toMatch(/ADD COLUMN IF NOT EXISTS claim_epoch BIGINT NOT NULL DEFAULT 0/);
+  });
+
+  // R5-D (round 5 — the renewal is lease-identity-guarded): the heartbeat
+  // renewal is a conditional UPDATE guarded by the EXACT lease identity
+  // (claim_owner + claim_epoch). A stale owner's renewal returns 0 rows →
+  // the fence check fails → it aborts. An unconditional renewal would let a
+  // stale owner keep "renewing" a lease that was reclaimed under a new
+  // owner.
+  it('R5-D. the renewal UPDATE is guarded by the exact lease identity (claim_owner + claim_epoch)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'renewHandoffObligationClaim is implemented').toMatch(/async renewHandoffObligationClaim\(/);
+    // The renewal predicate: owner + epoch + not-yet-discharged.
+    expect(repoSrc, 'the renewal is guarded by claim_owner + claim_epoch (the fencing check)').toMatch(/async renewHandoffObligationClaim\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3[\s\S]*?AND discharged_at IS NULL/);
+    // The release is guarded by the SAME lease identity (a stale invocation
+    // can never clear a newer owner's claim).
+    expect(repoSrc, 'the release is guarded by claim_owner + claim_epoch').toMatch(/async releaseHandoffObligationClaim\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+  });
+
+  // R5-E (round 5 — every claim increments the fencing epoch): both claim
+  // sites (the atomic reserve+claim + the standalone reclaim) increment
+  // claim_epoch, so each successive lease gets a strictly greater token.
+  // Without the increment, a reclaimed lease would keep the stale owner's
+  // epoch + the fence predicates could not distinguish the leases.
+  it('R5-E. every claim increments the claim_epoch fencing token (monotonic per lease)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    const increments = repoSrc.match(/claim_epoch = COALESCE\(claim_epoch, 0\) \+ 1/g) ?? [];
+    expect(increments.length, 'BOTH claim sites increment the epoch (createHandoffAndClaim + claimHandoffObligation)').toBe(2);
+    // The claim RETURNs the epoch (the claimant learns its fencing token).
+    expect(repoSrc, 'the claim RETURNs claim_epoch (the claimant learns its fencing token)').toMatch(/RETURNING id, claim_epoch/);
+  });
+
+  // R5-F (round 5 — the discharge is epoch-fenced): the discharge UPDATE is
+  // guarded by the claim owner + epoch — only the LIVE lease holder can
+  // complete the authoritative obligation transition. A stale owner's
+  // discharge affects 0 rows, so an expired-then-reclaimed owner can never
+  // discharge even if its phase-boundary fence check raced.
+  it('R5-F. the discharge is epoch-fenced at the DB (only the live lease holder can discharge)', () => {
+    const repoSrc = readFileSync(CROSS_MODE_REPO, 'utf8');
+    expect(repoSrc, 'the discharge is implemented').toMatch(/async dischargeHandoffObligation\(/);
+    expect(repoSrc, 'the discharge UPDATE is guarded by claim_owner + claim_epoch').toMatch(/async dischargeHandoffObligation\([\s\S]*?AND claim_owner = \$2[\s\S]*?AND claim_epoch = \$3/);
+    // The service passes the EXACT lease identity to the discharge.
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    expect(serviceSrc, 'the service discharges under its own lease identity (lease.owner + lease.claimEpoch)').toMatch(/dischargeHandoffObligation\(\s*handoff\.id,\s*lease\.owner,\s*lease\.claimEpoch,?\s*\)/);
+    // A fenced-out discharge is NOT treated as completion (fence-lost return).
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    expect(reconcileBody, 'a fenced-out discharge returns stage fence-lost (NOT complete)').toMatch(/if\s*\(!discharged\)[\s\S]*?stage:\s*'fence-lost'/);
+  });
+
+  // R5-G (round 5 — the fence check precedes EVERY side-effect phase): the
+  // phase-boundary ensureFence calls run BEFORE the record mutate, the
+  // session transition, the provider dispatch, and the relay enqueue. A
+  // stalled owner whose lease was reclaimed aborts at the NEXT boundary —
+  // BEFORE any further side effect (zero duplicate dispatch / session
+  // transitions). Reordering any fence check after its phase (or removing
+  // it) fails these orderings.
+  it('R5-G. the fence check precedes every side-effect phase (mutate, session, dispatch, enqueue) on BOTH paths', () => {
+    const serviceSrc = readFileSync(CROSS_MODE_SERVICE, 'utf8');
+    // mutateAndDispatch body: 3 fence checks (record-mutate, session-
+    // transition, dispatch), each BEFORE its phase.
+    const mdStart = serviceSrc.indexOf('private async mutateAndDispatch(');
+    expect(mdStart, 'mutateAndDispatch is defined').toBeGreaterThan(-1);
+    const mdEnd = serviceSrc.indexOf('private ', mdStart + 10);
+    const mdBody = serviceSrc.slice(mdStart, mdEnd > mdStart ? mdEnd : mdStart + 3000);
+    const fenceCalls = mdBody.match(/ensureFence\(lease,/g) ?? [];
+    expect(fenceCalls.length, 'mutateAndDispatch has a fence check per side-effect phase (record-mutate, session-transition, dispatch)').toBe(3);
+    expect(mdBody.indexOf("ensureFence(lease, 'record-mutate')"), 'the record-mutate fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'record-mutate')"), 'the fence precedes the transitionMode mutate').toBeLessThan(mdBody.indexOf('transitionMode('));
+    expect(mdBody.indexOf("ensureFence(lease, 'session-transition')"), 'the session-transition fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'session-transition')"), 'the fence precedes the session transition').toBeLessThan(mdBody.indexOf('transitionSessionForHandoff('));
+    expect(mdBody.indexOf("ensureFence(lease, 'dispatch')"), 'the dispatch fence check exists').toBeGreaterThan(-1);
+    expect(mdBody.indexOf("ensureFence(lease, 'dispatch')"), 'the fence precedes the provider dispatch').toBeLessThan(mdBody.indexOf('dispatchExternal('));
+
+    // The caller path: the fence precedes the relay enqueue.
+    const handoffStart = serviceSrc.indexOf('async handoff(');
+    const handoffEnd = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(', handoffStart + 10);
+    const handoffBody = serviceSrc.slice(handoffStart, handoffEnd);
+    expect(handoffBody.indexOf("ensureFence(lease, 'relay-enqueue')"), 'the relay-enqueue fence check exists in handoff()').toBeGreaterThan(-1);
+    expect(handoffBody.indexOf("ensureFence(lease, 'relay-enqueue')"), 'the fence precedes the relay enqueue').toBeLessThan(handoffBody.indexOf('enqueueRelayJob('));
+
+    // The relay path: fence checks before the re-mutate, each re-dispatch,
+    // and the session convergence.
+    const reconcileStart = serviceSrc.indexOf('async reconcileCrossModeHandoffForExecution(');
+    const reconcileEnd = serviceSrc.indexOf('private ', reconcileStart + 10);
+    const reconcileBody = serviceSrc.slice(reconcileStart, reconcileEnd > reconcileStart ? reconcileEnd : reconcileStart + 5000);
+    const reconcileFences = reconcileBody.match(/ensureFence\(lease,/g) ?? [];
+    expect(reconcileFences.length, 'the reconcile has a fence check per recovery phase (re-mutate, re-dispatch-external, re-dispatch-native, session-convergence)').toBeGreaterThanOrEqual(4);
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-mutate')"), 'the re-mutate fence check exists').toBeLessThan(reconcileBody.indexOf('mutateAndDispatch('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-dispatch-external')"), 'the re-dispatch-external fence precedes dispatchExternal').toBeLessThan(reconcileBody.indexOf('dispatchExternal('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 're-dispatch-native')"), 'the re-dispatch-native fence precedes dispatchNative').toBeLessThan(reconcileBody.indexOf('dispatchNative('));
+    expect(reconcileBody.indexOf("ensureFence(lease, 'session-convergence')"), 'the session-convergence fence precedes the session transition').toBeLessThan(reconcileBody.indexOf('transitionSessionForHandoff('));
+    // A fence loss inside the reconcile body is caught + converted to a
+    // fence-lost return (NOT an error — the new owner completes the handoff).
+    expect(reconcileBody, 'the reconcile catches claim-fence-lost + returns stage fence-lost').toMatch(/err\.code === 'claim-fence-lost'[\s\S]*?stage:\s*'fence-lost'/);
   });
 });

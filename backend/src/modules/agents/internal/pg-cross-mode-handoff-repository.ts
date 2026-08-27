@@ -139,25 +139,29 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
   }
 
   /**
-   * PR #46 round 4 (the concurrency-serialization fix): INSERT the handoff
-   * log row AND claim the durable obligation in ONE transaction. The reserve
-   * INSERT (0042) + migration 0043's AFTER INSERT trigger (the obligation
-   * row) + the claim UPDATE are atomic — a concurrent reconcile cannot see
-   * the obligation until the transaction commits, at which point the claim
-   * is already held. This closes the round-4 boot-sweep race (a reconcile
-   * that fired between the reserve commit and a separate claim commit could
-   * previously claim + re-mutate the same obligation).
+   * PR #46 round 4 (the concurrency-serialization fix) + round 5 (the
+   * lease-ownership fix): INSERT the handoff log row AND claim the durable
+   * obligation in ONE transaction. The reserve INSERT (0042) + migration
+   * 0043's AFTER INSERT trigger (the obligation row) + the claim UPDATE are
+   * atomic — a concurrent reconcile cannot see the obligation until the
+   * transaction commits, at which point the claim is already held.
    *
-   * The claim UPDATE within the transaction always matches (the obligation
-   * is freshly created by the trigger — `claimed_at IS NULL` holds). On a
-   * 23505 UNIQUE violation the whole transaction rolls back (claim not
-   * applied) + the error is mapped by {@link mapCreateError}.
+   * PR #46 round 5: the claim UPDATE increments `claim_epoch` (migration
+   * 0045 — the fencing token) + RETURNs it. The `owner` is the unique
+   * per-invocation identity (`<role-prefix>:<uuid>` — the service composes
+   * it via newCrossModeHandoffClaimOwner); the returned `claimEpoch`
+   * identifies THIS lease and is required for the heartbeat renewal + the
+   * `finally` release (a stale invocation can never release a newer lease:
+   * different owner AND different epoch).
    */
   async createHandoffAndClaim(
     input: CreateCrossModeHandoffInput,
     owner: string,
     leaseMs: number,
-  ): Promise<{ handoff: CrossModeHandoffRecord; claimed: boolean }> {
+  ): Promise<
+    | { handoff: CrossModeHandoffRecord; claimed: true; claimEpoch: number }
+    | { handoff: CrossModeHandoffRecord; claimed: false; claimEpoch: null }
+  > {
     try {
       return await this.db.transaction(async (tx) => {
         // 1. INSERT the handoff log row (0043's AFTER INSERT trigger writes
@@ -210,19 +214,31 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
         //    `claim_expires_at` is the crash-reclaim window — a crashed
         //    owner's lease auto-expires after `leaseMs`, after which the
         //    `claim_expires_at < NOW()` arm of the reclaim predicate lets
-        //    the boot sweep reclaim.
-        const claimResult = await tx.query<{ id: string }>(
+        //    the boot sweep reclaim. PR #46 round 5: the claim ALSO
+        //    increments `claim_epoch` (the fencing token — migration 0045)
+        //    + RETURNs it so the caller identifies its individual lease for
+        //    the renewal + the release.
+        const claimResult = await tx.query<{ id: string; claim_epoch: string | number }>(
           `UPDATE wfos_cross_mode_handoff_obligations
               SET claimed_at = NOW(),
                   claim_expires_at = NOW() + ($3::double precision / 1000.0) * INTERVAL '1 second',
-                  claim_owner = $2
+                  claim_owner = $2,
+                  claim_epoch = COALESCE(claim_epoch, 0) + 1
             WHERE handoff_id = $1
               AND discharged_at IS NULL
               AND (claimed_at IS NULL OR claim_expires_at < NOW())
-           RETURNING id`,
+           RETURNING id, claim_epoch`,
           [handoff.id, owner, leaseMs],
         );
-        return { handoff, claimed: claimResult.rows.length > 0 };
+        const claimedRow = claimResult.rows[0];
+        if (!claimedRow) {
+          return { handoff, claimed: false as const, claimEpoch: null };
+        }
+        return {
+          handoff,
+          claimed: true as const,
+          claimEpoch: Number(claimedRow.claim_epoch),
+        };
       });
     } catch (err) {
       throw mapCreateError(err, input);
@@ -237,25 +253,38 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
    * re-evaluates after the first commits + sees a claimed row → 0 rows. The
    * reclaim predicate (`claimed_at IS NULL OR claim_expires_at < NOW()`)
    * lets a crashed owner's expired lease be reclaimed by the next sweep.
+   *
+   * PR #46 round 5: the claim increments `claim_epoch` (the fencing token —
+   * migration 0045) + RETURNs it. The `owner` is the unique per-invocation
+   * identity; the returned `claimEpoch` identifies THIS lease (used by the
+   * heartbeat renewal + the epoch-fenced discharge). The epoch is NEVER
+   * reset — each successive lease gets a strictly greater token, so a stale
+   * owner's renewal/discharge/release predicates can never match a newer
+   * lease.
    */
   async claimHandoffObligation(
     handoffId: string,
     owner: string,
     leaseMs: number,
-  ): Promise<{ claimed: true } | { claimed: false; activeOwner: string | null }> {
-    const result = await this.db.query<{ id: string }>(
+  ): Promise<
+    | { claimed: true; claimEpoch: number }
+    | { claimed: false; activeOwner: string | null }
+  > {
+    const result = await this.db.query<{ id: string; claim_epoch: string | number }>(
       `UPDATE wfos_cross_mode_handoff_obligations
           SET claimed_at = NOW(),
               claim_expires_at = NOW() + ($3::double precision / 1000.0) * INTERVAL '1 second',
-              claim_owner = $2
+              claim_owner = $2,
+              claim_epoch = COALESCE(claim_epoch, 0) + 1
         WHERE handoff_id = $1
           AND discharged_at IS NULL
           AND (claimed_at IS NULL OR claim_expires_at < NOW())
-       RETURNING id`,
+       RETURNING id, claim_epoch`,
       [handoffId, owner, leaseMs],
     );
-    if (result.rows.length > 0) {
-      return { claimed: true } as const;
+    const claimedRow = result.rows[0];
+    if (claimedRow) {
+      return { claimed: true as const, claimEpoch: Number(claimedRow.claim_epoch) };
     }
     // Did not claim — read the active owner for diagnostics (another actor
     // holds a live claim, OR the obligation was already discharged).
@@ -270,16 +299,52 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
   }
 
   /**
-   * PR #46 round 4: release the claim (clear the claim columns). The
-   * `claim_owner` guard ensures only the owner can release (defensive — a
-   * concurrent actor that stole an expired lease + released under a
-   * different owner cannot clear the original owner's columns). A no-op
-   * when the obligation was discharged (the `discharged_at IS NULL` guard
-   * returns 0 rows) or the claim already expired/released.
+   * PR #46 round 5 (the lease-expiry fix): renew the claim lease — the
+   * HEARTBEAT + the fence check. A conditional UPDATE guarded by the exact
+   * lease identity (`claim_owner = $2 AND claim_epoch = $3`) extending
+   * `claim_expires_at`. Returns TRUE when this lease still owns the claim;
+   * FALSE when another actor reclaimed it (owner/epoch mismatch — the
+   * caller MUST abort its critical section) or the obligation was
+   * discharged. The renewal does NOT require the lease to be un-expired: an
+   * expired-but-unreclaimed lease may be renewed by its (alive-again) owner;
+   * a concurrent renew/reclaim pair is serialized by the row lock (the
+   * second UPDATE's WHERE re-evaluates after the first commits — exactly
+   * one matches).
+   */
+  async renewHandoffObligationClaim(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>(
+      `UPDATE wfos_cross_mode_handoff_obligations
+          SET claim_expires_at = NOW() + ($4::double precision / 1000.0) * INTERVAL '1 second'
+        WHERE handoff_id = $1
+          AND claim_owner = $2
+          AND claim_epoch = $3
+          AND discharged_at IS NULL
+       RETURNING id`,
+      [handoffId, owner, claimEpoch, leaseMs],
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
+   * PR #46 round 4 + round 5: release the claim (clear the claim columns).
+   * Guarded by the EXACT lease identity (`claim_owner = $2 AND claim_epoch =
+   * $3`) — only the individual lease holder can release. A stale invocation
+   * whose lease expired + was reclaimed (new unique owner + new epoch)
+   * affects 0 rows: it can NEVER clear the new owner's live claim. A no-op
+   * (false, not an error) when the obligation was discharged (the
+   * `discharged_at IS NULL` guard) or the claim was already
+   * reclaimed/released. The epoch is intentionally NOT reset — fencing
+   * tokens are never reused across leases.
    */
   async releaseHandoffObligationClaim(
     handoffId: string,
     owner: string,
+    claimEpoch: number,
   ): Promise<boolean> {
     const result = await this.db.query<{ id: string }>(
       `UPDATE wfos_cross_mode_handoff_obligations
@@ -288,9 +353,10 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
               claim_owner = NULL
         WHERE handoff_id = $1
           AND claim_owner = $2
+          AND claim_epoch = $3
           AND discharged_at IS NULL
        RETURNING id`,
-      [handoffId, owner],
+      [handoffId, owner, claimEpoch],
     );
     return result.rows.length > 0;
   }
@@ -348,20 +414,33 @@ export class PgCrossModeHandoffRepository implements CrossModeHandoffRepository 
   }
 
   /**
-   * PR #46 review #2: idempotently discharge a cross-mode-handoff obligation
-   * (set discharged_at = NOW()). Returns true when a row was discharged,
-   * false when the obligation was already discharged (a repeated recovery /
-   * a fast path that won the race before the discharge). The obligation is
-   * append-only — only the discharge column changes (the immutability trigger
-   * on wfos_cross_mode_handoff_obligations enforces this).
+   * PR #46 review #2 + round 5 (the epoch fence): idempotently discharge a
+   * cross-mode-handoff obligation (set discharged_at = NOW()). PR #46 round
+   * 5: the discharge is FENCED by the exact lease identity
+   * (`claim_owner = $2 AND claim_epoch = $3`) — only the LIVE lease holder
+   * can discharge. A stale owner (whose lease expired + was reclaimed under
+   * a new owner/epoch) affects 0 rows → false: it cannot complete the
+   * authoritative obligation transition. Returns true when this lease
+   * discharged the obligation, false when fenced out (reclaimed) or already
+   * discharged (a repeated recovery / a fast path that won the race before
+   * the discharge). The obligation is append-only — only the discharge
+   * column changes (the immutability trigger on
+   * wfos_cross_mode_handoff_obligations enforces this).
    */
-  async dischargeHandoffObligation(handoffId: string): Promise<boolean> {
+  async dischargeHandoffObligation(
+    handoffId: string,
+    owner: string,
+    claimEpoch: number,
+  ): Promise<boolean> {
     const result = await this.db.query<{ id: string }>(
       `UPDATE wfos_cross_mode_handoff_obligations
          SET discharged_at = NOW()
-       WHERE handoff_id = $1 AND discharged_at IS NULL
+       WHERE handoff_id = $1
+         AND claim_owner = $2
+         AND claim_epoch = $3
+         AND discharged_at IS NULL
        RETURNING id`,
-      [handoffId],
+      [handoffId, owner, claimEpoch],
     );
     return result.rows.length > 0;
   }

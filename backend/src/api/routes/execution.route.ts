@@ -139,6 +139,14 @@ function codedErrorBody(err: unknown): { status: number; body: Record<string, un
       return { status: 503, body: { error: 'native-provider-unavailable', message } };
     case 'handoff-dispatch-failed':
       return { status: 500, body: { error: 'handoff-dispatch-failed', message } };
+    case 'claim-fence-lost':
+      // WORK-042 PR #46 round 5: the claim/lease fence was lost
+      // mid-critical-section (the lease expired + another actor reclaimed it
+      // while this request was stalled). The stale request aborted BEFORE
+      // further side effects; the new owner completes the handoff. 409: a
+      // concurrent actor owns the obligation — the client retries + converges
+      // on the owner's completed state (the same idempotencyKey converges).
+      return { status: 409, body: { error: 'claim-fence-lost', message } };
     case 'cross-mode-handoff-not-external':
       // Reserved: a non-external record on the external-handoff token path.
       return { status: 409, body: { error: 'cross-mode-handoff-not-external', message } };

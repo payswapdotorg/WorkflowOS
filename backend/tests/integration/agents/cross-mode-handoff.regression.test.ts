@@ -2261,7 +2261,8 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
            SET discharged_at = NULL,
                claimed_at = NULL,
                claim_expires_at = NULL,
-               claim_owner = NULL
+               claim_owner = NULL,
+               claim_epoch = 0
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );
@@ -2337,12 +2338,15 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       // the claim, so the columns are NULL — the explicit clear makes the
       // 'simulate the crash gap' intent robust to any future caller-path
       // change that might leave a stale held claim blocking the reconcile).
+      // PR #46 round 5: also reset claim_epoch to 0 (the fencing-token
+      // baseline — a fresh lease mints epoch 1 on its claim).
       await stack.db.client.query(
         `UPDATE wfos_cross_mode_handoff_obligations
            SET discharged_at = NULL,
                claimed_at = NULL,
                claim_expires_at = NULL,
-               claim_owner = NULL
+               claim_owner = NULL,
+               claim_epoch = 0
          WHERE handoff_id = (SELECT id FROM wfos_execution_mode_handoffs WHERE execution_record_id = $1)`,
         [recordId],
       );

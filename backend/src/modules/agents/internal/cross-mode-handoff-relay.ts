@@ -64,6 +64,19 @@
  * potential concurrent driver and therefore participates in the claim/
  * lease ownership semantics.
  *
+ * PR #46 round 5 (the lease-ownership + lease-expiry fixes): every claim
+ * owner is now a UNIQUE per-invocation identity
+ * (`cross-mode-handoff-relay:<uuid>` — two relay deliveries NEVER share an
+ * owner, so a stale delivery's `finally` release can never clear a newer
+ * delivery's live claim), every claim increments `claim_epoch` (the fencing
+ * token — migration 0045), the lease is renewed by a HEARTBEAT across the
+ * whole reconcile critical section (a live delivery's lease cannot expire
+ * mid-flight), and a stalled delivery whose expired lease was reclaimed
+ * fails its phase-boundary fence checks + its epoch-fenced discharge — it
+ * returns `{ stage: 'fence-lost' }` (NOT an error) and the new owner
+ * completes the handoff. The boot sweep reclaim of a CRASHED owner's
+ * expired lease (the round-4 semantics) is preserved.
+ *
  * NO scheduler, NO polling loop, NO second execution engine: the relay only
  * delivers ALREADY-AUTHORITATIVE durable intent (the obligation rows). It
  * never decides what work should exist. The reconciliation is the EXISTING
