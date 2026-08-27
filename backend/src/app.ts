@@ -285,6 +285,11 @@ import type {
 // src/execution-routing/, mirroring the §34 benchmark pattern).
 import { AdaptiveExecutionRouter } from './execution-routing/index.js';
 import type { AdaptiveExecutionRouterService } from './execution-routing/index.js';
+// WORK-045: the Agent Roles catalog — the provider-independent role
+// contract layer (application-layer role model at src/agent-roles/, the
+// §33.9 bounded slice: declarative, deterministic, authority-free).
+import { DefaultAgentRoleCatalogService } from './agent-roles/index.js';
+import type { AgentRoleCatalogService } from './agent-roles/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -484,6 +489,12 @@ export interface AppDeps {
    *  configured. Never re-evaluates hard constraints; never mutates
    *  workflow state; never dispatches. */
   executionRouterService?: AdaptiveExecutionRouterService;
+  /** WORK-045: the Agent Roles catalog service — the provider-independent
+   *  role-contract layer (a closed static catalog: declarative capabilities
+   *  consumed by the EXISTING eligibility boundary, deterministic identity
+   *  resolution, no authority of any kind). Always present (pure static
+   *  data — no dependencies). */
+  agentRoleCatalogService?: AgentRoleCatalogService;
   /** WORK-038: Existing Project Onboarding — the application-layer
    *  orchestrator (NOT a module, NOT an authority). Composes /github
    *  (revision resolution) + /agents (the project-scoped ToolPolicyGate) +
@@ -733,6 +744,12 @@ export async function buildApp(
   // WORK-043 eligibility verdicts). Declared at function scope; constructed
   // inside the execution-policy block (after the policy service).
   let executionRouterService: AdaptiveExecutionRouterService | undefined;
+  // WORK-045: the agent-role catalog service. PURE STATIC DATA — no
+  // dependencies (no DB, no repositories, no tenant context), so it is
+  // constructed unconditionally: the closed catalog validates + freezes at
+  // module load (fail-closed). Advisory configuration only — the role
+  // layer never dispatches, evaluates, or mutates workflow state.
+  const agentRoleCatalogService: AgentRoleCatalogService = new DefaultAgentRoleCatalogService();
   let executionHandoffService: ExecutionHandoffService | undefined;
   let executionCallbackService: ExecutionCallbackService | undefined;
   let executionEventIngestionService: ExecutionEventIngestionService | undefined;
@@ -1927,6 +1944,9 @@ export async function buildApp(
       // execution-policy service is configured). Advisory only — the
       // selection layer over the WORK-043 eligibility verdicts.
       executionRouterService,
+      // WORK-045: the agent-role catalog service (always present — the
+      // provider-independent role contracts; advisory configuration only).
+      agentRoleCatalogService,
     },
     start: async () => {
       if (options.startWorker !== false) {
