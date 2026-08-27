@@ -278,7 +278,10 @@ import {
   DefaultBenchmarkEvidenceProvider,
   PgExecutionPolicyRepository,
 } from './execution-policy/index.js';
-import type { ExecutionPolicyService } from './execution-policy/index.js';
+import type {
+  ExecutionPolicyService,
+  ExecutionAdmissionPort,
+} from './execution-policy/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
 import type {
@@ -1343,20 +1346,34 @@ export async function buildApp(
       acceptanceCriterionRepository: acceptanceCriterionRepository!,
       logger,
     });
-    const executionAdmissionService = new DefaultExecutionAdmissionService({
-      executionPolicyService,
-      organizationResolver: {
-        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
-      },
-      logger,
-    });
+    // WORK-043 (final admission): the admission service re-evaluates the
+    // CURRENT hard constraints immediately before provider dispatch. It
+    // depends on the execution-policy service, which is constructed LATER in
+    // buildApp (the WORK-033 block — after the benchmark + agent-provider-
+    // registry sections its evidence/capability sources need). The binding
+    // is therefore LATE-BOUND through the file's established forward-
+    // reference pattern (cf. the benchmarkService closure below): the
+    // executionService holds a delegating port, and the concrete admission
+    // service is assigned in the WORK-033 block. By the time any admission
+    // evaluation fires (a request after buildApp returns), the binding is
+    // present — the same guarantee the benchmarkService closure relies on.
+    let executionAdmissionService: ExecutionAdmissionPort | undefined;
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
       auditService,
       logger,
       sessionService: executionSessionService,
-      executionAdmission: executionAdmissionService,
+      executionAdmission: {
+        admit: (task) => {
+          if (!executionAdmissionService) {
+            // Unreachable post-buildApp (the WORK-033 block assigns the
+            // binding before buildApp returns); fail closed regardless.
+            return Promise.reject(new Error('execution-admission-not-wired: the admission boundary is assigned in the WORK-033 policy block of buildApp'));
+          }
+          return executionAdmissionService.admit(task);
+        },
+      },
     });
     executionHandoffService = new PolicyGatedExecutionHandoffService({
       inner: new DefaultExecutionHandoffService({
@@ -1572,6 +1589,18 @@ export async function buildApp(
       // decides the pre-ranking eligibility verdict. The AgentPolicyEngine
       // structurally satisfies AgentPolicyProjectGateLike.
       agentPolicyProjectGate: agentPolicyEngine,
+    });
+    // WORK-043 (final admission): NOW the policy service exists — construct
+    // the concrete admission boundary + bind it into the executionService's
+    // delegating port (see the agents block above for the forward
+    // reference). The org scope is resolved AUTHORITATIVELY from the
+    // Project → Organization relation (never caller-supplied).
+    executionAdmissionService = new DefaultExecutionAdmissionService({
+      executionPolicyService,
+      organizationResolver: {
+        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
+      },
+      logger,
     });
 
     // --- WORK-042: Cross-Mode Execution Handoff. ---

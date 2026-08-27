@@ -169,7 +169,7 @@ test.beforeAll(async () => {
   const detExternal = new DeterministicExternalBenchmarkProvider({ variant: 'perfect-first-pass' });
   const executionRecordRepository = new PgExecutionRecordRepository(db);
   const executionEventRepository = new PgExecutionEventRepository(db);
-  const executionService = new DefaultExecutionService({ executionRecordRepository, providers: [detNative, detExternal], auditService, logger 
+  const executionService = new DefaultExecutionService({ executionRecordRepository, providers: [detNative, detExternal], auditService, logger,
       executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
   // PR #35 review fix #4: the execution-event ingestion boundary — the test

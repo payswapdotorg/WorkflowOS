@@ -76,6 +76,10 @@ export type {
   ExecutionEventIngestionService,
   ExecutionSubmitResult,
   ExecutionService,
+  // WORK-043: the provider-independent final admission contract (the
+  // execution-side boundary immediately before provider dispatch).
+  ExecutionAdmissionResult,
+  ExecutionAdmissionPort,
 } from './internal/execution.types.js';
 
 // WORK-042: Cross-Mode Execution Handoff — the cross-mode transition boundary

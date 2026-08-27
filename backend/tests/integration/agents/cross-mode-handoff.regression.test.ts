@@ -112,6 +112,31 @@ class StubExecutionPolicyService implements CrossModeExecutionPolicyPort {
   async getProjectPolicy(_projectId: string): Promise<{ nativeExecutionAllowed: boolean; policyVersion: number | null } | null> {
     return { nativeExecutionAllowed: this.nativeAllowed, policyVersion: 1 };
   }
+  // WORK-043 remediation: the destination-eligibility seam is REQUIRED —
+  // the stub returns an ELIGIBLE verdict (the verdict-driven destination
+  // tests live in the WORK-043 destination re-eligibility describe below,
+  // which uses VerdictExecutionPolicyService).
+  async evaluateCandidateEligibility(_input: {
+    organizationId: string;
+    projectId: string;
+    workItemId: string;
+    provider: string;
+    model: string | null;
+    executionMode: 'native' | 'external';
+    userId?: string | null;
+  }): Promise<{
+    eligibility: {
+      status: string;
+      eligible: boolean;
+      blockingReasons: readonly { category: string; constraint: string; reason: string }[];
+    };
+    policyVersion: number;
+  }> {
+    return {
+      eligibility: { status: 'eligible', eligible: true, blockingReasons: [] },
+      policyVersion: 1,
+    };
+  }
 }
 
 /**
@@ -549,6 +574,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       agentRunRepository: agentRunRepo,
       agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
       executionPolicyService: new StubExecutionPolicyService(true),
+      organizationResolver: { getOrganizationId: async () => 'org-test' },
       agentProviderRegistryService: new StubAgentProviderRegistry(),
       executionSessionService,
       agentWorkspaceService,
@@ -1456,6 +1482,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1658,6 +1685,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1743,6 +1771,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1850,6 +1879,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -1949,6 +1979,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2001,6 +2032,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2084,6 +2116,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService: flakySession, // throws on first interrupt
         agentWorkspaceService,
@@ -2138,6 +2171,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService, // the REAL session service (no flaky wrapper)
         agentWorkspaceService,
@@ -2302,6 +2336,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2367,6 +2402,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2766,6 +2802,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new DenyExternalAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(true),
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2798,6 +2835,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: new StubExecutionPolicyService(false), // native NOT allowed
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2833,6 +2871,10 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         agentRunRepository: agentRunRepo,
         agentPolicyEvaluator: new AllowAllAgentPolicyEvaluator(),
         executionPolicyService: policy,
+        // WORK-043 remediation: the authoritative org scope for the
+        // destination gate (a fixed test org — the verdict assertions key
+        // on the verdict, not the resolved scope).
+        organizationResolver: { getOrganizationId: async () => 'org-test' },
         agentProviderRegistryService: new StubAgentProviderRegistry(),
         executionSessionService,
         agentWorkspaceService,
@@ -2947,9 +2989,12 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       expect(dest.provider).toBeTruthy();
     });
 
-    // 43e: a pre-WORK-043 port (no seam) → the handoff proceeds and the
-    // summary records the gate's absence HONESTLY ('not_evaluated').
-    it('43e. pre-WORK-043 port (no seam) → proceeds with an honest not_evaluated marker', async () => {
+    // 43e (WORK-043 remediation): the destination-eligibility seam is
+    // MANDATORY — the pre-WORK-043 optional-seam bypass ('not_evaluated') is
+    // REMOVED. Every port implements the seam (the interface requires it);
+    // even the permissive stub's verdict is EVALUATED + recorded — there is
+    // no code path that skips the destination gate.
+    it("43e. the MANDATORY destination gate always evaluates — the permissive stub's eligible verdict is recorded (no not_evaluated bypass)", async () => {
       const { executionId } = await createNativeRecord('failed');
       const result = await serviceWith(new StubExecutionPolicyService(true)).handoff(
         executionId,
@@ -2958,8 +3003,9 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
       );
       expect(result.record.mode).toBe('external');
       const parsed = JSON.parse(result.handoff.policyDecision ?? '{}') as Record<string, unknown>;
-      const dest = parsed.destinationEligibility as { status: string };
-      expect(dest.status).toBe('not_evaluated');
+      const dest = parsed.destinationEligibility as { status: string; eligible: boolean };
+      expect(dest.status).toBe('eligible');
+      expect(dest.eligible).toBe(true);
     });
   });
 });

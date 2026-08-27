@@ -1005,21 +1005,23 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
     it('a quota-exhausted destination verdict (the handoff gate input)', async () => {
       await service.updateProjectPolicy(projectId, { maxExecutionsPerDay: 3 });
       const verdict = await service.evaluateCandidateEligibility({
-        projectId, workItemId,
+        organizationId, projectId, workItemId,
         provider: 'external-coder', model: null, executionMode: 'external',
       });
       expect(verdict.eligibility.eligible).toBe(false);
       expect(verdict.eligibility.status).toBe('quota_exhausted');
       expect(verdict.eligibility.blockingReasons.some((b) => b.constraint === 'daily_quota_exhausted')).toBe(true);
-      // No organization context → the agent-policy family is INACTIVE
-      // (the handoff's own per-execution gate enforces it).
+      // WORK-043 remediation: the organization scope is REQUIRED + resolved
+      // authoritatively; with no agent-policy gate wired for this suite the
+      // family's default verdict is 'allow' (the handoff's own per-execution
+      // gate remains the stricter external-domain enforcer).
       expect(verdict.constraints.agentPolicy.externalDecision).toBe('allow');
       await service.updateProjectPolicy(projectId, { maxExecutionsPerDay: null });
     });
 
     it('an UNKNOWN provider → the honest configuration_missing verdict (no invented capabilities)', async () => {
       const verdict = await service.evaluateCandidateEligibility({
-        projectId, workItemId,
+        organizationId, projectId, workItemId,
         provider: 'never-configured', model: 'm', executionMode: 'native',
       });
       expect(verdict.eligibility.eligible).toBe(false);
@@ -1036,7 +1038,7 @@ describe('WORK-043 — Execution Eligibility and Constraint Engine (PG)', () => 
         externalSecurityCeiling: 'standard',
       });
       const verdict = await service.evaluateCandidateEligibility({
-        projectId, workItemId,
+        organizationId, projectId, workItemId,
         provider: 'external-coder', model: null, executionMode: 'external',
       });
       expect(verdict.eligibility.eligible).toBe(false);
