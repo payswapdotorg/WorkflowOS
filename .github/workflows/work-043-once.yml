@@ -32,12 +32,18 @@ jobs:
             printf '%s\n' "$tsc_out"
             exit 1
           fi
-      - name: Targeted tests
+      - name: Lint
         working-directory: backend
-        run: |
-          bunx eslint src/execution-policy src/modules/agents/internal/execution-service.ts src/modules/agents/internal/default-cross-mode-handoff-service.ts src/app.ts tests/integration/execution-policy/execution-admission.regression.test.ts
-          bunx vitest run tests/integration/execution-policy/execution-admission.regression.test.ts tests/integration/execution-policy/execution-eligibility-engine.integration.test.ts tests/integration/execution-policy/execution-eligibility-constraints.regression.test.ts
-          bunx vitest run tests/architecture/static-architecture.test.ts
+        run: bunx eslint src/execution-policy src/modules/agents/internal/execution-service.ts src/modules/agents/internal/default-cross-mode-handoff-service.ts src/app.ts tests/integration/execution-policy/execution-admission.regression.test.ts
+      - name: Admission regression
+        working-directory: backend
+        run: bunx vitest run tests/integration/execution-policy/execution-admission.regression.test.ts
+      - name: Existing eligibility regressions
+        working-directory: backend
+        run: bunx vitest run tests/integration/execution-policy/execution-eligibility-engine.integration.test.ts tests/integration/execution-policy/execution-eligibility-constraints.regression.test.ts
+      - name: Architecture invariants
+        working-directory: backend
+        run: bunx vitest run tests/architecture/static-architecture.test.ts
       - name: Commit
         run: |
           rm -f .github/workflows/work-043-remediation-apply.yml .github/workflows/work-043-remediation-finalize.yml .github/workflows/work-043-apply2.yml
