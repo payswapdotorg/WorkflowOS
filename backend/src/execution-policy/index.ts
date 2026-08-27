@@ -68,6 +68,8 @@ export type {
   RecommendInput,
   CandidateEligibilityInput,
   CandidateEligibilityResult,
+  ExecutionAdmissionResult,
+  ExecutionAdmissionPort,
   ProjectPolicyRecord,
   UserPreferenceRecord,
   ProviderAccessProfileRecord,
@@ -99,6 +101,7 @@ export type {
   ResolvedOrgPolicy,
 } from './internal/execution-policy.types.js';
 
+export { DefaultExecutionAdmissionService } from './internal/default-execution-admission-service.js';
 export { DefaultExecutionEligibilityService } from './internal/default-execution-eligibility-service.js';
 export { DefaultExecutionRecommendationService } from './internal/default-execution-recommendation-service.js';
 export { DefaultExecutionTaskProfileBuilder } from './internal/default-execution-task-profile-builder.js';

@@ -271,6 +271,7 @@ import type { OutboxRelay } from '@platform/index.js';
 // EXTERNAL_UI_CATALOG from @modules/agents).
 import {
   DefaultExecutionPolicyService,
+  DefaultExecutionAdmissionService,
   DefaultExecutionEligibilityService,
   DefaultExecutionRecommendationService,
   DefaultExecutionTaskProfileBuilder,
@@ -1342,12 +1343,20 @@ export async function buildApp(
       acceptanceCriterionRepository: acceptanceCriterionRepository!,
       logger,
     });
+    const executionAdmissionService = new DefaultExecutionAdmissionService({
+      executionPolicyService,
+      organizationResolver: {
+        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
+      },
+      logger,
+    });
     executionService = new DefaultExecutionService({
       executionRecordRepository,
       providers: [nativeExecutionProvider, externalExecutionProvider],
       auditService,
       logger,
       sessionService: executionSessionService,
+      executionAdmission: executionAdmissionService,
     });
     executionHandoffService = new PolicyGatedExecutionHandoffService({
       inner: new DefaultExecutionHandoffService({
@@ -1607,6 +1616,9 @@ export async function buildApp(
       agentRunRepository: agentRunRepository!,
       agentPolicyEvaluator: agentPolicyEngine,
       executionPolicyService,
+      organizationResolver: {
+        getOrganizationId: async (projectId) => (await projectRepository!.findById(projectId))?.organizationId ?? null,
+      },
       agentProviderRegistryService,
       executionSessionService,
       agentWorkspaceService,

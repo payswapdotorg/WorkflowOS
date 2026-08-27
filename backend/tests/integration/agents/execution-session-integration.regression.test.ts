@@ -164,7 +164,9 @@ describe('WORK-034 — session-aware execution integration', () => {
       } as never,
       logger: stack.db.logger,
       sessionService,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
   }
 
   /** A passing native provider (the real one, against the FakeAgentAdapter). */

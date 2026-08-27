@@ -152,6 +152,8 @@ test.beforeAll(async () => {
     providers: [nativeExecutionProvider, externalExecutionProvider],
     auditService,
     logger,
+  
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
   const executionHandoffService = new DefaultExecutionHandoffService({
     executionRecordRepository: executionRecordRepo,

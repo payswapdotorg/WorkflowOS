@@ -340,9 +340,6 @@ export class DefaultExecutionPolicyService implements ExecutionPolicyService {
     const organizationId = input.organizationId ?? null;
 
     let policy = await this.deps.repository.getProjectPolicy(projectId);
-    if (!policy && organizationId) {
-      policy = await this.deps.repository.insertDefaultProjectPolicy(organizationId, projectId);
-    }
     if (!policy) {
       // No policy row AND no org context (the handoff path for a project
       // that never evaluated a recommendation): evaluate against the SAME

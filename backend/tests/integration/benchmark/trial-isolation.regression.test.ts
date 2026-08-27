@@ -289,7 +289,9 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
     countingExecutionService = new CountingExecutionService(realExecutionService);
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,
@@ -498,7 +500,9 @@ describe('PR #35 fix #3 — trial isolation failures are NOT swallowed', () => {
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
     const localCountingExec = new CountingExecutionService(realExecutionService);
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,

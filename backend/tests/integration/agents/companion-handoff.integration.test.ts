@@ -169,7 +169,9 @@ describe('WORK-028 — Companion handoff redemption (token-only)', () => {
       ],
       auditService,
       logger: stack.db.logger,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
     const executionHandoffService = new DefaultExecutionHandoffService({
       executionRecordRepository: executionRecordRepo,
       handoffRepository: new PgExecutionHandoffRepository(stack.db.client),

@@ -764,7 +764,7 @@ export interface RecommendInput {
  * — which is STRICTER (approval-aware); no coverage is lost.
  */
 export interface CandidateEligibilityInput {
-  readonly organizationId?: string | null;
+  readonly organizationId: string;
   readonly projectId: string;
   readonly workItemId: string;
   readonly provider: string;

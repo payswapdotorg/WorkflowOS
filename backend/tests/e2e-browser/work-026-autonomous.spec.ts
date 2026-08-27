@@ -375,6 +375,8 @@ test.beforeAll(async () => {
     providers: [nativeExecutionProvider],
     auditService,
     logger,
+  
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
   });
   const startImplementationService = new DefaultStartImplementationService({
     executionTaskService,

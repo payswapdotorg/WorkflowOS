@@ -220,8 +220,8 @@ export interface CrossModeExecutionPolicyPort {
    * pre-WORK-043 fakes/ports still satisfy the interface; the destination
    * gate is skipped when absent (the composition root always wires it).
    */
-  evaluateCandidateEligibility?(input: {
-    organizationId?: string | null;
+  evaluateCandidateEligibility(input: {
+    organizationId: string;
     projectId: string;
     workItemId: string;
     provider: string;
@@ -248,6 +248,11 @@ export interface CrossModeExecutionPolicyPort {
  * structurally. Used to resolve + validate the native provider availability
  * (fail-closed when no platform-native provider is configured).
  */
+/** WORK-043: authoritative Project → Organization resolver. */
+export interface CrossModeProjectOrganizationResolver {
+  getOrganizationId(projectId: string): Promise<string | null>;
+}
+
 export interface CrossModeAgentProviderRegistryPort {
   /** The platform-default ready provider name (undefined when none is ready). */
   getPlatformDefaultProvider(): string | undefined;
@@ -323,6 +328,7 @@ export interface DefaultCrossModeHandoffServiceDeps {
   readonly agentPolicyEvaluator: AgentPolicyHandoffEvaluator;
   /** native_execution_allowed gate (WORK-033) — the execution-policy service. */
   readonly executionPolicyService: CrossModeExecutionPolicyPort;
+  readonly organizationResolver: CrossModeProjectOrganizationResolver;
   /** Native provider availability (WORK-026) — the agent provider registry. */
   readonly agentProviderRegistryService: CrossModeAgentProviderRegistryPort;
   /** PR #46 review #3: the WORK-034 session lifecycle port. */
@@ -1418,31 +1424,24 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
     actor: { userId: string; source: string },
     policySummary: string,
   ): Promise<string> {
-    const seam = this.deps.executionPolicyService.evaluateCandidateEligibility;
-    if (!seam) {
-      // Pre-WORK-043 port — the destination gate is not wired. Compose a
-      // skip marker so the log row records the gate's absence honestly.
-      return composeSummary(policySummary, {
-        destinationEligibility: { status: 'not_evaluated', eligible: null, reason: 'WORK-043 destination eligibility seam not wired' },
-      });
+    const organizationId = await this.deps.organizationResolver.getOrganizationId(record.projectId);
+    if (!organizationId) {
+      throw new CrossModeHandoffError(
+        `handoff-ineligible-destination: organization for project ${record.projectId} could not be resolved — failing closed`,
+        'handoff-ineligible-destination',
+      );
     }
     let verdict;
     try {
-      verdict = await seam.call(
-        this.deps.executionPolicyService,
-        {
-          // No organization context at the handoff service layer: the
-          // org-scoped families are inactive; the per-execution agent-policy
-          // gate (step 6) already enforces the external domain STRICTER.
-          organizationId: null,
-          projectId: record.projectId,
-          workItemId: record.workItemId,
-          provider,
-          model,
-          executionMode: input.targetMode,
-          userId: actor.userId,
-        },
-      );
+      verdict = await this.deps.executionPolicyService.evaluateCandidateEligibility({
+        organizationId,
+        projectId: record.projectId,
+        workItemId: record.workItemId,
+        provider,
+        model,
+        executionMode: input.targetMode,
+        userId: actor.userId,
+      });
     } catch (err) {
       throw new CrossModeHandoffError(
         `handoff-ineligible-destination: the destination eligibility evaluation failed for execution ${executionId} (${(err as Error).message}) — failing closed`,

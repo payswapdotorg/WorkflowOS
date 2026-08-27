@@ -119,7 +119,9 @@ describe('WORK-032 §39 — bias regression tests', () => {
     });
     const executionService = new DefaultExecutionService({
       executionRecordRepository, providers: [deterministicNativeProvider, deterministicExternalProvider], auditService, logger,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository, executionService, executionTaskService, agentRunRepository,
       workItemRepository: stack.workItemRepository, workOrderRepository: stack.workOrderRepository,

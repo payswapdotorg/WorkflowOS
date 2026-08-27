@@ -325,7 +325,9 @@ describe('PR #35 fix — control-plane boundary (authz-before-mutation) + atomic
       providers: [deterministicNativeProvider, deterministicExternalProvider],
       auditService,
       logger: logger as never,
-    });
+    
+      executionAdmission: { admit: async () => ({ admitted: true, reason: 'test-permit', policyVersion: null, blockingReasons: [] }) },
+  });
     const trialOrchestrator = new DefaultBenchmarkTrialOrchestrator({
       repository: benchmarkRepository,
       executionService,
