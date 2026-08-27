@@ -1242,20 +1242,55 @@ describe.skipIf(!isRealPg)('PR #42 round-6 + round-7 — the database-level + sc
       const t0Held = new Promise<void>((resolve) => {
         releaseT0 = resolve;
       });
+      // DE-FLAKE GATE: signal that T0's FOR UPDATE has RETURNED — at that
+      // instant T0's transaction definitively HOLDS the project anchor row
+      // lock (the row lock is granted when the SELECT returns). Awaiting
+      // `t0LockHeld` BEFORE starting T2 removes the startup race in which
+      // T2's transaction reached the anchor row BEFORE T0's lock was
+      // granted: T2 then ran BEGIN..COMMIT without ever blocking, so
+      // PROBE 1 observed 'resolved' — the CI flake (backend-job failures
+      // on main @ f9629e18 + ba03ee6d, and on this branch @ b6da61d +
+      // 9766225, always THIS assertion). Locally the ungated pattern
+      // reproduces at ~60% (37/60 iterations); with the gate: 0/60 (also
+      // under 4-way CPU contention on a 2-core box). This mirrors test
+      // A's willMutate pattern (T2 starts only after T1's locks are
+      // held) — the same happens-before edge, added for the external
+      // T0 lock holder.
+      let t0LockAcquired!: () => void;
+      const t0LockHeld = new Promise<void>((resolve) => {
+        t0LockAcquired = resolve;
+      });
       const t0Promise = t0.client.transaction(async (tx) => {
         await tx.query(
           `SELECT id FROM wfos_projects WHERE id = $1 FOR UPDATE`,
           [projectId],
         );
+        // The row lock IS held now — signal BEFORE parking on t0Held.
+        t0LockAcquired();
         // Hold the transaction open until releaseT0 is called.
         await t0Held;
       });
 
+      // T0 must ACTUALLY hold the anchor lock before T2 starts. T2's
+      // atomic transaction (round-8) is `BEGIN; SELECT FOR UPDATE (blocks
+      // on T0's lock); INSERT; COMMIT` — the first statement that touches
+      // the anchor row cannot complete while T0 parks on t0Held, so T2 is
+      // now GUARANTEED to queue on T0's lock. (Failure-safe: if T0's
+      // transaction dies or ends before acquiring the lock, surface that
+      // HERE instead of hanging on the gate until the test timeout. The
+      // `.catch(() => {})` swallows the sentinel's LATE rejection when
+      // T0 eventually completes NORMALLY after releaseT0() — by then the
+      // race has long settled via t0LockHeld.)
+      const t0EndedEarly = t0Promise.then(() => {
+        throw new Error('T0 transaction ended before acquiring the project anchor lock');
+      });
+      t0EndedEarly.catch(() => {});
+      await Promise.race([t0LockHeld, t0EndedEarly]);
+
       // T2's mutation: setProjectPolicy(V8_DOCUMENT) — an INSERT ... ON
-      // CONFLICT DO UPDATE on the SAME project policy row. T2's atomic
-      // transaction (round-8) is `BEGIN; SELECT FOR UPDATE (blocks on
-      // T0's lock); INSERT; COMMIT`. T2 is started FIRST so it is
-      // queued on T0's lock BEFORE T1.
+      // CONFLICT DO UPDATE on the SAME project policy row. T2 is started
+      // AFTER T0's lock is confirmed held, so it is queued on T0's lock
+      // BEFORE T1.
       const t2Repo = new PgAgentPolicyRepository({ db: second!.client });
       const t2Promise = (async () => {
         await t2Repo.setProjectPolicy({
@@ -1267,6 +1302,10 @@ describe.skipIf(!isRealPg)('PR #42 round-6 + round-7 — the database-level + sc
       })();
 
       // Give T2 time to reach the blocked state (queued on T0's lock).
+      // Not load-bearing for PROBE 1 anymore: T2 CANNOT resolve while T0
+      // parks (its anchor-lock acquisition blocks), so the T2 probe below
+      // is structurally guaranteed 'pending'; the delay only lets T2
+      // reach the blocked state before T1 queues behind it.
       await delay(300);
 
       // T1's fence: started AFTER T2 is queued on T0's lock (so T1 is
