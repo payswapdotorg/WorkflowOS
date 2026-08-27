@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stack.js';
+import { AllowAllCheckpointGate } from '../../helpers/allow-all-checkpoint-gate.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger, generateExecutionId } from '@platform/index.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
@@ -189,7 +190,7 @@ describe('WORK-024 — End-to-end WorkflowOS development lifecycle', () => {
       stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
       architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
-      stack.projectRepository, generateExecutionId,
+      stack.projectRepository, new AllowAllCheckpointGate(), generateExecutionId,
     );
     // Wire the GitHub webhook processing service (for the PR merge boundary).
     const webhookEventRepo = new PgWebhookEventRepository(stack.db.client);

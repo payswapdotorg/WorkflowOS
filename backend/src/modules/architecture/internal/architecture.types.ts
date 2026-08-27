@@ -82,6 +82,91 @@ export interface ArchitectureRepository {
   findByProject(projectId: string): Promise<Architecture[]>;
 }
 
+// --- Architecture Assertions (WORK-051) ---
+//
+// An Architecture Assertion is a version-scoped architectural rule owned by
+// /architecture and attached to an IMMUTABLE ArchitectureVersion. It describes
+// a condition that must remain true for implementations governed by that
+// version (issue #51; design §4.1).
+//
+// Immutability is TWO-layered and persistence-enforced (migration 0052):
+//  1. ROW immutability — assertion rows are append-only (no UPDATE/DELETE
+//     trigger-rejected at the PostgreSQL level).
+//  2. SET immutability — assertions attach only to DRAFT versions; a FROZEN
+//     version's assertion set is closed. Intentional change follows the
+//     Architecture Change Request → new immutable version path (ARCH-004).
+//
+// The checkpoint subsystem (application layer) READS assertions through the
+// public barrel's {@link ArchitectureAssertionReader}; it can never create,
+// mutate, or remove them.
+
+export type ArchitectureAssertionSeverity = 'blocking' | 'advisory';
+
+export type ArchitectureAssertionScope =
+  | 'repository'
+  | 'module'
+  | 'interface'
+  | 'data'
+  | 'workflow'
+  | 'security'
+  | 'execution'
+  | 'other';
+
+export interface ArchitectureAssertion {
+  readonly id: string;
+  readonly architectureVersionId: string;
+  /** Stable human-facing identifier, unique per version (e.g. 'ARCH-051-001'). */
+  readonly assertionId: string;
+  readonly severity: ArchitectureAssertionSeverity;
+  readonly scope: ArchitectureAssertionScope;
+  /** Human-readable statement of the architectural rule. */
+  readonly statement: string;
+  /** Identifies the deterministic detector class that evaluates this assertion. */
+  readonly detectorKind: string;
+  /** Opaque detector configuration (JSON). Contains no credentials. */
+  readonly detectorConfig: Record<string, unknown>;
+  readonly createdAt: Date;
+}
+
+export interface CreateArchitectureAssertionInput {
+  architectureVersionId: string;
+  assertionId: string;
+  severity: ArchitectureAssertionSeverity;
+  scope: ArchitectureAssertionScope;
+  statement: string;
+  detectorKind: string;
+  detectorConfig?: Record<string, unknown>;
+}
+
+/**
+ * The assertion repository owned by /architecture. Deliberately read+create
+ * only — there is NO update and NO delete method anywhere in the contract.
+ * Persistence-level triggers (migration 0052) reject UPDATE/DELETE and reject
+ * creation against a non-DRAFT version.
+ */
+export interface ArchitectureAssertionRepository {
+  /**
+   * Attach an assertion to a DRAFT version. Rejected by the persistence
+   * layer (trigger) when the version is frozen/superseded — the assertion
+   * set is immutable with its ArchitectureVersion.
+   */
+  create(input: CreateArchitectureAssertionInput): Promise<ArchitectureAssertion>;
+  findById(id: string): Promise<ArchitectureAssertion | null>;
+  listForVersion(architectureVersionId: string): Promise<ArchitectureAssertion[]>;
+}
+
+/**
+ * READ-ONLY view of the assertion store for cross-module consumption via the
+ * /architecture public barrel (WORK-051). Consumers (the application-layer
+ * checkpoint subsystem) can resolve the assertion set of a version but hold
+ * NO mutation capability — the narrowed surface makes the boundary
+ * structural, not conventional.
+ */
+export interface ArchitectureAssertionReader {
+  findById(id: string): Promise<ArchitectureAssertion | null>;
+  listForVersion(architectureVersionId: string): Promise<ArchitectureAssertion[]>;
+}
+
 // --- Architecture Decision Records (ARCH-003) ---
 
 export interface ArchitectureDecisionRecord {

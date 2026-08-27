@@ -107,6 +107,7 @@ import {
   PgArchitectureVersionRepository,
   PgArchitectureDecisionRepository,
   PgArchitectureChangeRequestRepository,
+  PgArchitectureAssertionRepository,
 } from './modules/architecture/internal/pg-architecture-repository.js';
 import { DefaultArchitectureService } from './modules/architecture/internal/architecture-service.js';
 import type {
@@ -146,7 +147,13 @@ import type { AppConfig } from './config.js';
 import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
 import type { WorkflowEngine } from '@modules/workflows/index.js';
 import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from './modules/workflows/internal/workflow-orchestrator.js';
-import type { WorkflowOrchestrator } from '@modules/workflows/index.js';
+import type { WorkflowOrchestrator, ArchitectureCheckpointGate } from '@modules/workflows/index.js';
+// WORK-051: the application-layer architecture checkpoint subsystem (the
+// lifecycle gate implementation consumed by the workflow orchestrator).
+import {
+  DefaultArchitectureCheckpointService,
+  createDefaultDetectorRegistry,
+} from '@root/architecture-checkpoints/index.js';
 import { DefaultAgentGateway } from './modules/agents/internal/agent-gateway.js';
 import type { AgentGateway } from '@modules/agents/index.js';
 import { PgAgentRunRepository } from './modules/agents/internal/pg-agent-repository.js';
@@ -346,6 +353,8 @@ export interface AppDeps {
   architectureDecisionRepository?: ArchitectureDecisionRepository;
   /** WORK-005: architecture change request repository. */
   architectureChangeRequestRepository?: ArchitectureChangeRequestRepository;
+  /** WORK-051: the assertion store owned by /architecture (append-only). */
+  architectureAssertionRepository?: PgArchitectureAssertionRepository;
   /** WORK-005: architecture service (freeze, approve change → replacement version). */
   architectureService?: ArchitectureService;
   /** WORK-006: requirement repository. */
@@ -641,6 +650,7 @@ export async function buildApp(
   let architectureVersionRepository: ArchitectureVersionRepository | undefined;
   let architectureDecisionRepository: ArchitectureDecisionRepository | undefined;
   let architectureChangeRequestRepository: ArchitectureChangeRequestRepository | undefined;
+  let architectureAssertionRepository: PgArchitectureAssertionRepository | undefined;
   let architectureService: ArchitectureService | undefined;
   let requirementRepository: RequirementRepository | undefined;
   let requirementDependencyRepository: RequirementDependencyRepository | undefined;
@@ -763,6 +773,9 @@ export async function buildApp(
     architectureVersionRepository = new PgArchitectureVersionRepository(database);
     architectureDecisionRepository = new PgArchitectureDecisionRepository(database);
     architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(database);
+    // WORK-051: the assertion store owned by /architecture (append-only; the
+    // public-barrel reader view is what the checkpoint subsystem receives).
+    architectureAssertionRepository = new PgArchitectureAssertionRepository(database);
     architectureService = new DefaultArchitectureService(database);
     requirementRepository = new PgRequirementRepository(database);
     requirementDependencyRepository = new PgRequirementDependencyRepository(database);
@@ -895,6 +908,22 @@ export async function buildApp(
     // WORK-017/018: workflow orchestrator (convergence loop). Requires
     // Redis for the queue — constructed only when redisClient is available.
     if (redisClient) {
+      // WORK-051: the architecture checkpoint gate — the application-layer
+      // checkpoint service evaluates architectural conformance (assertion
+      // set owned by /architecture; evidence persisted through
+      // /verification) and returns the gating result the orchestrator
+      // consumes before each gated lifecycle transition. The readers are
+      // the STRUCTURALLY NARROWED read-only views (no mutation capability).
+      const architectureCheckpointGate: ArchitectureCheckpointGate =
+        new DefaultArchitectureCheckpointService({
+          workItemReader: workItemRepository,
+          architectureVersionReader: architectureVersionRepository,
+          architectureReader: architectureRepository,
+          assertionReader: architectureAssertionRepository,
+          verificationService,
+          detectors: createDefaultDetectorRegistry(),
+          logger,
+        });
       orchestrator = new DefaultWorkflowOrchestrator(
         database, logger, queue, workflowEngine,
         workItemRepository, workOrderRepository, depService,
@@ -904,7 +933,7 @@ export async function buildApp(
         architectService,
         verificationService, reviewService, githubAdapter,
         architectureVersionRepository, architectureRepository,
-        projectRepository, generateExecutionId,
+        projectRepository, architectureCheckpointGate, generateExecutionId,
       );
     }
     authProvider = new ApiKeyAuthProvider(database, secretStore);
@@ -1799,6 +1828,7 @@ export async function buildApp(
       architectureVersionRepository,
       architectureDecisionRepository,
       architectureChangeRequestRepository,
+      architectureAssertionRepository,
       architectureService,
       requirementRepository,
       requirementDependencyRepository,

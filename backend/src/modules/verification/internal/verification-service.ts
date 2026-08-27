@@ -611,6 +611,50 @@ export class DefaultVerificationService implements VerificationService {
   async storeLargeArtifact(input: PutObjectInput): Promise<PutObjectResult> {
     return this.objectStore.put(input);
   }
+
+  // --- WORK-051: orchestration-run finalization ---
+  //
+  // The architecture checkpoint subsystem (application layer) persists its
+  // evidence through this /verification public contract. Runs it creates
+  // reach a terminal state ONLY through this method — /verification stays
+  // the sole evidence authority and the caller holds no verification-table
+  // write capability.
+
+  async finalizeOrchestrationRun(input: {
+    verificationRunId: string;
+    status: 'completed' | 'failed';
+    summary?: Record<string, unknown>;
+    errorMetadata?: Record<string, unknown> | null;
+  }): Promise<VerificationRun> {
+    const run = await this.runRepo.findById(input.verificationRunId);
+    if (!run) {
+      throw new Error(
+        `finalizeOrchestrationRun: verification run ${input.verificationRunId} not found`,
+      );
+    }
+    // Fail closed: only non-terminal runs may be finalized, and only to a
+    // terminal status. A completed/failed run is an immutable historical
+    // record — re-finalization would overwrite history (the checkpoint
+    // contract: a later checkpoint creates a NEW run, never overwrites).
+    if (run.status === 'completed' || run.status === 'failed') {
+      throw new Error(
+        `finalizeOrchestrationRun: verification run ${input.verificationRunId} is already ` +
+          `${run.status} — orchestration runs are finalized exactly once`,
+      );
+    }
+    const updated = await this.runRepo.update(input.verificationRunId, {
+      status: input.status,
+      finishedAt: new Date(),
+      summary: input.summary ?? {},
+      errorMetadata: input.errorMetadata ?? null,
+    });
+    if (!updated) {
+      throw new Error(
+        `finalizeOrchestrationRun: verification run ${input.verificationRunId} not found`,
+      );
+    }
+    return updated;
+  }
 }
 
 // --- Translation helpers ---

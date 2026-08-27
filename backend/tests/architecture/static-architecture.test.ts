@@ -1229,6 +1229,15 @@ describe('WORK-005 invariants — architecture module boundaries', () => {
       // WORK-025: re-exported for transaction-scoped plan apply
       'PgArchitectureRepository',
       'PgArchitectureVersionRepository',
+      // WORK-051: version-scoped architecture assertions (owned by
+      // /architecture; read by the checkpoint subsystem through the
+      // public-barrel ArchitectureAssertionReader).
+      'ArchitectureAssertion',
+      'ArchitectureAssertionSeverity',
+      'ArchitectureAssertionScope',
+      'CreateArchitectureAssertionInput',
+      'ArchitectureAssertionRepository',
+      'ArchitectureAssertionReader',
     ]);
     const exported: string[] = [];
     for (const m of archIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -11198,7 +11207,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-043 execution-eligibility constraint migration — ALTER + INDEX only, no planner-owned table)').toMatch(/^0051_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 architecture-assertions migration — /architecture-owned assertion storage, no planner-owned table)').toMatch(/^0052_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -14535,5 +14544,492 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(handoff).toMatch(/R4-#1\. advisory gate ELIGIBLE \+ a saturated window/);
     expect(handoff).toMatch(/handoff-admission-rejected/);
     expect(handoff).toMatch(/the obligation stays PENDING \(recoverable\)/);
+  });
+});
+
+// =============================================================================
+// WORK-051 — Architecture Governance and Checkpoints
+// (issue #51: an executable architecture-conformance substrate around the
+// existing lifecycle — /architecture owns versions+assertions, /verification
+// owns evidence, /workflows owns transitions, the checkpoint capability is
+// application-layer orchestration ONLY).
+// =============================================================================
+
+describe('WORK-051 invariants — Architecture Governance and Checkpoints', () => {
+  const AC_DIR = join(BACKEND_ROOT, 'src', 'architecture-checkpoints');
+  const AC_INTERNAL = join(AC_DIR, 'internal');
+  const AC_DETECTORS = join(AC_INTERNAL, 'detectors');
+  const AC_TYPES = join(AC_DIR, 'types.ts');
+  const AC_SERVICE = join(AC_INTERNAL, 'default-checkpoint-service.ts');
+  const AC_REGISTRY = join(AC_INTERNAL, 'detector-registry.ts');
+  const ORCHESTRATOR = join(MODULES_DIR, 'workflows', 'internal', 'workflow-orchestrator.ts');
+  const CONVERGENCE_TYPES = join(MODULES_DIR, 'workflows', 'internal', 'convergence.types.ts');
+  const ARCH_TYPES = join(MODULES_DIR, 'architecture', 'internal', 'architecture.types.ts');
+  const ARCH_REPO = join(MODULES_DIR, 'architecture', 'internal', 'pg-architecture-repository.ts');
+  const ARCH_BARREL = join(MODULES_DIR, 'architecture', 'index.ts');
+  const VER_TYPES = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+  const VER_SERVICE = join(MODULES_DIR, 'verification', 'internal', 'verification-service.ts');
+  const WORKFLOW_TYPES = join(MODULES_DIR, 'workflows', 'internal', 'workflow.types.ts');
+  const MIGRATION_0052 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0052_architecture_assertions.sql',
+  );
+  const GATE_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'workflows', 'checkpoint-gates.integration.test.ts',
+  );
+  const CHECKPOINT_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'architecture-governance', 'checkpoint-service.integration.test.ts',
+  );
+  const ASSERTION_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'architecture', 'architecture-assertions.integration.test.ts',
+  );
+
+  function strip(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function listAcFiles(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const entry of readdirSync(d).sort()) {
+        const full = join(d, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) out.push(full);
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  const AC_FILES = listAcFiles(AC_DIR);
+
+  // --- (1) NO second workflow/state-machine authority -----------------------
+
+  it('NO second workflow/state-machine authority — the checkpoint subsystem owns no state machine, no engine, no transition map', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      // The workflow-transition DETECTOR legitimately READS the authority's
+      // LEGAL_TRANSITIONS literal (that is its evaluation). What checkpoint
+      // code must NEVER do is DECLARE its own map — a second state machine.
+      expect(src, `${f}: no LEGAL_TRANSITIONS declaration in checkpoint code`).not.toMatch(
+        /(?:const|let|var)\s+LEGAL_TRANSITIONS/,
+      );
+      expect(src, `${f}: no WorkflowEngine implementation`).not.toMatch(/implements\s+WorkflowEngine/);
+      expect(src, `${f}: no workflow-transition SQL`).not.toMatch(/wfos_workflow_executions|wfos_workflow_transitions/);
+      // The checkpoint vocabulary is its OWN closed set — it never re-declares
+      // WorkflowState or a competing state enum.
+      expect(src, `${f}: no competing workflow-state enum`).not.toMatch(
+        /type\s+\w*\s*=\s*'(draft|ready|assigned|implementing)'\s*\|/,
+      );
+    }
+    // The gate contract explicitly says the gate NEVER mutates workflow state
+    // (raw source — the prose lives in the doc comment).
+    const gateTypesRaw = readFileSync(CONVERGENCE_TYPES, 'utf8');
+    expect(gateTypesRaw).toMatch(/NEVER mutates workflow state/);
+    // LEGAL_TRANSITIONS itself is unchanged — still exactly the frozen 15-state map.
+    const wf = readFileSync(WORKFLOW_TYPES, 'utf8');
+    expect(wf).toMatch(/verified: \[\], \/\/ terminal/);
+    expect(wf).toMatch(/architecture_change_request: \[\], \/\/ terminal until architecture change is resolved/);
+  });
+
+  // --- (2) NO second verification/evidence authority --------------------------
+
+  it('NO second verification/evidence authority — migration 0052 creates only the /architecture assertion table; checkpoint evidence flows through /verification', () => {
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/CREATE TABLE wfos_architecture_assertions/);
+    // The ONLY table created is the assertion table — NO evidence store.
+    const created = [...migration.matchAll(/CREATE TABLE (\w+)/g)].map((m) => m[1]);
+    expect(created).toEqual(['wfos_architecture_assertions']);
+    // No migration anywhere creates a checkpoint/evidence-adjacent table.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = strip(readFileSync(join(migrationsDir, f), 'utf8'));
+      expect(text, `${f}: no parallel checkpoint/evidence store`).not.toMatch(
+        /CREATE TABLE[^\n]*(checkpoint|conformance)/i,
+      );
+    }
+    // Checkpoint code never declares a competing evidence repository/run
+    // implementation — it consumes the VerificationService public contract.
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no evidence-table SQL`).not.toMatch(/wfos_evidence|wfos_verification_runs/);
+      expect(src, `${f}: no VerificationService implementation`).not.toMatch(
+        /implements\s+VerificationService/,
+      );
+    }
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/verificationService\.createRun/);
+    expect(svc).toMatch(/verificationService\.attachEvidence/);
+    expect(svc).toMatch(/verificationService\.finalizeOrchestrationRun/);
+    // /verification owns the finalize contract (the ONLY new method, on the
+    // existing authority).
+    const verTypes = strip(readFileSync(VER_TYPES, 'utf8'));
+    expect(verTypes).toMatch(/finalizeOrchestrationRun/);
+    expect(readFileSync(VER_TYPES, 'utf8')).toMatch(/SOLE evidence authority/);
+  });
+
+  // --- (3) NO second architecture authority -----------------------------------
+
+  it('NO second architecture authority — assertions are owned by /architecture; the checkpoint subsystem holds only READ-ONLY reader ports', () => {
+    // The assertion repository + types live ONLY under /architecture.
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no assertion-repository implementation`).not.toMatch(
+        /implements\s+ArchitectureAssertionRepository/,
+      );
+      expect(src, `${f}: no assertion-table SQL`).not.toMatch(/wfos_architecture_assertions/);
+      expect(src, `${f}: no ArchitectureService implementation`).not.toMatch(
+        /implements\s+ArchitectureService/,
+      );
+    }
+    // The /architecture types declare the reader + the append-only repo
+    // (create/find/list ONLY — no update, no delete).
+    const archTypes = strip(readFileSync(ARCH_TYPES, 'utf8'));
+    expect(archTypes).toMatch(/interface ArchitectureAssertionRepository/);
+    expect(archTypes).toMatch(/interface ArchitectureAssertionReader/);
+    const repoIface = archTypes.slice(
+      archTypes.indexOf('interface ArchitectureAssertionRepository'),
+      archTypes.indexOf('interface ArchitectureAssertionReader'),
+    );
+    expect(repoIface).toMatch(/create\(/);
+    expect(repoIface).toMatch(/findById\(/);
+    expect(repoIface).toMatch(/listForVersion\(/);
+    expect(repoIface, 'no update method on the assertion contract').not.toMatch(/\bupdate\(/);
+    expect(repoIface, 'no delete method on the assertion contract').not.toMatch(/\bdelete\(/);
+    // The reader is exported through the /architecture public barrel.
+    const barrel = readFileSync(ARCH_BARREL, 'utf8');
+    expect(barrel).toMatch(/ArchitectureAssertionReader/);
+    // The checkpoint service consumes the reader — never the repository.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/assertionReader/);
+    expect(svc, 'the checkpoint service takes no assertion repository').not.toMatch(
+      /assertionRepository/,
+    );
+  });
+
+  // --- (4)+(5)+(6) NO direct writes from checkpoint code ----------------------
+
+  it('checkpoint code cannot DIRECTLY write workflow state, architecture definitions, or verification tables', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      // No SQL at all in the checkpoint subsystem.
+      expect(src, `${f}: checkpoint code issues no SQL`).not.toMatch(
+        /\b(INSERT INTO|UPDATE|DELETE FROM|SELECT)\b/,
+      );
+      // No workflow-state mutation capability.
+      expect(src, `${f}: no WorkflowEngine dependency`).not.toMatch(/WorkflowEngine/);
+      expect(src, `${f}: no workflow transition invocation`).not.toMatch(/\.transition\(/);
+      // No architecture mutation capability.
+      expect(src, `${f}: no transitionState/freeze/approve calls`).not.toMatch(
+        /transitionState|freezeVersion|approveChangeAndCreateReplacement|rejectChangeRequest/,
+      );
+    }
+    // The service's reader ports are structurally read-only (findById only).
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    for (const reader of ['ArchitectureVersionReader', 'ArchitectureReader', 'WorkItemReader']) {
+      const block = types.slice(
+        types.indexOf(`interface ${reader}`),
+        types.indexOf('}', types.indexOf(`interface ${reader}`) + 1),
+      );
+      expect(block, `${reader}: findById only`).toMatch(/findById\(/);
+      expect(block, `${reader}: no mutation methods`).not.toMatch(/\b(create|update|delete|transition)\b/);
+    }
+    // Evidence persistence goes through the /verification public barrel import.
+    const svcImports = readFileSync(AC_SERVICE, 'utf8');
+    expect(svcImports).toMatch(/from '@platform\/logger\.js'/);
+    expect(svcImports, 'the checkpoint service imports from module barrels only').not.toMatch(
+      /from '@modules\/[^']+'\/internal\//,
+    );
+  });
+
+  // --- (7) detector imports use public barrels only ---------------------------
+
+  it('detectors import through public barrels only (no module internal/ bypasses)', () => {
+    const detectorFiles = listAcFiles(AC_DETECTORS);
+    expect(detectorFiles.length).toBeGreaterThanOrEqual(7); // 6 detectors + file-tree helper
+    for (const f of [...detectorFiles, AC_REGISTRY]) {
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1]!;
+        if (spec.startsWith('@modules/')) {
+          // Public barrels ONLY: '@modules/<name>/index.js' or '@modules/<name>'.
+          expect(spec, `${f}: detector imports must use the module barrel`).toMatch(
+            /^@modules\/[\w-]+(\/index\.js)?$/,
+          );
+        }
+      }
+    }
+    // The same rule holds for the whole checkpoint subsystem.
+    for (const f of AC_FILES) {
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1]!;
+        if (spec.startsWith('@modules/')) {
+          expect(spec, `${f}: checkpoint code must use the module barrel`).toMatch(
+            /^@modules\/[\w-]+(\/index\.js)?$/,
+          );
+        }
+      }
+    }
+  });
+
+  // --- (8) NO detector/provider credential coupling ----------------------------
+
+  it('detectors hold no provider or credential coupling', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no pg/pglite/redis drivers`).not.toMatch(
+        /from '(pg|@electric-sql\/pglite|ioredis)'/,
+      );
+      expect(src, `${f}: no secrets/credential access`).not.toMatch(
+        /secretStore|SecretStore|apiToken|apiKey|credential/i,
+      );
+      expect(src, `${f}: no environment-variable credential reads`).not.toMatch(/process\.env/);
+    }
+    // The detector contract states it in prose (types.ts).
+    const types = readFileSync(AC_TYPES, 'utf8');
+    expect(types).toMatch(/never hold credentials or provider coupling/);
+  });
+
+  // --- (9) NO caller-controlled tenant scope ------------------------------------
+
+  it('tenant/project scope is SERVER-RESOLVED and validated BEFORE detector execution', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // The server-side resolution chain: workItem → version → architecture → project.
+    expect(svc).toMatch(/workItemReader\.findById/);
+    expect(svc).toMatch(/architectureVersionReader\.findById/);
+    expect(svc).toMatch(/architectureReader\.findById/);
+    // The tenant guard compares the CALLER'S expectation against the resolved
+    // project and throws BEFORE any detector runs.
+    expect(svc).toMatch(/CrossTenantCheckpointAccessError/);
+    // CODE-ORDER proof (stripped source): the tenant throw precedes BOTH the
+    // assertion-set read and the detector lookup — no detector can run for a
+    // cross-tenant caller.
+    const tenantThrow = svc.indexOf('throw new CrossTenantCheckpointAccessError');
+    const assertionRead = svc.indexOf('this.deps.assertionReader.listForVersion');
+    const detectorLookup = svc.indexOf('this.deps.detectors.get');
+    expect(tenantThrow).toBeGreaterThanOrEqual(0);
+    expect(assertionRead).toBeGreaterThanOrEqual(0);
+    expect(detectorLookup).toBeGreaterThanOrEqual(0);
+    expect(tenantThrow, 'the tenant guard fires before assertions are read').toBeLessThan(assertionRead);
+    expect(tenantThrow, 'the tenant guard fires before any detector is resolved').toBeLessThan(detectorLookup);
+    // The prose contract lives in the raw source (doc comments).
+    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/BEFORE any detector execution/);
+    // The gate input type documents the same contract (raw source — prose).
+    const gateTypes = readFileSync(CONVERGENCE_TYPES, 'utf8');
+    expect(gateTypes).toMatch(/SERVER-SIDE/);
+    expect(gateTypes).toMatch(/caller-controlled tenant scope is impossible by construction/);
+    // The orchestrator passes the SERVER-RESOLVED signal.projectId (never a
+    // client-supplied project id) as the expected project.
+    const orch = strip(readFileSync(ORCHESTRATOR, 'utf8'));
+    expect(orch).toMatch(/expectedProjectId: signal\.projectId/);
+  });
+
+  // --- (10) NO new lifecycle states ----------------------------------------------
+
+  it('NO new lifecycle states — the gate contract is a gate, not a state; WorkflowState is untouched', () => {
+    const wf = readFileSync(WORKFLOW_TYPES, 'utf8');
+    // The frozen 15 states, exactly (counting assertion — mutation-proof).
+    const states = [...wf.matchAll(/^\s{2}\| '(\w+)';?$/gm)].map((m) => m[1]!);
+    expect(states).toHaveLength(15);
+    expect(states).toContain('verified');
+    expect(states).toContain('architecture_change_request');
+    // The checkpoint kinds are NOT workflow states.
+    const gateTypes = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    const kinds = gateTypes.slice(
+      gateTypes.indexOf('export type ArchitectureCheckpointKind'),
+      gateTypes.indexOf('export interface ArchitectureCheckpointGateInput'),
+    );
+    expect(kinds).toMatch(/'readiness'/);
+    expect(kinds).toMatch(/'work_order'/);
+    expect(kinds).toMatch(/'pr_conformance'/);
+    expect(kinds).toMatch(/'verification_entry'/);
+    // The orchestrator still performs EVERY transition through the engine
+    // (the boundary prose lives in the raw source doc comment).
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    expect(strip(orch)).toMatch(/this\.workflowEngine\.transition\(/);
+    expect(orch).toMatch(/NEVER mutates wfos_workflow_executions directly/);
+  });
+
+  // --- (11) NO scheduler-driven checkpoint execution -------------------------------
+
+  it('NO scheduler-driven checkpoint execution in the initial increment', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no scheduler`).not.toMatch(/setInterval|setTimeout|cron|schedule\(/);
+      // No queue producers — checkpoint evaluation is caller-invoked only.
+      expect(src, `${f}: no queue coupling`).not.toMatch(/enqueue\(/);
+    }
+  });
+
+  // --- (12) the lifecycle gates are enforced at EVERY transition site (counting) -----
+
+  it('MUTATION-PROOF — the four gates guard EVERY gated transition site in the orchestrator (counting, not first-occurrence)', () => {
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    // 8 gate invocations (readiness ×1, work_order ×2, pr_conformance ×3,
+    // verification_entry ×2) + 1 private method definition = 9 occurrences.
+    const gateCalls = [...orch.matchAll(/this\.runArchitectureCheckpointGate\(/g)].length;
+    expect(gateCalls, 'all four gate kinds × all sites must evaluate the gate').toBe(8);
+    const gateDefs = [...orch.matchAll(/private async runArchitectureCheckpointGate\(/g)].length;
+    expect(gateDefs).toBe(1);
+
+    // Each gated transition site is immediately preceded by its gate check:
+    // counting pairs — 'allowed' check BEFORE 'transition(' — at every site.
+    const prOpenTransitions = [...orch.matchAll(/this\.transition\(signal, 'pr_open'\)/g)].length;
+    expect(prOpenTransitions).toBe(3);
+    const prGates = [...orch.matchAll(/this\.runArchitectureCheckpointGate\(\s*\n?\s*this\.checkpointGateInput\(\s*\n?\s*signal,\s*\n?\s*'pr_conformance'/g)].length;
+    expect(prGates, 'every pr_open transition has a pr_conformance gate').toBe(3);
+
+    const assignedTransitions = [...orch.matchAll(/this\.transition\(signal, 'assigned'\)/g)].length;
+    expect(assignedTransitions).toBe(1);
+    const readinessGates = [...orch.matchAll(/'readiness'/g)].length;
+    expect(readinessGates).toBeGreaterThanOrEqual(2); // the gate call + the denial log
+
+    const workOrderGates = [...orch.matchAll(/'work_order', null, workOrder\.id\)/g)].length;
+    expect(workOrderGates, 'both agent-launch sites gate on work_order').toBe(2);
+
+    const verifyingTransitions = [...orch.matchAll(/toState: 'verifying'|transition\(signal, 'verifying'\)/g)].length;
+    expect(verifyingTransitions).toBe(2);
+    const verificationEntryGates = [...orch.matchAll(/checkpointKind: 'verification_entry'/g)].length;
+    expect(verificationEntryGates, 'both verification-entry paths gate').toBe(2);
+
+    // The direct beginVerification path throws the typed denial (fail closed
+    // with a durable reason), and the route maps it to 409.
+    expect(orch).toMatch(/ArchitectureCheckpointGateDeniedError/);
+    const route = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8');
+    expect(route).toMatch(/architecture-checkpoint-gate-denied/);
+    expect(route).toMatch(/reply\.code\(409\)/);
+    // Gate errors fail closed in the orchestrator helper.
+    expect(orch).toMatch(/FAIL CLOSED/);
+  });
+
+  // --- the detector registry is closed and matches the design ------------------
+
+  it('the detector registry registers EXACTLY the six initial detector kinds (closed set)', () => {
+    const registry = strip(readFileSync(AC_REGISTRY, 'utf8'));
+    expect(registry).toMatch(/'repository-structure'/);
+    expect(registry).toMatch(/'schema-migration'/);
+    expect(registry).toMatch(/'authority-ownership'/);
+    expect(registry).toMatch(/'interface-contract'/);
+    expect(registry).toMatch(/'workflow-transition'/);
+    expect(registry).toMatch(/'runtime-configuration'/);
+    const kinds = [...registry.matchAll(/'([a-z-]+)',/g)].map((m) => m[1]!);
+    const declared = kinds.filter((k) =>
+      ['repository-structure', 'schema-migration', 'authority-ownership', 'interface-contract', 'workflow-transition', 'runtime-configuration'].includes(k),
+    );
+    expect(declared).toHaveLength(6);
+    // No other file registers detectors (single enumerable seam).
+    for (const f of AC_FILES) {
+      if (f === AC_REGISTRY) continue;
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: detectors register only in the registry`).not.toMatch(
+        /registry\.set\(d\.detectorKind/,
+      );
+    }
+  });
+
+  // --- the impact matrix is pinned as data ---------------------------------------
+
+  it('the impact/checkpoint applicability matrix matches the design (frequency control, never rule weakening)', () => {
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(
+      /readiness: \['high'\],\s*work_order: \['medium', 'high'\],\s*pr_conformance: \['low', 'medium', 'high'\],\s*verification_entry: \['high'\],/,
+    );
+    // The fail-closed default: unknown/absent impact derives 'high'.
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/FAIL-CLOSED default 'high'/);
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/return 'high';/);
+    // Impact controls frequency ONLY — the checkpoint never downgrades
+    // severity (raw source — the prose lives in the doc comment; flexible
+    // whitespace to span the wrapped comment line).
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(
+      /never weakens[\s\S]{0,40}underlying architecture[\s\S]{0,20}rules/,
+    );
+  });
+
+  // --- the fail-closed aggregation is pinned --------------------------------------
+
+  it('the aggregation is fail-closed: blocking fail OR inconclusive ⇒ blocked; advisory never blocks', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/blockingFindings\.length > 0/);
+    expect(svc).toMatch(/'passed_with_advisories'/);
+    expect(svc).toMatch(/'passed'/);
+    // An inconclusive blocking assertion is a DENIAL (the design §7 rule):
+    // the ONLY statuses excluded from the findings loop are pass and
+    // not_applicable — a blocking 'inconclusive' falls through to
+    // blockingFindings exactly like a blocking 'fail'.
+    expect(svc).toMatch(
+      /if \(e\.status === 'not_applicable' \|\| e\.status === 'pass'\) continue;\s*const line =[\s\S]{0,160}if \(e\.severity === 'blocking'\) \{\s*blockingFindings\.push\(line\);\s*\} else \{\s*advisories\.push\(line\);/,
+    );
+    // A detector crash is inconclusive — never a pass.
+    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/detector crash is an INCONCLUSIVE evaluation/);
+  });
+
+  // --- evidence immutability + revision binding ------------------------------------
+
+  it('checkpoint evidence is revision-bound, append-only, and finalized exactly once', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/headSha: result\.implementationRevision/);
+    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/the next checkpoint creates a NEW run/);
+    const ver = strip(readFileSync(VER_SERVICE, 'utf8'));
+    expect(ver).toMatch(/finalized exactly once/);
+    expect(ver).toMatch(/orchestration runs are finalized exactly once/);
+  });
+
+  // --- the self-hosting boundary -----------------------------------------------------
+
+  it('self-hosting: WorkflowOS can evaluate itself but gains NO unchecked authority over its governing architecture', () => {
+    // The checkpoint subsystem has NO path to mutate architecture: no
+    // ArchitectureService dependency, no version transitions, reader-only
+    // ports (already asserted above), and /architecture owns every write.
+    const archRepo = strip(readFileSync(ARCH_REPO, 'utf8'));
+    expect(archRepo).toMatch(/class PgArchitectureAssertionRepository/);
+    // The frozen version's assertion set is closed at the PERSISTENCE level.
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/wfos_arch_assertions_draft_only/);
+    expect(migration).toMatch(/wfos_arch_assertions_protect/);
+    expect(migration).toMatch(/append-only/i);
+    // The runtime self-hosting regression exists and evaluates the REAL tree.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/PROOF 11 — WorkflowOS evaluates ITSELF/);
+    expect(tests).toMatch(/claim-authority/);
+  });
+
+  // --- the mandatory regression coverage exists ---------------------------------------
+
+  it('the mandatory WORK-051 regression coverage exists (all 11 proofs mapped to executable tests)', () => {
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    const service = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    const assertions = readFileSync(ASSERTION_TESTS, 'utf8');
+    // 1 — violation detected before PR creation.
+    expect(service).toMatch(/PROOF 1 —/);
+    expect(gates).toMatch(/drift caught before PR creation/);
+    // 2 — determinism.
+    expect(service).toMatch(/PROOF 2 —/);
+    // 3 — evidence binding.
+    expect(service).toMatch(/PROOF 3 —/);
+    // 4 — distinct immutable revision-bound results.
+    expect(service).toMatch(/PROOF 4 —/);
+    // 5 — blocking failures prevent the workflow transition.
+    expect(gates).toMatch(/PROOF 5 —/);
+    // 6 — advisory failures do not block.
+    expect(service).toMatch(/PROOF 6 —/);
+    expect(gates).toMatch(/PROOF 6 \(lifecycle\)/);
+    // 7 — inconclusive blocking assertions fail closed.
+    expect(service).toMatch(/PROOF 7a —/);
+    expect(service).toMatch(/PROOF 7b —/);
+    expect(service).toMatch(/PROOF 7c —/);
+    expect(service).toMatch(/PROOF 7d —/);
+    // 8 — intentional architecture changes never mutate frozen versions.
+    expect(assertions).toMatch(/PROOF 8a —/);
+    expect(assertions).toMatch(/PROOF 8b —/);
+    expect(assertions).toMatch(/PROOF 8c —/);
+    expect(assertions).toMatch(/PROOF 8d —/);
+    // 9 — cross-tenant rejection before detector execution.
+    expect(service).toMatch(/PROOF 9 —/);
+    // 10 — checkpoint code cannot directly write workflow/architecture/verification.
+    //      (That is THIS block: invariants (1)-(6) above are the executable proof.)
+    // 11 — self-hosting without unchecked authority.
+    expect(service).toMatch(/PROOF 11 —/);
   });
 });

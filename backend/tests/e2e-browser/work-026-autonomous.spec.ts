@@ -136,6 +136,7 @@ import { DefaultExecutionService } from '../../src/modules/agents/internal/execu
 import { DefaultExecutionPromptBuilder } from '../../src/modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from '../../src/modules/work-items/internal/execution-task-service.js';
 import type { FastifyInstance } from 'fastify';
+import { AllowAllCheckpointGate } from '../helpers/allow-all-checkpoint-gate.js';
 
 let stack: TestAuthStack;
 let server: FastifyInstance;
@@ -409,6 +410,7 @@ test.beforeAll(async () => {
     stack.architectureVersionRepository,
     stack.architectureRepository,
     stack.projectRepository,
+    new AllowAllCheckpointGate(),
     generateExecutionId,
   );
 

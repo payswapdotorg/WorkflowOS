@@ -387,4 +387,31 @@ export interface VerificationService {
    * Pure read — no mutation, no evaluation.
    */
   listMappingsForRun(verificationRunId: string): Promise<CriterionEvidenceMapping[]>;
+
+  /**
+   * WORK-051 — finalize a VerificationRun produced by an application-layer
+   * orchestration capability (e.g. the architecture checkpoint subsystem).
+   *
+   * /verification remains the SOLE evidence authority: this is the ONLY way
+   * an orchestration-produced run reaches a terminal state. It records the
+   * terminal status + summary through /verification's own repository — the
+   * caller never writes verification tables directly.
+   *
+   * Constraints (fail closed):
+   * - the run must exist;
+   * - the run must be in a non-terminal state ('pending' | 'running');
+   * - the target status must be terminal ('completed' | 'failed').
+   *
+   * This does NOT evaluate criteria, map evidence, derive requirement
+   * statuses, or mutate workflow state. Checkpoint evidence attached through
+   * {@link attachEvidence} remains `claim`-authority by the frozen evidence
+   * hierarchy (§2.2, §15) — machine-produced conformance evidence is traceable
+   * context, never authoritative criterion PASS.
+   */
+  finalizeOrchestrationRun(input: {
+    verificationRunId: string;
+    status: 'completed' | 'failed';
+    summary?: Record<string, unknown>;
+    errorMetadata?: Record<string, unknown> | null;
+  }): Promise<VerificationRun>;
 }

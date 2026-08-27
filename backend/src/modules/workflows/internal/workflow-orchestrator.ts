@@ -23,7 +23,12 @@ import type {
   ConvergenceSignal,
   SubmitSignalInput,
   MergeGateResult,
+  ArchitectureCheckpointKind,
+  ArchitectureCheckpointGate,
+  ArchitectureCheckpointGateInput,
+  ArchitectureCheckpointGateResult,
 } from './convergence.types.js';
+import { ArchitectureCheckpointGateDeniedError } from './convergence.types.js';
 import type { WorkflowEngine, WorkflowState, TransitionResult } from './workflow.types.js';
 import { PgConvergenceSignalRepository } from './pg-convergence-repository.js';
 
@@ -78,6 +83,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     private readonly architectureVersionRepository: ArchitectureVersionRepository,
     private readonly architectureRepository: ArchitectureRepository,
     projectRepository: ProjectRepository,
+    private readonly architectureCheckpointGate: ArchitectureCheckpointGate,
     private readonly genExecutionId: typeof generateExecutionId,
   ) {
     this.signalRepo = new PgConvergenceSignalRepository(this.db);
@@ -408,6 +414,18 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       const workOrders = await this.workOrderRepository.listForWorkItem(signal.workItemId);
       const workOrder = workOrders.find((wo) => wo.state === 'generated' || wo.state === 'draft') ?? workOrders[0] ?? null;
       if (workOrder) {
+        // WORK-051 gate 2 (correction path) — PRE-IMPLEMENTATION WORK ORDER
+        // checkpoint before the corrected implementation agent starts. A
+        // non-allowing gate leaves the work item IMPLEMENTING with no agent
+        // run (the correction cannot proceed until conformance is restored
+        // or an Architecture Change Request is opened).
+        const workOrderGate = await this.runArchitectureCheckpointGate(
+          this.checkpointGateInput(signal, 'work_order', null, workOrder.id),
+        );
+        if (!workOrderGate.allowed) {
+          this.logCheckpointDenial('work_order', signal.workItemId, workOrderGate);
+          return currentState;
+        }
         const agentExecutionId = this.genExecutionId();
         const provider = (signal.payload.agentProvider as string) ?? 'fake';
         try {
@@ -431,6 +449,20 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
                   headCommit: agentResult.commitRef ?? undefined,
                 });
               }
+            }
+            // WORK-051 gate 3 (correction path) — PR ARCHITECTURE
+            // CONFORMANCE checkpoint before PR_OPEN. A non-allowing gate
+            // leaves the work item IMPLEMENTING (no PR_OPEN transition).
+            const prGate = await this.runArchitectureCheckpointGate(
+              this.checkpointGateInput(
+                signal,
+                'pr_conformance',
+                agentResult.commitRef ?? agentResult.pullRequestRef ?? null,
+              ),
+            );
+            if (!prGate.allowed) {
+              this.logCheckpointDenial('pr_conformance', signal.workItemId, prGate);
+              return currentState;
             }
             const prResult = await this.transition(signal, 'pr_open');
             if (prResult.success) currentState = 'pr_open';
@@ -499,6 +531,17 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
 
       // ASSIGNED (only transition if not already assigned)
       if (currentState === 'ready') {
+        // WORK-051 gate 1 — ARCHITECTURE READINESS before implementation
+        // assignment. The checkpoint verifies the Work Item has a valid
+        // immutable ArchitectureVersion and a resolvable assertion set. A
+        // non-allowing gate leaves the work item in READY (no assignment).
+        const readinessGate = await this.runArchitectureCheckpointGate(
+          this.checkpointGateInput(signal, 'readiness', null),
+        );
+        if (!readinessGate.allowed) {
+          this.logCheckpointDenial('readiness', signal.workItemId, readinessGate);
+          return currentState;
+        }
         const assignedResult = await this.transition(signal, 'assigned');
         if (!assignedResult.success) return currentState;
         currentState = 'assigned';
@@ -521,6 +564,16 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       // Execute the agent run (synchronous in tests; in production this would
       // be async via the agent.execute job).
       try {
+        // WORK-051 gate 2 — PRE-IMPLEMENTATION WORK ORDER checkpoint before
+        // the implementation agent starts. A non-allowing gate leaves the
+        // work item ASSIGNED (no agent run, no IMPLEMENTING transition).
+        const workOrderGate = await this.runArchitectureCheckpointGate(
+          this.checkpointGateInput(signal, 'work_order', null, workOrder.id),
+        );
+        if (!workOrderGate.allowed) {
+          this.logCheckpointDenial('work_order', signal.workItemId, workOrderGate);
+          return currentState;
+        }
         const agentResult = await this.agentGateway.execute(agentRequest);
         // IMPLEMENTING
         const implResult = await this.transition(signal, 'implementing');
@@ -542,6 +595,20 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
                 headCommit: agentResult.commitRef ?? undefined,
               });
             }
+          }
+          // WORK-051 gate 3 (initiate path) — PR ARCHITECTURE CONFORMANCE
+          // checkpoint before PR_OPEN. A non-allowing gate leaves the work
+          // item IMPLEMENTING (no PR_OPEN transition).
+          const prGate = await this.runArchitectureCheckpointGate(
+            this.checkpointGateInput(
+              signal,
+              'pr_conformance',
+              agentResult.commitRef ?? agentResult.pullRequestRef ?? null,
+            ),
+          );
+          if (!prGate.allowed) {
+            this.logCheckpointDenial('pr_conformance', signal.workItemId, prGate);
+            return currentState;
           }
           const prResult = await this.transition(signal, 'pr_open');
           if (!prResult.success) return currentState;
@@ -589,6 +656,21 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       }
       // Transition to PR_OPEN if currently IMPLEMENTING.
       if (exec.currentState === 'implementing') {
+        // WORK-051 gate 3 (agent_run_completed path) — PR ARCHITECTURE
+        // CONFORMANCE checkpoint before PR_OPEN, bound to the exact
+        // implementation revision the agent produced. A non-allowing gate
+        // leaves the work item IMPLEMENTING.
+        const prGate = await this.runArchitectureCheckpointGate(
+          this.checkpointGateInput(
+            signal,
+            'pr_conformance',
+            commitRef ?? pullRequestRef ?? null,
+          ),
+        );
+        if (!prGate.allowed) {
+          this.logCheckpointDenial('pr_conformance', signal.workItemId, prGate);
+          return exec.currentState;
+        }
         const result = await this.transition(signal, 'pr_open');
         return result.success ? 'pr_open' : exec.currentState;
       }
@@ -736,6 +818,74 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     });
   }
 
+  // --- WORK-051: architecture checkpoint gates ---
+  //
+  // The checkpoint capability is application-layer orchestration ONLY: it
+  // evaluates architectural conformance (ArchitectureVersion + assertion set
+  // owned by /architecture, evidence persisted through /verification) and
+  // returns a GATING RESULT. It NEVER mutates workflow state — this
+  // orchestrator performs the legal transition ONLY when the gate allows.
+  // Gate errors FAIL CLOSED (an unevaluable gate blocks the transition).
+
+  private checkpointGateInput(
+    signal: ConvergenceSignal,
+    checkpointKind: ArchitectureCheckpointKind,
+    implementationRevision: string | null | undefined,
+    workOrderId?: string | null,
+  ): ArchitectureCheckpointGateInput {
+    return {
+      checkpointKind,
+      workItemId: signal.workItemId,
+      // signal.projectId is already SERVER-RESOLVED (submitSignalInternal
+      // derives it from the work item, never from client input); the
+      // checkpoint service re-validates it against its own independent
+      // resolution before any detector executes.
+      expectedProjectId: signal.projectId,
+      implementationRevision: implementationRevision ?? null,
+      executionId: signal.executionId,
+      idempotencyKey: `${signal.workItemId}:checkpoint:${checkpointKind}:${signal.sourceEventId}`,
+      workOrderId: workOrderId ?? null,
+    };
+  }
+
+  private async runArchitectureCheckpointGate(
+    input: ArchitectureCheckpointGateInput,
+  ): Promise<ArchitectureCheckpointGateResult> {
+    try {
+      return await this.architectureCheckpointGate.evaluate(input);
+    } catch (err) {
+      // FAIL CLOSED: an unevaluable checkpoint blocks the gated transition.
+      // The work item stays in its current lifecycle state until the gate
+      // can evaluate (or an Architecture Change Request resolves the drift).
+      this.logger.warn('convergence.checkpoint.gate_error', {
+        workItemId: input.workItemId,
+        checkpointKind: input.checkpointKind,
+        error: (err as Error).message,
+      });
+      return {
+        allowed: false,
+        applicable: true,
+        status: 'inconclusive',
+        checkpointId: null,
+        reasons: [`checkpoint gate evaluation failed: ${(err as Error).message}`],
+      };
+    }
+  }
+
+  /** Log a denied gate deterministically (durable evidence lives in /verification). */
+  private logCheckpointDenial(
+    checkpointKind: ArchitectureCheckpointKind,
+    workItemId: string,
+    result: ArchitectureCheckpointGateResult,
+  ): void {
+    this.logger.info('convergence.checkpoint.denied', {
+      workItemId,
+      checkpointKind,
+      status: result.status,
+      reasons: result.reasons,
+    });
+  }
+
   // --- WORK-018: Verification/Review orchestration ---
 
   // begin_verification: PR_OPEN → VERIFYING + create VerificationRun
@@ -773,6 +923,32 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     // Transition PR_OPEN → VERIFYING synchronously (the caller needs the result).
     const exec = await this.workflowEngine.getOrCreate(input.workItemId);
     if (exec.currentState === 'pr_open') {
+      // WORK-051 gate 4 — VERIFICATION-ENTRY checkpoint before entry to
+      // VERIFYING. Architecture conformance is re-evaluated against the exact
+      // revision that will be verified (the active PR association's head
+      // commit), preventing verification from validating an implementation
+      // that drifted after the last architecture checkpoint.
+      const activePr =
+        await this.pullRequestAssociationRepository.findActiveForWorkItem(input.workItemId);
+      const verificationGate = await this.runArchitectureCheckpointGate({
+        checkpointKind: 'verification_entry',
+        workItemId: input.workItemId,
+        expectedProjectId: projectId,
+        implementationRevision: activePr?.headCommit ?? null,
+        executionId: input.executionId,
+        idempotencyKey: `${input.workItemId}:checkpoint:verification_entry:${input.sourceEventId}`,
+        workOrderId: null,
+      });
+      if (!verificationGate.allowed) {
+        // No PR_OPEN → VERIFYING transition; no verification run is created.
+        // The denial (with its durable /verification evidence) is surfaced to
+        // the caller as a typed conflict.
+        this.logCheckpointDenial('verification_entry', input.workItemId, verificationGate);
+        throw new ArchitectureCheckpointGateDeniedError(
+          'verification_entry',
+          verificationGate.reasons,
+        );
+      }
       await this.workflowEngine.transition({
         workItemId: input.workItemId,
         toState: 'verifying',
@@ -796,6 +972,10 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     const existingRunResult = await this.db.query<{ id: string; status: string }>(
       `SELECT id, status FROM wfos_verification_runs
        WHERE work_item_id = $1 AND status IN ('pending', 'running')
+         -- WORK-051: never adopt an orchestration-produced run (e.g. an
+         -- orphaned architecture-checkpoint run) as a verification run —
+         -- checkpoint evidence runs are a distinct source.
+         AND source <> 'architecture-checkpoint'
        ORDER BY created_at DESC LIMIT 1`,
       [input.workItemId],
     );
@@ -850,6 +1030,25 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         workItemId: signal.workItemId,
         currentState: exec.currentState,
       });
+      return exec.currentState;
+    }
+
+    // WORK-051 gate 4 (signal path) — VERIFICATION-ENTRY checkpoint before
+    // PR_OPEN → VERIFYING. A non-allowing gate leaves the work item PR_OPEN
+    // (no transition, no verification run created).
+    const activePr =
+      await this.pullRequestAssociationRepository.findActiveForWorkItem(signal.workItemId);
+    const verificationGate = await this.runArchitectureCheckpointGate({
+      checkpointKind: 'verification_entry',
+      workItemId: signal.workItemId,
+      expectedProjectId: signal.projectId,
+      implementationRevision: activePr?.headCommit ?? null,
+      executionId: signal.executionId,
+      idempotencyKey: `${signal.workItemId}:checkpoint:verification_entry:${signal.sourceEventId}`,
+      workOrderId: null,
+    });
+    if (!verificationGate.allowed) {
+      this.logCheckpointDenial('verification_entry', signal.workItemId, verificationGate);
       return exec.currentState;
     }
 

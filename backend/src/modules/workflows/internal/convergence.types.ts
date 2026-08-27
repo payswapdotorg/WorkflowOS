@@ -345,3 +345,102 @@ export interface MergeGateResult {
 // --- Re-export for convenience ---
 
 export type { WorkflowState, WorkflowEngine };
+
+// --- WORK-051: Architecture checkpoint gate (the lifecycle gate contract) ---
+//
+// The checkpoint capability is APPLICATION-LAYER ORCHESTRATION ONLY. It owns
+// no workflow state machine and no parallel evidence authority. This port is
+// the CONTRACT /workflows consumes: the checkpoint subsystem (wired by the
+// composition root) implements it, evaluates architectural conformance
+// against the Work Item's immutable ArchitectureVersion + assertion set
+// (owned by /architecture), persists evidence through /verification, and
+// returns a GATING RESULT.
+//
+// The gate NEVER mutates workflow state — /workflows performs the legal
+// transition only when the gate allows it (frozen architecture §13; design
+// §8: "A checkpoint never creates or mutates workflow state directly").
+
+/** The four lifecycle gates implemented in the initial increment (design §5, §11). */
+export type ArchitectureCheckpointKind =
+  | 'readiness' // before implementation assignment (READY → ASSIGNED)
+  | 'work_order' // before an implementation agent starts (ASSIGNED → agent run)
+  | 'pr_conformance' // before PR_OPEN
+  | 'verification_entry'; // before/at entry to VERIFYING
+
+export interface ArchitectureCheckpointGateInput {
+  checkpointKind: ArchitectureCheckpointKind;
+  workItemId: string;
+  /**
+   * The caller's project context. The checkpoint service resolves the
+   * authoritative project SERVER-SIDE (work item → architecture version →
+   * architecture → project) and rejects a mismatch BEFORE any detector
+   * executes — caller-controlled tenant scope is impossible by construction.
+   */
+  expectedProjectId: string;
+  /**
+   * The exact implementation revision being gated (commit SHA). REQUIRED
+   * semantically for 'pr_conformance' and 'verification_entry' (a checkpoint
+   * evaluates an exact implementation revision); null is permitted only for
+   * the pre-implementation kinds where no implementation revision exists
+   * yet. A null revision at a revision-bound gate fails closed.
+   */
+  implementationRevision?: string | null;
+  executionId: string;
+  /**
+   * Optional idempotency key derived from the convergence signal — repeated
+   * processing of the SAME signal replays the recorded checkpoint result
+   * instead of re-evaluating (a later revision is a different key and
+   * evaluates fresh).
+   */
+  idempotencyKey?: string | null;
+  /**
+   * Optional Work Order context for the pre-implementation checkpoint kinds
+   * (traceability only — the checkpoint service resolves all authoritative
+   * state server-side; this field is never trusted as identity).
+   */
+  workOrderId?: string | null;
+}
+
+export interface ArchitectureCheckpointGateResult {
+  /** Whether the gated lifecycle progression may proceed. */
+  allowed: boolean;
+  /** Whether this checkpoint kind applies to the work item's impact profile. */
+  applicable: boolean;
+  /** Checkpoint status (null when not applicable). */
+  status: 'passed' | 'passed_with_advisories' | 'blocked' | 'inconclusive' | null;
+  /** Traceability id (the /verification run id; null when not applicable). */
+  checkpointId: string | null;
+  /** Blocking findings + advisories (human-readable, deterministic order). */
+  reasons: string[];
+}
+
+/**
+ * The gate contract consumed by the WorkflowOrchestrator. Implemented by the
+ * application-layer checkpoint subsystem (src/architecture-checkpoints/),
+ * wired by the composition root.
+ */
+export interface ArchitectureCheckpointGate {
+  evaluate(input: ArchitectureCheckpointGateInput): Promise<ArchitectureCheckpointGateResult>;
+}
+
+/**
+ * Typed error thrown by the orchestrator when a lifecycle operation is
+ * refused because the architecture checkpoint gate denied progression
+ * (WORK-051). Carries the deterministic denial reasons for the API layer
+ * (mapped to HTTP 409 by the workflow route — the route duck-types the
+ * `code` field; the class itself is NOT exported through the public barrel).
+ */
+export class ArchitectureCheckpointGateDeniedError extends Error {
+  readonly code = 'architecture-checkpoint-gate-denied';
+  readonly checkpointKind: ArchitectureCheckpointKind;
+  readonly reasons: string[];
+
+  constructor(checkpointKind: ArchitectureCheckpointKind, reasons: string[]) {
+    super(
+      `architecture checkpoint gate denied ${checkpointKind}: ${reasons.join('; ')}`,
+    );
+    this.name = 'ArchitectureCheckpointGateDeniedError';
+    this.checkpointKind = checkpointKind;
+    this.reasons = reasons;
+  }
+}

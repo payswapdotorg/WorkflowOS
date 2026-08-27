@@ -53,6 +53,7 @@ import { DefaultVerificationService } from '../../src/modules/verification/inter
 import { DefaultReviewService } from '../../src/modules/reviews/internal/review-service.js';
 import { DefaultAuditService } from '../../src/modules/audit/internal/audit-service.js';
 import type { FastifyInstance } from 'fastify';
+import { AllowAllCheckpointGate } from '../helpers/allow-all-checkpoint-gate.js';
 
 let stack: TestAuthStack;
 let server: FastifyInstance;
@@ -122,7 +123,7 @@ test.beforeAll(async () => {
     stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
     architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
     stack.architectureVersionRepository, stack.architectureRepository,
-    stack.projectRepository, generateExecutionId,
+    stack.projectRepository, new AllowAllCheckpointGate(), generateExecutionId,
   );
   const handlers = buildHandlerRegistry([
     createConvergenceJobHandler(orchestrator, logger),

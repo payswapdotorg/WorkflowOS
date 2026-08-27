@@ -7,6 +7,12 @@ import type {
   ArchitectureVersionRepository,
   ArchitectureVersionState,
   CreateArchitectureVersionInput,
+  ArchitectureAssertion,
+  ArchitectureAssertionRepository,
+  ArchitectureAssertionReader,
+  ArchitectureAssertionSeverity,
+  ArchitectureAssertionScope,
+  CreateArchitectureAssertionInput,
   ArchitectureDecisionRecord,
   ArchitectureDecisionRepository,
   CreateAdrInput,
@@ -178,6 +184,86 @@ export class PgArchitectureVersionRepository implements ArchitectureVersionRepos
       );
       return mapVersion(result.rows[0]!);
     });
+  }
+}
+
+// ===========================================================================
+// Architecture Assertions repository (WORK-051)
+// ===========================================================================
+
+/**
+ * Append-only assertion store (migration 0052). There is deliberately NO
+ * update() and NO delete() method — assertion rows are immutable facts, and
+ * the PostgreSQL BEFORE UPDATE OR DELETE trigger rejects direct SQL mutation
+ * even if this contract were bypassed. Creation is trigger-gated to DRAFT
+ * versions (the assertion set is immutable with its ArchitectureVersion).
+ */
+export class PgArchitectureAssertionRepository
+  implements ArchitectureAssertionRepository, ArchitectureAssertionReader
+{
+  constructor(private readonly db: DatabaseClient) {}
+
+  async create(input: CreateArchitectureAssertionInput): Promise<ArchitectureAssertion> {
+    // Validate the version exists + is DRAFT for a clean typed error before
+    // the persistence-layer trigger (which remains the authoritative gate).
+    const version = await this.db.query<{ state: string }>(
+      'SELECT state FROM wfos_architecture_versions WHERE id = $1',
+      [input.architectureVersionId],
+    );
+    if (version.rows.length === 0) {
+      throw new Error(
+        `architecture assertion: architecture version ${input.architectureVersionId} not found`,
+      );
+    }
+    const state = version.rows[0]!.state;
+    if (state !== 'draft') {
+      throw new Error(
+        `architecture assertion: cannot attach to ${state} version ${input.architectureVersionId} — ` +
+          'the assertion set is immutable with a frozen/superseded version; ' +
+          'use the Architecture Change Request path',
+      );
+    }
+    const result = await this.db.query<AssertionRow>(
+      `INSERT INTO wfos_architecture_assertions
+         (architecture_version_id, assertion_id, severity, scope, statement,
+          detector_kind, detector_config)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, architecture_version_id, assertion_id, severity, scope,
+                 statement, detector_kind, detector_config, created_at`,
+      [
+        input.architectureVersionId,
+        input.assertionId,
+        input.severity,
+        input.scope,
+        input.statement,
+        input.detectorKind,
+        JSON.stringify(input.detectorConfig ?? {}),
+      ],
+    );
+    return mapAssertion(result.rows[0]!);
+  }
+
+  async findById(id: string): Promise<ArchitectureAssertion | null> {
+    const result = await this.db.query<AssertionRow>(
+      `SELECT id, architecture_version_id, assertion_id, severity, scope,
+              statement, detector_kind, detector_config, created_at
+       FROM wfos_architecture_assertions WHERE id = $1`,
+      [id],
+    );
+    if (result.rows.length === 0) return null;
+    return mapAssertion(result.rows[0]!);
+  }
+
+  async listForVersion(architectureVersionId: string): Promise<ArchitectureAssertion[]> {
+    const result = await this.db.query<AssertionRow>(
+      `SELECT id, architecture_version_id, assertion_id, severity, scope,
+              statement, detector_kind, detector_config, created_at
+       FROM wfos_architecture_assertions
+       WHERE architecture_version_id = $1
+       ORDER BY assertion_id`,
+      [architectureVersionId],
+    );
+    return result.rows.map(mapAssertion);
   }
 }
 
@@ -386,6 +472,18 @@ interface VersionRow {
   created_at: Date;
   updated_at: Date;
 }
+interface AssertionRow {
+  id: string;
+  architecture_version_id: string;
+  assertion_id: string;
+  severity: string;
+  scope: string;
+  statement: string;
+  detector_kind: string;
+  detector_config: Record<string, unknown>;
+  created_at: Date;
+}
+
 interface AdrRow {
   id: string;
   version_id: string;
@@ -439,6 +537,20 @@ function mapVersion(row: VersionRow): ArchitectureVersion {
     frozenBy: row.frozen_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapAssertion(row: AssertionRow): ArchitectureAssertion {
+  return {
+    id: row.id,
+    architectureVersionId: row.architecture_version_id,
+    assertionId: row.assertion_id,
+    severity: row.severity as ArchitectureAssertionSeverity,
+    scope: row.scope as ArchitectureAssertionScope,
+    statement: row.statement,
+    detectorKind: row.detector_kind,
+    detectorConfig: row.detector_config ?? {},
+    createdAt: row.created_at,
   };
 }
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stack.js';
+import { AllowAllCheckpointGate } from '../../helpers/allow-all-checkpoint-gate.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger, generateExecutionId } from '@platform/index.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
@@ -131,7 +132,7 @@ describe('WORK-018 — Verification and architect-review orchestration', () => {
       stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
       architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
-      stack.projectRepository, generateExecutionId,
+      stack.projectRepository, new AllowAllCheckpointGate(), generateExecutionId,
     );
 
     const handlers = buildHandlerRegistry([createConvergenceJobHandler(orchestrator, logger)]);
