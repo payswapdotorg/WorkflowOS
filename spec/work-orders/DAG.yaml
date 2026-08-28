@@ -1,0 +1,32 @@
+architecture_version: "2.0"
+
+work_items:
+
+  WORK-052:
+    status: completed
+    enables:
+      - WORK-053
+      - WORK-054
+
+
+  WORK-053:
+    status: ready
+    depends_on:
+      - WORK-052
+    parallel_group:
+      governance
+
+
+  WORK-054:
+    status: ready
+    depends_on:
+      - WORK-052
+    parallel_group:
+      governance
+
+
+  WORK-055:
+    status: blocked
+    depends_on:
+      - WORK-053
+      - WORK-054
