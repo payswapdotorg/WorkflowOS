@@ -88,6 +88,7 @@ export {
   CORE_SELF_HOSTING_PROHIBITIONS,
   CODE_PINNED_PROFILE_MINIMUMS,
   CODE_PINNED_COMPLETION_RULE,
+  CODE_PINNED_POST_MERGE_FINALIZATION,
   selectAssuranceProfile,
 } from '../architecture-checkpoints/index.js';
 
@@ -235,6 +236,29 @@ export interface DevelopmentGovernanceService {
     requiredProofClasses: readonly ProofClass[];
   }>;
   resumeImplementation(workOrderId: string): ResumptionView;
+  /**
+   * The merged-finalization audit (§34.8; ADR-0007): binds the canonical
+   * state to the repository's git merge history and reports every gap — a
+   * merged Work Order that is not yet `complete` with matching `mergedAs`.
+   * Without explicit evidence the history is read from the bound repository
+   * root (fail closed when neither is available). Query-only.
+   */
+  verifyPostMergeFinalization(evidence?: MergeHistoryEvidence): PostMergeFinalizationReport;
+}
+
+/** Merge evidence as consumed by the finalization audit (§34.8). */
+export type MergeHistoryEvidence = import('./internal/merged-finalization.js').MergeEvidence;
+
+/** The post-merge finalization report — the completion protocol's audit result. */
+export interface PostMergeFinalizationReport {
+  /** Work orders bound to merge evidence in the audited history. */
+  readonly merged: number;
+  /** Of those, the ones finalized truthfully (complete + matching mergedAs). */
+  readonly finalized: number;
+  /** Finalization gaps — empty means the canonical state matches the merge history. */
+  readonly gaps: readonly string[];
+  /** Where the evidence came from (explicit vs the repository git history). */
+  readonly evidenceSource: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -28,3 +28,14 @@ export type {
 
 export { DefaultDevelopmentGovernanceService } from './internal/default-development-governance-service.js';
 export type { DefaultDevelopmentGovernanceServiceDeps } from './internal/default-development-governance-service.js';
+
+export {
+  auditMergedFinalization,
+  collectMergeEvidenceFromLines,
+  collectMergeEvidenceFromRepository,
+  MergeEvidenceUnavailableError,
+} from './internal/merged-finalization.js';
+export type {
+  MergeEvidence,
+  MergedFinalizationAudit,
+} from './internal/merged-finalization.js';

@@ -214,14 +214,59 @@ describe('WORK-052 — the governance-manifest detector (self-hosting boundary a
     expect(evidence.filter((e) => e.evidenceType === 'architecture-assertion')[0]!.result).toBe('fail');
   });
 
-  it('W052-AC09 — a MISSING manifest at the bound revision fails closed for a governed repository', async () => {
-    // No governance files seeded at this ref at all.
+  it('W052-AC09 — a MISSING manifest at the bound revision is INCONCLUSIVE per ADR-0006 (a blocking assertion then blocks — fail closed)', async () => {
+    // No governance files seeded at this ref at all. ADR-0006: missing/
+    // unreadable/parses-failing manifests are INCONCLUSIVE — the governed state
+    // could not be ESTABLISHED; the blocking gate denies (the post-merge
+    // correction, BLOCKER 3: the code must match the accepted ADR).
     const version = await frozenVersionWithGovernanceAssertion(project.id);
     const wi = await workItemOn(project.id, version.id);
     const result = await service.evaluateCheckpoint(gate(wi.id, 'rev-missing'));
     expect(result.status).toBe('blocked');
     expect(result.allowed).toBe(false);
+    expect(result.evaluations[0]!.status).toBe('inconclusive');
     expect(result.blockingFindings.join('\n')).toMatch(/ABSENT|development-governance state/);
+    expect(result.blockingFindings.join('\n')).toMatch(/ADR-0006/);
+  });
+
+  it('W052-AC09 — DISCRIMINATION (post-merge correction, BLOCKER 3): a manifest that does not PARSE is INCONCLUSIVE per ADR-0006 (never a vacuous pass; a blocking assertion then blocks)', async () => {
+    // The model parses; the program state is BROKEN JSON at the bound
+    // revision. ADR-0006: parses-failing manifests are INCONCLUSIVE — and the
+    // fail-closed behavior lives DOWNSTREAM: the blocking assertion blocks.
+    // The old code returned 'fail' here, contradicting the accepted ADR.
+    seedManifest(REPO, 'rev-unparseable', REAL_MODEL_TEXT, '{ this is not JSON');
+    const version = await frozenVersionWithGovernanceAssertion(project.id);
+    const wi = await workItemOn(project.id, version.id);
+    const result = await service.evaluateCheckpoint(gate(wi.id, 'rev-unparseable'));
+    expect(result.status).toBe('blocked');
+    expect(result.allowed).toBe(false);
+    expect(result.evaluations[0]!.status).toBe('inconclusive');
+    expect(result.evaluations[0]!.summary).toMatch(/does not PARSE/);
+    expect(result.evaluations[0]!.summary).toMatch(/ADR-0006/);
+    // And DIRECTLY on the detector: the parse-failure arm is inconclusive,
+    // never 'fail' — 'fail' is reserved for ESTABLISHED validation violations.
+    const detector = new GovernanceManifestDetector();
+    const readableSnapshot: RepositorySnapshot = {
+      revision: 'rev-unparseable',
+      repository: `${OWNER}/${REPO}`,
+      async listDir(): Promise<readonly SnapshotDirEntry[]> { return []; },
+      async readFile(path: string): Promise<string | null> {
+        return path.endsWith('program-state.json') ? '{ this is not JSON' : REAL_MODEL_TEXT;
+      },
+      async dirExists(): Promise<boolean> { return true; },
+      identity: () => ({ revision: 'rev-unparseable', repository: `${OWNER}/${REPO}`, filesRead: 2, treeDigest: null }),
+    };
+    const direct = await detector.evaluate({
+      assertion: {
+        id: 'a1', architectureVersionId: 'v1', assertionId: 'ARCH-052-001', severity: 'blocking', scope: 'repository',
+        statement: 's', detectorKind: 'governance-manifest', detectorConfig: {}, createdAt: new Date(),
+      },
+      checkpointKind: 'pr_conformance',
+      snapshot: readableSnapshot,
+      context: { projectId: 'p1', workItemId: 'w1', architectureVersionId: 'v1', implementationRevision: 'rev-unparseable', workOrderId: null },
+    });
+    expect(direct.status).toBe('inconclusive');
+    expect(direct.summary).toMatch(/does not PARSE/);
   });
 
   it('W052-AC09 — a CYCLIC program state at the bound revision fails (the DAG invariant through the substrate)', async () => {

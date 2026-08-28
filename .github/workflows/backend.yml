@@ -70,6 +70,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history: the merged-finalization invariant (WORK-052 §34.8)
+          # audits the canonical program state against the repository's real
+          # first-parent merge history.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

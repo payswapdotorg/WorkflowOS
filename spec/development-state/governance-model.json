@@ -12,7 +12,8 @@
       "docs/adr/ADR-0002-assurance-depth-not-authority.md",
       "docs/adr/ADR-0003-parallel-protocol-surface-declaration.md",
       "docs/adr/ADR-0004-fail-closed-validation-core-prohibitions.md",
-      "docs/adr/ADR-0006-governance-manifest-detector.md"
+      "docs/adr/ADR-0006-governance-manifest-detector.md",
+      "docs/adr/ADR-0007-post-merge-finalization.md"
     ]
   },
   "engineeringControlLoop": {
@@ -681,5 +682,16 @@
       "complete"
     ],
     "historicalNote": "WORK-001..WORK-051 completed before this rule was recorded; their merge evidence alone satisfies it (checkpoint outcomes were not part of their contracts)."
+  },
+  "postMergeFinalization": {
+    "trigger": "architect-merge",
+    "obligation": "after the architect's merge lands on main, the canonical program state is FINALIZED: the Work Order's status becomes complete with mergedAs (pr + the ACTUAL merge commit), the active handoff is removed (a fresh instance cannot resume already-merged work), and the work-order document status is updated — a data-only change merged by the architect (no code rides along unless separately ordered)",
+    "enforcement": "the merged-finalization invariant: a Work Order with merge evidence in the repository's first-parent history (a 'Merge pull request #N' merge commit OR the 'WORK-NNN:' architect-merge subject convention) must be complete with a mergedAs matching the AUTHORITATIVE merge identity — the PR number AND the ACTUAL merge commit are both validated (a genuine merge commit paired with a false PR number is a violation) — enforced by the static architecture suite (CI fails between the merge and the finalization: that visible red window IS the enforcement) and reported by governance:status",
+    "constraints": [
+      "no new authority — the architect remains the only completion authority; the finalization records the architect's merge decision after the fact",
+      "no new workflow state — statuses stay pending/blocked/in_flight/complete",
+      "no automation — the finalization is a manual architect-controlled change",
+      "the audit evidence is repository-resident git history, never an external service"
+    ]
   }
 }

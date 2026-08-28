@@ -1205,3 +1205,41 @@ pinned verbatim in the static architecture suite, and enforced at checkpoints by
 `governance-manifest` detector. Governance state is never stored outside the repository
 (PostgreSQL remains the authority for tenant runtime state; the repository is the
 authority for the self-hosting program).
+
+## 34.8 The Post-Merge Finalization Protocol
+
+The completion rule (this section's `completionRule` in `governance-model.json`)
+defines the completion CONDITION — the architect's merge is the only completion
+event. The post-merge review of WORK-052 (merged as `47615c2` while the
+canonical state still recorded `in_flight`) exposed the operational gap: a
+condition without a finalization mechanism leaves the repository able to hold a
+FALSE program state — a merged Work Order that appears active and resumable.
+This subsection closes that gap (ADR-0007).
+
+**Protocol.** When the architect's merge lands on `main`, the canonical state
+MUST be finalized: the Work Order's status becomes `complete` with `mergedAs`
+recording the PR number and the ACTUAL merge commit; the active handoff is
+removed (a fresh instance can never resume already-merged work); the work-order
+document status is updated. The finalization is a small, data-only change
+prepared on a branch from the post-merge `main` and merged by the architect; no
+code changes ride along unless separately ordered.
+
+**Enforcement — the merged-finalization invariant.** A Work Order with merge
+evidence in the repository's first-parent history — a `Merge pull request #N
+from …` merge commit (bound by PR number) or the architect-merge subject
+convention `WORK-NNN: …` (bound by work-order id; PR #62 merged this way) —
+MUST be `complete` with a `mergedAs` matching the AUTHORITATIVE merge
+identity: both components are validated — the PR number (the work order's
+declared `pr`, which the classic merge subject names and the `WORK-NNN:`
+convention defers to) AND the ACTUAL merge commit. A genuine merge commit
+paired with a false PR number is a violation; a bound record that declares no
+`pr` cannot anchor its `mergedAs.pr` claim and fails closed. Violations are
+detected by the static architecture suite (the audit runs against the real
+git history; CI fails between the merge and the finalization — that visible
+red window IS the enforcement) and reported by `governance:status`. The audit
+consumes repository-resident git history only, never an external service.
+
+**Authority.** The protocol adds NO new authority, NO new workflow state, NO
+automation: the architect remains the only completion authority; the
+finalization records the architect's merge decision after the fact. A complete
+Work Order is re-opened only by an architect-issued Work Order.

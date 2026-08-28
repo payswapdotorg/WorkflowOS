@@ -36,6 +36,7 @@ import {
   type FrontierView,
   type GoverningStateView,
   type ParallelEligibilityReport,
+  type PostMergeFinalizationReport,
   type ResumptionView,
   type SharedSurface,
 } from '../types.js';
@@ -43,6 +44,12 @@ import {
   FileSystemGovernanceStateLoader,
   type FileSystemGovernanceStateLoaderOptions,
 } from './governance-state-loader.js';
+import {
+  auditMergedFinalization,
+  collectMergeEvidenceFromRepository,
+  MergeEvidenceUnavailableError,
+  type MergeEvidence,
+} from './merged-finalization.js';
 
 export interface DefaultDevelopmentGovernanceServiceDeps {
   loader: FileSystemGovernanceStateLoader;
@@ -108,11 +115,13 @@ export class DefaultDevelopmentGovernanceService implements DevelopmentGovernanc
   private readonly model: GovernanceModel;
   private readonly program: ProgramState;
   private readonly byId: Map<string, WorkOrderRecord>;
+  private readonly repoRoot: string | null;
 
-  private constructor(model: GovernanceModel, program: ProgramState) {
+  private constructor(model: GovernanceModel, program: ProgramState, repoRoot: string | null) {
     this.model = model;
     this.program = program;
     this.byId = new Map(program.workOrders.map((w) => [w.id, w]));
+    this.repoRoot = repoRoot;
   }
 
   /**
@@ -126,12 +135,12 @@ export class DefaultDevelopmentGovernanceService implements DevelopmentGovernanc
   ): Promise<DefaultDevelopmentGovernanceService> {
     const loader = new FileSystemGovernanceStateLoader(options);
     const loaded = await loader.load();
-    return new DefaultDevelopmentGovernanceService(loaded.model, loaded.program);
+    return new DefaultDevelopmentGovernanceService(loaded.model, loaded.program, loaded.repoRoot);
   }
 
   /** Construct over already-loaded (validated) state — tests and compositions. */
   static fromLoadedState(model: GovernanceModel, program: ProgramState): DefaultDevelopmentGovernanceService {
-    return new DefaultDevelopmentGovernanceService(model, program);
+    return new DefaultDevelopmentGovernanceService(model, program, null);
   }
 
   // --- control question 1 + 6: the governing state -------------------------
@@ -357,6 +366,27 @@ export class DefaultDevelopmentGovernanceService implements DevelopmentGovernanc
       parallelProtocolRules: this.model.parallelProtocol.rules,
       governingDocuments: this.program.governing.governingDocuments,
       decisions: this.program.decisions,
+    };
+  }
+
+  // --- the post-merge finalization audit (§34.8; ADR-0007) --------------------
+
+  verifyPostMergeFinalization(evidence?: MergeEvidence): PostMergeFinalizationReport {
+    const explicit = evidence !== undefined;
+    const used = evidence ?? (this.repoRoot !== null ? collectMergeEvidenceFromRepository(this.repoRoot) : undefined);
+    if (!used) {
+      throw new MergeEvidenceUnavailableError(
+        'no repository root is bound to this service instance — construct via create(repoRoot) or pass explicit merge evidence',
+      );
+    }
+    const audit = auditMergedFinalization(this.program, used);
+    return {
+      merged: audit.mergedWorkOrderIds.length,
+      finalized: audit.mergedWorkOrderIds.length - audit.gaps.length,
+      gaps: audit.gaps,
+      evidenceSource: explicit
+        ? 'explicit merge evidence'
+        : `the first-parent merge history of ${this.repoRoot}/origin/main`,
     };
   }
 }

@@ -23,14 +23,17 @@
  *     its development state; when false, a missing manifest is 'not_applicable'
  *     (repos that do not declare the governance artifacts).
  *
- * Semantics (fail closed):
+ * Semantics (fail closed; ADR-0006):
  *   - no snapshot bound → 'not_applicable' (revision-bound assertions only)
  *   - a read FAILURE (unreadable revision content) → 'inconclusive'
- *   - missing manifest with requirePresent → 'fail' (the governed state is
- *     absent — exactly the drift this detector exists to catch)
- *   - JSON parse failure → 'fail'
- *   - any validation violation → 'fail' with the violation list (the boundary
- *     was weakened, the DAG went cyclic, a completion lost its evidence, …)
+ *   - missing manifest with requirePresent → 'inconclusive' (the governed
+ *     state could not be ESTABLISHED; a blocking assertion then blocks —
+ *     ADR-0006: missing/unreadable/parses-failing manifests are inconclusive)
+ *   - JSON parse failure → 'inconclusive' (the same ADR-0006 rule — the
+ *     post-merge review, BLOCKER 3: the code must match the accepted ADR)
+ *   - any validation violation → 'fail' with the violation list (the
+ *     boundary was weakened, the DAG went cyclic, a completion lost its
+ *     evidence, …) — 'fail' is reserved for ESTABLISHED violations
  *   - otherwise → 'pass'
  */
 
@@ -94,11 +97,12 @@ export class GovernanceManifestDetector implements ArchitectureAssertionDetector
           (p === modelPath ? modelText : programText) === null,
         );
         return {
-          status: 'fail',
+          status: 'inconclusive',
           summary:
             `the development-governance state is ABSENT at revision ${snapshot.revision} ` +
             `(missing: ${missing.join(', ')}) — a governed repository must carry its ` +
-            'repository-resident state (WORK-052 §34.1; ADR-0001)',
+            'repository-resident state (WORK-052 §34.1; ADR-0001); ADR-0006: ' +
+            'missing/unreadable/parses-failing manifests are INCONCLUSIVE (a blocking assertion then blocks)',
         };
       }
       return {
@@ -116,10 +120,11 @@ export class GovernanceManifestDetector implements ArchitectureAssertionDetector
       program = JSON.parse(programText);
     } catch (err) {
       return {
-        status: 'fail',
+        status: 'inconclusive',
         summary:
           `the development-governance state does not PARSE at revision ${snapshot.revision} — ` +
-          String(err instanceof Error ? err.message : err),
+          `${String(err instanceof Error ? err.message : err)}; ADR-0006: ` +
+          'missing/unreadable/parses-failing manifests are INCONCLUSIVE (a blocking assertion then blocks)',
       };
     }
 

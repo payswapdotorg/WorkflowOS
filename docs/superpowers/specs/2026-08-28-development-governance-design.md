@@ -238,3 +238,39 @@ evidence stays in `/verification`; assertions stay in `/architecture`; transitio
 `/workflows`; semantic judgment stays in `/reviews`; external truth stays in `/github`.
 Any future change to a frozen rule still requires the Architecture Change Request path
 and a new immutable architecture version.
+
+## 13. The post-merge finalization protocol (the post-merge correction, §34.8)
+
+The post-merge architectural review of PR #62 (merged as `47615c2` at head
+`2f1daec`) found the completion semantics sound but the completion PROTOCOL
+operationally incomplete: nothing reconciled the canonical state with the merge
+after it landed, and the repository held a false program state (WORK-052
+`in_flight` while merged). The correction (ADR-0007; `spec/architecture.md`
+§34.8):
+
+1. **The finalization protocol** — after the architect's merge lands on `main`,
+   the canonical state is finalized (status `complete` + `mergedAs` with the
+   ACTUAL merge commit; the active handoff removed; the work-order document
+   updated) through a small, data-only, architect-merged change. It is explicit
+   machine-readable state (`governance-model.json` `postMergeFinalization`),
+   code-pinned in the shared validation engine like the completion rule.
+2. **The merged-finalization invariant** — a Work Order with merge evidence in
+   the repository's first-parent history (`Merge pull request #N` merge commits
+   by PR number; the `WORK-NNN:` architect-merge subject convention by
+   work-order id) must be `complete` with a `mergedAs` matching the
+   AUTHORITATIVE merge identity — the PR number AND the ACTUAL merge commit are
+   both validated (the PR #63 round-2 review: a genuine merge commit paired
+   with a false PR number is rejected; a bound record declaring no `pr` fails
+   closed). Enforced by the static architecture suite against the real git
+   history (the visible red window between merge and finalization IS the
+   enforcement) and reported by
+   `governance:status` through the shared audit module
+   (`backend/src/development-governance/internal/merged-finalization.ts`).
+3. **The ADR-0006 detector correction** — the `governance-manifest` detector's
+   parse-failure and missing-manifest branches return `inconclusive` exactly as
+   the accepted ADR specifies (a blocking assertion then blocks — fail-closed
+   downstream); `fail` is reserved for established validation violations.
+
+No new authority, no new workflow state, no automation: the architect remains
+the only completion authority, and this protocol is the first thing it
+finalized.

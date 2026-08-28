@@ -159,6 +159,26 @@ export const CODE_PINNED_COMPLETION_RULE: Readonly<{
 };
 
 /**
+ * The code-pinned post-merge finalization protocol (§34.8; ADR-0007; the
+ * post-merge review of PR #62, BLOCKER 2): the completion rule defines the
+ * completion CONDITION — this protocol defines the finalization MECHANISM
+ * that reconciles the canonical state with the architect's merge AFTER it
+ * lands. Weakening it in governance-model.json is a validation failure, not
+ * a silent policy change.
+ */
+export const CODE_PINNED_POST_MERGE_FINALIZATION: Readonly<{
+  trigger: 'architect-merge';
+  obligationMustMention: readonly string[];
+  enforcementMustMention: readonly string[];
+  constraintsMustInclude: readonly string[];
+}> = {
+  trigger: 'architect-merge',
+  obligationMustMention: ['mergedAs', 'handoff', 'data-only'],
+  enforcementMustMention: ['merged-finalization'],
+  constraintsMustInclude: ['no new authority', 'no new workflow state', 'no automation'],
+};
+
+/**
  * The code-pinned assurance minimums (ADR-0002): every profile's declared
  * requirements must be a SUPERSET of these. These minimums are themselves the
  * dominance floor over the WORK-051 impact/checkpoint matrix (each profile
@@ -284,6 +304,13 @@ export interface GovernanceModel {
     inFlightInvariant: string;
     outcomesAllowedOn: string[];
     historicalNote?: string;
+  };
+  /** The post-merge finalization protocol (§34.8; ADR-0007; the post-merge review, BLOCKER 2). */
+  postMergeFinalization: {
+    trigger: string;
+    obligation: string;
+    enforcement: string;
+    constraints: string[];
   };
   parallelProtocol: { authority: string; rules: string[]; surfaceKinds: string[] };
   feedbackOrigins: FeedbackOrigin[];
@@ -470,8 +497,8 @@ export async function validateGovernanceState(
 
   if (model && typeof model === 'object') knownKeys(model, [
     '$schema', 'schemaVersion', 'artifact', 'authority', 'engineeringControlLoop', 'assuranceProfiles',
-    'checkpointContracts', 'selfHostingBoundary', 'completionRule', 'parallelProtocol', 'feedbackOrigins',
-    'feedbackRule', 'authorityMap', 'detector',
+    'checkpointContracts', 'selfHostingBoundary', 'completionRule', 'postMergeFinalization',
+    'parallelProtocol', 'feedbackOrigins', 'feedbackRule', 'authorityMap', 'detector',
   ], 'governance-model', violations);
 
   // --- (2) the control loop is pinned --------------------------------------
@@ -746,6 +773,37 @@ export async function validateGovernanceState(
     }
     if (!isStringArray(completion.outcomesAllowedOn) || completion.outcomesAllowedOn.length !== CODE_PINNED_COMPLETION_RULE.outcomesAllowedOn.length || !CODE_PINNED_COMPLETION_RULE.outcomesAllowedOn.every((s, i) => completion.outcomesAllowedOn[i] === s)) {
       violations.push(`completionRule.outcomesAllowedOn must be exactly [${CODE_PINNED_COMPLETION_RULE.outcomesAllowedOn.join(', ')}] — widening where implementer claims may be recorded weakens the merge-vs-checkpoint separation`);
+    }
+  }
+
+  // --- (8c) the post-merge finalization protocol (§34.8; ADR-0007) ------------
+  // The post-merge review of PR #62 (merged as 47615c2 while the canonical
+  // state still said in_flight) exposed the operational gap: the completion
+  // rule defines the completion CONDITION; the repository needs an explicit
+  // finalization MECHANISM so a merged Work Order can never remain represented
+  // as in_flight in canonical state. The protocol is code-pinned like the
+  // completion rule itself.
+  const finalization = model.postMergeFinalization;
+  if (!finalization || typeof finalization !== 'object') {
+    violations.push('postMergeFinalization: REQUIRED — the post-merge finalization protocol must be explicit machine-readable state (the post-merge review, BLOCKER 2)');
+  } else {
+    knownKeys(finalization, ['trigger', 'obligation', 'enforcement', 'constraints'], 'postMergeFinalization', violations);
+    if (finalization.trigger !== CODE_PINNED_POST_MERGE_FINALIZATION.trigger) {
+      violations.push(`postMergeFinalization.trigger must be "${CODE_PINNED_POST_MERGE_FINALIZATION.trigger}" (got ${JSON.stringify(finalization.trigger)}) — the finalization is triggered by the SAME event that completes the work order (the architect's merge)`);
+    }
+    for (const word of CODE_PINNED_POST_MERGE_FINALIZATION.obligationMustMention) {
+      if (!isNonEmptyString(finalization.obligation) || !finalization.obligation.includes(word)) {
+        violations.push(`postMergeFinalization.obligation must mention "${word}" (status → complete with mergedAs recording the ACTUAL merge commit; handoff removal; a data-only change) — a vague obligation cannot be audited`);
+      }
+    }
+    for (const word of CODE_PINNED_POST_MERGE_FINALIZATION.enforcementMustMention) {
+      if (!isNonEmptyString(finalization.enforcement) || !finalization.enforcement.includes(word)) {
+        violations.push(`postMergeFinalization.enforcement must reference "${word}" (the invariant that binds canonical state to git merge history) — a protocol without enforcement is a wish, not a mechanism`);
+      }
+    }
+    const constraints = finalization.constraints;
+    if (!isStringArray(constraints) || !CODE_PINNED_POST_MERGE_FINALIZATION.constraintsMustInclude.every((c) => constraints.some((x) => x.includes(c)))) {
+      violations.push(`postMergeFinalization.constraints must include [${CODE_PINNED_POST_MERGE_FINALIZATION.constraintsMustInclude.join(', ')}] — the protocol adds no authority, no workflow state, no automation`);
     }
   }
 

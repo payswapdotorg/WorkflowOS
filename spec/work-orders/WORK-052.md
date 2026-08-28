@@ -1,6 +1,6 @@
 # WORK-052 — Development Governance & Self-Hosting Control Plane
 
-Status: IN FLIGHT (implementation PR against `main`; architect review pending)
+Status: COMPLETE — merged by the architect as `47615c236ec0e194e112efd3d2ef0f432c4bf210` (PR #62, squash-merged at head `2f1daec`, 2026-08-28); post-merge corrective finalization recorded per §34.8 (the protocol this work order's own review produced)
 Architecture: frozen v1.0 authority model + forward evolution (§34 — Development Governance and Self-Hosting Control Plane)
 Dependencies: WORK-038, WORK-039, WORK-040, WORK-041, WORK-045, WORK-051
 Authoritative Work Order: GitHub Issue #61 (this document is its repository-resident form)
@@ -252,3 +252,44 @@ STOP and raise an Architecture Change Request if implementation requires:
 - Independent Architect Review approves the implementation PR (the implementer never
   merges).
 - WORK-052 is recorded complete in `program-state.json` with merge evidence.
+
+## Post-merge correction (architect review, round 2 — the corrective finalization)
+
+The architect merged PR #62 as `47615c2` and issued a post-merge REQUEST CHANGES:
+the canonical state had not been finalized (WORK-052 still `in_flight` with a stale
+head and an active handoff), the completion protocol lacked an explicit post-merge
+finalization mechanism, and the `governance-manifest` detector's parse-failure
+behavior contradicted ADR-0006. The corrective finalization:
+
+1. **State reconciled** (BLOCKER 1): WORK-052 → `complete` with `mergedAs`
+   `{ pr: 62, mergeCommit: 47615c236ec0e194e112efd3d2ef0f432c4bf210 }`, head
+   `2f1daec`; the active handoff removed (merged work is not resumable).
+2. **Post-merge finalization protocol** (BLOCKER 2): §34.8 + ADR-0007 + the
+   code-pinned `postMergeFinalization` model rule + the merged-finalization
+   invariant — a merged Work Order cannot remain `in_flight` in canonical state
+   (enforced against the real git merge history; `governance:status` reports gaps).
+3. **Detector corrected to ADR-0006** (BLOCKER 3): missing and parses-failing
+   manifests are `inconclusive` (a blocking assertion then blocks — fail-closed
+   downstream); `fail` is reserved for established validation violations.
+
+## Post-merge correction (architect review of the corrective change — the provenance identity)
+
+The PR #63 architectural review found one provenance defect in the new
+merged-finalization invariant: the audit validated only
+`mergedAs.mergeCommit` — a genuine merge commit paired with a false
+`mergedAs.pr` audited clean, violating the stated finalization obligation
+(`mergedAs` records the PR number AND the actual merge commit). The narrow
+correction:
+
+1. **The full provenance identity is validated**: `mergedAs.pr` must match the
+   authoritative PR identity — the work order's declared `pr` for BOTH merge
+   shapes (the classic merge subject names it; the `WORK-NNN:` convention
+   defers to it) — in addition to `mergedAs.mergeCommit` matching an actual
+   merge commit. A bound record that declares no `pr` fails closed (dropping
+   `pr` must not bypass the check).
+2. **Discriminating regressions** (integration + static suites): a mutation of
+   `mergedAs.pr: 62 → 999` with the REAL merge commit intact is REJECTED; the
+   unanchorable no-`pr` arm is REJECTED; the model/spec/ADR enforcement text
+   records the identity semantics.
+
+This change is the first execution of the finalization protocol it codifies.

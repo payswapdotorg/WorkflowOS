@@ -4,6 +4,11 @@ import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, relative, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FROZEN_MODULE_NAMES, type ModuleContract } from '@platform/module-contract.js';
+import {
+  auditMergedFinalization,
+  collectMergeEvidenceFromRepository,
+} from '../../src/development-governance/internal/merged-finalization.js';
+import type { ProgramState } from '../../src/architecture-checkpoints/index.js';
 
 /**
  * Static architecture checks for WORK-001.
@@ -16578,6 +16583,9 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
   const DG_DETECTOR_TESTS = join(
     BACKEND_ROOT, 'tests', 'integration', 'architecture-governance', 'governance-manifest-detector.integration.test.ts',
   );
+  const DG_FINALIZATION_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'development-governance', 'merged-finalization.integration.test.ts',
+  );
 
   function stripW52(src: string): string {
     return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
@@ -16632,7 +16640,7 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(wo).toMatch(/W052-AC10 — Decision durability/);
   });
 
-  it('the durable decision records exist: ADRs 0001-0006 with the README authority declaration', () => {
+  it('the durable decision records exist: ADRs 0001-0007 with the README authority declaration', () => {
     expect(existsSync(join(ADR_DIR, 'README.md'))).toBe(true);
     for (const n of [
       'ADR-0001-repository-resident-governance-state.md',
@@ -16641,6 +16649,7 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
       'ADR-0004-fail-closed-validation-core-prohibitions.md',
       'ADR-0005-work-052-base-branch.md',
       'ADR-0006-governance-manifest-detector.md',
+      'ADR-0007-post-merge-finalization.md',
     ]) {
       const adr = readFileSync(join(ADR_DIR, n), 'utf8');
       expect(adr, `${n} must exist and carry status + context + decision + consequences`).toMatch(/^# ADR-000\d — .+/m);
@@ -16839,6 +16848,25 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(detector).toMatch(/spec\/development-state\/program-state\.json/);
   });
 
+  it('the governance-manifest detector matches ADR-0006: missing and parses-failing manifests are INCONCLUSIVE (the post-merge correction, BLOCKER 3)', () => {
+    // The ADR is the accepted decision and the model's detector.semantics
+    // agrees with it: missing/unreadable/parses-failing ⇒ inconclusive (a
+    // blocking assertion then blocks — fail-closed downstream); 'fail' is
+    // reserved for ESTABLISHED validation violations. The code must match
+    // the ADR (the post-merge review, BLOCKER 3).
+    const detector = readFileSync(GM_DETECTOR, 'utf8');
+    expect(detector).toMatch(/does not PARSE at revision/);
+    expect(detector).toMatch(/missing\/unreadable\/parses-failing manifests are INCONCLUSIVE/);
+    expect(detector).toMatch(/ABSENT at revision/);
+    // NEGATIVE PIN: exactly ONE 'fail' return remains — the established-
+    // violations arm. The missing-manifest and parse-failure arms can never
+    // regress to 'fail' without breaking this count.
+    expect(detector.match(/status: 'fail'/g)?.length).toBe(1);
+    // The model artifact carries the ADR-0006 semantics.
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as { detector: { semantics: string } };
+    expect(model.detector.semantics).toMatch(/missing\/unreadable\/invalid manifests are inconclusive/);
+  });
+
   // --- (6) the parallel protocol + resumption are query-only over the state ---
 
   it('the parallel protocol is deterministic surface-intersection conflict detection (ADR-0003)', () => {
@@ -16896,6 +16924,108 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(service).not.toMatch(/coordinated: incomplete\.length === 0 \|\| Boolean\(w\.coordination\)/);
   });
 
+  // --- (6c) the post-merge finalization protocol (the post-merge correction) ----
+
+  it('the post-merge finalization protocol is explicit, code-pinned machine-readable state (the post-merge correction, BLOCKER 2)', () => {
+    // The code-pinned protocol essentials live in the shared engine.
+    const engine = readFileSync(AC_VALIDATION, 'utf8');
+    expect(engine).toMatch(/CODE_PINNED_POST_MERGE_FINALIZATION/);
+    expect(engine).toMatch(/postMergeFinalization: REQUIRED/);
+    expect(engine).toMatch(/postMergeFinalization\.trigger must be "\$\{CODE_PINNED_POST_MERGE_FINALIZATION\.trigger\}"/);
+    expect(engine).toMatch(/postMergeFinalization\.obligation must mention/);
+    expect(engine).toMatch(/postMergeFinalization\.enforcement must reference/);
+    expect(engine).toMatch(/postMergeFinalization\.constraints must include/);
+    // The model artifact carries the protocol with the pinned essentials.
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as {
+      postMergeFinalization: { trigger: string; obligation: string; enforcement: string; constraints: string[] };
+      authority: { decisions: string[] };
+    };
+    expect(model.postMergeFinalization.trigger).toBe('architect-merge');
+    expect(model.postMergeFinalization.obligation).toMatch(/mergedAs/);
+    expect(model.postMergeFinalization.obligation).toMatch(/handoff/);
+    expect(model.postMergeFinalization.obligation).toMatch(/data-only/);
+    expect(model.postMergeFinalization.enforcement).toMatch(/merged-finalization/);
+    for (const c of ['no new authority', 'no new workflow state', 'no automation']) {
+      expect(model.postMergeFinalization.constraints.join('\n')).toContain(c);
+    }
+    expect(model.authority.decisions).toContain('docs/adr/ADR-0007-post-merge-finalization.md');
+    // The spec + ADR + README record the protocol (durable decisions).
+    expect(readFileSync(SPEC_ARCH, 'utf8')).toMatch(/## 34\.8 The Post-Merge Finalization Protocol/);
+    expect(readFileSync(GOV_README, 'utf8')).toMatch(/merged-finalization invariant/i);
+    const adr = readFileSync(join(ADR_DIR, 'ADR-0007-post-merge-finalization.md'), 'utf8');
+    expect(adr).toMatch(/Status: accepted/);
+    expect(adr).toMatch(/47615c236ec0e194e112efd3d2ef0f432c4bf210/);
+    // The ONE audit implementation is shared by the control plane and the CLI.
+    const auditModule = readFileSync(join(DG_INTERNAL, 'merged-finalization.ts'), 'utf8');
+    expect(auditModule).toMatch(/auditMergedFinalization/);
+    expect(auditModule).toMatch(/Merge pull request #/);
+    expect(auditModule).toMatch(/\^\(WORK-\\d\{3\}\)\\b/);
+    // The PR #63 round-2 review: the ENTIRE mergedAs identity is validated —
+    // the PR number against the authoritative PR identity (the declared pr),
+    // not merely stored.
+    expect(auditModule).toMatch(/authoritative PR identity/);
+    expect(auditModule).toMatch(/w\.mergedAs\.pr !== w\.pr/);
+    const service = readFileSync(DG_SERVICE, 'utf8');
+    expect(service).toMatch(/verifyPostMergeFinalization/);
+    const cli = readFileSync(DG_CLI, 'utf8');
+    expect(cli).toMatch(/verifyPostMergeFinalization/);
+    // CI carries the full git history the invariant needs.
+    expect(readFileSync(join(REPO_ROOT, '.github', 'workflows', 'backend.yml'), 'utf8')).toMatch(/fetch-depth: 0/);
+  });
+
+  it('the merged-finalization invariant holds on the REAL repository — a merged Work Order cannot remain in_flight in canonical state (the post-merge correction, BLOCKER 1)', () => {
+    const evidence = collectMergeEvidenceFromRepository(REPO_ROOT);
+    const program = JSON.parse(readFileSync(GOV_PROGRAM, 'utf8')) as ProgramState;
+    const audit = auditMergedFinalization(program, evidence);
+    // The squash merge of PR #62 binds WORK-052 (the WORK-NNN convention).
+    expect(audit.mergedWorkOrderIds).toContain('WORK-052');
+    // The finalized truth: complete + mergedAs = the ACTUAL merge commit + the
+    // actual merged head + NO active handoff (merged work is not resumable).
+    expect(audit.gaps).toEqual([]);
+    const w052 = program.workOrders.find((w) => w.id === 'WORK-052')!;
+    expect(w052.status).toBe('complete');
+    expect(w052.mergedAs).toEqual({ pr: 62, mergeCommit: '47615c236ec0e194e112efd3d2ef0f432c4bf210' });
+    expect(w052.head).toBe('2f1daec');
+    expect(program.resumption.activeHandoffs.some((h) => h.workOrderId === 'WORK-052')).toBe(false);
+    // DISCRIMINATION (in memory, the REAL evidence): the exact false state the
+    // post-merge review found — merged but still in_flight — is DETECTED.
+    const unfinalized = structuredClone(program);
+    const mutated = unfinalized.workOrders.find((w) => w.id === 'WORK-052')!;
+    mutated.status = 'in_flight';
+    delete (mutated as { mergedAs?: unknown }).mergedAs;
+    const gaps = auditMergedFinalization(unfinalized, evidence).gaps;
+    expect(gaps.join('\n')).toMatch(/WORK-052.*MERGED/);
+    expect(gaps.join('\n')).toMatch(/in_flight/);
+    // DISCRIMINATION: a complete record with the WRONG merge commit is DETECTED.
+    const wrong = structuredClone(program);
+    wrong.workOrders.find((w) => w.id === 'WORK-052')!.mergedAs = {
+      pr: 62,
+      mergeCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    };
+    expect(auditMergedFinalization(wrong, evidence).gaps.join('\n')).toMatch(/does not match the actual merge evidence/);
+    // DISCRIMINATION (the PR #63 round-2 review — the provenance identity): a
+    // FALSE mergedAs.pr — a different PR number with the REAL merge commit
+    // intact — is DETECTED. The PR number is part of the durable provenance
+    // identity, validated against the authoritative PR identity (the declared
+    // pr) for BOTH merge shapes, not merely stored.
+    const falsePr = structuredClone(program);
+    falsePr.workOrders.find((w) => w.id === 'WORK-052')!.mergedAs = {
+      pr: 999,
+      mergeCommit: '47615c236ec0e194e112efd3d2ef0f432c4bf210',
+    };
+    const falsePrGaps = auditMergedFinalization(falsePr, evidence).gaps;
+    expect(falsePrGaps.join('\n')).toMatch(/does not match the authoritative PR identity/);
+    expect(falsePrGaps.join('\n')).toContain('999');
+    // DISCRIMINATION (the PR #63 round-2 review — fail closed): dropping the
+    // declared pr must NOT bypass the PR-identity check — an unanchorable
+    // mergedAs.pr claim (WORK-NNN evidence, no declared pr) is DETECTED.
+    const unanchored = structuredClone(program);
+    delete (unanchored.workOrders.find((w) => w.id === 'WORK-052')! as { pr?: number }).pr;
+    expect(auditMergedFinalization(unanchored, evidence).gaps.join('\n')).toMatch(/no authoritative PR identity/);
+    // The work-order document is consistent with the finalized state.
+    expect(readFileSync(WORK_ORDER, 'utf8')).toMatch(/Status: COMPLETE — merged by the architect as `47615c236ec0e194e112efd3d2ef0f432c4bf210`/);
+  });
+
   // --- (7) mandatory regression coverage (the executable proof contract) ------
 
   it('the WORK-052 integration suites carry the mandated regression markers', () => {
@@ -16919,7 +17049,10 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): checkpoint outcomes on an UNSTARTED \(pending\) work order are REJECTED/);
     expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): a WEAKENED completion rule \(checkpoint outcomes completing work\) is REJECTED/);
     expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): a MISSING completion rule is REJECTED/);
-    expect(state).toMatch(/W052-AC02 — the merge-vs-checkpoint rule is POSITIVE: all outcomes evidenced but NOT merged stays in_flight/);
+    // The post-merge correction (round 2) — the finalization protocol.
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(post-merge correction, BLOCKER 2\): a MISSING post-merge finalization protocol is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(post-merge correction, BLOCKER 2\): a WEAKENED post-merge finalization protocol is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — the merge-vs-checkpoint rule is POSITIVE: outcomes never transition status/);
     expect(state).toMatch(/W052-AC07 — crash\/restart\/resume: a fresh control-plane instance reconstructs the resumption view/);
     expect(state).toMatch(/W052-AC07 — resuming a work order with no handoff record fails closed/);
     const parallel = readFileSync(DG_PARALLEL_TESTS, 'utf8');
@@ -16934,11 +17067,22 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination/);
     expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — a MUTUALLY declared coordination flips the frontier flags to true/);
     expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — the frontier dependency-coordination flag is truthful/);
+    // The merged-finalization audit suite (§34.8; ADR-0007).
+    const finalization = readFileSync(DG_FINALIZATION_TESTS, 'utf8');
+    expect(finalization).toMatch(/WORK-052 — the post-merge finalization audit binds canonical state to git merge history/);
+    expect(finalization).toMatch(/BOTH merge shapes \(the classic merge commit AND the WORK-NNN architect-merge subject convention\)/);
+    expect(finalization).toMatch(/DISCRIMINATION \(post-merge correction, BLOCKER 1\): a MERGED work order still in_flight is a GAP/);
+    expect(finalization).toMatch(/DISCRIMINATION \(post-merge correction, BLOCKER 1\): a complete work order whose mergedAs does NOT match the actual merge evidence is a GAP/);
+    expect(finalization).toMatch(/DISCRIMINATION \(the PR #63 round-2 review — the provenance identity\): a FALSE mergedAs\.pr/);
+    expect(finalization).toMatch(/DISCRIMINATION \(the PR #63 round-2 review — fail closed\): a WORK-NNN-merged work order that declares NO pr cannot anchor its mergedAs\.pr provenance claim/);
+    expect(finalization).toMatch(/an in-flight work order with NO merge evidence is NOT a gap/);
+    expect(finalization).toMatch(/the REAL repository audits clean/);
     const detectorTests = readFileSync(DG_DETECTOR_TESTS, 'utf8');
     expect(detectorTests).toMatch(/WORK-052 — the governance-manifest detector \(self-hosting boundary at the checkpoint substrate\)/);
     expect(detectorTests).toMatch(/W052-AC09 — a valid governance manifest at the bound revision PASSES with durable \/verification evidence/);
     expect(detectorTests).toMatch(/W052-AC09 — DISCRIMINATION: a WEAKENED boundary at the bound revision FAILS the checkpoint/);
-    expect(detectorTests).toMatch(/W052-AC09 — a MISSING manifest at the bound revision fails closed/);
+    expect(detectorTests).toMatch(/W052-AC09 — a MISSING manifest at the bound revision is INCONCLUSIVE per ADR-0006/);
+    expect(detectorTests).toMatch(/W052-AC09 — DISCRIMINATION \(post-merge correction, BLOCKER 3\): a manifest that does not PARSE is INCONCLUSIVE per ADR-0006/);
     expect(detectorTests).toMatch(/W052-AC09 — requirePresent=false: a repository without governance state is not_applicable/);
     expect(detectorTests).toMatch(/W052-AC09 — snapshot isolation: the detector reads only the bound project snapshot/);
   });

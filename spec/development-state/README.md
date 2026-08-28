@@ -32,6 +32,9 @@ module remains the per-project ADR/authority; this directory is the self-hosting
 - The `governance-manifest` detector (7th detector in the WORK-051 closed registry)
   evaluates this state at any exact revision through the architecture-checkpoint
   substrate (`docs/adr/ADR-0006-governance-manifest-detector.md`).
+- The post-merge finalization audit (`§34.8`; ADR-0007) binds this state to the
+  repository's git merge history: `governance:status` reports every gap (a merged
+  Work Order not yet `complete` with matching `mergedAs`).
 
 ## Validation invariants (enforced by the loader — fail closed)
 
@@ -53,6 +56,11 @@ module remains the per-project ADR/authority; this directory is the self-hosting
 7. Each assurance profile's requirements dominate the WORK-051 impact/checkpoint matrix
    at the corresponding impact level (ADR-0002) — assurance adds depth, never subtracts.
 8. Every checkpoint contract's enforcement references exist in the repository.
+9. The post-merge finalization protocol is explicit, code-pinned machine-readable
+   state (trigger `architect-merge`; the obligation names `mergedAs`, handoff
+   removal, and the data-only constraint; the enforcement references the
+   merged-finalization invariant; the constraints add no authority, no workflow
+   state, no automation — §34.8, ADR-0007).
 
 A repository whose development state violates any invariant is NOT a valid governed
 state: the control plane refuses to serve it, and the `governance-manifest` checkpoint

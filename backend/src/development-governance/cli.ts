@@ -59,6 +59,23 @@ const main = async (): Promise<void> => {
     console.log(`blocked:           ${w.id} — ${w.title}${w.blockedBy.length ? ` (blocked by ${w.blockedBy.join(', ')})` : ''}`);
   }
   console.log('');
+  console.log('--- Post-merge finalization (§34.8 — the completion protocol) ---');
+  try {
+    const finalization = service.verifyPostMergeFinalization();
+    console.log(
+      `merged work orders finalized: ${finalization.finalized}/${finalization.merged} ` +
+        `(evidence: ${finalization.evidenceSource})`,
+    );
+    for (const gap of finalization.gaps) {
+      console.log(`  GAP: ${gap}`);
+    }
+    if (finalization.gaps.length > 0) process.exitCode = 1;
+  } catch (err) {
+    // Fail closed: an unverifiable finalization state is reported, never swallowed.
+    console.log(`  EVIDENCE UNAVAILABLE: ${String(err instanceof Error ? err.message : err)}`);
+    process.exitCode = 1;
+  }
+  console.log('');
   console.log('--- Q4: parallel eligibility (non-complete candidates) ---');
   for (const a of parallel.assessments) {
     // A candidate is independently startable when its dependencies are
