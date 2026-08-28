@@ -250,6 +250,14 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
     throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
   }
 
+  async findPullRequestByHead(_input: import('./project-github-repository.types.js').FindPullRequestByHeadInput): Promise<import('./project-github-repository.types.js').FindPullRequestByHeadResult | null> {
+    // WORK-051 round 2 (BLOCKER 2): the PR CONVERGENCE READ. Same live-API
+    // credential gate as every other provisioning method — the production
+    // adapter throws until GITHUB_APP_* is wired (never a silent null that
+    // would falsely imply "no existing PR").
+    throw new Error('github-not-configured: live GitHub read API requires GITHUB_APP_PRIVATE_KEY');
+  }
+
   async getBranch(_input: GetBranchInput): Promise<GetBranchResult> {
     throw new Error('github-not-configured: live GitHub write API requires GITHUB_APP_PRIVATE_KEY');
   }

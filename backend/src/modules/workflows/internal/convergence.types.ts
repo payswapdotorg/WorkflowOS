@@ -423,18 +423,25 @@ export interface ArchitectureCheckpointGate {
   evaluate(input: ArchitectureCheckpointGateInput): Promise<ArchitectureCheckpointGateResult>;
 }
 
-// --- WORK-051 round 1 (PR #52 review, BLOCKER 2): the PR-creation boundary ---
+// --- WORK-051 round 2 (PR #52 review, BLOCKER 1 + BLOCKER 2): the governed
+// PR-creation boundary ---
 //
-// The governed convergence path is a TWO-STAGE protocol:
+// The governed convergence path is a TWO-CAPABILITY protocol:
 //
-//   stage 1 — the pre-gate implementation phase: the agent executes with
-//     pullRequestPolicy 'prohibited' (structurally cannot yield a PR; the
-//     gateway enforces the contract with a typed violation error);
-//   stage 2 — PR creation, ONLY after the pr_conformance checkpoint allows
-//     it, through THIS port: the actual PR-creation boundary owned by the
-//     orchestrator's PR path, satisfied in production by the /github
+//   capability 1 — the pre-gate implementation phase: the agent execution
+//     contract is STRUCTURALLY PR-INCAPABLE (no PR field on the request or
+//     the result, no PR-creation capability handed to any provider adapter;
+//     the gateway re-projects provider returns onto the contract). The
+//     provider cannot create a PR through the platform in this phase at all
+//     — there is no policy to violate;
+//   capability 2 — PR creation, ONLY after the pr_conformance checkpoint
+//     allows it, through THIS port: the actual PR-creation boundary owned by
+//     the orchestrator's PR path, satisfied in production by the /github
 //     authority's createPullRequest (repository coordinates resolved
-//     SERVER-SIDE from the project's /github link).
+//     SERVER-SIDE from the project's /github link). The port call is wrapped
+//     by the DURABLE create-or-converge protocol (GovernedPullRequestService
+//     + the wfos_pull_request_intents ledger): crash/retry/duplicate re-drives
+//     of the same (work item, implementation revision) converge on ONE PR.
 //
 // The architectural property is structural: with a blocking architecture
 // violation, ZERO createPullRequest side effects occur; a PR exists in the
@@ -452,19 +459,44 @@ export interface CreatedPullRequest {
 }
 
 /**
- * The PR-creation boundary consumed by the WorkflowOrchestrator. Called ONLY
- * after the pr_conformance checkpoint gate allows progression — never before,
- * never as an agent side effect.
+ * The PR-creation boundary consumed by the governed PR-creation protocol.
+ * Called ONLY after the pr_conformance checkpoint gate allows progression —
+ * never before, never as an agent side effect.
+ *
+ * PR #52 round 2 (BLOCKER 2): the port is BOTH halves of the external
+ * boundary — the convergence READ and the create. The deterministic head
+ * branch (a pure function of the work item + implementation revision — see
+ * {@link governedHeadBranch}) is the convergence marker that ties them
+ * together: after a crash between the external create and the durable
+ * record, the retry finds the already-created PR by that branch and
+ * converges instead of creating a second PR.
  */
 export interface PullRequestCreationPort {
+  /**
+   * The CONVERGENCE READ: find the PR this boundary already created for the
+   * (workItemId, headRevision) pair. Returns null when no such PR exists.
+   * Read-only — no side effects.
+   */
+  findExistingPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    workItemId: string;
+    /** The EXACT implementation revision the checkpoint gated on. */
+    headRevision: string;
+  }): Promise<CreatedPullRequest | null>;
+
+  /**
+   * The CREATE: open the governed PR. The head branch is DERIVED
+   * deterministically from (workItemId, headRevision) — the convergence
+   * marker — so a create is idempotent at the provider boundary (GitHub
+   * itself rejects a second open PR for the same head).
+   */
   createPullRequest(input: {
     /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
     projectId: string;
     workItemId: string;
     /** The EXACT implementation revision the checkpoint gated on. */
     headRevision: string;
-    /** The implementation branch (when known — used as the PR head). */
-    branch: string | null;
     title: string;
     body?: string | null;
   }): Promise<CreatedPullRequest>;

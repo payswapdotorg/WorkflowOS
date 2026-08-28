@@ -4,7 +4,6 @@ import type {
   AgentGateway, AgentRequest, AgentExecutionResult, AgentError,
   AgentProviderAdapter,
 } from './agent.types.js';
-import { AgentPullRequestProhibitedError } from './agent.types.js';
 import { PgAgentRunRepository } from './pg-agent-repository.js';
 
 /** Deterministic fake agent adapter for tests. */
@@ -38,18 +37,18 @@ export class FakeAgentAdapter implements AgentProviderAdapter {
         provider: this.providerName, retryable: this.failure.retryable,
       } as AgentError;
     }
-    // WORK-051 round 1 (BLOCKER 2): a CONTRACT-ABIDING provider honors the
-    // pull-request policy — under 'prohibited' it never creates a PR (the
-    // implementation commits to the branch; PR creation is a separate,
-    // post-gate operation owned by the orchestrator's PR boundary).
-    const prohibited = request.pullRequestPolicy === 'prohibited';
+    // PR #52 round 2 (BLOCKER 1): the fake models a CONTRACT-ABIDING
+    // provider of the PR-INCAPABLE execution contract — it performs
+    // implementation work (a commit) and reports nothing PR-shaped,
+    // because the execution contract has no PR semantics to report
+    // through. PR creation is the orchestrator's separate post-gate
+    // capability.
     return {
       status: 'success', output: this.output,
       startedAt: new Date(), completedAt: new Date(),
       executionId: request.executionId, provider: this.providerName,
       configuration: request.configuration,
       commitRef: 'abc123',
-      pullRequestRef: prohibited ? null : 'github:owner/repo#1',
       reportedTests: [{ name: 'test-1', status: 'pass' }],
       reportedBlockers: [],
       error: null, metadata: {},
@@ -96,35 +95,36 @@ export class DefaultAgentGateway implements AgentGateway {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const result = await adapter.execute(request);
-        // WORK-051 round 1 (PR #52 review, BLOCKER 2): CONTRACT ENFORCEMENT —
-        // a provider that reports a pull request for a 'prohibited' phase
-        // violates the agent contract. The gateway fails the run and throws
-        // the typed error: the pre-checkpoint phase STRUCTURALLY cannot yield
-        // a PR, no matter what the provider did.
-        if (
-          request.pullRequestPolicy === 'prohibited' &&
-          result.pullRequestRef !== null &&
-          result.pullRequestRef !== undefined &&
-          result.pullRequestRef !== ''
-        ) {
-          const violation = new AgentPullRequestProhibitedError(
-            request.provider,
-            request.executionId,
-            result.pullRequestRef,
-          );
-          await this.runRepo.updateFailed(run.id, violation, attempt);
-          this.logger.warn('agent.execute.pr_prohibited_violation', {
-            executionId: request.executionId,
-            provider: request.provider,
-            pullRequestRef: result.pullRequestRef,
-          });
-          throw violation;
-        }
-        await this.runRepo.updateSuccess(run.id, result);
+        // PR #52 round 2 (BLOCKER 1) — THE CAPABILITY MEMBRANE.
+        //
+        // The gateway re-projects every provider return onto the execution
+        // contract field-by-field. A provider's return value is UNTRUSTED
+        // data: properties outside {@link AgentExecutionResult} (e.g. a
+        // smuggled `pullRequestRef` from a misbehaving provider) cannot
+        // cross this boundary — they are dropped here, never persisted, and
+        // never visible to the caller. There is nothing to "check for"
+        // after the fact because the contract itself is PR-incapable: the
+        // pre-gate execution phase holds no PR-creation capability, and the
+        // only PR-creation capability in the system is the orchestrator's
+        // post-gate PullRequestCreationPort → /github boundary.
+        const projected: AgentExecutionResult = {
+          status: result.status,
+          output: result.output,
+          startedAt: result.startedAt,
+          completedAt: result.completedAt,
+          executionId: result.executionId,
+          provider: result.provider,
+          configuration: result.configuration,
+          commitRef: result.commitRef,
+          reportedTests: result.reportedTests,
+          reportedBlockers: result.reportedBlockers,
+          error: result.error,
+          metadata: result.metadata,
+        };
+        await this.runRepo.updateSuccess(run.id, projected);
         this.logger.info('agent.execute.success', { executionId: request.executionId, attempt });
-        return result;
+        return projected;
       } catch (err) {
-        if (err instanceof AgentPullRequestProhibitedError) throw err;
         lastError = err as AgentError;
         if (!lastError.retryable || attempt >= this.maxRetries) {
           await this.runRepo.updateFailed(run.id, lastError, attempt);

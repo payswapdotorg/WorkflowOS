@@ -27,9 +27,9 @@ import type {
   ArchitectureCheckpointGate,
   ArchitectureCheckpointGateInput,
   ArchitectureCheckpointGateResult,
-  PullRequestCreationPort,
 } from './convergence.types.js';
 import { ArchitectureCheckpointGateDeniedError } from './convergence.types.js';
+import { GovernedPullRequestService } from './governed-pull-request-service.js';
 import type { WorkflowEngine, WorkflowState, TransitionResult } from './workflow.types.js';
 import { PgConvergenceSignalRepository } from './pg-convergence-repository.js';
 
@@ -87,13 +87,16 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     private readonly architectureCheckpointGate: ArchitectureCheckpointGate,
     private readonly genExecutionId: typeof generateExecutionId,
     /**
-     * WORK-051 round 1 (PR #52 review, BLOCKER 2): the ACTUAL PR-creation
-     * boundary. The governed convergence path is a two-stage protocol — the
-     * pre-gate agent phase executes under pullRequestPolicy 'prohibited'
-     * (structurally cannot create a PR), and the PR is created ONLY after
-     * the pr_conformance checkpoint allows it, through THIS port.
+     * WORK-051 round 2 (PR #52 review, BLOCKER 2): the governed PR-creation
+     * boundary — the durable create-or-converge protocol over the
+     * PullRequestCreationPort. The pre-gate agent phase is structurally
+     * PR-incapable (the execution contract has no PR semantics), and the
+     * PR is created ONLY after the pr_conformance checkpoint allows it,
+     * through THIS protocol: at most ONE PR per (work item, implementation
+     * revision), across crashes, retries, and duplicate convergence
+     * signals.
      */
-    private readonly pullRequestCreationPort: PullRequestCreationPort,
+    private readonly governedPullRequests: GovernedPullRequestService,
   ) {
     this.signalRepo = new PgConvergenceSignalRepository(this.db);
     // projectRepository is accepted for future use (project-level convergence
@@ -438,10 +441,12 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         const agentExecutionId = this.genExecutionId();
         const provider = (signal.payload.agentProvider as string) ?? 'fake';
         try {
-          // WORK-051 round 1 (BLOCKER 2): the pre-gate implementation phase
-          // executes under pullRequestPolicy 'prohibited' — the provider
-          // CANNOT create a PR for this phase (gateway-enforced contract).
-          // The PR is created only after the pr_conformance gate allows it.
+          // PR #52 round 2 (BLOCKER 1): the agent execution contract is
+          // structurally PR-INCAPABLE (no policy request, no PR- reporting
+          // field, gateway projection) — the provider CANNOT create a PR
+          // through the platform for this phase. The PR is created only
+          // after the pr_conformance gate allows it, via the governed
+          // PR-creation boundary.
           const agentResult = await this.agentGateway.execute({
             provider,
             configuration: (signal.payload.agentConfiguration as Record<string, unknown>) ?? {},
@@ -450,7 +455,6 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
             architectureVersionId: wi.architectureVersionId,
             executionId: agentExecutionId,
             input: (signal.payload.agentInput as string) ?? 'Implement the corrected work order',
-            pullRequestPolicy: 'prohibited',
           });
           if (agentResult.status === 'success' && agentResult.commitRef) {
             // WORK-051 gate 3 (correction path) — the governed PR-creation
@@ -560,11 +564,10 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         architectureVersionId: wi.architectureVersionId,
         executionId: agentExecutionId,
         input: (signal.payload.agentInput as string) ?? 'Implement the work order',
-        // WORK-051 round 1 (BLOCKER 2): the pre-gate implementation phase
-        // executes under pullRequestPolicy 'prohibited' — the provider
-        // CANNOT create a PR for this phase (gateway-enforced contract). The
-        // PR is created only after the pr_conformance gate allows it.
-        pullRequestPolicy: 'prohibited' as const,
+        // PR #52 round 2 (BLOCKER 1): the agent execution contract is
+        // structurally PR-INCAPABLE — no PR-creation capability exists in
+        // the pre-gate phase at all (see the correction-path comment above).
+        // The PR is created only after the pr_conformance gate allows it.
       };
       // Execute the agent run (synchronous in tests; in production this would
       // be async via the agent.execute job).
@@ -627,13 +630,13 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
 
     const status = signal.payload.status as string;
     const commitRef = signal.payload.commitRef as string | undefined;
-    // WORK-051 round 1 (BLOCKER 2): a payload pullRequestRef is an EXTERNAL
+    // WORK-051 round 2 (BLOCKER 1): a payload pullRequestRef is an EXTERNAL
     // PR observation (e.g. a webhook-recorded PR opened by a human or an
-    // out-of-band tool) — the pre-gate agent phase is prohibited from
-    // creating PRs, so this handler NEVER creates a PR from a payload ref.
-    // An external PR is ADOPTED (associated + transitioned) only AFTER the
-    // pr_conformance gate passes; PR creation itself happens only through
-    // openGovernedPullRequest's port call.
+    // out-of-band tool) — the agent execution contract is PR-incapable, so
+    // this handler NEVER creates a PR from a payload ref. An external PR is
+    // ADOPTED (associated + transitioned) only AFTER the pr_conformance
+    // gate passes; PR creation itself happens only through
+    // openGovernedPullRequest's governed PR-creation boundary.
     const pullRequestRef = signal.payload.pullRequestRef as string | undefined;
 
     if (status === 'success' && (commitRef || pullRequestRef)) {
@@ -664,17 +667,19 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
   }
 
   /**
-   * WORK-051 round 1 (PR #52 review, BLOCKER 2) — the ACTUAL PR-creation
-   * boundary of the governed convergence path. Strict order:
+   * WORK-051 round 2 (PR #52 review, BLOCKERS 1 + 2) — the ACTUAL
+   * PR-creation boundary of the governed convergence path. Strict order:
    *
    *   1. the pr_conformance architecture checkpoint, bound to the EXACT
    *      implementation revision (fail closed);
    *   2. ONLY if the gate allows: either adopt an already-existing EXTERNAL
    *      PR observation (record the association — no creation side effect),
-   *      or CREATE the PR through the PR-creation port (the single
-   *      PR-creation side-effect site, backed by /github's
-   *      createPullRequest) and record the association from the
-   *      authoritative creation result;
+   *      or CREATE the PR through the governed PR-creation protocol (the
+   *      durable create-or-converge boundary over the single
+   *      PullRequestCreationPort → /github path) and record the association
+   *      from the authoritative creation result — IDEMPOTENTLY: a
+   *      crash/retry/duplicate re-drive of the same (work item, revision)
+   *      converges on the SAME PR (no second external create);
    *   3. the caller performs the PR_OPEN transition.
    *
    * A denied gate returns false having performed ZERO PR-creation side
@@ -702,7 +707,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     }
 
     // (2a) An external PR already exists — adopt the observed identity
-    // (association only; no creation side effect).
+    // (association only; no creation side effect; idempotent).
     if (externalPrRef) {
       const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
       const alreadyHasPr = existingPrs.some((p) => p.externalPrId === externalPrRef);
@@ -716,23 +721,30 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       return true;
     }
 
-    // (2b) Create the PR through the ACTUAL PR-creation boundary — the only
-    // place a governed PR side effect happens, and only ever AFTER the gate.
+    // (2b) Create the PR through the governed PR-creation boundary — the
+    // durable create-or-converge protocol (the ONLY PR-creation capability,
+    // only ever AFTER the gate). A crash/retry/duplicate re-drive of the
+    // same (work item, implementation revision) converges on the SAME PR.
     try {
       const wi = await this.workItemRepository.findById(signal.workItemId);
-      const created = await this.pullRequestCreationPort.createPullRequest({
+      const created = await this.governedPullRequests.open({
         projectId: signal.projectId,
         workItemId: signal.workItemId,
         headRevision: gateRevision,
-        branch: null,
         title: wi ? `Work item ${wi.workItemId}: ${wi.title}` : `Work item ${signal.workItemId}`,
         body: `WorkflowOS governed implementation — architecture checkpoint ${prGate.checkpointId ?? 'n/a'} allowed at revision ${gateRevision}.`,
       });
-      await this.pullRequestAssociationRepository.create({
-        workItemId: signal.workItemId,
-        externalPrId: created.externalPrId,
-        headCommit: created.headCommit ?? gateRevision,
-      });
+      // Record the association IDEMPOTENTLY (a converged re-drive of the
+      // same key returns the SAME PR — create-if-absent, never duplicate).
+      const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
+      const alreadyAssociated = existingPrs.some((p) => p.externalPrId === created.externalPrId);
+      if (!alreadyAssociated) {
+        await this.pullRequestAssociationRepository.create({
+          workItemId: signal.workItemId,
+          externalPrId: created.externalPrId,
+          headCommit: created.headCommit ?? gateRevision,
+        });
+      }
       this.logger.info('convergence.pr.created', {
         workItemId: signal.workItemId,
         externalPrId: created.externalPrId,
@@ -741,7 +753,8 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       return true;
     } catch (err) {
       // Fail closed: PR creation failed — stay IMPLEMENTING (no association,
-      // no PR_OPEN; the signal can be re-processed).
+      // no PR_OPEN; the signal can be re-processed — the governed protocol
+      // converges instead of creating a second PR).
       this.logger.warn('convergence.pr.creation_failed', {
         workItemId: signal.workItemId,
         error: (err as Error).message,

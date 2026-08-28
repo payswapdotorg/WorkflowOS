@@ -129,6 +129,10 @@ class ConfigurableGitHubAdapter implements GitHubAdapter {
   async createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult> {
     return this.inner.createPullRequest(input);
   }
+  async findPullRequestByHead(input: import('../../../src/modules/github/internal/project-github-repository.types.js').FindPullRequestByHeadInput): Promise<import('../../../src/modules/github/internal/project-github-repository.types.js').FindPullRequestByHeadResult | null> {
+    // WORK-051 round 2: delegate the PR CONVERGENCE READ to the wrapped fake.
+    return this.inner.findPullRequestByHead(input);
+  }
   async getBranch(input: GetBranchInput): Promise<GetBranchResult> {
     return this.inner.getBranch(input);
   }

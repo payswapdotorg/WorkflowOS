@@ -188,7 +188,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
         this.orchestrationKey(input),
       );
       if (recorded && (recorded.status === 'completed' || recorded.status === 'failed')) {
-        const replay = this.resultFromRecordedRun(recorded, input.workItemId);
+        const replay = await this.resultFromRecordedRun(recorded, input.workItemId);
         this.deps.logger?.info('checkpoint.replayed', {
           workItemId: input.workItemId,
           checkpointKind: input.checkpointKind,
@@ -258,6 +258,9 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
         checkpointId: null,
         replayed: false,
         evaluatedAt: new Date().toISOString(),
+        // The provider-observed identity of whatever the (denied-context)
+        // snapshot served — recorded for auditability.
+        snapshotIdentity: snapshot ? snapshot.identity() : null,
       };
       result.checkpointId = await this.persistCheckpointEvidence(
         architecture.projectId,
@@ -321,6 +324,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
         checkpointId: null,
         replayed: false,
         evaluatedAt: new Date().toISOString(),
+        snapshotIdentity: snapshot ? snapshot.identity() : null,
       };
       result.checkpointId = await this.persistCheckpointEvidence(
         architecture.projectId,
@@ -379,6 +383,11 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       checkpointId: null,
       replayed: false,
       evaluatedAt: new Date().toISOString(),
+      // PR #52 round 2 (HIGH): the PROVIDER-OBSERVED snapshot identity —
+      // captured AFTER the detectors ran, so it covers every read the
+      // evaluation performed. Durable in the evidence (summary row + run
+      // summary); strictly stronger than the revision string alone.
+      snapshotIdentity: snapshot ? snapshot.identity() : null,
     };
 
     // --- 8. Durable evidence through /verification (ONE atomic record) ----
@@ -494,6 +503,11 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
     // cleanup path because no partial state can exist.
     const evidence = [
       // One Evidence row per assertion evaluation (deterministic order).
+      // PR #52 round 2 (HIGH 2): the row metadata carries the FULL
+      // evaluation (including the summary + details) so the replay path can
+      // reconstruct the ORIGINAL per-assertion evaluation list through
+      // /verification — a replayed result is semantically equivalent to the
+      // original, not a summary-only reduction.
       ...result.evaluations.map((e) => ({
         evidenceType: 'architecture-assertion',
         provider: 'architecture-checkpoint',
@@ -507,6 +521,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
           severity: e.severity,
           detectorKind: e.detectorKind,
           detectorStatus: e.status,
+          summary: e.summary,
           checkpointKind: result.checkpointKind,
           architectureVersionId: result.architectureVersionId,
           details: e.details,
@@ -530,6 +545,10 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
           blockingFindings: result.blockingFindings,
           advisories: result.advisories,
           evaluationCount: result.evaluations.length,
+          // PR #52 round 2 (HIGH): the PROVIDER-OBSERVED snapshot identity
+          // — durable next to the revision string (the revision is a claim;
+          // the identity is a digest of what /github actually served).
+          snapshotIdentity: result.snapshotIdentity ?? null,
         },
       },
     ];
@@ -544,6 +563,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       blockingFindings: result.blockingFindings,
       advisories: result.advisories,
       checkpointIdempotencyKey: input.idempotencyKey ?? null,
+      snapshotIdentity: result.snapshotIdentity ?? null,
       evaluationSummaries: result.evaluations.map((e) => ({
         assertionId: e.assertionId,
         severity: e.severity,
@@ -588,7 +608,17 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
   // Idempotent replay (the durable identity lookup)
   // -------------------------------------------------------------------------
 
-  private resultFromRecordedRun(
+  /**
+   * PR #52 round 2 (HIGH 2) — replay reconstructs the ORIGINAL result, not a
+   * summary-only reduction. The per-assertion evaluation list is rebuilt
+   * THROUGH /verification (the evidence authority) from the run's persisted
+   * `architecture-assertion` evidence rows — the rows carry the full
+   * evaluation (assertionId, row id, severity, detectorKind, status,
+   * summary, details), so a replayed {@link ArchitectureCheckpointResult} is
+   * semantically equivalent to the original. The provider-observed snapshot
+   * identity is replayed from the summary the same way.
+   */
+  private async resultFromRecordedRun(
     recorded: {
       id: string;
       architectureVersionId: string;
@@ -598,8 +628,45 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       createdAt: Date;
     },
     workItemId: string,
-  ): ArchitectureCheckpointResult {
+  ): Promise<ArchitectureCheckpointResult> {
     const s = recorded.summary ?? {};
+    // Reconstruct the per-assertion evaluations through the /verification
+    // evidence authority (read path; ordered as persisted).
+    let evaluations: AssertionEvaluation[] = [];
+    try {
+      const evidenceRows = await this.deps.verificationService.listEvidenceForRun(recorded.id);
+      evaluations = evidenceRows
+        .filter((row) => row.evidenceType === 'architecture-assertion')
+        .map((row) => {
+          const m = (row.metadata ?? {}) as Record<string, unknown>;
+          return {
+            assertionId: (m.assertionId as string) ?? row.externalRef,
+            assertionRowId: (m.assertionRowId as string) ?? '',
+            severity: (m.severity as AssertionEvaluation['severity']) ?? 'advisory',
+            detectorKind: (m.detectorKind as string) ?? 'unknown',
+            status: (m.detectorStatus as AssertionEvaluation['status']) ?? 'inconclusive',
+            summary: (m.summary as string) ?? row.contentSummary,
+            details: (m.details as Record<string, unknown>) ?? {},
+          };
+        })
+        // The rows were written in ONE transaction (identical created_at),
+        // so their physical order is not a stable sort key — restore the
+        // ORIGINAL evaluation order (the assertion reader lists by
+        // assertion_id).
+        .sort((a, b) => (a.assertionId < b.assertionId ? -1 : a.assertionId > b.assertionId ? 1 : 0));
+    } catch {
+      // The evidence read is the authority's surface; a read failure must
+      // not corrupt the replayed verdict — replay the summary (the verdict,
+      // blocking findings, and advisories are authoritative in the run
+      // summary). The evaluation list degrades to the summary's evaluation
+      // summaries rather than to [] (still not a silent loss).
+      evaluations = this.evaluationsFromSummary(s);
+    }
+    if (evaluations.length === 0) {
+      // No assertion evidence rows (an explicitly assertion-free version, or
+      // a legacy record): fall back to the summary's evaluation summaries.
+      evaluations = this.evaluationsFromSummary(s);
+    }
     return {
       checkpointKind: (s.checkpointKind as ArchitectureCheckpointKind) ?? 'pr_conformance',
       workItemId,
@@ -609,7 +676,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       applicable: true,
       status: (s.status as ArchitectureCheckpointResult['status']) ?? 'inconclusive',
       allowed: s.allowed === true,
-      evaluations: [],
+      evaluations,
       blockingFindings: Array.isArray(s.blockingFindings) ? (s.blockingFindings as string[]) : [],
       advisories: Array.isArray(s.advisories) ? (s.advisories as string[]) : [],
       checkpointId: recorded.id,
@@ -617,7 +684,30 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
       evaluatedAt: recorded.finishedAt
         ? new Date(recorded.finishedAt).toISOString()
         : new Date(recorded.createdAt).toISOString(),
+      snapshotIdentity: (s.snapshotIdentity as ArchitectureCheckpointResult['snapshotIdentity']) ?? null,
     };
+  }
+
+  /**
+   * The degraded replay source: the run summary's evaluation summaries
+   * (assertionId/severity/detectorKind/status/summary — no row ids or
+   * details). Used only when the evidence rows cannot be read or a legacy
+   * record lacks them; never a silent empty list when the summary carries
+   * evaluation data.
+   */
+  private evaluationsFromSummary(
+    s: Record<string, unknown>,
+  ): AssertionEvaluation[] {
+    if (!Array.isArray(s.evaluationSummaries)) return [];
+    return (s.evaluationSummaries as Array<Record<string, unknown>>).map((e) => ({
+      assertionId: (e.assertionId as string) ?? '',
+      assertionRowId: '', // not carried by the summary — evidence rows carry it
+      severity: (e.severity as AssertionEvaluation['severity']) ?? 'advisory',
+      detectorKind: (e.detectorKind as string) ?? 'unknown',
+      status: (e.status as AssertionEvaluation['status']) ?? 'inconclusive',
+      summary: (e.summary as string) ?? '',
+      details: {},
+    }));
   }
 }
 

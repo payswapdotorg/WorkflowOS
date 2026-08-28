@@ -21,6 +21,8 @@ import type {
   CreatePullRequestResult,
   CreateRepositoryInput,
   CreateRepositoryResult,
+  FindPullRequestByHeadInput,
+  FindPullRequestByHeadResult,
   GetBranchInput,
   GetBranchResult,
   GetFileContentInput,
@@ -132,8 +134,28 @@ export interface GitHubAdapter {
    *
    * WORK-026: used by the autonomous implementation loop to open the PR
    * that carries the agent's implementation commits into the default branch.
+   *
+   * PR #52 round 2 (BLOCKER 2): adapters implementing this method MUST
+   * mirror GitHub's own identity semantics — at most ONE OPEN pull request
+   * per (head, base) pair. A second create for the same head while an open
+   * PR exists fails (GitHub: HTTP 422 "A pull request already exists"); it
+   * must NEVER silently open a duplicate. The governed PR-creation
+   * protocol relies on this + {@link findPullRequestByHead} for crash-safe
+   * exactly-once PR creation.
    */
   createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult>;
+
+  /**
+   * Find the OPEN pull request for a head branch — the CONVERGENCE READ
+   * (WORK-051 round 2, PR #52 review BLOCKER 2).
+   *
+   * Returns null when no open PR exists for that head branch. The governed
+   * PR-creation boundary calls this BEFORE creating: after a crash between
+   * the external create and the durable record, the retry CONVERGES on the
+   * PR the crashed attempt already created (identified by the deterministic
+   * head branch) instead of opening a second one.
+   */
+  findPullRequestByHead(input: FindPullRequestByHeadInput): Promise<FindPullRequestByHeadResult | null>;
 
   /**
    * Look up a branch's current HEAD SHA + whether it is the default branch.
@@ -161,6 +183,18 @@ export interface GitHubAdapter {
    * baseline is pinned to an immutable SHA) OR a branch/tag name (for ad-hoc
    * reads outside onboarding; the onboarding path always passes the resolved
    * SHA). The GitHub getContent API accepts both forms.
+   *
+   * EXACT-REF RESOLUTION CONTRACT (WORK-051 round 2, PR #52 review HIGH —
+   * pinned as a static invariant): an adapter MUST resolve EXACTLY the
+   * requested `ref` — it passes the ref through to the provider API
+   * VERBATIM and returns the content that ref resolves to, or `null`/throws
+   * when that ref cannot be resolved. An adapter MUST NEVER silently fall
+   * back to the default branch, to a moved branch head, or to any working
+   * tree: a caller that pinned an immutable commit SHA (the architecture
+   * checkpoint snapshot, the onboarding baseline) receives the bytes of
+   * EXACTLY that revision or an honest failure — never the bytes of some
+   * other revision. A revision-bound snapshot built on this contract is
+   * therefore bound to the revision it claims, at the provider boundary.
    */
   getFileContent(input: GetFileContentInput): Promise<GetFileContentResult | null>;
 
@@ -170,6 +204,12 @@ export interface GitHubAdapter {
    * Returns an empty `entries` array when the directory does not exist at
    * that revision. Used by onboarding to enumerate candidate paths (e.g.
    * `.github/workflows` for CI discovery) without reading each file.
+   *
+   * EXACT-REF RESOLUTION CONTRACT: same guarantee as
+   * {@link getFileContent} — the listing is of EXACTLY the requested `ref`
+   * (verbatim pass-through; no branch/worktree fallback, no substitution),
+   * or an honest failure/empty-for-missing-path. Never a listing of some
+   * other revision.
    */
   listDir(input: ListDirInput): Promise<ListDirResult>;
 

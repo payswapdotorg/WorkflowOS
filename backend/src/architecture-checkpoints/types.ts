@@ -115,6 +115,34 @@ export class SnapshotReadError extends Error {
 }
 
 /**
+ * The PROVIDER-OBSERVED identity of a repository snapshot (PR #52 round 2,
+ * HIGH) — a digest of what the /github authority actually served through
+ * this snapshot, recorded alongside the revision string in the durable
+ * checkpoint evidence.
+ *
+ * The revision string alone is a CLAIM; the identity makes the evidence
+ * stronger: every file the detectors read contributed its PROVIDER-computed
+ * content digest (sha256, from the /github exact-ref content-read contract)
+ * to `treeDigest`. Two evaluations of the same revision that read the same
+ * paths produce the SAME identity — and a mutated tree under the same
+ * revision label produces a DIFFERENT one.
+ */
+export interface RepositorySnapshotIdentity {
+  /** The exact revision the snapshot was opened at (echoed, not re-resolved). */
+  readonly revision: string;
+  /** The server-resolved repository coordinates ('owner/name'). */
+  readonly repository: string;
+  /** The number of DISTINCT files read through this snapshot. */
+  readonly filesRead: number;
+  /**
+   * sha256 over the sorted `path:contentDigest` pairs of every file read —
+   * the provider-observed digest of the evaluated tree slice. `null` when
+   * nothing was read (no repository-backed assertion executed).
+   */
+  readonly treeDigest: string | null;
+}
+
+/**
  * An EXACT-REVISION, read-only view of a governed repository — the ONLY
  * source repository-backed detectors may read (PR #52 round 1, BLOCKER 1).
  *
@@ -132,6 +160,8 @@ export class SnapshotReadError extends Error {
  * - `listDir` → the directory entries at the revision ([] when the directory
  *   does not exist). A read FAILURE throws {@link SnapshotReadError}.
  * - `dirExists` → parent-chain-verified existence. A read FAILURE throws.
+ * - `identity` → the provider-observed identity of everything this snapshot
+ *   served so far (see {@link RepositorySnapshotIdentity}).
  */
 export interface RepositorySnapshot {
   /** The exact implementation revision this snapshot is bound to. */
@@ -141,6 +171,8 @@ export interface RepositorySnapshot {
   listDir(path: string): Promise<readonly SnapshotDirEntry[]>;
   readFile(path: string): Promise<string | null>;
   dirExists(path: string): Promise<boolean>;
+  /** The provider-observed identity (what /github actually served). */
+  identity(): RepositorySnapshotIdentity;
 }
 
 /**
@@ -258,6 +290,15 @@ export interface ArchitectureCheckpointResult {
   replayed: boolean;
   /** ISO-8601 timestamp of the evaluation. */
   evaluatedAt: string;
+  /**
+   * PR #52 round 2 (HIGH) — the PROVIDER-OBSERVED snapshot identity: a
+   * digest of what /github actually served during this evaluation (what the
+   * detectors read, at which repository/revision). Strictly stronger than
+   * the revision string alone: recorded in the durable evidence and
+   * reconstructed on replay. Null when no revision-bound snapshot was
+   * opened (non-revision-bound kinds, or a denied context).
+   */
+  snapshotIdentity?: RepositorySnapshotIdentity | null;
 }
 
 // ---------------------------------------------------------------------------

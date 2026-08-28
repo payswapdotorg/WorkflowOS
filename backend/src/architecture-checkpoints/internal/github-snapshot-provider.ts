@@ -30,8 +30,10 @@ import type {
   GitHubAdapter,
   ProjectGitHubRepositoryRepository,
 } from '@modules/github/index.js';
+import { createHash } from 'node:crypto';
 import type {
   RepositorySnapshot,
+  RepositorySnapshotIdentity,
   RepositorySnapshotReader,
   SnapshotDirEntry,
 } from '../types.js';
@@ -52,6 +54,14 @@ export class GithubRepositorySnapshot implements RepositorySnapshot {
   readonly revision: string;
   readonly repository: string;
 
+  /**
+   * PR #52 round 2 (HIGH) — the provider-observed identity inputs: the
+   * PROVIDER-computed content digest (from the /github exact-ref read) of
+   * every DISTINCT file path read through this snapshot, keyed by path.
+   * This is what /github ACTUALLY served — not a claim about a revision.
+   */
+  private readonly servedDigests = new Map<string, string>();
+
   constructor(
     private readonly adapter: GitHubAdapter,
     private readonly owner: string,
@@ -61,6 +71,22 @@ export class GithubRepositorySnapshot implements RepositorySnapshot {
   ) {
     this.repository = repository;
     this.revision = revision;
+  }
+
+  /** The provider-observed identity of everything served so far. */
+  identity(): RepositorySnapshotIdentity {
+    const pairs = [...this.servedDigests.entries()]
+      .map(([path, digest]) => `${path}:${digest}`)
+      .sort();
+    return {
+      revision: this.revision,
+      repository: `${this.owner}/${this.repository}`,
+      filesRead: this.servedDigests.size,
+      treeDigest:
+        pairs.length === 0
+          ? null
+          : createHash('sha256').update(pairs.join('\n'), 'utf8').digest('hex'),
+    };
   }
 
   async listDir(path: string): Promise<readonly SnapshotDirEntry[]> {
@@ -89,11 +115,18 @@ export class GithubRepositorySnapshot implements RepositorySnapshot {
       const result = await this.adapter.getFileContent({
         owner: this.owner,
         repository: this.repository,
+        // EXACT-REF CONTRACT: the bound revision is passed VERBATIM — the
+        // /github adapter resolves exactly this ref (never a branch or
+        // worktree fallback; pinned as a static invariant).
         ref: this.revision,
         path: p,
         installationId: this.installationId,
       });
-      return result === null ? null : result.content;
+      if (result === null) return null;
+      // Record the PROVIDER-computed digest (sha256 of the served content) —
+      // the provider-observed snapshot identity input.
+      this.servedDigests.set(p, result.contentDigest);
+      return result.content;
     } catch (err) {
       throw new SnapshotReadError(
         'unreadable',

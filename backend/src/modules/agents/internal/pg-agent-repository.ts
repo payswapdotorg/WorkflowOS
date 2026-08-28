@@ -73,7 +73,11 @@ export class PgAgentRunRepository implements AgentRunRepository {
          execution_metadata = $6, completed_at = NOW(), updated_at = NOW()
        WHERE id = $7
        RETURNING *`,
-      [result.output, result.commitRef, result.pullRequestRef,
+      // PR #52 round 2 (BLOCKER 1): the execution contract is PR-incapable —
+      // a gateway-recorded success can NEVER set pull_request_ref (the
+      // column is reserved for external PR observations ingested through the
+      // execution-event/webhook boundary, never provider reports).
+      [result.output, result.commitRef, null,
        JSON.stringify(result.reportedTests), JSON.stringify(result.reportedBlockers),
        JSON.stringify(result.metadata), id]);
     return r.rows.length ? mapRow(r.rows[0]!) : null;

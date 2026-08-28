@@ -155,9 +155,10 @@ import {
   createDefaultDetectorRegistry,
   GithubRepositorySnapshotProvider,
 } from '@root/architecture-checkpoints/index.js';
-// WORK-051 round 1 (BLOCKER 2): the production PR-creation boundary — the
-// orchestrator's governed PR creation through /github's createPullRequest.
+// WORK-051 round 2 (BLOCKER 2): the durable governed PR-creation protocol
+// over the PR-creation port (the /github authority's createPullRequest).
 import { GithubBackedPullRequestCreationPort } from './modules/workflows/internal/github-pr-creation-port.js';
+import { GovernedPullRequestService } from './modules/workflows/internal/governed-pull-request-service.js';
 import { DefaultAgentGateway } from './modules/agents/internal/agent-gateway.js';
 import type { AgentGateway } from '@modules/agents/index.js';
 import { PgAgentRunRepository } from './modules/agents/internal/pg-agent-repository.js';
@@ -958,13 +959,20 @@ export async function buildApp(
           detectors: createDefaultDetectorRegistry(),
           logger,
         });
-      // WORK-051 round 1 (BLOCKER 2): the ACTUAL PR-creation boundary — the
-      // orchestrator creates a governed PR through /github's
-      // createPullRequest ONLY after the pr_conformance checkpoint allows
-      // it (never as a pre-gate agent side effect).
+      // WORK-051 round 2 (PR #52 review, BLOCKER 2): the ACTUAL PR-creation
+      // boundary — the durable create-or-converge protocol over the
+      // PullRequestCreationPort → /github path. The orchestrator creates a
+      // governed PR ONLY after the pr_conformance checkpoint allows it
+      // (never as a pre-gate agent side effect — the agent execution
+      // contract is PR-incapable), and at most ONE PR per
+      // (work item, implementation revision) across crashes and retries.
       const pullRequestCreationPort = new GithubBackedPullRequestCreationPort(
         projectGitHubRepositoryRepository,
         githubAdapter,
+      );
+      const governedPullRequests = new GovernedPullRequestService(
+        database,
+        pullRequestCreationPort,
       );
       orchestrator = new DefaultWorkflowOrchestrator(
         database, logger, queue, workflowEngine,
@@ -976,7 +984,7 @@ export async function buildApp(
         verificationService, reviewService, githubAdapter,
         architectureVersionRepository, architectureRepository,
         projectRepository, architectureCheckpointGate, generateExecutionId,
-        pullRequestCreationPort,
+        governedPullRequests,
       );
     }
     authProvider = new ApiKeyAuthProvider(database, secretStore);

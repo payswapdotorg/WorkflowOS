@@ -56,6 +56,8 @@ import type {
   CreatePullRequestResult,
   CreateRepositoryInput,
   CreateRepositoryResult,
+  FindPullRequestByHeadInput,
+  FindPullRequestByHeadResult,
   GetBranchInput,
   GetBranchResult,
   GetFileContentInput,
@@ -88,6 +90,27 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   // the setup.
   private files = new Map<string, string>();
   private dirs = new Map<string, RepoDirEntry[]>();
+
+  // --- WORK-051 round 2 (PR #52 review, BLOCKER 2): the open-PR registry ---
+  //
+  // Mirrors GitHub's own identity semantics: at most ONE OPEN pull request
+  // per (owner, repository, head) triple. A second createPullRequest for the
+  // same head while its PR is open FAILS exactly like GitHub's HTTP 422
+  // ("A pull request already exists for...") — the fake never silently opens
+  // a duplicate. This is what makes the crash/retry convergence regressions
+  // honest: a converged retry cannot accidentally mint a second PR.
+  private openPullRequests = new Map<string, {
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+  }>();
+  private nextPrNumber = 1;
+
+  /** Operation counters (provider-side counting for the governed PR-creation regressions). */
+  readonly createPullRequestCalls: string[] = [];
+  readonly findPullRequestByHeadCalls: string[] = [];
 
   /** sha256 hex of text (reproducibility — matches the production digest). */
   private static digest(text: string): string {
@@ -207,12 +230,49 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   async createPullRequest(
     input: CreatePullRequestInput,
   ): Promise<CreatePullRequestResult> {
+    this.createPullRequestCalls.push(input.head);
+    const key = `${input.owner}/${input.repository}/${input.head}`;
+    if (this.openPullRequests.has(key)) {
+      // GitHub's real semantics (HTTP 422): at most one OPEN PR per
+      // (head, base). A governed-path duplicate create is a BUG — the
+      // convergence protocol must find + adopt the existing PR instead.
+      throw new Error(
+        `github-fake: a pull request already exists for head '${input.head}' ` +
+          `in ${input.owner}/${input.repository} (GitHub rejects duplicate open PRs for the same head)`,
+      );
+    }
+    const number = this.nextPrNumber++;
+    const headSha = `fakesha${sha8(input.head)}`;
+    this.openPullRequests.set(key, {
+      owner: input.owner,
+      repository: input.repository,
+      number,
+      head: input.head,
+      headSha,
+    });
     return {
       owner: input.owner,
       repository: input.repository,
-      number: 1,
-      url: `https://github.com/${input.owner}/${input.repository}/pull/1`,
-      headSha: `fakesha${sha8(input.head)}`,
+      number,
+      url: `https://github.com/${input.owner}/${input.repository}/pull/${number}`,
+      headSha,
+    };
+  }
+
+  async findPullRequestByHead(
+    input: FindPullRequestByHeadInput,
+  ): Promise<FindPullRequestByHeadResult | null> {
+    this.findPullRequestByHeadCalls.push(input.head);
+    const found = this.openPullRequests.get(
+      `${input.owner}/${input.repository}/${input.head}`,
+    );
+    if (!found) return null;
+    return {
+      owner: found.owner,
+      repository: found.repository,
+      number: found.number,
+      headSha: found.headSha,
+      state: 'open',
     };
   }
 

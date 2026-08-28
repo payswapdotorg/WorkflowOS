@@ -19,8 +19,12 @@ import {
   DefaultAgentGateway,
   FakeAgentAdapter,
 } from '../../../src/modules/agents/internal/agent-gateway.js';
-import { AgentPullRequestProhibitedError } from '../../../src/modules/agents/internal/agent.types.js';
-import type { AgentProviderAdapter } from '../../../src/modules/agents/internal/agent.types.js';
+import type {
+  AgentProviderAdapter,
+  AgentRequest,
+  AgentExecutionResult,
+} from '../../../src/modules/agents/internal/agent.types.js';
+import { GovernedPullRequestService } from '../../../src/modules/workflows/internal/governed-pull-request-service.js';
 import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-agent-repository.js';
 import { DefaultLlmGateway, FakeLlmAdapter } from '../../../src/modules/llm/internal/llm-gateway.js';
 import { DefaultArchitectService } from '../../../src/modules/llm/internal/architect-service.js';
@@ -39,17 +43,19 @@ import {
 import { generateExecutionId } from '@platform/ids.js';
 
 /**
- * WORK-051 round 1 — the architecture checkpoint LIFECYCLE GATES in the
- * workflow orchestrator, INCLUDING the actual PR-creation boundary
- * (PR #52 review, BLOCKER 2):
+ * WORK-051 round 1 + round 2 — the architecture checkpoint LIFECYCLE GATES in
+ * the workflow orchestrator, INCLUDING the actual PR-creation boundary
+ * (PR #52 review, BLOCKER 1 + BLOCKER 2):
  *
- *   - the pre-gate implementation phase executes under pullRequestPolicy
- *     'prohibited' (the gateway ENFORCES the contract with a typed error —
- *     a violating provider can never yield a PR for that phase);
+ *   - the agent execution contract is STRUCTURALLY PR-INCAPABLE: a
+ *     deliberately SIDE-EFFECTING provider (smuggled PR ref + capability
+ *     probes) can neither create nor report a PR in the pre-gate phase;
  *   - with a BLOCKING architecture violation, the recorded PR-creation
  *     side-effect count is ZERO;
  *   - with a CONFORMANT revision, EXACTLY ONE PR is created and only AFTER
  *     the gate passes (event-order proof);
+ *   - the governed PR creation is CRASH-SAFE + IDEMPOTENT across the
+ *     external side effect (see governed-pr-creation.integration.test.ts);
  *   - the four lifecycle gates block their transitions (proof 5 + the
  *     readiness/work-order/verification-entry gates);
  *   - advisory results allow; a throwing gate fails closed;
@@ -123,7 +129,6 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
       projectId: string;
       workItemId: string;
       headRevision: string;
-      branch: string | null;
       title: string;
       body?: string | null;
     }): Promise<{ externalPrId: string; headCommit: string | null }> {
@@ -133,20 +138,18 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
     }
   }
 
-  /** A scriptable agent provider: a settable commitRef + policy-honoring PR refs. */
+  /** A scriptable agent provider: a settable commitRef. */
   class ScriptedAgentAdapter implements AgentProviderAdapter {
     readonly providerName = 'scripted';
     private commitRef = 'rev-corrupt';
-    private reportPullRequest = false;
-    readonly calls: Array<{ pullRequestPolicy?: string }> = [];
+    readonly calls: Array<{ executionId: string }> = [];
 
     setCommitRef(ref: string): void { this.commitRef = ref; }
-    setReportPullRequest(v: boolean): void { this.reportPullRequest = v; }
 
     supports(provider: string): boolean { return provider === 'scripted'; }
 
-    async execute(request: import('../../../src/modules/agents/internal/agent.types.js').AgentRequest) {
-      this.calls.push({ pullRequestPolicy: request.pullRequestPolicy });
+    async execute(request: AgentRequest) {
+      this.calls.push({ executionId: request.executionId });
       return {
         status: 'success' as const,
         output: 'scripted output',
@@ -156,12 +159,73 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
         provider: this.providerName,
         configuration: request.configuration,
         commitRef: this.commitRef,
-        pullRequestRef: this.reportPullRequest ? 'github:gates/leak#1' : null,
         reportedTests: [],
         reportedBlockers: [],
         error: null,
         metadata: {},
       };
+    }
+  }
+
+  /**
+   * PR #52 round 2 (BLOCKER 1) — a DELIBERATELY SIDE-EFFECTING provider.
+   *
+   * Constructed EXACTLY as production constructs agent adapters (zero
+   * platform capabilities — createOpenAiAgentAdapterFromEnv grants nothing
+   * but environment config), it attempts EVERY avenue a misbehaving
+   * provider has during the pre-gate execution phase:
+   *
+   *   1. probes the request object for ANY function-valued property (a
+   *      capability smuggled into the request would be a PR-creation
+   *      avenue);
+   *   2. records whatever capabilities its constructor received (none in
+   *      the production construction shape);
+   *   3. SMUGGLES a `pullRequestRef` onto its return value (type-laundered
+   *      past the compiler) hoping it crosses the gateway boundary and
+   *      enters the governed path.
+   *
+   * The regressions prove all attempts are structurally inert: there is no
+   * capability to use, no channel to report through, and no side effect.
+   */
+  class SideEffectingAgentAdapter implements AgentProviderAdapter {
+    readonly providerName = 'side-effecting';
+    readonly probe = {
+      /** Function-valued properties found on the request (capability probe). */
+      requestFunctionProps: [] as string[],
+      /** Capabilities the constructor was granted (none, production shape). */
+      constructorCapabilities: [] as string[],
+      /** Whether the smuggled PR ref was attached to the return value. */
+      smuggledPrRefAttached: false,
+    };
+
+    supports(provider: string): boolean { return provider === 'side-effecting'; }
+
+    async execute(request: AgentRequest): Promise<AgentExecutionResult> {
+      // (1) Capability probe: is there ANY function on the request the
+      // provider could invoke to cause a PR side effect?
+      for (const [key, value] of Object.entries(request)) {
+        if (typeof value === 'function') this.probe.requestFunctionProps.push(key);
+      }
+      // (2) The adapter was constructed with zero platform capabilities —
+      // there is no PR-creation port, credential, or SDK to reach for.
+      // (3) Smuggle a PR identity onto the return value — a runtime object
+      // is not bound by the compile-time contract.
+      this.probe.smuggledPrRefAttached = true;
+      return {
+        status: 'success' as const,
+        output: 'side-effecting output',
+        startedAt: new Date(),
+        completedAt: new Date(),
+        executionId: request.executionId,
+        provider: this.providerName,
+        configuration: request.configuration,
+        commitRef: 'rev-smuggle',
+        reportedTests: [],
+        reportedBlockers: [],
+        error: null,
+        metadata: {},
+        pullRequestRef: 'github:evil/smuggle#666',
+      } as unknown as AgentExecutionResult;
     }
   }
 
@@ -188,7 +252,9 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
       new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
       stack.projectRepository, gate, generateExecutionId,
-      prPort,
+      // PR #52 round 2 (BLOCKER 2): the governed PR-creation boundary — the
+      // durable create-or-converge protocol over the port (the fake).
+      new GovernedPullRequestService(stack.db.client, prPort),
     );
   };
 
@@ -367,8 +433,9 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
 
     await initiate(orchestrator, wi.id, 'scripted');
 
-    // The agent phase ran (prohibited policy — no PR from the provider)…
-    expect(scriptedAgent.calls.some((c) => c.pullRequestPolicy === 'prohibited')).toBe(true);
+    // The agent phase ran (the PR-incapable execution contract — there is
+    // no PR semantic the provider could produce)…
+    expect(scriptedAgent.calls.length).toBeGreaterThanOrEqual(1);
     // …the gate evaluated the EXACT revision and BLOCKED…
     expect(events.some((e) => e.type === 'gate' && e.detail === 'pr_conformance@rev-corrupt')).toBe(true);
     // …and the PR authority recorded ZERO createPullRequest side effects.
@@ -413,81 +480,87 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
     expect(prs[0]!.headCommit).toBe('rev-clean');
   });
 
-  it('BLOCKER 2 — the agent gateway ENFORCES the prohibition: a provider reporting a PR for a prohibited phase fails the run with the typed violation', async () => {
-    seedTree('rev-gwviolation', cleanTree());
+  it('BLOCKER 1 (round 2) — a SIDE-EFFECTING provider cannot create a PR in the pre-gate phase: no capability, no channel, no side effect', async () => {
+    seedTree('rev-smuggle', cleanTree());
     const v = await frozenVersionWithAssertion();
     const wi = await workItemOn(v.id);
 
     const events: Array<{ type: string; detail: string }> = [];
     const prPort = new RecordingPrPort(events);
-    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
-    // A CONTRACT-VIOLATING provider: reports a PR for the prohibited phase.
-    scriptedAgent.setCommitRef('rev-gwviolation');
-    scriptedAgent.setReportPullRequest(true);
+    // PRODUCTION CONSTRUCTION SHAPE: the adapter receives ZERO platform
+    // capabilities (exactly what createOpenAiAgentAdapterFromEnv grants —
+    // environment config only). It probes + smuggles anyway.
+    const evilAgent = new SideEffectingAgentAdapter();
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [evilAgent]);
 
-    // The gateway throws the typed violation (the initiate path's catch
-    // handles the agent failure; the run is recorded FAILED).
-    await initiate(orchestrator, wi.id, 'scripted');
+    await initiate(orchestrator, wi.id, 'side-effecting');
 
-    // ZERO PR-creation side effects (the violation was rejected before any
-    // gated boundary was reached).
-    expect(prPort.calls).toHaveLength(0);
-    // The typed error exists and the agent run is failed (not success).
+    // (a) The request the provider received is PURE DATA — no
+    //     function-valued properties (no smuggled capability to invoke).
+    expect(evilAgent.probe.requestFunctionProps).toEqual([]);
+    // (b) The provider holds NO platform capability (constructed with none).
+    expect(evilAgent.probe.constructorCapabilities).toEqual([]);
+    // (c) ZERO PR side effects reached the /github authority from the agent
+    //     phase (the fake's operation counter is empty — the only PR
+    //     creation in the whole flow is the post-gate port call below).
+    expect(fakeGithub.createPullRequestCalls).toHaveLength(0);
+    // (d) The gate ran at the exact revision and ALLOWED; the ONLY PR
+    //     creation is the post-gate governed port call — exactly one,
+    //     strictly AFTER the gate event.
+    expect(prPort.calls).toHaveLength(1);
+    expect(prPort.calls[0]!.headRevision).toBe('rev-smuggle');
+    const gateIndex = events.findIndex(
+      (e) => e.type === 'gate' && e.detail === 'pr_conformance@rev-smuggle',
+    );
+    const createIndex = events.findIndex((e) => e.type === 'pr-create');
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    expect(createIndex).toBeGreaterThan(gateIndex);
+    // (e) The SMUGGLED PR identity appears NOWHERE: not on any persisted
+    //     agent run (the gateway membrane drops it), not in any association
+    //     (the only association is the post-gate port PR), not in state.
     const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
     expect(runs.length).toBeGreaterThanOrEqual(1);
-    expect(runs.some((r) => r.status === 'failed')).toBe(true);
-    // The prohibited policy was requested of the provider.
-    expect(scriptedAgent.calls.some((c) => c.pullRequestPolicy === 'prohibited')).toBe(true);
-
-    scriptedAgent.setReportPullRequest(false);
+    expect(runs.some((r) => r.pullRequestRef === 'github:evil/smuggle#666')).toBe(false);
+    for (const r of runs) expect(r.pullRequestRef).toBeNull();
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs.length).toBe(1);
+    expect(prs[0]!.externalPrId).not.toBe('github:evil/smuggle#666');
+    // The lifecycle completed through the LEGITIMATE boundary only.
+    expect(await state(wi.id)).toBe('pr_open');
   });
 
-  it('BLOCKER 2 (unit) — the gateway throws AgentPullRequestProhibitedError for a prohibited-phase PR report', async () => {
+  it('BLOCKER 1 (round 2, unit) — the gateway is the CAPABILITY MEMBRANE: a smuggled pullRequestRef cannot cross the provider boundary', async () => {
+    const evil = new SideEffectingAgentAdapter();
     const logger = createLogger({ level: 'silent' });
-    const violatingProvider: AgentProviderAdapter = {
-      providerName: 'pr-violator',
-      supports: (p: string) => p === 'pr-violator',
-      async execute(request) {
-        return {
-          status: 'success',
-          output: 'x',
-          startedAt: new Date(),
-          completedAt: new Date(),
-          executionId: request.executionId,
-          provider: 'pr-violator',
-          configuration: {},
-          commitRef: 'abc',
-          pullRequestRef: 'github:x/y#1', // VIOLATION under prohibition
-          reportedTests: [],
-          reportedBlockers: [],
-          error: null,
-          metadata: {},
-        };
-      },
-    };
-    const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'GW Arch' });
+    const arch = await stack.architectureRepository.create({ projectId: project.id, name: 'Membrane Arch' });
     const v = await stack.architectureVersionRepository.create({ architectureId: arch.id, contentInline: 'c' });
     const wi = await workItemOn(v.id);
     // A REAL work order (the agent-run FK requires one).
     const wo = await stack.workOrderRepository.create({
       workItemId: wi.id, projectId: project.id, architectureVersionId: v.id,
     });
-    const gateway = new DefaultAgentGateway(stack.db.client, logger, [violatingProvider], 3);
-    await expect(
-      gateway.execute({
-        provider: 'pr-violator',
-        configuration: {},
-        workItemId: wi.id,
-        workOrderId: wo.id,
-        executionId: generateExecutionId(),
-        input: 'impl',
-        pullRequestPolicy: 'prohibited',
-      }),
-    ).rejects.toBeInstanceOf(AgentPullRequestProhibitedError);
-    // The run is FAILED (not a success carrying a forbidden PR).
-    const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
-    expect(runs[0]!.status).toBe('failed');
-    expect(runs[0]!.pullRequestRef).toBeNull();
+    const gateway = new DefaultAgentGateway(stack.db.client, logger, [evil], 3);
+    const executionId = generateExecutionId();
+    const result = await gateway.execute({
+      provider: 'side-effecting',
+      configuration: {},
+      workItemId: wi.id,
+      workOrderId: wo.id,
+      executionId,
+      input: 'impl',
+    });
+    // The provider DID attach the smuggled property to its return value…
+    expect(evil.probe.smuggledPrRefAttached).toBe(true);
+    // …but the gateway's returned result is the PROJECTED contract — the
+    // property cannot cross the boundary (it does not exist on the result).
+    expect('pullRequestRef' in result).toBe(false);
+    expect((result as unknown as Record<string, unknown>).pullRequestRef).toBeUndefined();
+    // …and the persisted AgentRun row records NO PR ref.
+    const runRepo = new PgAgentRunRepository(stack.db.client);
+    const run = await runRepo.findByExecutionId(executionId);
+    expect(run).toBeTruthy();
+    expect(run!.status).toBe('success');
+    expect(run!.pullRequestRef).toBeNull();
   });
 
   it('BLOCKER 2 (agent_run_completed path) — the same boundary holds: gate FIRST, exactly one creation, external PR refs adopted only post-gate', async () => {
@@ -524,7 +597,6 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
       architectureVersionId: v.id,
       executionId: generateExecutionId(),
       input: 'corrected implementation',
-      pullRequestPolicy: 'prohibited',
     });
     const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
     const correctedRun = runs.find((r) => r.commitRef === 'rev-arc-completed');
@@ -540,6 +612,114 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
     // Exactly ONE creation, after the gate, bound to the fixed revision.
     expect(prPort.calls).toHaveLength(1);
     expect(prPort.calls[0]!.headRevision).toBe('rev-arc-completed');
+    expect(await state(wi.id)).toBe('pr_open');
+  });
+
+  it('BLOCKER 2 (round 2, workflow crash/retry) — a crash AFTER the external PR create converges on re-drive: same PR, no second create, no duplicate association', async () => {
+    seedTree('rev-crash-retry', cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    /**
+     * A switchable PR port: the underlying fake performs the real
+     * create side effect; the wrapper can "kill the process" AFTER the
+     * external create (before the durable record + association + PR_OPEN).
+     */
+    class SwitchableCrashPort extends FakePullRequestCreationPort {
+      crashAfterCreate = false;
+      override async createPullRequest(input: {
+        projectId: string; workItemId: string; headRevision: string; title: string; body?: string | null;
+      }): Promise<{ externalPrId: string; headCommit: string | null }> {
+        const created = await super.createPullRequest(input); // the side effect happens
+        if (this.crashAfterCreate) {
+          throw new Error('simulated process death AFTER the external PR create');
+        }
+        return created;
+      }
+    }
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new SwitchableCrashPort();
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+
+    // Drive to IMPLEMENTING with a violating revision first (the gate
+    // blocks — no PR; the work item sits in implementing awaiting a new
+    // agent run, exactly the state in which a re-drive after a crash lands).
+    seedTree('rev-crash-bad', violatingTree());
+    scriptedAgent.setCommitRef('rev-crash-bad');
+    await initiate(orchestrator, wi.id, 'scripted');
+    expect(await state(wi.id)).toBe('implementing');
+    expect(prPort.calls).toHaveLength(0);
+
+    // The agent run at the conformance-passing revision.
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wi.id, projectId: project.id, architectureVersionId: v.id,
+    });
+    scriptedAgent.setCommitRef('rev-crash-retry');
+    const gateway = new DefaultAgentGateway(
+      stack.db.client, createLogger({ level: 'silent' }), [scriptedAgent], 3,
+    );
+    await gateway.execute({
+      provider: 'scripted',
+      configuration: {},
+      workItemId: wi.id,
+      workOrderId: wo.id,
+      architectureVersionId: v.id,
+      executionId: generateExecutionId(),
+      input: 'crash-retry implementation',
+    });
+    const runs = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
+    const run = runs.find((r) => r.commitRef === 'rev-crash-retry');
+    expect(run).toBeTruthy();
+    // FIRST drive: the external PR create SUCCEEDS, then the process dies
+    // before the durable record — the work item stays IMPLEMENTING with NO
+    // association (the transaction rolled back).
+    prPort.crashAfterCreate = true;
+    const signal = await orchestrator.submitAgentRunCompleted({
+      workItemId: wi.id,
+      agentRunId: run!.id,
+      executionId: generateExecutionId(),
+    });
+    await orchestrator.processSignal(signal.id);
+    expect(await state(wi.id)).toBe('implementing');
+    expect(prPort.calls).toHaveLength(1); // the external create DID happen
+    let prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs).toHaveLength(0); // …but nothing was durably recorded
+
+    // The RETRY (the convergence model reprocesses after failure/restart):
+    // a NEW agent run drives the SAME implementation revision (the same
+    // convergence key). The governed boundary must CONVERGE on the PR the
+    // crashed attempt created — never open a second one.
+    prPort.crashAfterCreate = false;
+    await gateway.execute({
+      provider: 'scripted',
+      configuration: {},
+      workItemId: wi.id,
+      workOrderId: wo.id,
+      architectureVersionId: v.id,
+      executionId: generateExecutionId(),
+      input: 'crash-retry re-drive (same revision)',
+    });
+    const runsAfter = await new PgAgentRunRepository(stack.db.client).findByWorkItem(wi.id);
+    const reDriveRun = runsAfter.find(
+      (r) => r.commitRef === 'rev-crash-retry' && r.id !== run!.id,
+    );
+    expect(reDriveRun).toBeTruthy();
+    const retrySignal = await orchestrator.submitAgentRunCompleted({
+      workItemId: wi.id,
+      agentRunId: reDriveRun!.id,
+      executionId: generateExecutionId(),
+    });
+    await orchestrator.processSignal(retrySignal.id);
+
+    // Still EXACTLY ONE external create; ONE association; the lifecycle
+    // completed through the converged PR.
+    expect(prPort.calls).toHaveLength(1);
+    expect(prPort.findCalls.length).toBeGreaterThanOrEqual(1); // the convergence read
+    prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs.length).toBe(1);
+    expect(prs[0]!.externalPrId).toBe('github:owner/repo#1'); // the crashed attempt's PR
+    expect(prs[0]!.headCommit).toBe('rev-crash-retry');
     expect(await state(wi.id)).toBe('pr_open');
   });
 

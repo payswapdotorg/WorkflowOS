@@ -93,6 +93,8 @@ import type {
   CreatePullRequestResult,
   CreateRepositoryInput,
   CreateRepositoryResult,
+  FindPullRequestByHeadInput,
+  FindPullRequestByHeadResult,
   GetBranchInput,
   GetBranchResult,
   GetFileContentInput,
@@ -133,6 +135,10 @@ class SpyGitHubAdapter implements GitHubAdapter {
   }
   async createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult> {
     return this.inner.createPullRequest(input);
+  }
+  async findPullRequestByHead(input: FindPullRequestByHeadInput): Promise<FindPullRequestByHeadResult | null> {
+    // WORK-051 round 2: delegate the PR CONVERGENCE READ to the wrapped fake.
+    return this.inner.findPullRequestByHead(input);
   }
   async getBranch(input: GetBranchInput): Promise<GetBranchResult> {
     return this.inner.getBranch(input);

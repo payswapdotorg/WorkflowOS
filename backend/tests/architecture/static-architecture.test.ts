@@ -11207,7 +11207,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-1 work-item impact column — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054; no planner-owned table)').toMatch(/^0054_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-2 governed PR-creation intent ledger — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055; no planner-owned table)').toMatch(/^0055_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -14580,7 +14580,16 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
   );
   const AGENT_TYPES = join(MODULES_DIR, 'agents', 'internal', 'agent.types.ts');
   const AGENT_GATEWAY = join(MODULES_DIR, 'agents', 'internal', 'agent-gateway.ts');
+  const OPENAI_AGENT_ADAPTER = join(MODULES_DIR, 'agents', 'internal', 'openai-agent-adapter.ts');
   const PR_PORT = join(MODULES_DIR, 'workflows', 'internal', 'github-pr-creation-port.ts');
+  const GOVERNED_PR_SERVICE = join(MODULES_DIR, 'workflows', 'internal', 'governed-pull-request-service.ts');
+  const PR_INTENT_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0055_governed_pull_request_intents.sql',
+  );
+  const GOVERNED_PR_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'workflows', 'governed-pr-creation.integration.test.ts',
+  );
   const SNAPSHOT_PROVIDER = join(AC_INTERNAL, 'github-snapshot-provider.ts');
   const SNAPSHOT_TREE = join(AC_DETECTORS, 'snapshot-tree.ts');
   const ARCH_SERVICE = join(MODULES_DIR, 'architecture', 'internal', 'architecture-service.ts');
@@ -14924,19 +14933,21 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(gateDefs).toBe(1);
 
     // The pr_conformance gate lives INSIDE the governed PR-creation boundary,
-    // and the ONLY PR-creation side-effect site (the port call) is strictly
-    // AFTER the gate check — code-order proof (BLOCKER 2).
+    // and the ONLY PR-creation entry (the governed create-or-converge service
+    // call) is strictly AFTER the gate check — code-order proof (BLOCKER 2).
+    // The service (not the orchestrator) holds the port: the port call itself
+    // is pinned in the governed-pull-request-service invariant below.
     const boundaryStart = orch.indexOf('private async openGovernedPullRequest(');
     expect(boundaryStart).toBeGreaterThanOrEqual(0);
     const boundary = orch.slice(boundaryStart, orch.indexOf('\n  }', boundaryStart));
     const gateCheck = boundary.indexOf('this.runArchitectureCheckpointGate(');
     const deniedReturn = boundary.indexOf('if (!prGate.allowed)');
-    const portCall = boundary.indexOf('this.pullRequestCreationPort.createPullRequest(');
+    const governedCall = boundary.indexOf('this.governedPullRequests.open(');
     expect(gateCheck).toBeGreaterThanOrEqual(0);
     expect(deniedReturn).toBeGreaterThan(gateCheck);
-    expect(portCall, 'the PR-creation side effect is INSIDE the boundary').toBeGreaterThan(deniedReturn);
-    // The boundary is the ONLY port call site in the orchestrator.
-    expect([...orch.matchAll(/this\.pullRequestCreationPort\.createPullRequest\(/g)].length).toBe(1);
+    expect(governedCall, 'the governed PR-creation call is INSIDE the boundary').toBeGreaterThan(deniedReturn);
+    // The boundary is the ONLY governed PR-creation entry in the orchestrator.
+    expect([...orch.matchAll(/this\.governedPullRequests\.open\(/g)].length).toBe(1);
 
     // Every pr_open transition is gated by the boundary (3 sites: initiate,
     // correction, agent_run_completed — each immediately preceded by an
@@ -15115,44 +15126,227 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(readFileSync(SNAPSHOT_TREE, 'utf8')).toMatch(/vacuous PASS|zero files vacuously/i);
   });
 
-  // --- PR #52 round 1, BLOCKER 2: the actual PR-creation boundary -----------------------
-
-  it('BLOCKER 2 — the governed PR-creation boundary: pre-gate agent phases are PR-prohibited; the port is the ONLY creation site', () => {
-    // (a) The agent contract carries the pull-request policy; the violation
-    // is a typed error.
+  // --- PR #52 round 2, BLOCKER 1: the STRUCTURAL capability split ------------------------
+  //
+  // `pullRequestPolicy: 'prohibited'` was NOT a capability boundary — the
+  // gateway checked the provider's REPORTED result after execute() returned,
+  // so a misbehaving provider's actual PR side effect had already happened.
+  // The round-2 fix removes the capability itself: the agent execution
+  // contract carries NO PR semantics at all, and the ONLY PR-creation
+  // capability is the post-gate PullRequestCreationPort → /github path.
+  it('BLOCKER 1 (round 2) — the agent execution contract is STRUCTURALLY PR-INCAPABLE; the only PR-creation capability is the post-gate port', () => {
     const agentTypes = readFileSync(AGENT_TYPES, 'utf8');
-    expect(agentTypes).toMatch(/pullRequestPolicy\?: 'prohibited' \| 'provider-managed'/);
-    expect(agentTypes).toMatch(/class AgentPullRequestProhibitedError/);
-    // (b) The gateway ENFORCES the prohibition (a violating provider's run is
-    // failed, the typed error is thrown — never a success with a PR).
+
+    // (a) The execution request + result interfaces contain NO pull-request
+    // semantics (extract each interface body precisely, from the
+    // comment-stripped source — the invariant pins the FIELDS, not the
+    // documentation; the persistence row type still carries the
+    // external-observation column).
+    const agentTypesCode = strip(agentTypes);
+    const extractInterface = (src: string, name: string): string => {
+      const start = src.indexOf(`export interface ${name} {`);
+      expect(start, `${name} must exist`).toBeGreaterThanOrEqual(0);
+      let depth = 0;
+      for (let i = start; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        if (src[i] === '}') {
+          depth--;
+          if (depth === 0) return src.slice(start, i);
+        }
+      }
+      return src.slice(start);
+    };
+    const requestIface = extractInterface(agentTypesCode, 'AgentRequest');
+    const resultIface = extractInterface(agentTypesCode, 'AgentExecutionResult');
+    expect(requestIface, 'the execution request carries no PR semantics').not.toMatch(/pullRequest/i);
+    expect(resultIface, 'the execution result carries no PR semantics').not.toMatch(/pullRequest/i);
+
+    // (b) The round-1 policy mechanism is GONE ENTIRELY (a contract request
+    // is not a capability boundary — there is no policy left to violate).
+    expect(agentTypes).not.toMatch(/pullRequestPolicy/);
+    expect(agentTypes).not.toMatch(/AgentPullRequestProhibitedError/);
+
+    // (c) The gateway is the CAPABILITY MEMBRANE: it contains NO PR
+    // vocabulary at all, and it re-projects provider returns onto the
+    // contract (out-of-contract properties cannot cross — runtime proof,
+    // not just compile-time).
     const gateway = strip(readFileSync(AGENT_GATEWAY, 'utf8'));
-    expect(gateway).toMatch(/request\.pullRequestPolicy === 'prohibited'/);
-    expect(gateway).toMatch(/AgentPullRequestProhibitedError/);
-    // (c) BOTH orchestrator agent-launch sites (initiate + correction) run
-    // the pre-gate phase under the prohibition — counting proof.
-    const orch = readFileSync(ORCHESTRATOR, 'utf8');
-    const prohibited = [...orch.matchAll(/pullRequestPolicy: 'prohibited'/g)].length;
-    expect(prohibited, 'both pre-gate agent-launch sites are PR-prohibited').toBe(2);
-    // (d) The PR-creation port is a /workflows contract; the production
-    // implementation resolves the repository SERVER-SIDE and creates through
-    // the /github authority.
+    expect(gateway, 'the gateway has no PR vocabulary').not.toMatch(/pullRequest/i);
+    expect(gateway).toMatch(/const projected: AgentExecutionResult = \{/);
+
+    // (d) The provider adapters hold NO PR vocabulary (the production
+    // adapter no longer fabricates a hallucinated PR identity).
+    const openaiAdapter = strip(readFileSync(OPENAI_AGENT_ADAPTER, 'utf8'));
+    expect(openaiAdapter).not.toMatch(/pullRequest/i);
+
+    // (e) THE CAPABILITY SPLIT (counting): NO file under /agents or the
+    // checkpoint subsystem references ANY PR-creation surface. The ONLY
+    // PR-creation capability in the codebase is the /workflows PR port →
+    // /github path.
+    const forbiddenDirs = [join(MODULES_DIR, 'agents'), AC_DIR];
+    for (const dir of forbiddenDirs) {
+      for (const f of listAcFiles(dir)) {
+        const src = strip(readFileSync(f, 'utf8'));
+        expect(
+          src,
+          `${f}: the agent/checkpoint subsystem must hold NO PR-creation capability`,
+        ).not.toMatch(/createPullRequest|findPullRequestByHead|PullRequestCreationPort|findExistingPullRequest/);
+      }
+    }
+
+    // (f) The side-effecting-provider regression exists (capability probes +
+    // smuggled PR ref + provider-side operation counting).
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/SIDE-EFFECTING provider cannot create a PR/);
+    expect(gates).toMatch(/CAPABILITY MEMBRANE/);
+    expect(gates).toMatch(/github:evil\/smuggle#666/);
+    expect(gates).toMatch(/requestFunctionProps/);
+
+    // (g) The composition root wires the /github-backed implementations and
+    // NO agent adapter receives any platform capability.
+    const app = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(app).toMatch(/GithubBackedPullRequestCreationPort/);
+    expect(app).toMatch(/GovernedPullRequestService/);
+    expect(app).toMatch(/GithubRepositorySnapshotProvider/);
+    expect(app).toMatch(/createOpenAiAgentAdapterFromEnv/);
+  });
+
+  // --- PR #52 round 2, BLOCKER 2: crash-safe idempotent governed PR creation --------------
+
+  it('BLOCKER 2 (round 2) — governed PR creation is DURABLY idempotent across the external side effect (create-or-converge on a unique intent ledger)', () => {
+    // (a) Migration 0055: the durable intent ledger — the convergence key is
+    // (work item, implementation revision) with a UNIQUE constraint, and a
+    // 'created' intent must carry the PR identity.
+    const migration = strip(readFileSync(PR_INTENT_MIGRATION, 'utf8'));
+    expect(migration).toMatch(/CREATE TABLE wfos_pull_request_intents/);
+    expect(migration).toMatch(/UNIQUE \(work_item_id, head_revision\)/);
+    expect(migration).toMatch(/CHECK \(status IN \('pending', 'created'\)\)/);
+    expect(migration).toMatch(/status <> 'created' OR external_pr_id IS NOT NULL/);
+
+    // (b) The service protocol: ONE transaction, lock-or-insert (FOR UPDATE
+    // + ON CONFLICT DO NOTHING), the terminal fast-path (zero external
+    // calls), the CONVERGENCE READ before any create, and the durable
+    // record in the SAME transaction as the create.
+    const service = strip(readFileSync(GOVERNED_PR_SERVICE, 'utf8'));
+    expect(service).toMatch(/this\.db\.transaction/);
+    expect(service).toMatch(/FOR UPDATE/);
+    expect(service).toMatch(/ON CONFLICT \(work_item_id, head_revision\) DO NOTHING/);
+    expect(service).toMatch(/findExistingPullRequest/);
+    expect(service).toMatch(/this\.port\.createPullRequest\(/);
+    // Code-order proof INSIDE the protocol: the convergence read strictly
+    // precedes the create, and the durable record strictly follows it.
+    const convergenceRead = service.indexOf('await this.port.findExistingPullRequest(');
+    const createCall = service.indexOf('await this.port.createPullRequest(');
+    expect(convergenceRead).toBeGreaterThanOrEqual(0);
+    expect(createCall).toBeGreaterThan(convergenceRead);
+    // The port's create is called EXACTLY ONCE in the service.
+    expect([...service.matchAll(/this\.port\.createPullRequest\(/g)].length).toBe(1);
+
+    // (c) The port contract has BOTH halves of the external boundary (the
+    // convergence read + the create), with the DETERMINISTIC head branch
+    // (a pure function of the convergence key) as the convergence marker.
     const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
     expect(convergence).toMatch(/interface PullRequestCreationPort/);
+    expect(convergence).toMatch(/findExistingPullRequest/);
     const prPort = strip(readFileSync(PR_PORT, 'utf8'));
-    expect(prPort).toMatch(/findByProject/);
+    expect(prPort).toMatch(/export function governedHeadBranch/);
+    expect(prPort).toMatch(/wfos\/wi-\$\{workItemId\.slice\(0, 12\)\}\/rev-\$\{headRevision\.slice\(0, 12\)\}/);
+    expect(prPort).toMatch(/findPullRequestByHead/);
     expect(prPort).toMatch(/createPullRequest\(/);
-    // (e) The orchestrator NEVER persists a provider-reported PR association
-    // before the gate: the only pre-gate association writes happen inside
+    expect(prPort).toMatch(/findByProject/);
+
+    // (d) The /github authority owns the convergence read contract + the
+    // one-open-PR-per-head identity semantics (the fake enforces it).
+    const ghTypes = readFileSync(join(MODULES_DIR, 'github', 'internal', 'github.types.ts'), 'utf8');
+    expect(ghTypes).toMatch(/findPullRequestByHead/);
+    expect(ghTypes).toMatch(/at most ONE OPEN pull request/);
+    const ghFake = readFileSync(join(MODULES_DIR, 'github', 'internal', 'fake-github-adapter.ts'), 'utf8');
+    expect(ghFake).toMatch(/pull request already exists/);
+    expect(ghFake).toMatch(/createPullRequestCalls/);
+    expect(ghFake).toMatch(/findPullRequestByHeadCalls/);
+
+    // (e) The crash/retry + concurrency regressions exist (provider-side
+    // operation counting, the exact crash interleaving, two-client races).
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/crash AFTER the external create/);
+    expect(prTests).toMatch(/crash BEFORE the external create/);
+    expect(prTests).toMatch(/concurrent duplicate drives/);
+    expect(prTests).toMatch(/createSecondClient/);
+    expect(prTests).toMatch(/simulated crash AFTER/);
+    // The workflow-level crash/retry regression exists (orchestrator path).
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/workflow crash\/retry/);
+    expect(gates).toMatch(/crashAfterCreate/);
+  });
+
+  // --- PR #52 round 2, HIGH 1: the exact-ref contract + the provider-observed identity ----
+
+  it('HIGH (round 2) — the /github EXACT-REF contract is pinned, and the durable evidence records the PROVIDER-OBSERVED snapshot identity', () => {
+    // (a) The /github content-read contract explicitly guarantees exact-ref
+    // resolution (verbatim pass-through; NO branch/worktree fallback).
+    const ghTypes = readFileSync(join(MODULES_DIR, 'github', 'internal', 'github.types.ts'), 'utf8');
+    expect(ghTypes).toMatch(/EXACT-REF RESOLUTION CONTRACT/);
+    expect(ghTypes).toMatch(/MUST NEVER silently fall[\s\S]{0,12}back to the default branch/);
+    expect(ghTypes).toMatch(/no branch\/worktree fallback/);
+
+    // (b) The snapshot provider passes the bound revision VERBATIM (both
+    // read surfaces), and computes the provider-observed identity from the
+    // PROVIDER-computed content digests.
+    const provider = readFileSync(SNAPSHOT_PROVIDER, 'utf8');
+    expect([...provider.matchAll(/ref: this\.revision,/g)].length).toBe(2);
+    expect(provider).toMatch(/identity\(\): RepositorySnapshotIdentity/);
+    expect(provider).toMatch(/result\.contentDigest/);
+    expect(provider).toMatch(/treeDigest/);
+
+    // (c) The snapshot contract exposes the identity (types) and the durable
+    // evidence records it (service) — next to the revision string.
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(/interface RepositorySnapshotIdentity/);
+    expect(types).toMatch(/identity\(\): RepositorySnapshotIdentity/);
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/snapshot\.identity\(\)/);
+    expect(svc).toMatch(/snapshotIdentity: result\.snapshotIdentity \?\? null/);
+
+    // (d) The regressions exist (identity durable + replayed; a mutated tree
+    // under the same label is detectable).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/provider-observed snapshot identity DIFFERS/);
+    expect(tests).toMatch(/snapshotIdentity/);
+  });
+
+  // --- PR #52 round 2, HIGH 2: replay is semantically equivalent --------------------------
+
+  it('HIGH (round 2) — replay RECONSTRUCTS the per-assertion evaluations through /verification (no summary-only reduction)', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // The replay reads the evidence authority + rebuilds the evaluation list.
+    expect(svc).toMatch(/listEvidenceForRun/);
+    expect(svc).toMatch(/evidenceType === 'architecture-assertion'/);
+    // The evidence rows carry the FULL evaluation (summary added in round 2).
+    expect(svc).toMatch(/summary: e\.summary,/);
+    // The degraded path (evidence unreadable / legacy) falls back to the
+    // summary's evaluation summaries — never a silent empty list.
+    expect(svc).toMatch(/evaluationsFromSummary/);
+    // The regression exists: the replayed result is field-by-field equal.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/SEMANTICALLY EQUIVALENT/);
+    expect(tests).toMatch(/replay\.evaluations\[i\]!\.assertionRowId\)/);
+  });
+
+  // --- PR #52 round 1, BLOCKER 2 (superseded by the round-2 split above) ------------------
+
+  it('BLOCKER 2 — the governed PR-creation boundary: the port is the ONLY creation site; the orchestrator adopts external PRs only post-gate', () => {
+    // (a) The orchestrator NEVER persists a provider-reported PR association
+    // before the gate: the only association writes happen inside
     // openGovernedPullRequest (post-gate), and agent result PR refs are
     // treated as external observations adopted only post-gate.
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
     expect(orch).toMatch(/pullRequestAssociationRepository\.create/);
     const associationWrites = [...orch.matchAll(/this\.pullRequestAssociationRepository\.create\(/g)].length;
     expect(associationWrites).toBe(2); // the external-adoption + the creation result — both inside the boundary
     expect(orch).toMatch(/EXTERNAL[\s\S]{0,200}PR observation/);
-    // (f) The composition root wires the /github-backed implementations.
-    const app = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
-    expect(app).toMatch(/GithubBackedPullRequestCreationPort/);
-    expect(app).toMatch(/GithubRepositorySnapshotProvider/);
+    // The production port is the /github-backed implementation.
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/findByProject/);
   });
 
   // --- PR #52 round 1, BLOCKER 3: serialized assertion attach vs freeze ------------------
@@ -15287,6 +15481,20 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(orchRuns).toMatch(/ATOMICALLY/);
     expect(orchRuns).toMatch(/crash safety/);
     expect(orchRuns).toMatch(/UNIQUE identity/);
+    // PR #52 round 2 regressions: the structural capability split, the
+    // crash-safe idempotent governed PR creation, the exact-ref contract +
+    // provider-observed snapshot identity, and the semantically-equivalent
+    // replay.
+    expect(gates).toMatch(/BLOCKER 1 \(round 2\) — a SIDE-EFFECTING provider/);
+    expect(gates).toMatch(/CAPABILITY MEMBRANE/);
+    expect(gates).toMatch(/BLOCKER 2 \(round 2, workflow crash\/retry\)/);
+    const governedPr = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(governedPr).toMatch(/crash AFTER the external create/);
+    expect(governedPr).toMatch(/crash BEFORE the external create/);
+    expect(governedPr).toMatch(/concurrent duplicate drives, real PostgreSQL/);
+    expect(governedPr).toMatch(/duplicate-key guard/);
+    expect(service).toMatch(/SEMANTICALLY EQUIVALENT/);
+    expect(service).toMatch(/provider-observed snapshot identity DIFFERS/);
   });
 });
 

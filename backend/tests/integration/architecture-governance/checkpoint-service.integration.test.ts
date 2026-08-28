@@ -665,6 +665,64 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
     // Exactly ONE run exists for the key.
     const runs = await verificationService.listRunsForWorkItem(wi.id);
     expect(runs.filter((r) => r.source === CHECKPOINT_RUN_SOURCE)).toHaveLength(1);
+
+    // PR #52 round 2 (HIGH 2) — the replay is SEMANTICALLY EQUIVALENT to the
+    // original: the per-assertion evaluation list is RECONSTRUCTED through
+    // /verification (the evidence authority), not reduced to a summary.
+    expect(replay.evaluations).toHaveLength(first.evaluations.length);
+    expect(replay.evaluations.map((e) => e.assertionId)).toEqual(
+      first.evaluations.map((e) => e.assertionId),
+    );
+    for (let i = 0; i < first.evaluations.length; i++) {
+      expect(replay.evaluations[i]!.assertionRowId).toBe(first.evaluations[i]!.assertionRowId);
+      expect(replay.evaluations[i]!.severity).toBe(first.evaluations[i]!.severity);
+      expect(replay.evaluations[i]!.detectorKind).toBe(first.evaluations[i]!.detectorKind);
+      expect(replay.evaluations[i]!.status).toBe(first.evaluations[i]!.status);
+      expect(replay.evaluations[i]!.summary).toBe(first.evaluations[i]!.summary);
+      expect(replay.evaluations[i]!.details).toEqual(first.evaluations[i]!.details);
+    }
+
+    // PR #52 round 2 (HIGH 1) — the provider-observed SNAPSHOT IDENTITY is
+    // recorded durably and replayed identically (the revision string is a
+    // claim; the identity is a digest of what /github actually served).
+    expect(first.snapshotIdentity).not.toBeNull();
+    expect(first.snapshotIdentity!.revision).toBe('rev-replay');
+    expect(first.snapshotIdentity!.repository).toBe(`${OWNER}/${REPO}`);
+    expect(first.snapshotIdentity!.filesRead).toBeGreaterThan(0);
+    expect(first.snapshotIdentity!.treeDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(replay.snapshotIdentity).toEqual(first.snapshotIdentity);
+    // The identity is durable in the recorded evidence: the summary row's
+    // metadata + the run summary both carry it.
+    const run = runs.find((r) => r.source === CHECKPOINT_RUN_SOURCE)!;
+    const evidenceRows = await verificationService.listEvidenceForRun(run.id);
+    const summaryRow = evidenceRows.find((r) => r.evidenceType === 'architecture-checkpoint')!;
+    expect(summaryRow.metadata.snapshotIdentity).toEqual(first.snapshotIdentity);
+    expect(run.summary.snapshotIdentity).toEqual(first.snapshotIdentity);
+  });
+
+  it('PR #52 round 2 (HIGH 1) — the provider-observed snapshot identity DIFFERS when the same revision label serves different bytes (a mutated tree is detectable in the evidence)', async () => {
+    // Two distinct revisions with the same tree → same identity inputs…
+    seedTree('rev-ident-a', cleanTreeFiles());
+    const v = await frozenVersionWithAssertions([structureAssertion()]);
+    const wiA = await workItemOn(v.id);
+    const a = await service.evaluateCheckpoint(gate(wiA.id, 'rev-ident-a', 'ident-key-a'));
+    expect(a.status).toBe('passed');
+
+    // …and the same tree content at a DIFFERENT revision label → the same
+    // treeDigest (the digest binds path+content, echoed with its revision).
+    seedTree('rev-ident-b', cleanTreeFiles());
+    const wiB = await workItemOn(v.id);
+    const b = await service.evaluateCheckpoint(gate(wiB.id, 'rev-ident-b', 'ident-key-b'));
+    expect(b.snapshotIdentity!.treeDigest).toBe(a.snapshotIdentity!.treeDigest);
+    expect(b.snapshotIdentity!.revision).toBe('rev-ident-b');
+
+    // A MUTATED tree under a revision label → a DIFFERENT treeDigest: the
+    // durable evidence distinguishes what /github actually served.
+    seedTree('rev-ident-c', violatingTreeFiles());
+    const wiC = await workItemOn(v.id);
+    const c = await service.evaluateCheckpoint(gate(wiC.id, 'rev-ident-c', 'ident-key-c'));
+    expect(c.status).toBe('blocked');
+    expect(c.snapshotIdentity!.treeDigest).not.toBe(a.snapshotIdentity!.treeDigest);
   });
 
   it('BLOCKER 4 — two CONCURRENT same-key evaluations converge on EXACTLY ONE run + ONE evidence set', async () => {
@@ -941,7 +999,9 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
         detectorKind: 'schema-migration',
         detectorConfig: {
           migrationsDir: 'src/platform/postgres/migrations',
-          expectedLastMigrationNumber: 54,
+          // PR #52 round 2: 0055 is the /workflows governed PR-creation
+          // intent ledger (the durable create-or-converge identity).
+          expectedLastMigrationNumber: 55,
         },
       },
     ]);
