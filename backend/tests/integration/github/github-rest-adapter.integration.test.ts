@@ -3,6 +3,7 @@ import { createHash, createVerify } from 'node:crypto';
 
 import {
   DefaultGitHubAdapter,
+  resolveGitHubAppCredentials,
 } from '../../../src/modules/github/internal/pg-github-repository.js';
 import {
   ScriptedGitHubApi,
@@ -337,5 +338,127 @@ describe('WORK-051 round 3 — the production /github REST authority (real clien
     await expect(
       adapter.mergePullRequest({ owner: OWNER, repo: REPO, prNumber: 1, installationId: INSTALLATION_ID }),
     ).rejects.toThrow(/WORK-019 follow-on/);
+  });
+});
+
+describe('WORK-051 round 4 — the credential AUTHORITY is the platform SecretStore (PR #52 review, BLOCKER 1)', () => {
+  // The round-4 finding: the adapter read GITHUB_APP_ID /
+  // GITHUB_APP_PRIVATE_KEY directly from process.env — a SECOND credential
+  // access mechanism next to the platform's SecretStore (SEC-001), so the
+  // adapter's documentation and its implementation contradicted each other.
+  //
+  // The fix proven here: /github owns the canonical KEY NAMES; the VALUES are
+  // resolved through the EXISTING SecretStore (resolveGitHubAppCredentials)
+  // and injected EXPLICITLY by the composition root. The adapter performs
+  // ZERO environment access — env credentials do not configure it at all.
+  let api: ScriptedGitHubApi;
+  let privateKeyPem: string;
+  const APP_ID = '87654321';
+  const INSTALLATION_ID = 'inst-r4';
+  const OWNER = 'r4-cred-org';
+  const REPO = 'r4-cred-repo';
+
+  /** An in-memory SecretStore double (records every resolution). */
+  class MapSecretStore {
+    readonly resolutions: string[] = [];
+    constructor(private readonly secrets: Map<string, string>) {}
+    async getSecret(ref: { key: string }): Promise<string | null> {
+      this.resolutions.push(ref.key);
+      return this.secrets.get(ref.key) ?? null;
+    }
+    ref(key: string): { key: string } {
+      return { key };
+    }
+  }
+
+  beforeAll(async () => {
+    const keyPair = await generateRsaKeyPairPem();
+    privateKeyPem = keyPair.privateKeyPem;
+    api = new ScriptedGitHubApi();
+    await api.start();
+  });
+
+  afterAll(async () => {
+    await api.stop();
+  });
+
+  it('resolveGitHubAppCredentials resolves BOTH credentials THROUGH the SecretStore (the only sanctioned mechanism)', async () => {
+    const store = new MapSecretStore(
+      new Map([
+        ['GITHUB_APP_ID', APP_ID],
+        ['GITHUB_APP_PRIVATE_KEY', privateKeyPem],
+      ]),
+    );
+    const credentials = await resolveGitHubAppCredentials(store);
+    expect(credentials).toEqual({ appId: APP_ID, privateKey: privateKeyPem });
+    // Both resolutions went THROUGH the SecretStore boundary — the canonical
+    // key names owned by /github.
+    expect(store.resolutions).toContain('GITHUB_APP_ID');
+    expect(store.resolutions).toContain('GITHUB_APP_PRIVATE_KEY');
+  });
+
+  it('a MISSING credential at the store resolves to null (an honestly unconfigured adapter — never a partial configuration)', async () => {
+    const onlyId = new MapSecretStore(new Map([['GITHUB_APP_ID', APP_ID]]));
+    expect(await resolveGitHubAppCredentials(onlyId)).toBeNull();
+    const onlyKey = new MapSecretStore(new Map([['GITHUB_APP_PRIVATE_KEY', privateKeyPem]]));
+    expect(await resolveGitHubAppCredentials(onlyKey)).toBeNull();
+    const empty = new MapSecretStore(new Map());
+    expect(await resolveGitHubAppCredentials(empty)).toBeNull();
+  });
+
+  it('the PRODUCTION WIRING SHAPE: the adapter built from SecretStore-resolved credentials performs the REAL governed REST create', async () => {
+    // Exactly the composition-root wiring (app.ts): resolve through the
+    // SecretStore, then inject EXPLICITLY. The resulting adapter speaks the
+    // real REST wire protocol.
+    const store = new MapSecretStore(
+      new Map([
+        ['GITHUB_APP_ID', APP_ID],
+        ['GITHUB_APP_PRIVATE_KEY', privateKeyPem],
+      ]),
+    );
+    const credentials = await resolveGitHubAppCredentials(store);
+    expect(credentials).not.toBeNull();
+    const wired = new DefaultGitHubAdapter({
+      ...(credentials ?? {}),
+      apiBaseUrl: api.url,
+    });
+
+    const branch = 'wfos/governed/r4-wiring-proof';
+    api.setBranchHead(OWNER, REPO, branch, 'r4wiringrev0000000000000000000000000001');
+    const created = await wired.createPullRequest({
+      owner: OWNER,
+      repository: REPO,
+      title: 'round-4 wiring proof',
+      head: branch,
+      base: 'main',
+      installationId: INSTALLATION_ID,
+    });
+    expect(created.headSha).toBe('r4wiringrev0000000000000000000000000001');
+    // The REAL authenticated wire call happened (installation-token bearer).
+    const wireCreate = api.requests.filter(
+      (r) => r.method === 'POST' && r.path === `/repos/${OWNER}/${REPO}/pulls`,
+    );
+    expect(wireCreate.length).toBeGreaterThanOrEqual(1);
+    expect(wireCreate.at(-1)!.authorization).toMatch(/^Bearer ghs_/);
+    expect(await wired.health()).toBe('connected');
+  });
+
+  it('the adapter performs ZERO environment access — env credentials alone NEVER configure it (fail closed)', async () => {
+    // The credentials exist in the ENVIRONMENT but are NOT injected: the
+    // adapter stays unconfigured (it never reads process.env itself — the
+    // composition root's SecretStore resolution is the only channel).
+    vi.stubEnv('GITHUB_APP_ID', APP_ID);
+    vi.stubEnv('GITHUB_APP_PRIVATE_KEY', privateKeyPem);
+    const unconfigured = new DefaultGitHubAdapter({ apiBaseUrl: api.url });
+    const requestsBefore = api.requests.length;
+    await expect(
+      unconfigured.createPullRequest({
+        owner: OWNER, repository: REPO, title: 'x', head: 'b', base: 'main', installationId: INSTALLATION_ID,
+      }),
+    ).rejects.toThrow(/github-not-configured/);
+    expect(await unconfigured.health()).toBe('not-configured');
+    // And ZERO wire calls were attempted (nothing reached the authority).
+    expect(api.requests.length).toBe(requestsBefore);
+    vi.unstubAllEnvs();
   });
 });

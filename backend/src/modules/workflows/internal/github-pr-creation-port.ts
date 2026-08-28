@@ -39,6 +39,7 @@ import type {
   PullRequestCreationPort,
   ResolvedExternalPullRequest,
 } from './convergence.types.js';
+import { GovernedConvergenceMismatchError } from './convergence.types.js';
 import { createHash } from 'node:crypto';
 
 /**
@@ -117,9 +118,39 @@ export class GithubBackedPullRequestCreationPort implements PullRequestCreationP
       installationId: link.installationId,
     });
     if (!found) return null;
+    // PR #52 round 4 (review, BLOCKER 3) — the convergence claim must prove
+    // BOTH halves of the governed identity:
+    //
+    //   the governed head BRANCH  (the deterministic marker), AND
+    //   the AUTHORITATIVE head SHA === the requested headRevision.
+    //
+    // A PR on the same branch whose actual head commit differs (a stale or
+    // force-pushed governed branch) is NON-CONVERGENT: adopting it would
+    // associate a PR whose content is not the revision the architecture
+    // checkpoint gated on. A missing head SHA is unprovable provenance.
+    // Both fail CLOSED with the typed mismatch error — never adopted.
+    if (!found.headSha) {
+      throw new GovernedConvergenceMismatchError({
+        workItemId: input.workItemId,
+        headRevision: input.headRevision,
+        governedBranch: head,
+        observedHeadCommit: null,
+        reason: `the open PR #${found.number} on the governed branch reports NO head commit`,
+      });
+    }
+    if (found.headSha !== input.headRevision) {
+      throw new GovernedConvergenceMismatchError({
+        workItemId: input.workItemId,
+        headRevision: input.headRevision,
+        governedBranch: head,
+        observedHeadCommit: found.headSha,
+        reason: `the open PR #${found.number} on the governed branch has head commit ${found.headSha}, `
+          + `which is NOT the gated implementation revision`,
+      });
+    }
     return {
       externalPrId: `github:${link.owner}/${link.repository}#${found.number}`,
-      headCommit: found.headSha ?? null,
+      headCommit: found.headSha,
     };
   }
 
@@ -152,9 +183,36 @@ export class GithubBackedPullRequestCreationPort implements PullRequestCreationP
       body: input.body ?? undefined,
       installationId: link.installationId,
     });
+    // PR #52 round 4 (review, BLOCKER 3) — the SAME provenance invariant on
+    // the CREATE result: the created PR's AUTHORITATIVE head SHA must be the
+    // gated implementation revision (the governed branch points at exactly
+    // that commit). A created PR whose head differs does not deliver the
+    // gated revision — recording it as the intent identity would claim
+    // provenance the authority did not prove. Fail CLOSED (typed); the
+    // external PR the provider created is left unassociated (an observable
+    // anomaly), and the durable record is NOT written.
+    if (!result.headSha) {
+      throw new GovernedConvergenceMismatchError({
+        workItemId: input.workItemId,
+        headRevision: input.headRevision,
+        governedBranch: head,
+        observedHeadCommit: null,
+        reason: `the created PR #${result.number} reports NO head commit`,
+      });
+    }
+    if (result.headSha !== input.headRevision) {
+      throw new GovernedConvergenceMismatchError({
+        workItemId: input.workItemId,
+        headRevision: input.headRevision,
+        governedBranch: head,
+        observedHeadCommit: result.headSha,
+        reason: `the created PR #${result.number} has head commit ${result.headSha}, which is NOT `
+          + 'the gated implementation revision',
+      });
+    }
     return {
       externalPrId: `github:${link.owner}/${link.repository}#${result.number}`,
-      headCommit: result.headSha ?? null,
+      headCommit: result.headSha,
     };
   }
 

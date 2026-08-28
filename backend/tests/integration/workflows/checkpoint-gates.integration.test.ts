@@ -26,6 +26,7 @@ import type {
 } from '../../../src/modules/agents/internal/agent.types.js';
 import { GovernedPullRequestService } from '../../../src/modules/workflows/internal/governed-pull-request-service.js';
 import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-agent-repository.js';
+import { PgPullRequestAssociationRepository } from '../../../src/modules/work-items/internal/pg-work-item-repository.js';
 import { DefaultLlmGateway, FakeLlmAdapter } from '../../../src/modules/llm/internal/llm-gateway.js';
 import { DefaultArchitectService } from '../../../src/modules/llm/internal/architect-service.js';
 import { DefaultVerificationService } from '../../../src/modules/verification/internal/verification-service.js';
@@ -235,26 +236,38 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
     gate: ArchitectureCheckpointGate,
     prPort: FakePullRequestCreationPort,
     agentAdapters: readonly import('../../../src/modules/agents/internal/agent.types.js').AgentProviderAdapter[] = [fakeAgent],
+    client: TestAuthStack['db']['client'] = stack.db.client,
   ): DefaultWorkflowOrchestrator => {
     const logger = createLogger({ level: 'silent' });
-    const gateway = new DefaultAgentGateway(stack.db.client, logger, agentAdapters, 3);
-    const llmGateway = new DefaultLlmGateway(stack.db.client, logger, [fakeLlm], 3);
-    const architectService = new DefaultArchitectService(stack.db.client, llmGateway, stack.workOrderRepository, logger);
-    const agentRunRepo = new PgAgentRunRepository(stack.db.client);
-    const depService = new DefaultWorkItemDependencyService(stack.db.client);
+    const gateway = new DefaultAgentGateway(client, logger, agentAdapters, 3);
+    const llmGateway = new DefaultLlmGateway(client, logger, [fakeLlm], 3);
+    const architectService = new DefaultArchitectService(client, llmGateway, stack.workOrderRepository, logger);
+    const agentRunRepo = new PgAgentRunRepository(client);
+    const depService = new DefaultWorkItemDependencyService(client);
+    // PR #52 round 4: the engine + the PR-association repository + the
+    // governed PR service bind to the GIVEN client so the concurrency
+    // regression can run a SECOND orchestrator on an INDEPENDENT connection
+    // (a second signal-processing worker — the production topology, where
+    // the connection pool gives each transaction its own connection).
+    const engine = client === stack.db.client
+      ? workflowEngine
+      : new DefaultWorkflowEngine(
+        client, logger,
+        (wiId: string) => depService.canBeginImplementation(wiId),
+      );
     return new DefaultWorkflowOrchestrator(
-      stack.db.client, logger, queue, workflowEngine,
+      client, logger, queue, engine,
       stack.workItemRepository, stack.workOrderRepository, depService,
       stack.workItemCompletionService,
-      stack.pullRequestAssociationRepository, gateway, agentRunRepo,
+      new PgPullRequestAssociationRepository(client), gateway, agentRunRepo,
       architectService,
-      verificationService, new DefaultReviewService(stack.db.client, stack.workItemRepository, logger),
+      verificationService, new DefaultReviewService(client, stack.workItemRepository, logger),
       new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
       stack.projectRepository, gate, generateExecutionId,
       // PR #52 round 2 (BLOCKER 2): the governed PR-creation boundary — the
       // durable create-or-converge protocol over the port (the fake).
-      new GovernedPullRequestService(stack.db.client, prPort),
+      new GovernedPullRequestService(client, prPort),
     );
   };
 
@@ -1131,5 +1144,185 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
       .sort();
     expect(statuses).toContain('blocked');
     expect(statuses).toContain('passed');
+  });
+
+  // --- PR #52 round 4 (review, BLOCKER 2): adoption converges through the
+  // --- SAME durable identity boundary as creation ----------------------------
+
+  /**
+   * Submit (without processing) an agent_run_completed signal whose run row
+   * carries the EXTERNAL OBSERVATION shape (commit_ref NULL + the observed PR
+   * reference — the webhook-ingestion shape). Returns the pending signal.
+   */
+  const submitExternalObservationSignal = async (
+    orchestrator: DefaultWorkflowOrchestrator,
+    wiId: string,
+    versionId: string,
+    externalPrRef: string,
+  ): Promise<ReturnType<typeof orchestrator.submitAgentRunCompleted>> => {
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wiId, projectId: project.id, architectureVersionId: versionId,
+    });
+    const gateway = new DefaultAgentGateway(
+      stack.db.client, createLogger({ level: 'silent' }), [scriptedAgent], 3,
+    );
+    const executionId = generateExecutionId();
+    await gateway.execute({
+      provider: 'scripted',
+      configuration: {},
+      workItemId: wiId,
+      workOrderId: wo.id,
+      architectureVersionId: versionId,
+      executionId,
+      input: 'external observation',
+    });
+    const run = await new PgAgentRunRepository(stack.db.client).findByExecutionId(executionId);
+    expect(run).toBeTruthy();
+    await stack.db.client.query(
+      'UPDATE wfos_agent_runs SET commit_ref = NULL, pull_request_ref = $1 WHERE id = $2',
+      [externalPrRef, run!.id],
+    );
+    return orchestrator.submitAgentRunCompleted({
+      workItemId: wiId,
+      agentRunId: run!.id,
+      executionId: generateExecutionId(),
+    });
+  };
+
+  it('BLOCKER 2 (round 4) — a processed adoption leaves the DURABLE governed identity (origin adopted) on the SAME ledger as creation', async () => {
+    const RESOLVED_SHA = `ee55ff6677889900aabbccdd0011223344556677`;
+    seedTree(RESOLVED_SHA, cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+
+    const EXT_PR = `github:${OWNER}/${REPO}#17`;
+    prPort.registerExternalPullRequest(EXT_PR, {
+      externalPrId: EXT_PR,
+      headCommit: RESOLVED_SHA,
+      state: 'open',
+      merged: false,
+    });
+
+    await driveToExternalObservation(orchestrator, wi.id, v.id, 'rev-adopt-r4a', EXT_PR);
+
+    // ONE association…
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]!.externalPrId).toBe(EXT_PR);
+    // …and the DURABLE governed identity on the SAME ledger the creation path
+    // uses — the explicit adoption origin (migration 0056).
+    const intentRow = await stack.db.client.query<{ status: string; external_pr_id: string; head_commit: string; origin: string }>(
+      `SELECT status, external_pr_id, head_commit, origin
+       FROM wfos_pull_request_intents
+       WHERE work_item_id = $1 AND head_revision = $2`,
+      [wi.id, RESOLVED_SHA],
+    );
+    expect(intentRow.rows).toHaveLength(1);
+    expect(intentRow.rows[0]).toEqual({
+      status: 'created',
+      external_pr_id: EXT_PR,
+      head_commit: RESOLVED_SHA,
+      origin: 'adopted',
+    });
+    expect(await state(wi.id)).toBe('pr_open');
+  });
+
+  it('BLOCKER 2 (round 4) — TWO CONCURRENT agent_run_completed signals carrying the SAME external PR converge on EXACTLY ONE association (the durable identity serializes them)', async () => {
+    const isRealPg =
+      !!process.env.WORKFLOWOS_DATABASE_URL &&
+      process.env.WORKFLOWOS_DATABASE_URL.startsWith('postgres');
+    if (!isRealPg || !stack.db.createSecondClient) {
+      // pglite is single-connection: true concurrent signal processing is not
+      // demonstrable there (the sequential convergence is covered above; the
+      // two-client ledger serialization is proven in
+      // governed-pr-creation.integration.test.ts on real PostgreSQL).
+      return;
+    }
+
+    // An ALLOW-ALL gate: the checkpoint gating semantics for external PR
+    // adoption are proven by the round-3 regressions above (resolved-SHA
+    // binding, violating-tree blocking, unresolvable fail-closed); THIS
+    // regression isolates what the round-4 review challenged — the durable
+    // identity + association convergence under TWO CONCURRENT signals.
+    const allowAllGate: ArchitectureCheckpointGate = {
+      async evaluate(): Promise<ArchitectureCheckpointGateResult> {
+        return { allowed: true, applicable: true, status: 'passed', checkpointId: 'r4-concurrent', reasons: [] };
+      },
+    };
+
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    // Orchestrator A — the first signal-processing worker (connection 1)...
+    const orchestratorA = buildOrchestrator(allowAllGate, prPort, [scriptedAgent]);
+    // ...and orchestrator B — an INDEPENDENT worker on its OWN connection
+    // (exactly the production topology: the pool gives each transaction its
+    // own connection; concurrent workers process different signals).
+    const second = await stack.db.createSecondClient();
+    try {
+      const orchestratorB = buildOrchestrator(allowAllGate, prPort, [scriptedAgent], second.client);
+
+      const EXT_PR = `github:${OWNER}/${REPO}#18`;
+      prPort.registerExternalPullRequest(EXT_PR, {
+        externalPrId: EXT_PR,
+        headCommit: 'ff6677889900aabbccdd00112233445566778899aa',
+        state: 'open',
+        merged: false,
+      });
+
+      // Drive to IMPLEMENTING (an agent run reporting NO revision — no PR
+      // path runs during initiate).
+      scriptedAgent.setCommitRef('');
+      await initiate(orchestratorA, wi.id, 'scripted');
+      expect(await state(wi.id)).toBe('implementing');
+
+      // TWO agent_run_completed signals, each carrying the SAME external PR
+      // observation (the PR #52 round-4 review scenario).
+      const signal1 = await submitExternalObservationSignal(orchestratorA, wi.id, v.id, EXT_PR);
+      const signal2 = await submitExternalObservationSignal(orchestratorA, wi.id, v.id, EXT_PR);
+
+      // The two signals process CONCURRENTLY on the two independent workers.
+      // Each resolves the observation, gates, and adopts — the (work item,
+      // resolved head revision) intent row SERIALIZES the two adoptions; both
+      // converge on the SAME recorded identity, and exactly ONE association
+      // is created (the association layer's unique-index race loser
+      // CONVERGES on the winner's row — create-if-absent with convergence on
+      // conflict, never a duplicate and never a hard failure).
+      await Promise.allSettled([
+        orchestratorA.processSignal(signal1.id),
+        orchestratorB.processSignal(signal2.id),
+      ]);
+
+      // EXACTLY ONE association for the external PR (no duplicates, no churn).
+      const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+      expect(prs.filter((p) => p.externalPrId === EXT_PR)).toHaveLength(1);
+      expect(prs.filter((p) => p.status === 'active')).toHaveLength(1);
+
+      // EXACTLY ONE durable governed identity for the key — origin 'adopted'.
+      const intentRows = await stack.db.client.query<{ status: string; external_pr_id: string; origin: string }>(
+        `SELECT status, external_pr_id, origin
+         FROM wfos_pull_request_intents
+         WHERE work_item_id = $1 AND head_revision = $2`,
+        [wi.id, 'ff6677889900aabbccdd00112233445566778899aa'],
+      );
+      expect(intentRows.rows).toHaveLength(1);
+      expect(intentRows.rows[0]!.status).toBe('created');
+      expect(intentRows.rows[0]!.external_pr_id).toBe(EXT_PR);
+      expect(intentRows.rows[0]!.origin).toBe('adopted');
+
+      // ZERO PR creations — adoption is association-only.
+      expect(prPort.calls).toHaveLength(0);
+      // The work item reached PR_OPEN (one of the concurrent transitions won;
+      // the loser's transition is a graceful no-op / concurrency conflict).
+      expect(await state(wi.id)).toBe('pr_open');
+    } finally {
+      await second.close();
+    }
   });
 });

@@ -737,6 +737,68 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
     expect(replayA.implementationRevision).toBe('rev-keyreuse-a');
   });
 
+  it('PR #52 round 4 (HIGH 1) — a /verification READ FAILURE during replay FAILS CLOSED (no silent summary downgrade presented as the original reconstruction)', async () => {
+    seedTree('rev-replay-failclosed', violatingTreeFiles());
+    const v = await frozenVersionWithAssertions([structureAssertion()]);
+    const wi = await workItemOn(v.id);
+
+    // A FIRST evaluation records the run (the replay source).
+    const first = await service.evaluateCheckpoint(gate(wi.id, 'rev-replay-failclosed', 'replay-fail-key'));
+    expect(first.status).toBe('blocked');
+    expect(first.replayed).toBe(false);
+    expect(first.evaluations.length).toBeGreaterThan(0);
+
+    // A service variant whose /verification evidence read FAILS (the
+    // authority is unavailable / errors). The replay of the SAME key must
+    // NOT silently fall back to the weaker summary-derived evaluation list
+    // and present it as the original per-assertion reconstruction — it
+    // FAILS CLOSED (throws; the gate error path blocks the transition and
+    // the signal remains reprocessable).
+    const failingReadService = Object.create(verificationService) as typeof verificationService;
+    failingReadService.listEvidenceForRun = async () => {
+      throw new Error('simulated /verification outage: the evidence store is unreadable');
+    };
+    const replayFailing = new DefaultArchitectureCheckpointService({
+      workItemReader: stack.workItemRepository,
+      architectureVersionReader: stack.architectureVersionRepository,
+      architectureReader: stack.architectureRepository,
+      assertionReader: assertionRepo,
+      verificationService: failingReadService,
+      snapshotReader: snapshotProvider,
+      detectors: createDefaultDetectorRegistry(),
+      logger: createLogger({ level: 'silent' }),
+    });
+    await expect(
+      replayFailing.evaluateCheckpoint(gate(wi.id, 'rev-replay-failclosed', 'replay-fail-key')),
+    ).rejects.toThrow(/evidence read failed.*fail closed/i);
+
+    // The CONTROL: with the authority readable, the SAME key still replays
+    // the recorded result exactly (the fail-closed behavior is specific to
+    // the read failure, not the replay path itself).
+    const healthy = await service.evaluateCheckpoint(gate(wi.id, 'rev-replay-failclosed', 'replay-fail-key'));
+    expect(healthy.replayed).toBe(true);
+    expect(healthy.checkpointId).toBe(first.checkpointId);
+    expect(healthy.evaluations).toEqual(first.evaluations);
+
+    // The DISTINCTION (the review's exact requirement): EXPECTED LEGACY/EMPTY
+    // evidence is a LEGITIMATE summary fallback. Simulate a legacy record (a
+    // run predating the evidence persistence — its rows genuinely absent):
+    // the replay still SUCCEEDS through the summary's evaluation summaries
+    // (never a silent []), clearly marked as the degraded shape (no row ids,
+    // no details) — a successful empty read is NOT a read failure.
+    await stack.db.client.query('DELETE FROM wfos_evidence WHERE verification_run_id = $1', [
+      first.checkpointId,
+    ]);
+    const legacy = await service.evaluateCheckpoint(gate(wi.id, 'rev-replay-failclosed', 'replay-fail-key'));
+    expect(legacy.replayed).toBe(true);
+    expect(legacy.status).toBe('blocked');
+    expect(legacy.evaluations.length).toBe(first.evaluations.length);
+    for (const e of legacy.evaluations) {
+      expect(e.assertionRowId).toBe(''); // the summary carries no row ids
+      expect(e.details).toEqual({}); // and no per-assertion details
+    }
+  });
+
   it('PR #52 round 2 (HIGH 1) — the provider-observed snapshot identity DIFFERS when the same revision label serves different bytes (a mutated tree is detectable in the evidence)', async () => {
     // Two distinct revisions with the same tree → same identity inputs…
     seedTree('rev-ident-a', cleanTreeFiles());
@@ -1036,9 +1098,10 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
         detectorKind: 'schema-migration',
         detectorConfig: {
           migrationsDir: 'src/platform/postgres/migrations',
-          // PR #52 round 2: 0055 is the /workflows governed PR-creation
-          // intent ledger (the durable create-or-converge identity).
-          expectedLastMigrationNumber: 55,
+          // PR #52 round 4: 0056 is the explicit durable adoption origin on
+          // the /workflows governed PR-intent ledger (round 2's 0055 is the
+          // create-or-converge identity itself).
+          expectedLastMigrationNumber: 56,
         },
       },
     ]);

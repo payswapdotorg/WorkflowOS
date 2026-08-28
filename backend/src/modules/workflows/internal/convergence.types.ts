@@ -493,12 +493,26 @@ export interface ResolvedExternalPullRequest {
  * together: after a crash between the external create and the durable
  * record, the retry finds the already-created PR by that branch and
  * converges instead of creating a second PR.
+ *
+ * PR #52 round 4 (review, BLOCKER 3): BOTH halves validate the COMPLETE
+ * governed identity — the deterministic head BRANCH **and** the
+ * AUTHORITATIVE head SHA === the requested headRevision. A branch match
+ * with a mismatched (or missing) SHA is NON-CONVERGENT: the production port
+ * throws {@link GovernedConvergenceMismatchError} (fail closed) instead of
+ * returning a PR whose content is not the revision the architecture
+ * checkpoint gated on. The convergence claim never asserts more provenance
+ * than the external authority actually proves.
  */
 export interface PullRequestCreationPort {
   /**
    * The CONVERGENCE READ: find the PR this boundary already created for the
    * (workItemId, headRevision) pair. Returns null when no such PR exists.
    * Read-only — no side effects.
+   *
+   * Round 4 (BLOCKER 3): a PR found on the deterministic governed branch
+   * whose AUTHORITATIVE head SHA does not equal the requested headRevision
+   * (or reports none) is NOT the converged PR — the implementation throws
+   * {@link GovernedConvergenceMismatchError} (non-convergent, fail closed).
    */
   findExistingPullRequest(input: {
     /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
@@ -513,6 +527,13 @@ export interface PullRequestCreationPort {
    * deterministically from (workItemId, headRevision) — the convergence
    * marker — so a create is idempotent at the provider boundary (GitHub
    * itself rejects a second open PR for the same head).
+   *
+   * Round 4 (BLOCKER 3): the creation result's AUTHORITATIVE head SHA must
+   * equal the requested headRevision — the created PR must deliver exactly
+   * the gated implementation revision. A mismatched (or missing) head SHA
+   * throws {@link GovernedConvergenceMismatchError} and the durable record
+   * is NOT written (the external PR is left unassociated — an observable
+   * anomaly, never a false provenance claim).
    */
   createPullRequest(input: {
     /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
@@ -568,5 +589,93 @@ export class ArchitectureCheckpointGateDeniedError extends Error {
     this.name = 'ArchitectureCheckpointGateDeniedError';
     this.checkpointKind = checkpointKind;
     this.reasons = reasons;
+  }
+}
+
+/**
+ * PR #52 round 4 (review, BLOCKER 2) — typed conflict thrown by the durable
+ * governed-PR identity protocol when TWO DIFFERENT PR identities claim the
+ * SAME convergence key (work item, authoritative head revision).
+ *
+ * The ledger (`wfos_pull_request_intents`) permits exactly ONE recorded PR
+ * identity per key: whichever governed path records first (create or adopt)
+ * wins, and the other path CONVERGES on the recorded identity. A path that
+ * arrives with a DIFFERENT PR for the same key is not a convergence — it is
+ * an identity conflict, and it fails CLOSED (no association, no PR_OPEN).
+ * The work item stays in its current lifecycle state; the conflict is
+ * observable (logged with both identities) and never silently resolves into
+ * a second PR association.
+ */
+export class GovernedPrIdentityConflictError extends Error {
+  readonly code = 'governed-pr-identity-conflict';
+  readonly workItemId: string;
+  readonly headRevision: string;
+  readonly recordedExternalPrId: string;
+  readonly claimedExternalPrId: string;
+
+  constructor(input: {
+    workItemId: string;
+    headRevision: string;
+    recordedExternalPrId: string;
+    claimedExternalPrId: string;
+  }) {
+    super(
+      `governed-pr-identity-conflict: the convergence key (work item ${input.workItemId}, ` +
+        `head revision ${input.headRevision}) is already durably bound to ` +
+        `${input.recordedExternalPrId}; the observed PR ${input.claimedExternalPrId} is a ` +
+        'DIFFERENT identity for the same key — one (work item, authoritative head commit) ' +
+        'converges on exactly one PR association (fail closed)',
+    );
+    this.name = 'GovernedPrIdentityConflictError';
+    this.workItemId = input.workItemId;
+    this.headRevision = input.headRevision;
+    this.recordedExternalPrId = input.recordedExternalPrId;
+    this.claimedExternalPrId = input.claimedExternalPrId;
+  }
+}
+
+/**
+ * PR #52 round 4 (review, BLOCKER 3) — typed failure thrown by the governed
+ * convergence boundary when the external authority's answer does not PROVE
+ * the provenance the governed path requires:
+ *
+ *   - the convergence read found an OPEN PR on the deterministic governed
+ *     head branch, but the PR's ACTUAL head commit differs from the
+ *     requested implementation revision (same branch, different SHA — a
+ *     stale or force-pushed branch must never be adopted as the converged
+ *     PR for the gated revision); or
+ *   - the authority returned no head SHA at all (unprovable provenance).
+ *
+ * A branch match with a mismatched SHA is NON-CONVERGENT: the protocol fails
+ * closed instead of associating a PR whose content is not the revision the
+ * architecture checkpoint gated on.
+ */
+export class GovernedConvergenceMismatchError extends Error {
+  readonly code = 'governed-pr-convergence-mismatch';
+  readonly workItemId: string;
+  readonly headRevision: string;
+  readonly governedBranch: string;
+  readonly observedHeadCommit: string | null;
+
+  constructor(input: {
+    workItemId: string;
+    headRevision: string;
+    governedBranch: string;
+    observedHeadCommit: string | null;
+    reason: string;
+  }) {
+    super(
+      `governed-pr-convergence-mismatch: ${input.reason} ` +
+        `(work item ${input.workItemId}, gated revision ${input.headRevision}, ` +
+        `governed branch ${input.governedBranch}, observed head commit ` +
+        `${input.observedHeadCommit ?? 'none'}) — the convergence marker matches but the ` +
+        'authoritative head SHA does not correspond to the requested governed revision ' +
+        '(non-convergent, fail closed)',
+    );
+    this.name = 'GovernedConvergenceMismatchError';
+    this.workItemId = input.workItemId;
+    this.headRevision = input.headRevision;
+    this.governedBranch = input.governedBranch;
+    this.observedHeadCommit = input.observedHeadCommit;
   }
 }

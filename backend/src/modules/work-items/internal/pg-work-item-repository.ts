@@ -302,33 +302,92 @@ export class PgPullRequestAssociationRepository implements PullRequestAssociatio
   constructor(private readonly db: DatabaseClient) {}
 
   async create(input: CreatePrAssociationInput): Promise<PullRequestAssociation> {
-    return this.db.transaction(async (tx) => {
-      // Supersede any existing active PR for this work item (WORK-AC-03).
-      await tx.query(
-        `UPDATE wfos_pull_request_associations
-         SET status = 'superseded', superseded_at = NOW()
-         WHERE work_item_id = $1 AND status = 'active'`,
-        [input.workItemId],
-      );
-      const result = await tx.query<PrRow>(
-        `INSERT INTO wfos_pull_request_associations
-           (work_item_id, external_pr_id, provider, repository_ref, branch,
-            base_branch, head_commit, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
-         RETURNING id, work_item_id, external_pr_id, provider, repository_ref,
-                   branch, base_branch, head_commit, status, created_at, superseded_at`,
-        [
-          input.workItemId,
-          input.externalPrId,
-          input.provider ?? 'github',
-          input.repositoryRef ?? null,
-          input.branch ?? null,
-          input.baseBranch ?? null,
-          input.headCommit ?? null,
-        ],
-      );
-      return mapPr(result.rows[0]!);
-    });
+    try {
+      return await this.db.transaction(async (tx) => {
+        // PR #52 round 4 (review, BLOCKER 2) — DB-level idempotency for the
+        // SAME active PR. Concurrent association writers for one work item
+        // serialize on the WORK ITEM row itself (FOR UPDATE): locking the
+        // empty association set would exclude nothing (a concurrent INSERT
+        // of a new active row is not blocked by an empty-range lock), so the
+        // work item row is the serialization domain for the
+        // one-active-PR-per-work-item invariant. After the lock:
+        //   - an active row with the SAME external PR already exists → return
+        //     it (re-observation / concurrent duplicate observation CONVERGES
+        //     on one association — never a supersede+reinsert churn, never a
+        //     duplicate);
+        //   - an active row with a DIFFERENT PR exists → supersede it
+        //     (WORK-AC-03: one active PR per work item) and insert the new one.
+        // The durable governed-identity ledger (wfos_pull_request_intents) is
+        // the architectural guarantee upstream; this makes the association
+        // layer itself converge for the same PR identity, with the
+        // one-active-PR-per-work-item partial unique index as the final
+        // arbiter (its race loser converges below instead of failing).
+        await tx.query(
+          `SELECT id FROM wfos_work_items WHERE id = $1 FOR UPDATE`,
+          [input.workItemId],
+        );
+        const existing = await tx.query<PrRow>(
+          `SELECT id, work_item_id, external_pr_id, provider, repository_ref,
+                  branch, base_branch, head_commit, status, created_at, superseded_at
+           FROM wfos_pull_request_associations
+           WHERE work_item_id = $1 AND status = 'active'
+           FOR UPDATE`,
+          [input.workItemId],
+        );
+        const samePr = existing.rows.find((r) => r.external_pr_id === input.externalPrId);
+        if (samePr) {
+          return mapPr(samePr);
+        }
+        // Supersede any existing (DIFFERENT) active PR for this work item
+        // (WORK-AC-03).
+        await tx.query(
+          `UPDATE wfos_pull_request_associations
+           SET status = 'superseded', superseded_at = NOW()
+           WHERE work_item_id = $1 AND status = 'active'`,
+          [input.workItemId],
+        );
+        const result = await tx.query<PrRow>(
+          `INSERT INTO wfos_pull_request_associations
+             (work_item_id, external_pr_id, provider, repository_ref, branch,
+              base_branch, head_commit, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+           RETURNING id, work_item_id, external_pr_id, provider, repository_ref,
+                     branch, base_branch, head_commit, status, created_at, superseded_at`,
+          [
+            input.workItemId,
+            input.externalPrId,
+            input.provider ?? 'github',
+            input.repositoryRef ?? null,
+            input.branch ?? null,
+            input.baseBranch ?? null,
+            input.headCommit ?? null,
+          ],
+        );
+        return mapPr(result.rows[0]!);
+      });
+    } catch (err) {
+      // PR #52 round 4 (review, BLOCKER 2) — CONVERGENCE ON CONFLICT: when a
+      // concurrent writer won the one-active-PR-per-work-item insert race
+      // (both observed no active row; the unique partial index
+      // wfos_pr_assoc_one_active_per_wi rejected the loser's insert), the
+      // loser CONVERGES on the winner's committed row when it is the SAME
+      // PR — the association layer is idempotent for the same PR identity
+      // under concurrency, never a duplicate and never a hard failure.
+      const e = err as { code?: string; constraint?: string };
+      if (e.code === '23505' && e.constraint === 'wfos_pr_assoc_one_active_per_wi') {
+        const converged = await this.db.query<PrRow>(
+          `SELECT id, work_item_id, external_pr_id, provider, repository_ref,
+                  branch, base_branch, head_commit, status, created_at, superseded_at
+           FROM wfos_pull_request_associations
+           WHERE work_item_id = $1 AND external_pr_id = $2 AND status = 'active'`,
+          [input.workItemId, input.externalPrId],
+        );
+        if (converged.rows.length > 0) {
+          return mapPr(converged.rows[0]!);
+        }
+      }
+      throw err;
+    }
   }
 
   async findById(id: string): Promise<PullRequestAssociation | null> {

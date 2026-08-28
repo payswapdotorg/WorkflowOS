@@ -668,28 +668,40 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
   }
 
   /**
-   * WORK-051 round 2 + round 3 (PR #52 review) — the ACTUAL PR-creation
-   * boundary of the governed convergence path. Strict order:
+   * WORK-051 round 2 + round 3 + round 4 (PR #52 review) — the ACTUAL
+   * PR-creation boundary of the governed convergence path. Strict order:
    *
-   *   0. RESOLVE THE REVISION (round 3, BLOCKER 3): the gate revision is
-   *      ALWAYS an exact implementation revision (a commit SHA). When only
-   *      an EXTERNAL PR observation is available (no commit revision), its
-   *      AUTHORITATIVE head commit is resolved through /github FIRST —
-   *      `resolveExternalPullRequest` — and only that SHA proceeds. A raw
-   *      PR reference NEVER enters the checkpoint binding or the
-   *      governed-creation identity; an unresolvable/closed/merged
-   *      observation fails closed (no gate run, no adoption, no transition);
+   *   0. RESOLVE THE REVISION (round 3, BLOCKER 3 + round 4): the gate
+   *      revision is ALWAYS an exact implementation revision (a commit SHA).
+   *      Whenever an EXTERNAL PR observation is available (with or without
+   *      an agent-reported commit ref), its AUTHORITATIVE head commit is
+   *      resolved through /github FIRST — resolveExternalPullRequest — and
+   *      only that SHA proceeds. A raw PR reference NEVER enters the
+   *      checkpoint binding or the governed-creation identity. When BOTH a
+   *      commit ref and an external PR exist, the observed PR's head MUST
+   *      equal the gated commit ref — a PR whose head differs does not
+   *      deliver the gated revision (fail closed). An
+   *      unresolvable/closed/merged observation fails closed (no gate run,
+   *      no adoption, no transition);
    *   1. the pr_conformance architecture checkpoint, bound to the EXACT
    *      implementation revision (fail closed);
-   *   2. ONLY if the gate allows: either adopt the already-existing EXTERNAL
-   *      PR observation (record the association — no creation side effect),
-   *      or CREATE the PR through the governed PR-creation protocol (the
+   *   2. ONLY if the gate allows: EITHER adopt the already-existing EXTERNAL
+   *      PR observation through the SAME durable PR-identity boundary as
+   *      the creation path (round 4, BLOCKER 2: GovernedPullRequestService
+   *      .adopt — the (work item, resolved head revision) intent ledger;
+   *      association only; no creation side effect; a different PR already
+   *      recorded for the same key is a typed conflict that fails closed),
+   *      OR CREATE the PR through the governed PR-creation protocol (the
    *      durable create-or-converge boundary over the single
    *      PullRequestCreationPort → /github path) and record the association
    *      from the authoritative creation result — IDEMPOTENTLY: a
    *      crash/retry/duplicate re-drive of the same (work item, revision)
    *      converges on the SAME PR (no second external create);
    *   3. the caller performs the PR_OPEN transition.
+   *
+   * For one (work item, authoritative head commit), BOTH governed paths —
+   * create and adopt — converge on EXACTLY ONE PR identity/association
+   * (the durable wfos_pull_request_intents ledger is the boundary).
    *
    * A denied gate returns false having performed ZERO PR-creation side
    * effects — the external PR authority's createPullRequest is never called.
@@ -699,15 +711,17 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     commitRef: string | null,
     externalPrRef: string | null,
   ): Promise<boolean> {
-    // (0) The gate revision — ALWAYS an exact implementation revision. When
-    // only an external PR observation exists, resolve its AUTHORITATIVE head
-    // commit through /github BEFORE the gate (BLOCKER 3: a raw PR reference
-    // is not a revision; treating it as one produced either a false
-    // checkpoint binding or an intentional fail-closed for legitimate
-    // webhook adoption).
+    // (0) The gate revision — ALWAYS an exact implementation revision.
+    // Whenever an external PR observation exists, resolve its AUTHORITATIVE
+    // head commit through /github BEFORE the gate (BLOCKER 3: a raw PR
+    // reference is not a revision; treating it as one produced either a
+    // false checkpoint binding or an intentional fail-closed for legitimate
+    // webhook adoption). Round 4: the resolution runs even when a commit ref
+    // exists — the observed PR's head MUST match the gated revision, or the
+    // observation does not deliver what the checkpoint gated on.
     let gateRevision = commitRef;
-    let adoptionHeadCommit: string | null = commitRef;
-    if (!gateRevision && externalPrRef) {
+    let adoptionIdentity: { externalPrId: string; headCommit: string } | null = null;
+    if (externalPrRef) {
       let resolved: ResolvedExternalPullRequest | null = null;
       try {
         resolved = await this.governedPullRequests.resolveExternalPullRequest({
@@ -739,8 +753,24 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         });
         return false;
       }
-      gateRevision = resolved.headCommit;
-      adoptionHeadCommit = resolved.headCommit;
+      if (commitRef && resolved.headCommit !== commitRef) {
+        // Round 4 (BLOCKER 3 completion): the agent reported commit ref is
+        // what the checkpoint will gate on — an external PR whose
+        // AUTHORITATIVE head differs does not deliver that revision and can
+        // never be associated as its implementation (fail closed).
+        this.logger.warn('convergence.pr.adoption_revision_mismatch', {
+          workItemId: signal.workItemId,
+          externalPrRef,
+          commitRef,
+          resolvedHeadCommit: resolved.headCommit,
+        });
+        return false;
+      }
+      gateRevision = commitRef ?? resolved.headCommit;
+      adoptionIdentity = {
+        externalPrId: resolved.externalPrId,
+        headCommit: resolved.headCommit,
+      };
     }
     if (!gateRevision) {
       // Nothing to bind the checkpoint to — cannot open a governed PR.
@@ -757,21 +787,53 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
       return false;
     }
 
-    // (2a) An external PR already exists — adopt the observed identity
-    // (association only; no creation side effect; idempotent). The
-    // association's headCommit is the RESOLVED authoritative head SHA when
-    // no agent-reported revision exists (round 3: never the raw PR ref).
-    if (externalPrRef) {
-      const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
-      const alreadyHasPr = existingPrs.some((p) => p.externalPrId === externalPrRef);
-      if (!alreadyHasPr) {
-        await this.pullRequestAssociationRepository.create({
+    // (2a) An external PR observation exists — ADOPT it through the SAME
+    // durable PR-identity boundary as the creation path (round 4, BLOCKER 2):
+    // GovernedPullRequestService.adopt converges the observation onto the
+    // (work item, resolved head revision) intent row. Two concurrent signals
+    // carrying the same external PR serialize through that row and converge
+    // on exactly one association; a DIFFERENT PR already recorded for the
+    // same key is a typed identity conflict — fail closed (no association,
+    // no PR_OPEN). The association's headCommit is the RESOLVED
+    // authoritative head SHA (round 3: never the raw PR ref).
+    if (adoptionIdentity) {
+      try {
+        const adopted = await this.governedPullRequests.adopt({
+          projectId: signal.projectId,
           workItemId: signal.workItemId,
-          externalPrId: externalPrRef,
-          headCommit: adoptionHeadCommit ?? undefined,
+          headRevision: gateRevision,
+          externalPrId: adoptionIdentity.externalPrId,
+          headCommit: adoptionIdentity.headCommit,
         });
+        // Associate the CONVERGED identity — idempotently (a concurrent or
+        // re-driven adoption of the same PR records ONE association).
+        const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
+        const alreadyHasPr = existingPrs.some((p) => p.externalPrId === adopted.externalPrId);
+        if (!alreadyHasPr) {
+          await this.pullRequestAssociationRepository.create({
+            workItemId: signal.workItemId,
+            externalPrId: adopted.externalPrId,
+            headCommit: adopted.headCommit ?? adoptionIdentity.headCommit,
+          });
+        }
+        this.logger.info('convergence.pr.adopted', {
+          workItemId: signal.workItemId,
+          externalPrId: adopted.externalPrId,
+          headRevision: gateRevision,
+        });
+        return true;
+      } catch (err) {
+        // Identity conflict (a different PR is durably bound to this exact
+        // (work item, revision) key) or a ledger failure — EVERY shape fails
+        // closed: no association, no PR_OPEN; the signal can be re-processed.
+        this.logger.warn('convergence.pr.adoption_failed', {
+          workItemId: signal.workItemId,
+          externalPrRef,
+          headRevision: gateRevision,
+          error: (err as Error).message,
+        });
+        return false;
       }
-      return true;
     }
 
     // (2b) Create the PR through the governed PR-creation boundary — the

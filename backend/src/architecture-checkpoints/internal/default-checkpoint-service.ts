@@ -640,6 +640,16 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
    * summary, details), so a replayed {@link ArchitectureCheckpointResult} is
    * semantically equivalent to the original. The provider-observed snapshot
    * identity is replayed from the summary the same way.
+   *
+   * PR #52 round 4 (review, HIGH 1) — the reconstruction is FAIL-CLOSED:
+   * a /verification READ FAILURE during replay THROWS (the gate error path
+   * blocks the gated transition; the signal can be re-processed when the
+   * evidence authority is readable again). The ONLY legitimate summary
+   * fallback is a SUCCESSFUL read that genuinely yields no
+   * architecture-assertion rows (an explicitly assertion-free version, or a
+   * legacy record predating the evidence persistence) — the replay must
+   * never silently downgrade a fully reconstructed evaluation list to the
+   * weaker summary representation and still present it as the original.
    */
   private async resultFromRecordedRun(
     recorded: {
@@ -655,7 +665,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
     const s = recorded.summary ?? {};
     // Reconstruct the per-assertion evaluations through the /verification
     // evidence authority (read path; ordered as persisted).
-    let evaluations: AssertionEvaluation[] = [];
+    let evaluations: AssertionEvaluation[];
     try {
       const evidenceRows = await this.deps.verificationService.listEvidenceForRun(recorded.id);
       evaluations = evidenceRows
@@ -677,17 +687,29 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
         // ORIGINAL evaluation order (the assertion reader lists by
         // assertion_id).
         .sort((a, b) => (a.assertionId < b.assertionId ? -1 : a.assertionId > b.assertionId ? 1 : 0));
-    } catch {
-      // The evidence read is the authority's surface; a read failure must
-      // not corrupt the replayed verdict — replay the summary (the verdict,
-      // blocking findings, and advisories are authoritative in the run
-      // summary). The evaluation list degrades to the summary's evaluation
-      // summaries rather than to [] (still not a silent loss).
-      evaluations = this.evaluationsFromSummary(s);
+    } catch (err) {
+      // PR #52 round 4 (review, HIGH 1) — a /verification READ FAILURE is
+      // NOT a legitimate degradation. The evidence reconstruction is the
+      // semantic guarantee of the replay; when the authority cannot be read,
+      // the replay FAILS CLOSED instead of silently substituting the weaker
+      // summary-derived evaluation list and presenting it as the original
+      // per-assertion reconstruction (which would claim row ids + details the
+      // degraded shape does not actually carry). The thrown error surfaces
+      // through the gate error path: the gated transition is blocked
+      // (allowed=false, inconclusive) and the signal remains reprocessable.
+      throw new Error(
+        `checkpoint replay ${recorded.id}: the /verification evidence read failed — the original ` +
+          `per-assertion evaluations cannot be reconstructed honestly (fail closed; the summary ` +
+          `fallback is reserved for an empty/legacy evidence set): ${(err as Error).message}`,
+        { cause: err },
+      );
     }
     if (evaluations.length === 0) {
-      // No assertion evidence rows (an explicitly assertion-free version, or
-      // a legacy record): fall back to the summary's evaluation summaries.
+      // EXPECTED legacy/empty evidence — a SUCCESSFUL read that genuinely
+      // holds no architecture-assertion rows (an explicitly assertion-free
+      // version, or a legacy record predating the evidence persistence):
+      // the legitimate summary fallback (the verdict, blocking findings, and
+      // advisories remain authoritative in the run summary).
       evaluations = this.evaluationsFromSummary(s);
     }
     return {
@@ -712,11 +734,13 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
   }
 
   /**
-   * The degraded replay source: the run summary's evaluation summaries
-   * (assertionId/severity/detectorKind/status/summary — no row ids or
-   * details). Used only when the evidence rows cannot be read or a legacy
-   * record lacks them; never a silent empty list when the summary carries
-   * evaluation data.
+   * The EXPECTED-EMPTY fallback source: the run summary's evaluation
+   * summaries (assertionId/severity/detectorKind/status/summary — no row ids
+   * or details). Used ONLY when a SUCCESSFUL evidence read genuinely holds
+   * no architecture-assertion rows (an explicitly assertion-free version, or
+   * a legacy record predating the evidence persistence) — never on a read
+   * failure (round 4, HIGH 1: a read failure fails closed) and never a
+   * silent empty list when the summary carries evaluation data.
    */
   private evaluationsFromSummary(
     s: Record<string, unknown>,

@@ -178,7 +178,12 @@ import { DefaultVerificationService } from './modules/verification/internal/veri
 import type { VerificationService } from '@modules/verification/index.js';
 import { DefaultReviewService } from './modules/reviews/internal/review-service.js';
 import type { ReviewService } from '@modules/reviews/index.js';
-import { DefaultGitHubAdapter, PgGitHubInstallationRepository, PgWebhookEventRepository } from './modules/github/internal/pg-github-repository.js';
+import {
+  DefaultGitHubAdapter,
+  PgGitHubInstallationRepository,
+  PgWebhookEventRepository,
+  resolveGitHubAppCredentials,
+} from './modules/github/internal/pg-github-repository.js';
 import { PgCiEvidenceIngestionRepository } from './modules/github/internal/pg-ci-evidence-repository.js';
 import { DefaultCiEvidenceIngestionService } from './modules/github/internal/ci-evidence-ingestion-service.js';
 import type { CiEvidenceIngestionService } from '@modules/github/index.js';
@@ -774,11 +779,23 @@ export async function buildApp(
   let planningEvaluateJobHandlerRef:
     | import('@platform/index.js').JobHandler
     | undefined;
-  const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
   // webhook route can be wired even if other DB-dependent services aren't.
   const secretStore: SecretStore = new EnvSecretStore();
+  // WORK-051 round 4 (PR #52 review, BLOCKER 1) — the platform SecretStore is
+  // the ONLY credential authority for the production /github adapter: /github
+  // owns the canonical secret key names; the composition root resolves the
+  // GitHub App credentials through the SecretStore (resolveGitHubAppCredentials)
+  // and injects them EXPLICITLY. The adapter itself performs ZERO environment
+  // access — there is exactly ONE credential access mechanism in the platform.
+  const githubAppCredentials = await resolveGitHubAppCredentials(secretStore);
+  const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter({
+    ...(githubAppCredentials ?? {}),
+    // NON-SECRET configuration (the public API endpoint override) may come
+    // from the environment — it is not a credential and carries no authority.
+    apiBaseUrl: process.env.GITHUB_API_BASE_URL,
+  });
   if (database) {
     userRepository = new PgUserRepository(database);
     membershipRepo = new PgMembershipRepository(database);

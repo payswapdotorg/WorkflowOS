@@ -11207,7 +11207,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-2 governed PR-creation intent ledger — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055; no planner-owned table)').toMatch(/^0055_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-4 adoption-origin column on the governed PR-intent ledger — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0056_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -15369,8 +15369,12 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     const adapter = readFileSync(GITHUB_ADAPTER, 'utf8');
     expect(adapter).toMatch(/class DefaultGitHubAdapter implements GitHubAdapter/);
     expect(adapter).toMatch(/new GitHubRestClient\(\{ appId, privateKey, apiBaseUrl \}\)/);
-    // The credential gate: unconfigured ⇒ the deterministic fail-closed error.
-    expect(adapter).toMatch(/github-not-configured: the live GitHub API requires GITHUB_APP_ID \+ GITHUB_APP_PRIVATE_KEY/);
+    // The credential gate: unconfigured ⇒ the deterministic fail-closed error
+    // (PR #52 round 4: the message names the SecretStore keys — the platform
+    // SecretStore is the ONLY credential authority; the adapter performs
+    // ZERO environment access).
+    expect(adapter).toMatch(/github-not-configured: the live GitHub API requires the GitHub App credentials/);
+    expect(adapter).toMatch(/SecretStore keys GITHUB_APP_ID \+ GITHUB_APP_PRIVATE_KEY/);
     // The REAL REST paths for the governed operations: the PR path template
     // (create + convergence read + PR resolution), the convergence-read
     // query (fully-qualified head + open state), the create payload fields,
@@ -15456,13 +15460,17 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     const gateIdx = orchCode.indexOf("this.checkpointGateInput(signal, 'pr_conformance', gateRevision)");
     expect(resolveIdx).toBeGreaterThanOrEqual(0);
     expect(gateIdx).toBeGreaterThan(resolveIdx);
-    expect(orchCode).toMatch(/gateRevision = resolved\.headCommit;/);
+    // PR #52 round 4: the resolved head commit is the gate revision whenever
+    // no agent-reported commit ref exists (and when BOTH exist, the resolved
+    // head MUST equal the commit ref — the revision-mismatch guard below).
+    expect(orchCode).toMatch(/gateRevision = commitRef \?\? resolved\.headCommit;/);
     // (c) Fail-closed branches: unresolvable (null), no head SHA, merged,
     //     closed — every one returns false BEFORE the gate runs.
     expect(orchCode).toMatch(/convergence\.pr\.adoption_unresolvable/);
     expect(orchCode).toMatch(/!resolved\.headCommit \|\| resolved\.merged \|\| resolved\.state !== 'open'/);
-    // The association carries the RESOLVED head SHA (never the PR ref).
-    expect(orchCode).toMatch(/headCommit: adoptionHeadCommit \?\? undefined,/);
+    // The association carries the RESOLVED head SHA (never the PR ref) —
+    // round 4: through the ADOPTED identity from the durable ledger.
+    expect(orchCode).toMatch(/headCommit: adopted\.headCommit \?\? adoptionIdentity\.headCommit,/);
 
     // (d) The port resolves through /github with server-side repository
     //     resolution + the repo-ownership guard; malformed refs throw.
@@ -15506,6 +15514,174 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(tests).toMatch(/DIFFERENT durable identity: fresh evaluation, never a foreign replay/);
     expect(tests).toMatch(/NOT the old 'blocked' verdict/);
     expect(tests).toMatch(/expect\(checkpointRuns\)\.toHaveLength\(2\)/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 1: the credential AUTHORITY is the SecretStore -------------
+
+  it('BLOCKER 1 (round 4) — the production adapter performs ZERO environment access; the platform SecretStore is the ONLY credential authority (composed at the composition root)', () => {
+    const adapter = readFileSync(GITHUB_ADAPTER, 'utf8');
+    const adapterCode = strip(adapter);
+
+    // (a) The adapter has NO process.env access at all — the round-3 second
+    //     credential mechanism (raw environment reads) is structurally gone.
+    expect(adapterCode, 'the adapter must not read process.env').not.toContain('process.env');
+
+    // (b) /github owns the canonical secret KEY NAMES, and the credential
+    //     resolution goes THROUGH the SecretStore boundary
+    //     (getSecret(ref(...)) — the existing platform mechanism, SEC-001).
+    expect(adapterCode).toMatch(/export const GITHUB_APP_ID_SECRET_KEY = 'GITHUB_APP_ID';/);
+    expect(adapterCode).toMatch(/export const GITHUB_APP_PRIVATE_KEY_SECRET_KEY = 'GITHUB_APP_PRIVATE_KEY';/);
+    expect(adapterCode).toMatch(/export async function resolveGitHubAppCredentials\(/);
+    expect(adapterCode).toMatch(/secretStore\.getSecret\(secretStore\.ref\(GITHUB_APP_ID_SECRET_KEY\)\)/);
+    expect(adapterCode).toMatch(/secretStore\.getSecret\(\s*secretStore\.ref\(GITHUB_APP_PRIVATE_KEY_SECRET_KEY\),?\s*\)/);
+
+    // (c) The composition root wires the adapter through the SecretStore:
+    //     resolve → inject explicitly (app.ts).
+    const appTs = strip(readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8'));
+    expect(appTs).toMatch(/const secretStore: SecretStore = new EnvSecretStore\(\);/);
+    expect(appTs).toMatch(/await resolveGitHubAppCredentials\(secretStore\)/);
+    expect(appTs).toMatch(/const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter\(\{/);
+    expect(appTs).toMatch(/\.\.\.\(githubAppCredentials \?\? \{\}\),/);
+
+    // (d) The regressions exist: the SecretStore resolution, the production
+    //     wiring shape over the real REST wire, the missing-credential null,
+    //     and the env-alone-never-configures proof.
+    const restTests = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restTests).toMatch(/the credential AUTHORITY is the platform SecretStore/);
+    expect(restTests).toMatch(/resolves BOTH credentials THROUGH the SecretStore/);
+    expect(restTests).toMatch(/the PRODUCTION WIRING SHAPE/);
+    expect(restTests).toMatch(/env credentials alone NEVER configure it/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 2: ONE durable identity boundary for create AND adopt -------
+
+  it('BLOCKER 2 (round 4) — external PR adoption converges through the SAME durable identity boundary as creation: one (work item, authoritative head commit) ⇒ exactly one PR identity/association', () => {
+    // (a) Migration 0056: the explicit durable adoption origin on the intent
+    //     ledger (the round-3 gap — adoption bypassed the ledger entirely).
+    const migration = strip(readFileSync(join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0056_pr_intent_adoption_origin.sql',
+    ), 'utf8'));
+    expect(migration).toMatch(/ADD COLUMN origin TEXT NOT NULL DEFAULT 'created'/);
+    expect(migration).toMatch(/CHECK \(origin IN \('created', 'adopted'\)\)/);
+    expect(migration).toMatch(/all governed paths[\s\S]{0,200}converge on EXACTLY ONE PR identity\/association/i);
+
+    // (b) The service: the ADOPT protocol — the SAME lock-or-insert + CAS on
+    //     the (work item, head revision) intent row; a different PR claiming
+    //     a recorded key is a TYPED conflict; the head-commit guard.
+    const service = strip(readFileSync(GOVERNED_PR_SERVICE, 'utf8'));
+    expect(service).toMatch(/async adopt\(input: \{/);
+    expect(service).toMatch(/GovernedPrIdentityConflictError/);
+    expect(service).toMatch(/'adopted'/);
+    expect(service).toMatch(/input\.headCommit !== input\.headRevision/);
+    expect(service).toMatch(/markCreated\(tx, intent\.id, observed, 'adopted'\)/);
+    expect(service).toMatch(/markCreated\(tx, intent\.id, existing, 'created'\)/);
+
+    // (c) The typed errors live on the convergence contract.
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/class GovernedPrIdentityConflictError/);
+    expect(convergence).toMatch(/class GovernedConvergenceMismatchError/);
+
+    // (d) The orchestrator: the adoption path routes through the durable
+    //     ledger (governedPullRequests.adopt) — NOT a read-then-associate
+    //     race; the revision-mismatch guard (an observed PR whose head is not
+    //     the gated commit ref fails closed).
+    const orch = strip(readFileSync(ORCHESTRATOR, 'utf8'));
+    expect(orch).toMatch(/this\.governedPullRequests\.adopt\(\{/);
+    expect(orch).toMatch(/convergence\.pr\.adoption_revision_mismatch/);
+    expect(orch).toMatch(/convergence\.pr\.adoption_failed/);
+    expect(orch).toMatch(/convergence\.pr\.adopted/);
+
+    // (e) The association layer converges for the same PR: create() serializes
+    //     writers on the WORK ITEM row (FOR UPDATE — the one-active-per-WI
+    //     serialization domain), returns the EXISTING active row for a
+    //     re-observed PR, and the unique-index race loser CONVERGES on the
+    //     winner's committed row (no churn, no duplicate, no hard failure).
+    const wiRepoRaw = readFileSync(WORK_ITEM_REPO, 'utf8');
+    const wiRepo = strip(wiRepoRaw);
+    expect(wiRepo).toMatch(/SELECT id FROM wfos_work_items WHERE id = \$1 FOR UPDATE/);
+    expect(wiRepo).toMatch(/WHERE work_item_id = \$1 AND status = 'active'\s*\n?\s*FOR UPDATE/);
+    expect(wiRepo).toMatch(/r\.external_pr_id === input\.externalPrId/);
+    expect(wiRepo).toMatch(/e\.code === '23505' && e\.constraint === 'wfos_pr_assoc_one_active_per_wi'/);
+    expect(wiRepoRaw).toMatch(/CONVERGENCE ON CONFLICT/);
+
+    // (f) The regressions exist: the adoption identity protocol (converge /
+    //     conflict / cross-path), the two-client concurrent adoption, the
+    //     two-concurrent-signals workflow proof, and the durable origin
+    //     assertion.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/ONE durable identity boundary for create AND adopt/);
+    expect(prTests).toMatch(/TYPED identity conflict/);
+    expect(prTests).toMatch(/CROSS-PATH convergence/);
+    expect(prTests).toMatch(/TWO CONCURRENT clients adopting the SAME external PR/);
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/TWO CONCURRENT agent_run_completed signals carrying the SAME external PR/);
+    expect(gates).toMatch(/origin: 'adopted'/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 3: the authoritative head-SHA validation --------------------
+
+  it('BLOCKER 3 (round 4) — convergence validates the governed branch AND the authoritative head SHA === the gated revision (a branch match with a mismatched SHA is non-convergent, fail closed)', () => {
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+
+    // (a) The CONVERGENCE READ validates the complete identity: a found PR on
+    //     the governed branch whose head SHA differs (or is missing) throws
+    //     the typed mismatch error — never adopted.
+    expect(prPort).toMatch(/if \(!found\.headSha\) \{/);
+    expect(prPort).toMatch(/found\.headSha !== input\.headRevision/);
+    expect(prPort).toMatch(/GovernedConvergenceMismatchError/);
+    expect(prPort).toMatch(/which is NOT the gated implementation revision/);
+
+    // (b) The CREATE result carries the SAME provenance invariant: a created
+    //     PR whose head is not the gated revision fails closed and the
+    //     durable record is NOT written.
+    expect(prPort).toMatch(/if \(!result\.headSha\) \{/);
+    expect(prPort).toMatch(/result\.headSha !== input\.headRevision/);
+
+    // (c) The test authorities model BRANCH HEADS (a pushed branch pointing
+    //     at an exact commit) so the validation exercises real semantics.
+    const ghFake = readFileSync(GITHUB_FAKE, 'utf8');
+    expect(ghFake).toMatch(/setBranchHead\(/);
+    const scripted = readFileSync(SCRIPTED_GITHUB_API, 'utf8');
+    expect(scripted).toMatch(/setBranchHead\(/);
+
+    // (d) The regressions exist: same-branch/different-SHA non-convergence,
+    //     the create-result validation, and the matching-SHA convergence.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/the CONVERGENCE READ fails CLOSED on same-branch \/ different-SHA/);
+    expect(prTests).toMatch(/the CREATE result is validated too/);
+    expect(prTests).toMatch(/a matching branch \+ matching SHA CONVERGES/);
+  });
+
+  // --- PR #52 round 4, HIGH 1: fail-closed replay reconstruction ---------------------------
+
+  it('HIGH 1 (round 4) — replay FAILS CLOSED on a /verification read failure; ONLY a genuinely empty/legacy evidence set falls back to the summary', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+
+    // (a) The read failure THROWS (the fail-closed marker in the catch) — no
+    //     silent downgrade to the summary-derived evaluation list.
+    expect(svc).toMatch(/the \/verification evidence read failed/);
+    expect(svc).toMatch(/cannot be reconstructed honestly \(fail closed/);
+    // The catch is a THROW, not a fallback: no evaluationsFromSummary call
+    // may appear inside the catch block.
+    const catchIdx = svc.indexOf('} catch (err) {');
+    const catchEnd = svc.indexOf('throw new Error(', catchIdx);
+    const catchBlock = svc.slice(catchIdx, svc.indexOf('}', svc.indexOf(';', catchEnd)));
+    expect(catchIdx).toBeGreaterThan(-1);
+    expect(catchBlock, 'the catch must throw, not fall back').not.toContain('evaluationsFromSummary');
+
+    // (b) The LEGITIMATE fallback remains: only a SUCCESSFUL read that
+    //     genuinely yields no architecture-assertion rows (legacy/empty).
+    //     (Checked on the RAW source — the marker lives in a comment.)
+    const svcRaw = readFileSync(AC_SERVICE, 'utf8');
+    expect(svcRaw).toMatch(/EXPECTED legacy\/empty evidence/);
+    expect(svc).toMatch(/evaluationsFromSummary/);
+
+    // (c) The regression exists: read failure ⇒ fail closed (with the healthy
+    //     control + the legacy fallback distinction).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/a \/verification READ FAILURE during replay FAILS CLOSED/);
+    expect(tests).toMatch(/EXPECTED LEGACY\/EMPTY[\s\S]{0,40}evidence is a LEGITIMATE summary fallback/);
   });
 
   // --- PR #52 round 1, BLOCKER 2 (superseded by the round-2 split above) ------------------

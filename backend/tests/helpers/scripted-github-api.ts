@@ -69,8 +69,22 @@ export class ScriptedGitHubApi {
   private nextPrNumber = 1;
   /** contentKey(owner, repo, ref, path) → entry (file) | entries array (dir). */
   private readonly content = new Map<string, ScriptedContentEntry | ScriptedContentEntry[]>();
+  /**
+   * PR #52 round 4 (review, BLOCKER 3) — the BRANCH-HEAD registry: a pushed
+   * branch pointing at an exact commit (what the WORK-026 governed-branch
+   * provisioning does in production). A created PR's head SHA is the commit
+   * the branch POINTS AT — mirroring GitHub — so the production port's
+   * authoritative-head-SHA validation exercises real semantics.
+   */
+  private readonly branchHeads = new Map<string, string>();
   private server: ReturnType<typeof createServer> | null = null;
   private baseUrl = '';
+
+  /** PR #52 round 4: register a branch's head commit (a pushed branch). */
+  setBranchHead(owner: string, repository: string, branch: string, sha: string): this {
+    this.branchHeads.set(`${owner}/${repository}/${branch}`, sha);
+    return this;
+  }
 
   /** Seed a file at an exact (owner, repo, ref, path) tuple. */
   setFile(owner: string, repository: string, ref: string, path: string, text: string): this {
@@ -243,7 +257,11 @@ export class ScriptedGitHubApi {
         repository,
         number,
         head,
-        headSha: deterministicHeadSha(owner, repository, head),
+        // Round 4 (BLOCKER 3): the created PR's head is the commit the
+        // branch POINTS AT (the registered branch head) — falling back to
+        // the legacy deterministic SHA for unregistered branches.
+        headSha: this.branchHeads.get(`${owner}/${repository}/${head}`)
+          ?? deterministicHeadSha(owner, repository, head),
         base,
         title,
         state: 'open',

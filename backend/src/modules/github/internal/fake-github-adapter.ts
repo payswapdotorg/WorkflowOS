@@ -109,6 +109,27 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   private nextPrNumber = 1;
 
   /**
+   * PR #52 round 4 (review, BLOCKER 3) — the BRANCH-HEAD registry: models a
+   * pushed branch pointing at an exact commit (what the WORK-026 governed
+   * branch provisioning does in production). `createPullRequest` reports the
+   * REGISTERED head SHA for the branch — mirroring GitHub, where a created
+   * PR's head is whatever commit the branch actually points at — so the
+   * production port's authoritative-head-SHA validation exercises real
+   * semantics (match ⇒ converge; mismatch ⇒ typed fail-closed).
+   */
+  private readonly branchHeads = new Map<string, string>();
+
+  /**
+   * PR #52 round 4: register a branch's head commit (a pushed branch). Tests
+   * seed the GOVERNED branch (governedHeadBranch(workItemId, headRevision))
+   * at the exact gated revision before driving the governed create path.
+   */
+  setBranchHead(owner: string, repository: string, branch: string, sha: string): this {
+    this.branchHeads.set(`${owner}/${repository}/${branch}`, sha);
+    return this;
+  }
+
+  /**
    * WORK-051 round 3 (PR #52 review, BLOCKER 3): when set, an unregistered
    * PR number resolves to an HONEST null (a 404 at the authority) instead of
    * the legacy synthetic info — the adoption fail-closed regressions use
@@ -313,7 +334,12 @@ export class FakeGitHubAdapter implements GitHubAdapter {
       );
     }
     const number = this.nextPrNumber++;
-    const headSha = `fakesha${sha8(input.head)}`;
+    // Round 4 (BLOCKER 3): the created PR's head SHA is the commit the
+    // branch POINTS AT (the registered branch head) — falling back to the
+    // legacy deterministic SHA for unregistered branches (backward
+    // compatibility with the pre-round-4 suites).
+    const headSha = this.branchHeads.get(`${input.owner}/${input.repository}/${input.head}`)
+      ?? `fakesha${sha8(input.head)}`;
     this.openPullRequests.set(key, {
       owner: input.owner,
       repository: input.repository,

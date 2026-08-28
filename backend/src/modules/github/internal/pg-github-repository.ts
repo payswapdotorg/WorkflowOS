@@ -26,6 +26,7 @@ import type {
   ListDirResult,
 } from './project-github-repository.types.js';
 import { createHash } from 'node:crypto';
+import type { SecretStore } from '@platform/index.js';
 import {
   GitHubRestClient,
   isGitHubApiHttpError,
@@ -191,9 +192,15 @@ import { createHmac, timingSafeEqual as safeEqual } from 'node:crypto';
  * {@link GitHubRestClient} (GitHub App RS256 JWT + installation tokens),
  * keeping this file dependency-free beyond node:crypto + the platform fetch.
  *
- * GitHub credentials are retrieved through the existing SecretStore (SEC-001)
- * conventions: GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY (the composition root
- * may also inject them explicitly through the constructor config).
+ * GitHub App credentials are retrieved through the EXISTING platform
+ * SecretStore (SEC-001): /github owns the canonical secret KEY NAMES
+ * (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY — see
+ * {@link resolveGitHubAppCredentials}), the composition root resolves the
+ * VALUES through the SecretStore and injects them explicitly through the
+ * constructor config. The adapter itself performs ZERO environment access —
+ * there is exactly ONE credential access mechanism in the platform (the
+ * SecretStore), and this adapter composes it rather than duplicating it
+ * (PR #52 round 4 review, BLOCKER 1).
  *
  * PRODUCTION SURFACE (WORK-051 round 3, PR #52 review BLOCKER 1) — the
  * GOVERNED PR boundary is implemented against the REAL GitHub REST API:
@@ -201,7 +208,7 @@ import { createHmac, timingSafeEqual as safeEqual } from 'node:crypto';
  *   - findPullRequestByHead   → GET  /repos/{o}/{r}/pulls?head={o}:{branch}&state=open
  *   - getPullRequestInfo      → GET  /repos/{o}/{r}/pulls/{number}
  *   - getFileContent / listDir → GET /repos/{o}/{r}/contents/{path}?ref={ref}
- * Until credentials are wired the adapter fails CLOSED with the deterministic
+ * Without injected credentials the adapter fails CLOSED with the deterministic
  * 'github-not-configured' error — never a silent vacuous result.
  *
  * EXPLICITLY OUT OF THE WORK-051 SCOPE (deterministic 'github-not-configured'
@@ -210,12 +217,64 @@ import { createHmac, timingSafeEqual as safeEqual } from 'node:crypto';
  * checkpoint boundary (no checkpoint gate calls them) and are NOT claimed
  * production-complete by WORK-051.
  */
+/**
+ * PR #52 round 4 (review, BLOCKER 1) — the canonical GitHub App credential
+ * SECRET KEYS owned by /github. The VALUES are resolved exclusively through
+ * the platform SecretStore (SEC-001) — never read from `process.env` by
+ * module code. The composition root calls {@link resolveGitHubAppCredentials}
+ * and injects the resolved credentials into {@link DefaultGitHubAdapter}
+ * explicitly; the adapter itself performs ZERO environment access.
+ */
+export const GITHUB_APP_ID_SECRET_KEY = 'GITHUB_APP_ID';
+export const GITHUB_APP_PRIVATE_KEY_SECRET_KEY = 'GITHUB_APP_PRIVATE_KEY';
+
+/** The resolved GitHub App credentials (raw values — treat as sensitive). */
+export interface GitHubAppCredentials {
+  readonly appId: string;
+  readonly privateKey: string;
+}
+
+/**
+ * Resolve the production GitHub App credentials through the EXISTING platform
+ * SecretStore — the only sanctioned credential access mechanism (SEC-001;
+ * PR #52 round 4 review BLOCKER 1). /github owns the canonical key names;
+ * the backing store (EnvSecretStore locally, vault/SSM in production) is the
+ * platform's substitution point, so /github gains no second credential
+ * mechanism — it composes the existing one.
+ *
+ * Returns null when either credential is absent at the store (an honestly
+ * unconfigured adapter — every governed surface then fails CLOSED with the
+ * deterministic 'github-not-configured' error, never a silent fake result).
+ */
+export async function resolveGitHubAppCredentials(
+  secretStore: SecretStore,
+): Promise<GitHubAppCredentials | null> {
+  const appId = await secretStore.getSecret(secretStore.ref(GITHUB_APP_ID_SECRET_KEY));
+  const privateKey = await secretStore.getSecret(
+    secretStore.ref(GITHUB_APP_PRIVATE_KEY_SECRET_KEY),
+  );
+  if (!appId || !privateKey) return null;
+  return { appId, privateKey };
+}
+
 export interface DefaultGitHubAdapterConfig {
-  /** The GitHub App id. Defaults to GITHUB_APP_ID. */
+  /**
+   * The GitHub App id. REQUIRED for a configured adapter — the composition
+   * root resolves it through the platform SecretStore
+   * (GITHUB_APP_ID) and injects it explicitly; this adapter never reads the
+   * environment itself.
+   */
   appId?: string;
-  /** The GitHub App private key (PEM; `\n`-escapes accepted). Defaults to GITHUB_APP_PRIVATE_KEY. */
+  /**
+   * The GitHub App private key (PEM; `\n`-escapes accepted). REQUIRED for a
+   * configured adapter — resolved through the platform SecretStore
+   * (GITHUB_APP_PRIVATE_KEY) by the composition root.
+   */
   privateKey?: string;
-  /** API base URL. Defaults to GITHUB_API_BASE_URL, then https://api.github.com. */
+  /**
+   * API base URL (NON-SECRET configuration). Defaults to the public GitHub
+   * API; the composition root may pass GITHUB_API_BASE_URL explicitly.
+   */
   apiBaseUrl?: string;
 }
 
@@ -225,14 +284,16 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
   private readonly restClient: GitHubRestClient | null;
 
   constructor(config: DefaultGitHubAdapterConfig = {}) {
-    const appId = config.appId ?? process.env.GITHUB_APP_ID;
-    const rawKey = config.privateKey ?? process.env.GITHUB_APP_PRIVATE_KEY;
+    // PR #52 round 4 (review, BLOCKER 1): ZERO environment access in the
+    // adapter. Credentials arrive ONLY through the constructor — the
+    // composition root resolves them through the platform SecretStore
+    // (resolveGitHubAppCredentials); tests inject them explicitly. There is
+    // exactly ONE credential access mechanism in the platform: the
+    // SecretStore.
+    const appId = config.appId;
+    const rawKey = config.privateKey;
     const privateKey = rawKey ? normalizePrivateKeyPem(rawKey) : undefined;
-    const apiBaseUrl = (
-      config.apiBaseUrl ??
-      process.env.GITHUB_API_BASE_URL ??
-      'https://api.github.com'
-    ).replace(/\/+$/, '');
+    const apiBaseUrl = (config.apiBaseUrl ?? 'https://api.github.com').replace(/\/+$/, '');
     // No credentials ⇒ no REST client ⇒ every governed-boundary call fails
     // CLOSED with 'github-not-configured' (never a silent fake result).
     this.restClient =
@@ -242,7 +303,9 @@ export class DefaultGitHubAdapter implements GitHubAdapter {
   private requireRestClient(): GitHubRestClient {
     if (!this.restClient) {
       throw new Error(
-        'github-not-configured: the live GitHub API requires GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY',
+        'github-not-configured: the live GitHub API requires the GitHub App credentials ' +
+          '(SecretStore keys GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY), resolved by the composition ' +
+          'root through the platform SecretStore and injected into the adapter',
       );
     }
     return this.restClient;
