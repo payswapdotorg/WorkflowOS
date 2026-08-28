@@ -14611,6 +14611,15 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
   const ORCH_RUNS_TESTS = join(
     BACKEND_ROOT, 'tests', 'integration', 'verification', 'orchestration-runs.integration.test.ts',
   );
+  const GITHUB_REST_CLIENT = join(MODULES_DIR, 'github', 'internal', 'github-rest-client.ts');
+  const GITHUB_ADAPTER = join(MODULES_DIR, 'github', 'internal', 'pg-github-repository.ts');
+  const GITHUB_FAKE = join(MODULES_DIR, 'github', 'internal', 'fake-github-adapter.ts');
+  const REST_ADAPTER_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'github', 'github-rest-adapter.integration.test.ts',
+  );
+  const SCRIPTED_GITHUB_API = join(
+    BACKEND_ROOT, 'tests', 'helpers', 'scripted-github-api.ts',
+  );
 
   function strip(src: string): string {
     return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
@@ -15250,7 +15259,13 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(convergence).toMatch(/findExistingPullRequest/);
     const prPort = strip(readFileSync(PR_PORT, 'utf8'));
     expect(prPort).toMatch(/export function governedHeadBranch/);
-    expect(prPort).toMatch(/wfos\/wi-\$\{workItemId\.slice\(0, 12\)\}\/rev-\$\{headRevision\.slice\(0, 12\)\}/);
+    // PR #52 round 3 (BLOCKER 2): the marker is a COLLISION-RESISTANT DIGEST
+    // of the COMPLETE key (sha256 over the canonical JSON encoding) — the
+    // truncated-identifier form is gone.
+    expect(prPort).toMatch(/createHash\('sha256'\)/);
+    expect(prPort).toMatch(/JSON\.stringify\(\[workItemId, headRevision\]\)/);
+    expect(prPort).toMatch(/wfos\/governed\/\$\{digest\}/);
+    expect(prPort, 'NO truncated identifier may participate in the branch identity').not.toMatch(/slice\(0, 12\)/);
     expect(prPort).toMatch(/findPullRequestByHead/);
     expect(prPort).toMatch(/createPullRequest\(/);
     expect(prPort).toMatch(/findByProject/);
@@ -15330,6 +15345,167 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
     expect(tests).toMatch(/SEMANTICALLY EQUIVALENT/);
     expect(tests).toMatch(/replay\.evaluations\[i\]!\.assertionRowId\)/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 1: the PRODUCTION /github REST authority --------------------
+
+  it('BLOCKER 1 (round 3) — the production /github adapter implements the GOVERNED PR boundary over the REAL REST API (no stubbed authority behind the crash-safe protocol)', () => {
+    // (a) The REST client exists and holds the REAL GitHub App auth: RS256
+    //     JWT signing (createSign), installation-token minting, token
+    //     caching, and a typed fail-closed error surface.
+    const client = strip(readFileSync(GITHUB_REST_CLIENT, 'utf8'));
+    expect(client).toMatch(/createSign\('RSA-SHA256'\)/);
+    expect(client).toMatch(/\/app\/installations\//);
+    expect(client).toMatch(/access_tokens/);
+    expect(client).toMatch(/expires_at/);
+    expect(client).toMatch(/GitHubApiTransportError/);
+    expect(client).toMatch(/GitHubApiHttpError/);
+
+    // (b) The production adapter implements the five governed-boundary
+    //     surfaces through the REAL client (each performs a REST call — the
+    //     method bodies reference the client, not a stub throw). NOTE: the
+    //     adapter source is checked RAW (not comment-stripped) — its doc
+    //     comments contain URLs whose '//' would corrupt the naive stripper.
+    const adapter = readFileSync(GITHUB_ADAPTER, 'utf8');
+    expect(adapter).toMatch(/class DefaultGitHubAdapter implements GitHubAdapter/);
+    expect(adapter).toMatch(/new GitHubRestClient\(\{ appId, privateKey, apiBaseUrl \}\)/);
+    // The credential gate: unconfigured ⇒ the deterministic fail-closed error.
+    expect(adapter).toMatch(/github-not-configured: the live GitHub API requires GITHUB_APP_ID \+ GITHUB_APP_PRIVATE_KEY/);
+    // The REAL REST paths for the governed operations: the PR path template
+    // (create + convergence read + PR resolution), the convergence-read
+    // query (fully-qualified head + open state), the create payload fields,
+    // and the exact-ref content-read query.
+    expect(adapter).toMatch(/`\/repos\/\$\{encodeURIComponent\(input\.owner\)\}\/\$\{encodeURIComponent\(input\.repository\)\}\/pulls`/);
+    expect(adapter).toMatch(/\?head=\$\{encodeURIComponent\(`\$\{input\.owner\}:\$\{input\.head\}`\)\}&state=open/);
+    expect(adapter).toMatch(/head: input\.head,/);
+    expect(adapter).toMatch(/base: input\.base,/);
+    expect(adapter).toMatch(/\?ref=\$\{encodeURIComponent\(ref\)\}/);
+    expect(adapter).toMatch(/requireRestClient\(\)/);
+    // The /github contract + the fake honor the honest-404 adoption semantics
+    // (the fake resolves REGISTERED PRs authoritatively; strict mode 404s).
+    const ghFake = readFileSync(GITHUB_FAKE, 'utf8');
+    expect(ghFake).toMatch(/strictPullRequestLookup/);
+    expect(ghFake).toMatch(/seedExternalPullRequest/);
+
+    // (c) The EXPLICIT scope statement: the provisioning/merge surfaces are
+    //     OUTSIDE the WORK-051 governed boundary and say so (never silently
+    //     stubbed — the narrowing is a decision, documented at every site).
+    expect(adapter).toMatch(/outside the WORK-051 governed boundary/);
+    expect(adapter).toMatch(/WORK-026 follow-on/);
+    expect(adapter).toMatch(/WORK-019 follow-on/);
+
+    // (d) The production-shaped regressions exist: the REAL adapter against
+    //     a scripted local GitHub REST API (RSA keypair + JWT signature
+    //     VERIFICATION + wire-level assertions + the crash/recovery proof).
+    const restTests = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restTests).toMatch(/REAL RS256 signature/);
+    expect(restTests).toMatch(/createVerify\('RSA-SHA256'\)/);
+    expect(restTests).toMatch(/422 duplicate-open-PR rejection VERBATIM/);
+    expect(restTests).toMatch(/REAL convergence-read query/);
+    expect(restTests).toMatch(/passes the ref through VERBATIM/);
+    expect(restTests).toMatch(/FAILS CLOSED on every governed surface/);
+    const scripted = readFileSync(SCRIPTED_GITHUB_API, 'utf8');
+    expect(scripted).toMatch(/A pull request already exists for/);
+    expect(scripted).toMatch(/class ScriptedGitHubApi/);
+
+    // (e) The crash/recovery + two-process convergence proofs re-run against
+    //     the PRODUCTION-shaped adapter (real HTTP wire counting).
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/PRODUCTION-shaped governed PR boundary/);
+    expect(prTests).toMatch(/EXACTLY ONE wire create/);
+    expect(prTests).toMatch(/two independent clients \(two processes\)/);
+    expect(prTests).toMatch(/new DefaultGitHubAdapter\(/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 2: the collision-proof convergence marker -------------------
+
+  it('BLOCKER 2 (round 3) — the governed head branch is a COLLISION-RESISTANT DIGEST of the COMPLETE convergence key (no truncated-identifier collision domain)', () => {
+    const prPortSrc = readFileSync(PR_PORT, 'utf8');
+    const prPort = strip(prPortSrc);
+    // (a) The digest construction: sha256 over the canonical JSON encoding of
+    //     BOTH complete components, under the fixed governed prefix.
+    expect(prPort).toMatch(/export function governedHeadBranch\(workItemId: string, headRevision: string\): string \{/);
+    expect(prPort).toMatch(/JSON\.stringify\(\[workItemId, headRevision\]\)/);
+    expect(prPort).toMatch(/createHash\('sha256'\)\.update\(canonicalKey/);
+    expect(prPort).toMatch(/return `wfos\/governed\/\$\{digest\}`/);
+    // (b) NO truncation anywhere in the identity derivation (the round-2
+    //     collision domain is structurally gone).
+    expect(prPort, 'no slice/truncation in the convergence marker').not.toMatch(/\.slice\(0, 12\)/);
+    // (c) The collision regression exists: two keys sharing 12-char prefixes
+    //     on BOTH components map to DIFFERENT branches.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/CRYPTOGRAPHIC DIGEST of the COMPLETE key/);
+    expect(prTests).toMatch(/CANNOT collide/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 3: revision-correct external PR adoption ---------------------
+
+  it('BLOCKER 3 (round 3) — external PR adoption resolves the AUTHORITATIVE head commit through /github BEFORE the gate; a raw PR reference NEVER enters the checkpoint or the creation identity', () => {
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+
+    // (a) The forbidden mixed-revision expression is GONE: the gate revision
+    //     is never the raw external PR reference.
+    expect(orch, 'the gate revision must never be the raw PR ref').not.toMatch(/commitRef \?\? externalPrRef/);
+
+    // (b) The resolution read precedes the gate in the adoption path: the
+    //     orchestrator resolves through the governed boundary FIRST, and the
+    //     resolved SHA is what the gate evaluates + what the creation
+    //     identity binds.
+    const orchCode = strip(orch);
+    const resolveIdx = orchCode.indexOf('await this.governedPullRequests.resolveExternalPullRequest(');
+    const gateIdx = orchCode.indexOf("this.checkpointGateInput(signal, 'pr_conformance', gateRevision)");
+    expect(resolveIdx).toBeGreaterThanOrEqual(0);
+    expect(gateIdx).toBeGreaterThan(resolveIdx);
+    expect(orchCode).toMatch(/gateRevision = resolved\.headCommit;/);
+    // (c) Fail-closed branches: unresolvable (null), no head SHA, merged,
+    //     closed — every one returns false BEFORE the gate runs.
+    expect(orchCode).toMatch(/convergence\.pr\.adoption_unresolvable/);
+    expect(orchCode).toMatch(/!resolved\.headCommit \|\| resolved\.merged \|\| resolved\.state !== 'open'/);
+    // The association carries the RESOLVED head SHA (never the PR ref).
+    expect(orchCode).toMatch(/headCommit: adoptionHeadCommit \?\? undefined,/);
+
+    // (d) The port resolves through /github with server-side repository
+    //     resolution + the repo-ownership guard; malformed refs throw.
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/async resolveExternalPullRequest\(/);
+    expect(prPort).toMatch(/getPullRequestInfo\(/);
+    expect(prPort).toMatch(/not the project's linked repository/);
+    expect(prPort).toMatch(/not a canonical GitHub PR reference/);
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/interface ResolvedExternalPullRequest/);
+    expect(convergence).toMatch(/resolveExternalPullRequest/);
+
+    // (e) The regressions exist: the resolved SHA gates (never the raw ref),
+    //     a violating tree at the resolved SHA blocks, and every
+    //     unresolvable shape fails closed.
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/RESOLVED authoritative HEAD SHA \(never the raw PR reference\)/);
+    expect(gates).toMatch(/VIOLATING tree at the external PR/);
+    expect(gates).toMatch(/UNRESOLVABLE external PR \(absent \/ closed \/ merged/);
+  });
+
+  // --- PR #52 round 3, HIGH: the revision-participating checkpoint identity ----------------
+
+  it('HIGH (round 3) — the durable checkpoint identity includes the architecture version + the EXACT revision (idempotency-key reuse across a revision change can never replay a foreign result)', () => {
+    // (a) The key composes EVERY semantic dimension of the claim.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/'architecture-checkpoint',/);
+    expect(svc).toMatch(/input\.workItemId,/);
+    expect(svc).toMatch(/architectureVersionId,/);
+    expect(svc).toMatch(/input\.checkpointKind,/);
+    expect(svc).toMatch(/input\.implementationRevision \?\? 'rev:none',/);
+    expect(svc).toMatch(/input\.idempotencyKey \?\? 'signal:none',/);
+    // The replay lookup AND the durable record use the same composed key.
+    expect(svc).toMatch(/this\.orchestrationKey\(input, version\.id\)/);
+    expect(svc).toMatch(/this\.orchestrationKey\(input, result\.architectureVersionId\)/);
+
+    // (b) The regression exists: same key + different revision → a FRESH
+    //     evaluation (its own run, its own verdict); same key + same
+    //     revision → the exact replay.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/DIFFERENT durable identity: fresh evaluation, never a foreign replay/);
+    expect(tests).toMatch(/NOT the old 'blocked' verdict/);
+    expect(tests).toMatch(/expect\(checkpointRuns\)\.toHaveLength\(2\)/);
   });
 
   // --- PR #52 round 1, BLOCKER 2 (superseded by the round-2 split above) ------------------
@@ -15495,6 +15671,20 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(governedPr).toMatch(/duplicate-key guard/);
     expect(service).toMatch(/SEMANTICALLY EQUIVALENT/);
     expect(service).toMatch(/provider-observed snapshot identity DIFFERS/);
+    // PR #52 round 3 regressions: the production REST authority (real client
+    // + scripted GitHub API + JWT verification + wire-level crash/recovery),
+    // the collision-proof convergence marker, the revision-correct external
+    // PR adoption, and the revision-participating checkpoint identity.
+    const restAdapter = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restAdapter).toMatch(/REAL RS256 signature/);
+    expect(restAdapter).toMatch(/422 duplicate-open-PR rejection VERBATIM/);
+    expect(restAdapter).toMatch(/the installation token is MINTED ONCE and cached/);
+    expect(governedPr).toMatch(/PRODUCTION-shaped governed PR boundary/);
+    expect(governedPr).toMatch(/CRYPTOGRAPHIC DIGEST of the COMPLETE key/);
+    expect(governedPr).toMatch(/two independent clients \(two processes\)/);
+    expect(gates).toMatch(/BLOCKER 3 \(round 3\) — an external PR observation gates on the RESOLVED authoritative HEAD SHA/);
+    expect(gates).toMatch(/UNRESOLVABLE external PR/);
+    expect(service).toMatch(/DIFFERENT durable identity: fresh evaluation, never a foreign replay/);
   });
 });
 

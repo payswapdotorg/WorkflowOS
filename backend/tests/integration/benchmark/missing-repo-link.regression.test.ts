@@ -120,7 +120,7 @@ class SpyGitHubAdapter implements GitHubAdapter {
   async getRepositoryMetadata(installationId: string, owner: string, repo: string): Promise<GitHubRepositoryInfo> {
     return this.inner.getRepositoryMetadata(installationId, owner, repo);
   }
-  async getPullRequestInfo(installationId: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequestInfo> {
+  async getPullRequestInfo(installationId: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequestInfo | null> {
     return this.inner.getPullRequestInfo(installationId, owner, repo, prNumber);
   }
   async mergePullRequest(input: { installationId: string; owner: string; repo: string; prNumber: number; commitMessage?: string }): Promise<GitHubMergeResult> {

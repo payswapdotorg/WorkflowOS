@@ -1,4 +1,8 @@
-import type { CreatedPullRequest, PullRequestCreationPort } from '../../src/modules/workflows/internal/convergence.types.js';
+import type {
+  CreatedPullRequest,
+  PullRequestCreationPort,
+  ResolvedExternalPullRequest,
+} from '../../src/modules/workflows/internal/convergence.types.js';
 
 /**
  * WORK-051 round 2 (PR #52 review, BLOCKER 2) — the deterministic test double
@@ -27,8 +31,12 @@ export class FakePullRequestCreationPort implements PullRequestCreationPort {
     workItemId: string;
     headRevision: string;
   }> = [];
+  /** PR #52 round 3 (BLOCKER 3): every external-PR adoption RESOLUTION read. */
+  readonly resolveCalls: string[] = [];
 
   private readonly createdKeys = new Map<string, CreatedPullRequest>();
+  /** PR #52 round 3 (BLOCKER 3): the external PRs this authority holds. */
+  private readonly externalPullRequests = new Map<string, ResolvedExternalPullRequest>();
   private nextExternalPrId: string | null = null;
   private nextHeadCommit: string | null = null;
 
@@ -36,6 +44,18 @@ export class FakePullRequestCreationPort implements PullRequestCreationPort {
   setNextResult(externalPrId: string, headCommit: string | null = null): void {
     this.nextExternalPrId = externalPrId;
     this.nextHeadCommit = headCommit;
+  }
+
+  /**
+   * PR #52 round 3 (BLOCKER 3): seed an EXTERNAL PR the fake authority holds
+   * (a PR opened by a human or an out-of-band tool). `resolveExternalPullRequest`
+   * returns its authoritative identity (head commit SHA, state, merged).
+   */
+  registerExternalPullRequest(
+    externalPrRef: string,
+    resolved: ResolvedExternalPullRequest,
+  ): void {
+    this.externalPullRequests.set(externalPrRef, resolved);
   }
 
   private static key(workItemId: string, headRevision: string): string {
@@ -83,5 +103,13 @@ export class FakePullRequestCreationPort implements PullRequestCreationPort {
     };
     this.createdKeys.set(key, created);
     return created;
+  }
+
+  async resolveExternalPullRequest(input: {
+    projectId: string;
+    externalPrRef: string;
+  }): Promise<ResolvedExternalPullRequest | null> {
+    this.resolveCalls.push(input.externalPrRef);
+    return this.externalPullRequests.get(input.externalPrRef) ?? null;
   }
 }

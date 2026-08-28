@@ -50,7 +50,11 @@
  */
 
 import type { DatabaseClient } from '@platform/index.js';
-import type { CreatedPullRequest, PullRequestCreationPort } from './convergence.types.js';
+import type {
+  CreatedPullRequest,
+  PullRequestCreationPort,
+  ResolvedExternalPullRequest,
+} from './convergence.types.js';
 
 interface IntentRow {
   id: string;
@@ -130,6 +134,29 @@ export class GovernedPullRequestService {
       await this.markCreated(tx, intent.id, created);
       return created;
     });
+  }
+
+  /**
+   * PR #52 round 3 (review, BLOCKER 3) — the ADOPTION RESOLUTION read:
+   * resolve an externally observed PR reference to its AUTHORITATIVE
+   * identity (the PR's real head commit SHA) through the /github boundary.
+   *
+   * NOT part of the create-or-converge protocol (no DB state, no side
+   * effects — a pure read through the external boundary port), but the same
+   * boundary: the orchestrator calls this BEFORE the pr_conformance gate
+   * whenever only an external PR observation is available, because only the
+   * RESOLVED COMMIT SHA may enter the checkpoint binding and the
+   * governed-creation identity — never the raw PR reference.
+   *
+   * Returns null when the authority holds no such PR; throws on malformed
+   * references, missing links, foreign repositories, and transport
+   * failures — every unresolvable shape fails closed at the caller.
+   */
+  async resolveExternalPullRequest(input: {
+    projectId: string;
+    externalPrRef: string;
+  }): Promise<ResolvedExternalPullRequest | null> {
+    return this.port.resolveExternalPullRequest(input);
   }
 
   /** The durable intent row (if any) for a convergence key — test/ops read. */

@@ -14,7 +14,13 @@
  *   3. Idempotent replay: an identical idempotency key with a recorded
  *      completed checkpoint returns the recorded result. The identity is the
  *      DURABLE /verification orchestration key (unique, indexed) — not a
- *      metadata scan (PR #52 round 1, BLOCKER 4).
+ *      metadata scan (PR #52 round 1, BLOCKER 4) — and the key composes EVERY
+ *      semantic dimension of the claim: work item + governing architecture
+ *      version + checkpoint kind + EXACT implementation revision + the
+ *      caller's logical signal key (PR #52 round 2 review, HIGH). Reusing an
+ *      idempotency key at a DIFFERENT revision (or under a NEW frozen
+ *      architecture version) is a DIFFERENT durable identity — it evaluates
+ *      fresh and can never replay the old terminal result.
  *   4. Revision-bound kinds (pr_conformance, verification_entry) require an
  *      implementation revision — a null revision is 'inconclusive' (fail
  *      closed) — and open the EXACT-REVISION repository snapshot through the
@@ -185,7 +191,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
     // --- 4. Idempotent replay (the DURABLE /verification identity) --------
     if (input.idempotencyKey) {
       const recorded = await this.deps.verificationService.findOrchestrationRun(
-        this.orchestrationKey(input),
+        this.orchestrationKey(input, version.id),
       );
       if (recorded && (recorded.status === 'completed' || recorded.status === 'failed')) {
         const replay = await this.resultFromRecordedRun(recorded, input.workItemId);
@@ -474,13 +480,30 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
   // -------------------------------------------------------------------------
 
   /**
-   * The durable orchestration identity for this evaluation. The caller's
-   * idempotency key names the logical evaluation; the checkpoint kind +
-   * work item scope it. (BLOCKER 4: the identity lives in /verification as a
-   * UNIQUE indexed column — not in scanned metadata.)
+   * The durable orchestration identity for this evaluation (PR #52 round 2
+   * review, HIGH): the identity composes EVERY semantic dimension of the
+   * claim — work item, GOVERNING ARCHITECTURE VERSION, checkpoint kind, EXACT
+   * IMPLEMENTATION REVISION, and the caller's logical signal key
+   * (idempotency key). The core governance promise is "this exact revision
+   * passed this exact architecture version", so a caller reusing an
+   * idempotency key at a different revision (or after a new version froze)
+   * produces a DIFFERENT durable identity: the old terminal result can never
+   * be replayed for a foreign revision — the new claim evaluates fresh and
+   * persists as its own revision-bound run. (BLOCKER 4: the identity lives in
+   * /verification as a UNIQUE indexed column — not in scanned metadata.)
    */
-  private orchestrationKey(input: ArchitectureCheckpointGateInput): string {
-    return `${input.workItemId}:checkpoint:${input.checkpointKind}:${input.idempotencyKey}`;
+  private orchestrationKey(
+    input: ArchitectureCheckpointGateInput,
+    architectureVersionId: string,
+  ): string {
+    return [
+      'architecture-checkpoint',
+      input.workItemId,
+      architectureVersionId,
+      input.checkpointKind,
+      input.implementationRevision ?? 'rev:none',
+      input.idempotencyKey ?? 'signal:none',
+    ].join(':');
   }
 
   private async persistCheckpointEvidence(
@@ -589,7 +612,7 @@ export class DefaultArchitectureCheckpointService implements ArchitectureCheckpo
           checkpointIdempotencyKey: input.idempotencyKey ?? null,
           workOrderId: input.workOrderId ?? null,
         },
-        orchestrationKey: this.orchestrationKey(input),
+        orchestrationKey: this.orchestrationKey(input, result.architectureVersionId),
       },
       evidence,
       finalize: {

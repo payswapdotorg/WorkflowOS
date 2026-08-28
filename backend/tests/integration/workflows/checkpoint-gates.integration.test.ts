@@ -723,6 +723,197 @@ describe('WORK-051 — orchestrator architecture checkpoint gates + the PR-creat
     expect(await state(wi.id)).toBe('pr_open');
   });
 
+  // --- PR #52 round 3, BLOCKER 3: revision-correct external PR adoption ----------
+
+  /**
+   * Drive a work item to IMPLEMENTING with a BLOCKED first revision, then
+   * record an EXTERNAL PR observation (the authoritative run row carries the
+   * PR ref with NO commit revision — the webhook-ingestion shape) on a NEW
+   * agent run, and submit agent_run_completed for it.
+   */
+  const driveToExternalObservation = async (
+    orchestrator: DefaultWorkflowOrchestrator,
+    wiId: string,
+    versionId: string,
+    blockedRevision: string,
+    externalPrRef: string,
+  ): Promise<void> => {
+    seedTree(blockedRevision, violatingTree());
+    scriptedAgent.setCommitRef(blockedRevision);
+    await initiate(orchestrator, wiId, 'scripted');
+    expect(await state(wiId)).toBe('implementing');
+
+    // A NEW agent run (the trusted agent_run_completed path), then the run
+    // row becomes the EXTERNAL OBSERVATION: no commit revision, only the
+    // observed PR reference (recorded out-of-band by webhook ingestion).
+    const wo = await stack.workOrderRepository.create({
+      workItemId: wiId, projectId: project.id, architectureVersionId: versionId,
+    });
+    const gateway = new DefaultAgentGateway(
+      stack.db.client, createLogger({ level: 'silent' }), [scriptedAgent], 3,
+    );
+    const executionId = generateExecutionId();
+    await gateway.execute({
+      provider: 'scripted',
+      configuration: {},
+      workItemId: wiId,
+      workOrderId: wo.id,
+      architectureVersionId: versionId,
+      executionId,
+      input: 'external observation',
+    });
+    // The NEW run — identified by its execution id (the initiate run with
+    // the same commitRef already had its agent_run_completed processed).
+    const run = await new PgAgentRunRepository(stack.db.client).findByExecutionId(executionId);
+    expect(run).toBeTruthy();
+    expect(run!.commitRef).toBe(blockedRevision);
+    await stack.db.client.query(
+      'UPDATE wfos_agent_runs SET commit_ref = NULL, pull_request_ref = $1 WHERE id = $2',
+      [externalPrRef, run!.id],
+    );
+    const signal = await orchestrator.submitAgentRunCompleted({
+      workItemId: wiId,
+      agentRunId: run!.id,
+      executionId: generateExecutionId(),
+    });
+    await orchestrator.processSignal(signal.id);
+  };
+
+  it('BLOCKER 3 (round 3) — an external PR observation gates on the RESOLVED authoritative HEAD SHA (never the raw PR reference) and adopts post-gate with zero creations', async () => {
+    // The tree at the PR's AUTHORITATIVE head SHA is conformant.
+    const RESOLVED_SHA = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd';
+    seedTree(RESOLVED_SHA, cleanTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+
+    const EXT_PR = `github:${OWNER}/${REPO}#7`;
+    prPort.registerExternalPullRequest(EXT_PR, {
+      externalPrId: EXT_PR,
+      headCommit: RESOLVED_SHA,
+      state: 'open',
+      merged: false,
+    });
+
+    await driveToExternalObservation(orchestrator, wi.id, v.id, 'rev-adopt-blocked-1', EXT_PR);
+
+    // The ADOPTION RESOLUTION read ran (through the governed boundary)…
+    expect(prPort.resolveCalls).toContain(EXT_PR);
+    // …the gate ran at the RESOLVED HEAD SHA — NOT at the raw PR reference…
+    expect(events).toContainEqual({ type: 'gate', detail: `pr_conformance@${RESOLVED_SHA}` });
+    expect(events.some((e) => e.type === 'gate' && e.detail.includes(EXT_PR))).toBe(false);
+    // …and ZERO PR creations happened (adoption records an association only).
+    expect(prPort.calls).toHaveLength(0);
+    expect(prPort.findCalls).toHaveLength(0);
+    // The association carries the RESOLVED head SHA — never the PR ref.
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs.length).toBe(1);
+    expect(prs[0]!.externalPrId).toBe(EXT_PR);
+    expect(prs[0]!.headCommit).toBe(RESOLVED_SHA);
+    expect(await state(wi.id)).toBe('pr_open');
+  });
+
+  it('BLOCKER 3 (round 3) — the gate really evaluates the RESOLVED revision: a VIOLATING tree at the external PR\'s head SHA blocks the adoption (fail closed)', async () => {
+    const RESOLVED_SHA = 'bb22cc33dd44ee55ff6677889900aabbccdd0011';
+    seedTree(RESOLVED_SHA, violatingTree());
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    const events: Array<{ type: string; detail: string }> = [];
+    const prPort = new RecordingPrPort(events);
+    const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+
+    const EXT_PR = `github:${OWNER}/${REPO}#8`;
+    prPort.registerExternalPullRequest(EXT_PR, {
+      externalPrId: EXT_PR,
+      headCommit: RESOLVED_SHA,
+      state: 'open',
+      merged: false,
+    });
+
+    await driveToExternalObservation(orchestrator, wi.id, v.id, 'rev-adopt-blocked-2', EXT_PR);
+
+    // The gate evaluated the resolved revision and BLOCKED it…
+    expect(events).toContainEqual({ type: 'gate', detail: `pr_conformance@${RESOLVED_SHA}` });
+    // …no association, no PR_OPEN — the work item stays IMPLEMENTING.
+    expect(prPort.calls).toHaveLength(0);
+    const prs = await stack.pullRequestAssociationRepository.listForWorkItem(wi.id);
+    expect(prs).toHaveLength(0);
+    expect(await state(wi.id)).toBe('implementing');
+  });
+
+  it('BLOCKER 3 (round 3) — an UNRESOLVABLE external PR (absent / closed / merged at the authority) fails closed: no gate run, no adoption, no transition', async () => {
+    const v = await frozenVersionWithAssertion();
+    const wi = await workItemOn(v.id);
+
+    // (a) The authority holds no such PR → null.
+    {
+      const events: Array<{ type: string; detail: string }> = [];
+      const prPort = new RecordingPrPort(events);
+      const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+      await driveToExternalObservation(orchestrator, wi.id, v.id, 'rev-adopt-blocked-3', `github:${OWNER}/${REPO}#404`);
+      // The resolution was attempted…
+      expect(prPort.resolveCalls).toHaveLength(1);
+      // …the pr_conformance gate NEVER ran for the adoption (the only
+      // pr_conformance evaluation is the initiate-phase blocked one — no
+      // revision was ever bound to the external observation)…
+      const prGates = events.filter((e) => e.type === 'gate' && e.detail.startsWith('pr_conformance@'));
+      expect(prGates).toHaveLength(1);
+      expect(prGates[0]!.detail).toBe('pr_conformance@rev-adopt-blocked-3');
+      // …and nothing was adopted or created.
+      expect(prPort.calls).toHaveLength(0);
+      expect((await stack.pullRequestAssociationRepository.listForWorkItem(wi.id))).toHaveLength(0);
+      expect(await state(wi.id)).toBe('implementing');
+    }
+
+    // (b) A CLOSED external PR → fail closed.
+    {
+      const wi2 = await workItemOn(v.id);
+      const events: Array<{ type: string; detail: string }> = [];
+      const prPort = new RecordingPrPort(events);
+      const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+      const EXT_PR = `github:${OWNER}/${REPO}#9`;
+      prPort.registerExternalPullRequest(EXT_PR, {
+        externalPrId: EXT_PR,
+        headCommit: 'cc33dd44ee55ff6677889900aabbccdd00112233',
+        state: 'closed',
+        merged: false,
+      });
+      await driveToExternalObservation(orchestrator, wi2.id, v.id, 'rev-adopt-blocked-4', EXT_PR);
+      expect(prPort.resolveCalls).toHaveLength(1);
+      const prGatesB = events.filter((e) => e.type === 'gate' && e.detail.startsWith('pr_conformance@'));
+      expect(prGatesB).toHaveLength(1);
+      expect(prGatesB[0]!.detail).toBe('pr_conformance@rev-adopt-blocked-4');
+      expect((await stack.pullRequestAssociationRepository.listForWorkItem(wi2.id))).toHaveLength(0);
+      expect(await state(wi2.id)).toBe('implementing');
+    }
+
+    // (c) A MERGED external PR → fail closed.
+    {
+      const wi3 = await workItemOn(v.id);
+      const events: Array<{ type: string; detail: string }> = [];
+      const prPort = new RecordingPrPort(events);
+      const orchestrator = buildOrchestrator(new RecordingGate(realService(), events), prPort, [scriptedAgent]);
+      const EXT_PR = `github:${OWNER}/${REPO}#10`;
+      prPort.registerExternalPullRequest(EXT_PR, {
+        externalPrId: EXT_PR,
+        headCommit: 'dd44ee55ff6677889900aabbccdd001122334455',
+        state: 'open',
+        merged: true,
+      });
+      await driveToExternalObservation(orchestrator, wi3.id, v.id, 'rev-adopt-blocked-5', EXT_PR);
+      expect(prPort.resolveCalls).toHaveLength(1);
+      const prGatesC = events.filter((e) => e.type === 'gate' && e.detail.startsWith('pr_conformance@'));
+      expect(prGatesC).toHaveLength(1);
+      expect(prGatesC[0]!.detail).toBe('pr_conformance@rev-adopt-blocked-5');
+      expect((await stack.pullRequestAssociationRepository.listForWorkItem(wi3.id))).toHaveLength(0);
+      expect(await state(wi3.id)).toBe('implementing');
+    }
+  });
+
   // --- PROOF 5: a blocking failure prevents the PR_OPEN transition ------------
 
   it('PROOF 5 — a BLOCKED pr_conformance gate prevents IMPLEMENTING → PR_OPEN (state stays implementing; no transition recorded)', async () => {

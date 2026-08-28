@@ -700,6 +700,43 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
     expect(run.summary.snapshotIdentity).toEqual(first.snapshotIdentity);
   });
 
+  it('PR #52 round 3 (HIGH) — idempotency-key reuse at a DIFFERENT revision is a DIFFERENT durable identity: fresh evaluation, never a foreign replay', async () => {
+    seedTree('rev-keyreuse-a', violatingTreeFiles());
+    const v = await frozenVersionWithAssertions([structureAssertion()]);
+    const wi = await workItemOn(v.id);
+
+    // First evaluation at revision A with key K → BLOCKED (terminal).
+    const first = await service.evaluateCheckpoint(gate(wi.id, 'rev-keyreuse-a', 'keyreuse-key'));
+    expect(first.status).toBe('blocked');
+    expect(first.replayed).toBe(false);
+    expect(first.implementationRevision).toBe('rev-keyreuse-a');
+
+    // The SAME idempotency key at a DIFFERENT revision (a conformant tree):
+    // the old terminal result can NEVER be replayed for the new claim — the
+    // revision participates in the durable identity, so this is a FRESH
+    // evaluation with its own run.
+    seedTree('rev-keyreuse-b', cleanTreeFiles());
+    const second = await service.evaluateCheckpoint(gate(wi.id, 'rev-keyreuse-b', 'keyreuse-key'));
+    expect(second.replayed).toBe(false);
+    expect(second.status).toBe('passed'); // NOT the old 'blocked' verdict
+    expect(second.checkpointId).not.toBe(first.checkpointId);
+    expect(second.implementationRevision).toBe('rev-keyreuse-b');
+
+    // Both runs exist durably — each bound to its exact revision (the
+    // governance promise: "this exact revision passed this exact version").
+    const runs = await verificationService.listRunsForWorkItem(wi.id);
+    const checkpointRuns = runs.filter((r) => r.source === CHECKPOINT_RUN_SOURCE);
+    expect(checkpointRuns).toHaveLength(2);
+
+    // The honest idempotency contract is PRESERVED: the same key at the SAME
+    // revision still replays the recorded result exactly.
+    const replayA = await service.evaluateCheckpoint(gate(wi.id, 'rev-keyreuse-a', 'keyreuse-key'));
+    expect(replayA.replayed).toBe(true);
+    expect(replayA.checkpointId).toBe(first.checkpointId);
+    expect(replayA.status).toBe('blocked');
+    expect(replayA.implementationRevision).toBe('rev-keyreuse-a');
+  });
+
   it('PR #52 round 2 (HIGH 1) — the provider-observed snapshot identity DIFFERS when the same revision label serves different bytes (a mutated tree is detectable in the evidence)', async () => {
     // Two distinct revisions with the same tree → same identity inputs…
     seedTree('rev-ident-a', cleanTreeFiles());

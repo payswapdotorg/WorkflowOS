@@ -108,6 +108,42 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   }>();
   private nextPrNumber = 1;
 
+  /**
+   * WORK-051 round 3 (PR #52 review, BLOCKER 3): when set, an unregistered
+   * PR number resolves to an HONEST null (a 404 at the authority) instead of
+   * the legacy synthetic info — the adoption fail-closed regressions use
+   * this to prove an unresolvable observation can never enter the checkpoint.
+   */
+  strictPullRequestLookup = false;
+
+  /**
+   * WORK-051 round 3: seed an EXTERNAL pull request (a PR opened by a human
+   * or an out-of-band tool — NOT the governed boundary). The adoption
+   * resolution path reads its authoritative identity (number, head SHA,
+   * state) through getPullRequestInfo.
+   */
+  seedExternalPullRequest(input: {
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+    state?: 'open' | 'closed';
+    merged?: boolean;
+  }): this {
+    this.externalPullRequests.push({ ...input, state: input.state ?? 'open', merged: input.merged ?? false });
+    return this;
+  }
+  private readonly externalPullRequests: Array<{
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+    state: 'open' | 'closed';
+    merged: boolean;
+  }> = [];
+
   /** Operation counters (provider-side counting for the governed PR-creation regressions). */
   readonly createPullRequestCalls: string[] = [];
   readonly findPullRequestByHeadCalls: string[] = [];
@@ -172,7 +208,42 @@ export class FakeGitHubAdapter implements GitHubAdapter {
     owner: string,
     repo: string,
     prNumber: number,
-  ): Promise<GitHubPullRequestInfo> {
+  ): Promise<GitHubPullRequestInfo | null> {
+    // WORK-051 round 3 (PR #52 review, BLOCKER 3): the two PR registries are
+    // AUTHORITATIVE when they hold the PR — the adoption path resolves REAL
+    // registered PRs to their authoritative identity (number, head SHA,
+    // state, merged) through this read. Unregistered numbers keep the legacy
+    // synthetic behavior (backward compatibility for the pre-existing
+    // suites) unless strictPullRequestLookup is set (the adoption
+    // fail-closed regressions need an honest 404 → null).
+    const external = this.externalPullRequests.find(
+      (pr) => pr.owner === owner && pr.repository === repo && pr.number === prNumber,
+    );
+    if (external) {
+      return {
+        prNumber,
+        title: `Fake PR #${prNumber} for ${owner}/${repo}`,
+        state: external.state,
+        branch: external.head,
+        baseBranch: 'main',
+        headCommit: external.headSha,
+        merged: external.merged,
+      };
+    }
+    for (const pr of this.openPullRequests.values()) {
+      if (pr.owner === owner && pr.repository === repo && pr.number === prNumber) {
+        return {
+          prNumber,
+          title: `Fake PR #${prNumber} for ${owner}/${repo}`,
+          state: 'open',
+          branch: pr.head,
+          baseBranch: 'main',
+          headCommit: pr.headSha,
+          merged: false,
+        };
+      }
+    }
+    if (this.strictPullRequestLookup) return null;
     return {
       prNumber,
       title: `Fake PR #${prNumber} for ${owner}/${repo}`,

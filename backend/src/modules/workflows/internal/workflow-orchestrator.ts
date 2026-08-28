@@ -27,6 +27,7 @@ import type {
   ArchitectureCheckpointGate,
   ArchitectureCheckpointGateInput,
   ArchitectureCheckpointGateResult,
+  ResolvedExternalPullRequest,
 } from './convergence.types.js';
 import { ArchitectureCheckpointGateDeniedError } from './convergence.types.js';
 import { GovernedPullRequestService } from './governed-pull-request-service.js';
@@ -667,12 +668,20 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
   }
 
   /**
-   * WORK-051 round 2 (PR #52 review, BLOCKERS 1 + 2) — the ACTUAL
-   * PR-creation boundary of the governed convergence path. Strict order:
+   * WORK-051 round 2 + round 3 (PR #52 review) — the ACTUAL PR-creation
+   * boundary of the governed convergence path. Strict order:
    *
+   *   0. RESOLVE THE REVISION (round 3, BLOCKER 3): the gate revision is
+   *      ALWAYS an exact implementation revision (a commit SHA). When only
+   *      an EXTERNAL PR observation is available (no commit revision), its
+   *      AUTHORITATIVE head commit is resolved through /github FIRST —
+   *      `resolveExternalPullRequest` — and only that SHA proceeds. A raw
+   *      PR reference NEVER enters the checkpoint binding or the
+   *      governed-creation identity; an unresolvable/closed/merged
+   *      observation fails closed (no gate run, no adoption, no transition);
    *   1. the pr_conformance architecture checkpoint, bound to the EXACT
    *      implementation revision (fail closed);
-   *   2. ONLY if the gate allows: either adopt an already-existing EXTERNAL
+   *   2. ONLY if the gate allows: either adopt the already-existing EXTERNAL
    *      PR observation (record the association — no creation side effect),
    *      or CREATE the PR through the governed PR-creation protocol (the
    *      durable create-or-converge boundary over the single
@@ -690,7 +699,49 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     commitRef: string | null,
     externalPrRef: string | null,
   ): Promise<boolean> {
-    const gateRevision = commitRef ?? externalPrRef;
+    // (0) The gate revision — ALWAYS an exact implementation revision. When
+    // only an external PR observation exists, resolve its AUTHORITATIVE head
+    // commit through /github BEFORE the gate (BLOCKER 3: a raw PR reference
+    // is not a revision; treating it as one produced either a false
+    // checkpoint binding or an intentional fail-closed for legitimate
+    // webhook adoption).
+    let gateRevision = commitRef;
+    let adoptionHeadCommit: string | null = commitRef;
+    if (!gateRevision && externalPrRef) {
+      let resolved: ResolvedExternalPullRequest | null = null;
+      try {
+        resolved = await this.governedPullRequests.resolveExternalPullRequest({
+          projectId: signal.projectId,
+          externalPrRef,
+        });
+      } catch (err) {
+        // Malformed ref / no repo link / foreign repository / transport
+        // failure — EVERY unresolvable shape fails closed: no checkpoint
+        // run, no association, no PR_OPEN.
+        this.logger.warn('convergence.pr.adoption_unresolvable', {
+          workItemId: signal.workItemId,
+          externalPrRef,
+          error: (err as Error).message,
+        });
+        return false;
+      }
+      if (!resolved || !resolved.headCommit || resolved.merged || resolved.state !== 'open') {
+        // Not found at the authority / no head SHA / merged / closed — an
+        // open-lifecycle PR_OPEN cannot adopt any of these (fail closed).
+        this.logger.warn('convergence.pr.adoption_unresolvable', {
+          workItemId: signal.workItemId,
+          externalPrRef,
+          reason: !resolved
+            ? 'the PR does not exist at the authority'
+            : !resolved.headCommit
+              ? 'the PR reports no head commit'
+              : `the PR is ${resolved.merged ? 'merged' : 'closed'}`,
+        });
+        return false;
+      }
+      gateRevision = resolved.headCommit;
+      adoptionHeadCommit = resolved.headCommit;
+    }
     if (!gateRevision) {
       // Nothing to bind the checkpoint to — cannot open a governed PR.
       this.logger.warn('convergence.pr.no_revision', { workItemId: signal.workItemId });
@@ -707,7 +758,9 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
     }
 
     // (2a) An external PR already exists — adopt the observed identity
-    // (association only; no creation side effect; idempotent).
+    // (association only; no creation side effect; idempotent). The
+    // association's headCommit is the RESOLVED authoritative head SHA when
+    // no agent-reported revision exists (round 3: never the raw PR ref).
     if (externalPrRef) {
       const existingPrs = await this.pullRequestAssociationRepository.listForWorkItem(signal.workItemId);
       const alreadyHasPr = existingPrs.some((p) => p.externalPrId === externalPrRef);
@@ -715,7 +768,7 @@ export class DefaultWorkflowOrchestrator implements WorkflowOrchestrator {
         await this.pullRequestAssociationRepository.create({
           workItemId: signal.workItemId,
           externalPrId: externalPrRef,
-          headCommit: commitRef ?? undefined,
+          headCommit: adoptionHeadCommit ?? undefined,
         });
       }
       return true;

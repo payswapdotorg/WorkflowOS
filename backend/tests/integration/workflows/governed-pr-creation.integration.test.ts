@@ -12,9 +12,15 @@ import {
 import type {
   CreatedPullRequest,
   PullRequestCreationPort,
+  ResolvedExternalPullRequest,
 } from '../../../src/modules/workflows/internal/convergence.types.js';
 import { FakeGitHubAdapter } from '../../../src/modules/github/internal/fake-github-adapter.js';
+import { DefaultGitHubAdapter } from '../../../src/modules/github/internal/pg-github-repository.js';
 import { PgProjectGitHubRepositoryRepository } from '../../../src/modules/github/internal/pg-project-github-repository-repository.js';
+import {
+  ScriptedGitHubApi,
+  generateRsaKeyPairPem,
+} from '../../helpers/scripted-github-api.js';
 
 /**
  * WORK-051 round 2 (PR #52 review, BLOCKER 2) — the durable, crash-safe,
@@ -63,6 +69,13 @@ describe('WORK-051 round 2 — the governed PR creation is crash-safe + idempote
       headRevision: string;
     }): Promise<CreatedPullRequest | null> {
       return this.inner.findExistingPullRequest(input);
+    }
+
+    async resolveExternalPullRequest(input: {
+      projectId: string;
+      externalPrRef: string;
+    }): Promise<ResolvedExternalPullRequest | null> {
+      return this.inner.resolveExternalPullRequest(input);
     }
 
     async createPullRequest(input: {
@@ -288,4 +301,259 @@ describe('WORK-051 round 2 — the governed PR creation is crash-safe + idempote
       }),
     ).rejects.toThrow(/no linked GitHub repository/i);
   });
+});
+
+describe('WORK-051 round 3 — the collision-proof convergence marker + the PRODUCTION-shaped governed PR boundary', () => {
+  // --- BLOCKER 2 (round 3): the collision-resistant digest ------------------
+
+  it('BLOCKER 2 (round 3) — the governed head branch is a CRYPTOGRAPHIC DIGEST of the COMPLETE key: distinct keys sharing 12-char prefixes CANNOT collide', () => {
+    // Two DISTINCT logical keys whose (workItemId, headRevision) components
+    // BOTH share their first 12 characters — the round-2 truncation's exact
+    // collision domain. Under the digest they must map to DIFFERENT branches.
+    const wiA = 'WI-collisionXXXXXA'; // 12-char shared prefix 'WI-collisionXX'
+    const wiB = 'WI-collisionXXXXXB';
+    const revA = 'rev-collisionYYYYYA'; // 12-char shared prefix 'rev-collision'
+    const revB = 'rev-collisionYYYYYB';
+    expect(wiA.slice(0, 12)).toBe(wiB.slice(0, 12));
+    expect(revA.slice(0, 12)).toBe(revB.slice(0, 12));
+
+    const branchA = governedHeadBranch(wiA, revA);
+    const branchB = governedHeadBranch(wiB, revB);
+    expect(branchA).not.toBe(branchB);
+
+    // The marker is a FULL 64-hex sha256 digest under a fixed governed
+    // prefix — no truncated identifier participates in the identity.
+    expect(branchA).toMatch(/^wfos\/governed\/[0-9a-f]{64}$/);
+
+    // Purity: the same key always derives the same branch.
+    expect(governedHeadBranch(wiA, revA)).toBe(branchA);
+
+    // A single-character difference in EITHER component changes the digest.
+    expect(governedHeadBranch(wiA, `${revA}x`)).not.toBe(branchA);
+    expect(governedHeadBranch(`${wiA}x`, revA)).not.toBe(branchA);
+  });
+
+  // --- BLOCKER 1 (round 3): the PRODUCTION-shaped crash/recovery proofs ------
+
+  let stack: TestAuthStack;
+  let api: ScriptedGitHubApi;
+  let linkRepo: PgProjectGitHubRepositoryRepository;
+  let project: { id: string };
+  const OWNER = 'prod-governed-org';
+  const REPO = 'prod-governed-repo';
+  let prodPrivateKey = '';
+
+  /** The PRODUCTION boundary composition: port → DefaultGitHubAdapter → real REST wire. */
+  const productionPort = (): GithubBackedPullRequestCreationPort =>
+    new GithubBackedPullRequestCreationPort(
+      linkRepo,
+      new DefaultGitHubAdapter({
+        appId: '99988877',
+        privateKey: prodPrivateKey,
+        apiBaseUrl: api.url,
+      }),
+    );
+
+  beforeAll(async () => {
+    const keyPair = await generateRsaKeyPairPem();
+    prodPrivateKey = keyPair.privateKeyPem;
+    api = new ScriptedGitHubApi();
+    await api.start();
+    stack = await buildAuthStack({});
+    linkRepo = new PgProjectGitHubRepositoryRepository(stack.db.client);
+    const org = await stack.organizationRepository.create({ name: 'Prod Governed Org' });
+    const user = await stack.userRepository.upsertByExternalId({ externalId: 'prod-governed-user', displayName: 'User' });
+    await stack.membershipRepository.assign({ userId: user.id, organizationId: org.id, roleId: 'owner' });
+    project = await stack.projectRepository.create({ organizationId: org.id, name: 'Prod Governed Project' });
+    await linkRepo.create({
+      projectId: project.id,
+      installationId: 'inst-prod-governed',
+      owner: OWNER,
+      repository: REPO,
+      defaultBranch: 'main',
+    });
+  });
+
+  afterAll(async () => {
+    await stack.teardown();
+    await api.stop();
+  });
+
+  const input = (workItemId: string, headRevision: string) => ({
+    projectId: project.id,
+    workItemId,
+    headRevision,
+    title: `Work item ${workItemId}`,
+    body: 'production-shaped regression',
+  });
+
+  /** Count the REAL wire creates (POST /repos/{owner}/{repo}/pulls). */
+  const wireCreates = (): number =>
+    api.requests.filter((r) => r.method === 'POST' && r.path === `/repos/${OWNER}/${REPO}/pulls`).length;
+
+  it('BLOCKER 1 (round 3) — crash AFTER the real REST create: the retry CONVERGES with EXACTLY ONE wire create (production adapter, real HTTP)', async () => {
+    const wiId = `WI-${generateExecutionId()}`;
+    const rev = `rev-${generateExecutionId()}`;
+
+    // First attempt: the real REST create SUCCEEDS on the wire, then the
+    // process dies before the durable record (the transaction rolls back).
+    const crashed = new GovernedPullRequestService(
+      stack.db.client,
+      new CrashingProductionPort(productionPort(), 'crash-after-create'),
+    );
+    await expect(crashed.open(input(wiId, rev))).rejects.toThrow('simulated crash AFTER');
+    // The durable record rolled back…
+    expect(await crashed.findIntent(wiId, rev)).toBeNull();
+    // …but the EXTERNAL side effect happened on the REAL wire: exactly one create.
+    expect(wireCreates()).toBe(1);
+
+    // The RETRY (a fresh process over the same durable state + the same
+    // external authority): converge on the PR the crashed attempt created —
+    // the convergence read finds it by the deterministic digest branch.
+    const retry = new GovernedPullRequestService(stack.db.client, productionPort());
+    const converged = await retry.open(input(wiId, rev));
+    expect(converged.externalPrId).toBe(`github:${OWNER}/${REPO}#1`);
+    expect(wireCreates()).toBe(1); // STILL exactly one create — no second PR
+    const intent = await retry.findIntent(wiId, rev);
+    expect(intent).toEqual({
+      status: 'created',
+      externalPrId: `github:${OWNER}/${REPO}#1`,
+      headCommit: converged.headCommit,
+    });
+
+    // A THIRD drive: pure convergence — zero new wire calls of any kind.
+    const requestsBefore = api.requests.length;
+    const again = await retry.open(input(wiId, rev));
+    expect(again.externalPrId).toBe(converged.externalPrId);
+    expect(api.requests.length).toBe(requestsBefore);
+  });
+
+  it('BLOCKER 1 (round 3) — two independent clients (two processes) converge on ONE PR with exactly ONE wire create (real PostgreSQL + production adapter)', async () => {
+    const isRealPg =
+      !!process.env.WORKFLOWOS_DATABASE_URL &&
+      process.env.WORKFLOWOS_DATABASE_URL.startsWith('postgres');
+    if (!isRealPg || !stack.db.createSecondClient) {
+      // pglite is single-connection: true cross-client interleaving is not
+      // demonstrable there (the fake-adapter suite covers the same-session
+      // serialization; this production-shaped proof is real-PG-only).
+      return;
+    }
+    const wiId = `WI-${generateExecutionId()}`;
+    const rev = `rev-${generateExecutionId()}`;
+
+    const second = await stack.db.createSecondClient();
+    try {
+      const serviceA = new GovernedPullRequestService(stack.db.client, productionPort());
+      const serviceB = new GovernedPullRequestService(second.client, productionPort());
+      const createsBefore = wireCreates();
+
+      // Both processes drive the SAME convergence key concurrently, each
+      // through its OWN production adapter instance (its own token cache —
+      // both mint installation tokens). The FOR UPDATE serialization forces
+      // one to win; the loser observes the winner's committed intent and
+      // converges with zero external calls of its own.
+      const [a, b] = await Promise.all([
+        serviceA.open(input(wiId, rev)),
+        serviceB.open(input(wiId, rev)),
+      ]);
+      expect(a.externalPrId).toBe(b.externalPrId);
+      expect(wireCreates()).toBe(createsBefore + 1); // EXACTLY ONE wire create
+      const intent = await serviceA.findIntent(wiId, rev);
+      expect(intent?.status).toBe('created');
+      expect(intent?.externalPrId).toBe(a.externalPrId);
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('BLOCKER 3 (round 3) — the PRODUCTION port resolves an external PR to its authoritative head commit through the real REST read', async () => {
+    const port = productionPort();
+    // An external PR (opened out-of-band) exists at the authority.
+    const headSha = `extsha${generateExecutionId()}`;
+    const number = api.seedExternalPullRequest({
+      owner: OWNER,
+      repository: REPO,
+      head: 'human-branch',
+      headSha,
+    });
+    const resolved = await port.resolveExternalPullRequest({
+      projectId: project.id,
+      externalPrRef: `github:${OWNER}/${REPO}#${number}`,
+    });
+    expect(resolved).toEqual({
+      externalPrId: `github:${OWNER}/${REPO}#${number}`,
+      headCommit: headSha,
+      state: 'open',
+      merged: false,
+    });
+    // The wire read was the real GET /repos/{o}/{r}/pulls/{n}.
+    const read = api.requests.filter(
+      (r) => r.method === 'GET' && r.path === `/repos/${OWNER}/${REPO}/pulls/${number}`,
+    );
+    expect(read.length).toBeGreaterThanOrEqual(1);
+
+    // An unknown PR is an honest null — unresolvable, never fabricated.
+    const missing = await port.resolveExternalPullRequest({
+      projectId: project.id,
+      externalPrRef: `github:${OWNER}/${REPO}#999999`,
+    });
+    expect(missing).toBeNull();
+
+    // A malformed reference fails closed.
+    await expect(
+      port.resolveExternalPullRequest({
+        projectId: project.id,
+        externalPrRef: 'not-a-pr-ref',
+      }),
+    ).rejects.toThrow(/not a canonical GitHub PR reference/i);
+
+    // A reference into a FOREIGN repository fails closed.
+    await expect(
+      port.resolveExternalPullRequest({
+        projectId: project.id,
+        externalPrRef: `github:other-org/${REPO}#${number}`,
+      }),
+    ).rejects.toThrow(/not the project's linked repository/i);
+  });
+
+  /**
+   * The crash-injecting wrapper over the PRODUCTION port (same protocol as
+   * the fake-adapter suite: the inner port performs the REAL REST delegation;
+   * the wrapper kills the caller around the external side effect).
+   */
+  class CrashingProductionPort implements PullRequestCreationPort {
+    constructor(
+      private readonly inner: PullRequestCreationPort,
+      private readonly mode: 'crash-before-create' | 'crash-after-create',
+    ) {}
+
+    async findExistingPullRequest(input: {
+      projectId: string;
+      workItemId: string;
+      headRevision: string;
+    }): Promise<CreatedPullRequest | null> {
+      return this.inner.findExistingPullRequest(input);
+    }
+
+    async resolveExternalPullRequest(input: {
+      projectId: string;
+      externalPrRef: string;
+    }): Promise<ResolvedExternalPullRequest | null> {
+      return this.inner.resolveExternalPullRequest(input);
+    }
+
+    async createPullRequest(input: {
+      projectId: string;
+      workItemId: string;
+      headRevision: string;
+      title: string;
+      body?: string | null;
+    }): Promise<CreatedPullRequest> {
+      if (this.mode === 'crash-before-create') {
+        throw new Error('simulated crash BEFORE the external PR create');
+      }
+      await this.inner.createPullRequest(input);
+      throw new Error('simulated crash AFTER the external PR create (before the durable record)');
+    }
+  }
 });

@@ -450,12 +450,35 @@ export interface ArchitectureCheckpointGate {
 // adopted by the webhook path — and is only associated + transitioned into
 // the governed lifecycle after the same gate passes.
 
-/** The result of a governed PR creation. */
+/**
+ * The result of a governed PR creation.
+ */
 export interface CreatedPullRequest {
   /** The provider-independent PR identity (e.g. 'github:owner/repo#12'). */
   readonly externalPrId: string;
   /** The PR head commit reported by the PR authority (null when unknown). */
   readonly headCommit: string | null;
+}
+
+/**
+ * PR #52 round 3 (review, BLOCKER 3) — an EXTERNALLY OBSERVED pull request,
+ * resolved to its AUTHORITATIVE identity through the /github boundary.
+ *
+ * A raw external PR reference (`github:owner/repo#12`) is NOT an
+ * implementation revision — it cannot enter the checkpoint binding or the
+ * governed-creation identity until the external PR's authoritative head
+ * COMMIT SHA has been resolved through /github. This type carries that
+ * resolved identity.
+ */
+export interface ResolvedExternalPullRequest {
+  /** The canonical provider-independent PR identity. */
+  readonly externalPrId: string;
+  /** The PR's authoritative head commit SHA (null when the authority reports none). */
+  readonly headCommit: string | null;
+  /** The PR state at the authority (adoption into PR_OPEN requires 'open'). */
+  readonly state: 'open' | 'closed';
+  /** Whether the authority reports the PR merged. */
+  readonly merged: boolean;
 }
 
 /**
@@ -500,6 +523,30 @@ export interface PullRequestCreationPort {
     title: string;
     body?: string | null;
   }): Promise<CreatedPullRequest>;
+
+  /**
+   * PR #52 round 3 (review, BLOCKER 3) — the EXTERNAL-OBSERVATION RESOLUTION
+   * read: resolve an externally observed PR reference to its AUTHORITATIVE
+   * identity (the PR's real head commit SHA, state, and merged flag) through
+   * /github. Read-only — no side effects.
+   *
+   * Returns null when the authority holds no such PR (an honest 404 — an
+   * unresolvable observation). Throws on a malformed reference, a missing
+   * project repository link, a reference to a repository OTHER than the
+   * project's linked repository, or any authority transport failure — the
+   * caller fails closed in every one of those cases.
+   *
+   * The orchestrator calls this BEFORE the pr_conformance gate whenever only
+   * an external PR observation (no commit revision) is available: only the
+   * resolved commit SHA may enter the checkpoint binding and the
+   * governed-creation identity.
+   */
+  resolveExternalPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    /** The external PR reference (e.g. 'github:owner/repo#12'). */
+    externalPrRef: string;
+  }): Promise<ResolvedExternalPullRequest | null>;
 }
 
 /**

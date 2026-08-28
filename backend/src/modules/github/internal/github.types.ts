@@ -87,8 +87,17 @@ export interface GitHubAdapter {
   /** Get repository metadata (provider-independent). */
   getRepositoryMetadata(installationId: string, owner: string, repo: string): Promise<GitHubRepositoryInfo>;
 
-  /** Get PR metadata (provider-independent). */
-  getPullRequestInfo(installationId: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequestInfo>;
+  /**
+   * Get PR metadata (provider-independent).
+   *
+   * WORK-051 round 3 (PR #52 review, BLOCKER 3): returns null when the
+   * authority holds no such pull request (an honest 404). The external-PR
+   * ADOPTION path resolves the PR's AUTHORITATIVE head commit through this
+   * read BEFORE anything enters the checkpoint binding or the governed
+   * creation identity — a raw external PR reference is never treated as an
+   * implementation revision.
+   */
+  getPullRequestInfo(installationId: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequestInfo | null>;
 
   /**
    * Merge a pull request through the GitHub provider boundary (WORK-019).
