@@ -205,3 +205,58 @@ No implementation is complete without:
 # Lifecycle Model
 
 The canonical lifecycle:
+SENSE
+↓
+UNDERSTAND
+↓
+PLAN
+↓
+CHECK
+↓
+EXECUTE
+↓
+VERIFY
+↓
+REVIEW
+↓
+RELEASE
+↓
+OBSERVE
+↓
+LEARN
+└──────────→ SENSE
+
+
+---
+
+# Complexity Model
+
+WorkflowOS must support:
+
+LIGHT:
+
+Simple changes
+
+STANDARD:
+
+Normal feature work
+
+HIGH_ASSURANCE:
+
+Architectural changes
+
+CRITICAL:
+
+Safety/security/business critical systems
+
+Same authority model.
+
+Different evidence depth.
+
+---
+
+# Final Constraint
+
+WorkflowOS must be capable of building WorkflowOS.
+
+The system must not depend on any single architect conversation.
