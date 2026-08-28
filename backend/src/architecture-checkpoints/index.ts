@@ -57,3 +57,55 @@ export {
   createDefaultDetectorRegistry,
   INITIAL_DETECTOR_KINDS,
 } from './internal/detector-registry.js';
+
+// ---------------------------------------------------------------------------
+// WORK-052 — the development-governance state contracts + the ONE fail-closed
+// validation engine (§34; ADR-0001/0004). These live in this subsystem because
+// they are the input contract of the `governance-manifest` detector
+// (ADR-0006); the application-layer control plane (src/development-governance/)
+// consumes them through THIS barrel so the substrate and the control plane can
+// never disagree about what a valid governed state is.
+// ---------------------------------------------------------------------------
+export {
+  ASSURANCE_PROFILES,
+  CHANGE_SURFACE_FLAGS,
+  PROOF_CLASSES,
+  GOVERNANCE_CHECKPOINT_KINDS,
+  WORK_ORDER_STATUSES,
+  FEEDBACK_ORIGINS,
+  CONTROL_LOOP_STAGES,
+  CORE_SELF_HOSTING_PROHIBITIONS,
+  CODE_PINNED_PROFILE_MINIMUMS,
+  CODE_PINNED_COMPLETION_RULE,
+  CLASSIFICATION_ORDER,
+  selectAssuranceProfile,
+  validateGovernanceState,
+} from './internal/governance-validation.js';
+export type {
+  AssuranceProfile,
+  ChangeSurfaceFlag,
+  ProofClass,
+  GovernanceCheckpointKind,
+  WorkOrderStatus,
+  FeedbackOrigin,
+  ImpactLevel,
+  SelectionRule,
+  AssuranceRequirements,
+  EnforcementReference,
+  CheckpointContract,
+  SelfHostingBoundary,
+  ControlLoopStage,
+  AuthorityMapEntry,
+  GovernanceModel,
+  MergeEvidence,
+  WorkOrderSurfaces,
+  CoordinationRecord,
+  CheckpointOutcomeRecord,
+  WorkOrderRecord,
+  HandoffRecord,
+  DecisionKind,
+  DecisionRecord,
+  ProgramState,
+  GovernanceFileReader,
+  GovernanceValidationResult,
+} from './internal/governance-validation.js';

@@ -14991,7 +14991,7 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
 
   // --- the detector registry is closed and matches the design ------------------
 
-  it('the detector registry registers EXACTLY the six initial detector kinds (closed set)', () => {
+  it('the detector registry registers EXACTLY the seven governed detector kinds (closed set; advanced 6→7 by WORK-052 ADR-0006)', () => {
     const registry = strip(readFileSync(AC_REGISTRY, 'utf8'));
     expect(registry).toMatch(/'repository-structure'/);
     expect(registry).toMatch(/'schema-migration'/);
@@ -14999,11 +14999,12 @@ describe('WORK-051 invariants — Architecture Governance and Checkpoints', () =
     expect(registry).toMatch(/'interface-contract'/);
     expect(registry).toMatch(/'workflow-transition'/);
     expect(registry).toMatch(/'runtime-configuration'/);
+    expect(registry).toMatch(/'governance-manifest'/);
     const kinds = [...registry.matchAll(/'([a-z-]+)',/g)].map((m) => m[1]!);
     const declared = kinds.filter((k) =>
-      ['repository-structure', 'schema-migration', 'authority-ownership', 'interface-contract', 'workflow-transition', 'runtime-configuration'].includes(k),
+      ['repository-structure', 'schema-migration', 'authority-ownership', 'interface-contract', 'workflow-transition', 'runtime-configuration', 'governance-manifest'].includes(k),
     );
-    expect(declared).toHaveLength(6);
+    expect(declared).toHaveLength(7);
     // No other file registers detectors (single enumerable seam).
     for (const f of AC_FILES) {
       if (f === AC_REGISTRY) continue;
@@ -16540,5 +16541,405 @@ describe('WORK-045 invariants — Agent Roles (§33.9)', () => {
     expect(api).toMatch(/DECLARED deterministic order/);
     expect(api).toMatch(/CROSS-TENANT API key is 403/);
     expect(api).toMatch(/NO fallback and no nearest-match/);
+  });
+});
+
+describe('WORK-052 invariants — Development Governance and Self-Hosting Control Plane', () => {
+  const REPO_ROOT = join(BACKEND_ROOT, '..');
+  const DG_DIR = join(BACKEND_ROOT, 'src', 'development-governance');
+  const DG_INTERNAL = join(DG_DIR, 'internal');
+  const DG_TYPES = join(DG_DIR, 'types.ts');
+  const DG_SERVICE = join(DG_INTERNAL, 'default-development-governance-service.ts');
+  const DG_LOADER = join(DG_INTERNAL, 'governance-state-loader.ts');
+  const DG_CLI = join(DG_DIR, 'cli.ts');
+  const AC_VALIDATION = join(BACKEND_ROOT, 'src', 'architecture-checkpoints', 'internal', 'governance-validation.ts');
+  const GM_DETECTOR = join(
+    BACKEND_ROOT, 'src', 'architecture-checkpoints', 'internal', 'detectors', 'governance-manifest.detector.ts',
+  );
+  const GOV_DIR = join(REPO_ROOT, 'spec', 'development-state');
+  const GOV_MODEL = join(GOV_DIR, 'governance-model.json');
+  const GOV_PROGRAM = join(GOV_DIR, 'program-state.json');
+  const GOV_README = join(GOV_DIR, 'README.md');
+  const SPEC_ARCH = join(REPO_ROOT, 'spec', 'architecture.md');
+  const SPEC_LOCK = join(REPO_ROOT, 'spec', 'architecture-lock.md');
+  const SPEC_WORK_ITEMS = join(REPO_ROOT, 'spec', 'work-items.md');
+  const SPEC_DEP_GRAPH = join(REPO_ROOT, 'spec', 'dependency-graph.md');
+  const WORK_ORDER = join(REPO_ROOT, 'spec', 'work-orders', 'WORK-052.md');
+  const DESIGN_PACKAGE = join(
+    REPO_ROOT, 'docs', 'superpowers', 'specs', '2026-08-28-development-governance-design.md',
+  );
+  const ADR_DIR = join(REPO_ROOT, 'docs', 'adr');
+  const DG_STATE_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'development-governance', 'governance-state.integration.test.ts',
+  );
+  const DG_PARALLEL_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'development-governance', 'parallel-eligibility.integration.test.ts',
+  );
+  const DG_DETECTOR_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'architecture-governance', 'governance-manifest-detector.integration.test.ts',
+  );
+
+  function stripW52(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function listDgFiles(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const entry of readdirSync(d).sort()) {
+        const full = join(d, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) out.push(full);
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  const DG_FILES = listDgFiles(DG_DIR);
+
+  // --- (1) the repository-resident source of truth exists (W052-AC01) --------
+
+  it('the canonical machine-readable development state exists with its authority declaration (repository source of truth)', () => {
+    for (const f of [GOV_MODEL, GOV_PROGRAM, GOV_README, WORK_ORDER, DESIGN_PACKAGE]) {
+      expect(existsSync(f), `${f} must exist`).toBe(true);
+    }
+    // The artifacts parse as JSON and identify themselves.
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as { artifact?: string; schemaVersion?: number };
+    const program = JSON.parse(readFileSync(GOV_PROGRAM, 'utf8')) as {
+      artifact?: string; schemaVersion?: number; workOrders?: unknown[]; decisions?: unknown[];
+    };
+    expect(model.artifact).toBe('workflowos-development-state/governance-model');
+    expect(model.schemaVersion).toBe(1);
+    expect(program.artifact).toBe('workflowos-development-state/program-state');
+    expect(program.schemaVersion).toBe(1);
+    expect((program.workOrders ?? []).length).toBeGreaterThanOrEqual(52);
+    expect((program.decisions ?? []).length).toBeGreaterThanOrEqual(6);
+    // The spec documents carry the forward-evolution sections (append-only; v1.0 untouched).
+    const arch = readFileSync(SPEC_ARCH, 'utf8');
+    expect(arch).toMatch(/# 34\. Forward Architecture Evolution — Development Governance and Self-Hosting Control Plane/);
+    expect(arch).toMatch(/## 34\.1 Repository-Resident Development State/);
+    expect(arch).toMatch(/## 34\.7 Self-Hosting Boundary/);
+    const lock = readFileSync(SPEC_LOCK, 'utf8');
+    expect(lock).toMatch(/### Development governance and self-hosting \(WORK-052, §34\)/);
+    // The human backlog records WORK-051/WORK-052 and the dependency graph the governance plane.
+    expect(readFileSync(SPEC_WORK_ITEMS, 'utf8')).toMatch(/### WORK-052 — Development Governance & Self-Hosting Control Plane/);
+    expect(readFileSync(SPEC_DEP_GRAPH, 'utf8')).toMatch(/### Development governance and self-hosting/);
+    // The work order carries the authority-boundary mapping + the acceptance contract.
+    const wo = readFileSync(WORK_ORDER, 'utf8');
+    expect(wo).toMatch(/## Authority-boundary mapping/);
+    expect(wo).toMatch(/W052-AC01 — Repository source of truth/);
+    expect(wo).toMatch(/W052-AC10 — Decision durability/);
+  });
+
+  it('the durable decision records exist: ADRs 0001-0006 with the README authority declaration', () => {
+    expect(existsSync(join(ADR_DIR, 'README.md'))).toBe(true);
+    for (const n of [
+      'ADR-0001-repository-resident-governance-state.md',
+      'ADR-0002-assurance-depth-not-authority.md',
+      'ADR-0003-parallel-protocol-surface-declaration.md',
+      'ADR-0004-fail-closed-validation-core-prohibitions.md',
+      'ADR-0005-work-052-base-branch.md',
+      'ADR-0006-governance-manifest-detector.md',
+    ]) {
+      const adr = readFileSync(join(ADR_DIR, n), 'utf8');
+      expect(adr, `${n} must exist and carry status + context + decision + consequences`).toMatch(/^# ADR-000\d — .+/m);
+      expect(adr).toMatch(/Status: accepted/);
+      expect(adr).toMatch(/## Context/);
+      expect(adr).toMatch(/## Decision/);
+      expect(adr).toMatch(/## Consequences/);
+    }
+  });
+
+  // --- (2) NO second authority in the control plane (W052-AC08) --------------
+
+  it('the development-governance control plane issues NO SQL, touches NO database, creates NO tables', () => {
+    for (const f of DG_FILES) {
+      const src = stripW52(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no SQL`).not.toMatch(/\b(SELECT|INSERT INTO|UPDATE |DELETE FROM|CREATE TABLE)\b/);
+      expect(src, `${f}: no pg/pglite/redis drivers`).not.toMatch(/from '(pg|@electric-sql\/pglite|ioredis)'/);
+      expect(src, `${f}: no module repositories (work-item/workflow/verification/review persistence)`).not.toMatch(
+        /WorkItemRepository|WorkflowRepository|VerificationRunRepository|ReviewRepository|PgWorkItem|PgWorkflow|PgVerification|PgReview/,
+      );
+      expect(src, `${f}: no environment access`).not.toMatch(/process\.env/);
+    }
+    // No migration anywhere creates a governance-state table (ADR-0001: the
+    // canonical development state is repository-resident; the DB stays the
+    // authority for TENANT runtime state only).
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = stripW52(readFileSync(join(migrationsDir, f), 'utf8'));
+      expect(text, `${f}: no governance-state tables in the database`).not.toMatch(
+        /CREATE TABLE[^\n]*(governance|development_state|work_order_state|program_state)/i,
+      );
+    }
+  });
+
+  it('the control plane holds NO mutation ports and NO lifecycle vocabulary (query-only; the frozen module set stays 17)', () => {
+    const types = readFileSync(DG_TYPES, 'utf8');
+    expect(types).toMatch(/DevelopmentGovernanceService/);
+    // The service port is query-shaped: the only methods are reads/resolutions.
+    expect(types).toMatch(/getGoverningState\(\)/);
+    expect(types).toMatch(/listWorkOrders/);
+    expect(types).toMatch(/getFrontier\(\)/);
+    expect(types).toMatch(/evaluateParallelEligibility/);
+    expect(types).toMatch(/resolveAssurance/);
+    expect(types).toMatch(/resumeImplementation/);
+    for (const f of DG_FILES) {
+      const src = stripW52(readFileSync(f, 'utf8'));
+      // No lifecycle mutation vocabulary, no second workflow engine surface.
+      expect(src, `${f}: no WorkflowEngine / LEGAL_TRANSITIONS / transition()`).not.toMatch(
+        /WorkflowEngine|LEGAL_TRANSITIONS|transitionState\(|markCompleted\(|freezeVersion\(|recordOrchestrationRun\(/,
+      );
+    }
+    // The frozen module set is unchanged (17): development-governance is an
+    // application-layer directory, NOT a module under src/modules.
+    expect(existsSync(join(BACKEND_ROOT, 'src', 'modules', 'development-governance'))).toBe(false);
+    const moduleDirs = readdirSync(MODULES_DIR).filter((d) => statSync(join(MODULES_DIR, d)).isDirectory());
+    expect(moduleDirs.length).toBe(17);
+  });
+
+  it('the control plane validates through the ONE shared engine — no second validator (ADR-0004)', () => {
+    // The loader imports validateGovernanceState from the architecture-checkpoints barrel.
+    const loader = readFileSync(DG_LOADER, 'utf8');
+    expect(loader).toMatch(/from '\.\.\/\.\.\/architecture-checkpoints\/index\.js'/);
+    expect(loader).toMatch(/validateGovernanceState/);
+    // The service constructs ONLY from loaded state (no independent parsing).
+    const service = readFileSync(DG_SERVICE, 'utf8');
+    expect(service).toMatch(/selectAssuranceProfile/);
+    expect(service, 'the service never re-implements selection').not.toMatch(/whenAny\.some/);
+    // The detector reuses the same engine (one validator across substrate + control plane).
+    const detector = readFileSync(GM_DETECTOR, 'utf8');
+    expect(detector).toMatch(/validateGovernanceState/);
+    // The engine itself is pure: no fs/db/env — its only I/O is the injected reader.
+    const engine = stripW52(readFileSync(AC_VALIDATION, 'utf8'));
+    expect(engine).not.toMatch(/from 'node:fs/);
+    expect(engine).not.toMatch(/process\.env/);
+    expect(engine).toMatch(/GovernanceFileReader/);
+  });
+
+  // --- (3) the self-hosting boundary is code-pinned + frozen-lock-pinned ------
+
+  it('the self-hosting boundary: the code-pinned core prohibitions cannot be silently removed from the model (ADR-0004)', () => {
+    const engine = readFileSync(AC_VALIDATION, 'utf8');
+    expect(engine).toMatch(/CORE_SELF_HOSTING_PROHIBITIONS/);
+    // All eight prohibitions pinned in code (counting, not first-occurrence).
+    const pins = [...engine.matchAll(/'([a-z][^']{40,})',/g)].map((m) => m[1]!);
+    expect(pins.length).toBeGreaterThanOrEqual(8);
+    // The validation cross-checks them against the artifact.
+    expect(engine).toMatch(/core prohibition REMOVED/);
+    // And the artifact actually carries them (the live state stays valid).
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as {
+      selfHostingBoundary: { coreProhibitions: string[]; mayNot: string[] };
+    };
+    expect(model.selfHostingBoundary.coreProhibitions.length).toBe(8);
+    for (const core of model.selfHostingBoundary.coreProhibitions) {
+      expect(model.selfHostingBoundary.mayNot).toContain(core);
+    }
+  });
+
+  it('MUTATION-PROOF — the frozen v1.0 lock sections are pinned VERBATIM (a silent rewrite of the governing rules fails CI)', () => {
+    const lock = readFileSync(SPEC_LOCK, 'utf8');
+    // The canonical workflow block — the heart of frozen v1.0.
+    expect(lock).toMatch(
+      /```text\nDRAFT\n→ READY\n→ ASSIGNED\n→ IMPLEMENTING\n→ PR_OPEN\n→ VERIFYING\n```/,
+    );
+    // The frozen module ownership list — one authority per domain.
+    for (const line of [
+      '- `/architecture`: Architecture Management, ADRs, Architecture Change Requests, Architecture Versions',
+      '- `/work-items`: Work Items, Work Item Dependencies, Work Order state',
+      '- `/workflows`: workflow state machine, legal state transitions, orchestration',
+      '- `/verification`: verification, evidence, criterion evaluation',
+      '- `/reviews`: Architect Reviews, Review Findings',
+      '- `/github`: GitHub App, GitHub webhooks, Pull Requests, CI integration',
+    ]) {
+      expect(lock, `frozen v1.0 module ownership line must remain verbatim: ${line}`).toContain(line);
+    }
+    // The frozen invariants.
+    expect(lock).toMatch(/- Frozen architecture versions are immutable\./);
+    expect(lock).toMatch(/- Work items reference exactly one architecture version\./);
+    expect(lock).toMatch(/- Tenant boundaries are enforced server-side\./);
+    // The lock's status is FROZEN and v1.0 sections precede the forward-evolution
+    // additions (append-only evolution — WORK-052 content comes AFTER).
+    expect(lock.indexOf('## Status')).toBeLessThan(lock.indexOf('## Work item / Pull Request cardinality'));
+    expect(lock.indexOf('### Development governance and self-hosting (WORK-052, §34)')).toBeGreaterThan(
+      lock.indexOf('## Forward-Evolution Invariants for the Next Architecture Version'),
+    );
+  });
+
+  // --- (4) assurance profiles: depth only, dominance preserved (ADR-0002) -----
+
+  it('the assurance vocabularies are closed sets and the classification is deterministic first-match', () => {
+    const engine = readFileSync(AC_VALIDATION, 'utf8');
+    expect(engine).toMatch(/'LIGHT',\n  'STANDARD',\n  'HIGH_ASSURANCE',\n  'CRITICAL',/);
+    expect(engine).toMatch(/export const CLASSIFICATION_ORDER/);
+    expect(engine).toMatch(/'CRITICAL',\n  'HIGH_ASSURANCE',\n  'STANDARD',\n  'LIGHT',/);
+    // Selection is a pure first-match over the declared rules with a fail-closed default.
+    expect(engine).toMatch(/rule\.whenAny\.some\(\(f\) => surfaces\.includes\(f\)\)/);
+    expect(engine).toMatch(/return model\.assuranceProfiles\.selection\.unclassifiedDefault;/);
+    // The model's declared requirements cannot fall below the code-pinned minimums.
+    expect(engine).toMatch(/CODE_PINNED_PROFILE_MINIMUMS/);
+    expect(engine).toMatch(/the code-pinned minimum was weakened/);
+    // Dominance over the LIVE impact matrix is checked inside the engine.
+    expect(engine).toMatch(/IMPACT_CHECKPOINT_MATRIX/);
+    expect(engine).toMatch(/dominance, ADR-0002/);
+  });
+
+  it('the live governance model dominates the WORK-051 impact matrix (assurance adds depth, never subtracts)', () => {
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as {
+      assuranceProfiles: {
+        requirements: Record<string, { checkpointKinds: string[]; proofClasses: string[]; architectReviewRecord: boolean; impactCoverage: string[] }>;
+      };
+    };
+    // The pinned impact matrix (mirrored from IMPACT_CHECKPOINT_MATRIX, which
+    // the WORK-051 describe pins in code — this test pins the SAME data as the
+    // dominance reference).
+    const matrix: Record<string, readonly string[]> = {
+      readiness: ['high'],
+      work_order: ['medium', 'high'],
+      pr_conformance: ['low', 'medium', 'high'],
+      verification_entry: ['high'],
+    };
+    for (const [profile, req] of Object.entries(model.assuranceProfiles.requirements)) {
+      for (const level of req.impactCoverage) {
+        for (const [kind, levels] of Object.entries(matrix)) {
+          if (levels.includes(level)) {
+            expect(
+              req.checkpointKinds,
+              `profile ${profile} covers impact ${level}; kind ${kind} applies there and MUST be required`,
+            ).toContain(kind);
+          }
+        }
+      }
+    }
+    // CRITICAL additionally demands the architect review record.
+    expect(model.assuranceProfiles.requirements['CRITICAL']!.architectReviewRecord).toBe(true);
+    // Profiles change DEPTH: the four requirement sets are strictly distinct.
+    const sigs = Object.entries(model.assuranceProfiles.requirements).map(
+      ([p, r]) => `${p}:${[...r.checkpointKinds].sort().join('+')}|${[...r.proofClasses].sort().join('+')}|${(r as { evidence?: string[] }).evidence?.length ?? 0}`,
+    );
+    expect(new Set(sigs).size).toBe(4);
+  });
+
+  // --- (5) the governance-manifest detector extends the closed registry ------
+
+  it('the governance-manifest detector reads ONLY the revision-bound snapshot and fails closed', () => {
+    const detector = readFileSync(GM_DETECTOR, 'utf8');
+    expect(detector).toMatch(/readonly detectorKind = 'governance-manifest'/);
+    // No filesystem access — the snapshot is the only source (BLOCKER 1 pattern).
+    expect(detector).not.toMatch(/from 'node:fs/);
+    expect(detector).toMatch(/input\.snapshot/);
+    // Fail-closed mapping: missing manifest fails a governed repository; a read
+    // failure is inconclusive; violations fail.
+    expect(detector).toMatch(/requirePresent/);
+    expect(detector).toMatch(/status: 'inconclusive'/);
+    expect(detector).toMatch(/status: 'fail'/);
+    // The default paths point at the canonical artifacts.
+    expect(detector).toMatch(/spec\/development-state\/governance-model\.json/);
+    expect(detector).toMatch(/spec\/development-state\/program-state\.json/);
+  });
+
+  // --- (6) the parallel protocol + resumption are query-only over the state ---
+
+  it('the parallel protocol is deterministic surface-intersection conflict detection (ADR-0003)', () => {
+    const service = stripW52(readFileSync(DG_SERVICE, 'utf8'));
+    expect(service).toMatch(/sharedSurfacesBetween/);
+    expect(service).toMatch(/mutuallyCoordinated/);
+    // Migration reservations participate in conflict detection (the 0052-0057 lesson).
+    expect(service).toMatch(/reservedMigrations/);
+    // Spec-doc containment: a declared directory owns what is beneath it.
+    expect(service).toMatch(/specDocsConflict/);
+    // The frontier rule: eligible only when every dependency is complete.
+    expect(service).toMatch(/incompleteDependencies/);
+  });
+
+  it('the CLI answers the control questions through the service (no independent state access)', () => {
+    const cli = readFileSync(DG_CLI, 'utf8');
+    expect(cli).toMatch(/DefaultDevelopmentGovernanceService\.create/);
+    expect(cli).toMatch(/getGoverningState\(\)/);
+    expect(cli).toMatch(/getFrontier\(\)/);
+    expect(cli).toMatch(/evaluateParallelEligibility\(\)/);
+    expect(cli).toMatch(/resumeImplementation/);
+    expect(cli).not.toMatch(/readFileSync|readdirSync/);
+  });
+
+  // --- (6b) the explicit merge-vs-checkpoint completion rule (PR #62 round 1) --
+
+  it('the merge-vs-checkpoint completion rule is explicit, code-pinned, and enforced (PR #62 round 1, BLOCKER 3)', () => {
+    // The code-pinned rule exists in the shared engine.
+    const engine = readFileSync(AC_VALIDATION, 'utf8');
+    expect(engine).toMatch(/CODE_PINNED_COMPLETION_RULE/);
+    expect(engine).toMatch(/completionEvent: 'architect-merge'/);
+    // The enforcement: in_flight + mergedAs is rejected; outcomes on unstarted items are rejected.
+    expect(engine).toMatch(/MUST NOT carry merge evidence/);
+    expect(engine).toMatch(/claims about a STARTED implementation/);
+    // The mutuality + coverage enforcement (BLOCKER 1).
+    expect(engine).toMatch(/ONE-SIDED/);
+    expect(engine).toMatch(/is NOT covered by the coordination record/);
+    // The model artifact carries the explicit rule and the mutuality protocol rule.
+    const model = JSON.parse(readFileSync(GOV_MODEL, 'utf8')) as {
+      completionRule: { completionEvent: string; rule: string; checkpointOutcomesAre: string; outcomesAllowedOn: string[] };
+      parallelProtocol: { rules: string[] };
+    };
+    expect(model.completionRule.completionEvent).toBe('architect-merge');
+    expect(model.completionRule.rule).toMatch(/mergedAs/);
+    expect(model.completionRule.checkpointOutcomesAre).toMatch(/claim/i);
+    expect(model.completionRule.outcomesAllowedOn).toEqual(['in_flight', 'complete']);
+    expect(
+      model.parallelProtocol.rules.some((r) => /MUTUAL|both records/i.test(r)),
+      'the protocol declares the mutuality rule',
+    ).toBe(true);
+    // The frontier computes the coordination FACT (BLOCKER 2), never the mere
+    // presence of a record: the truthful computation is pinned in the service.
+    const service = stripW52(readFileSync(DG_SERVICE, 'utf8'));
+    expect(service).toMatch(/const coordinated = conflicts\.every\(\(c\) => c\.coordinated\) && depsCoordinated;/);
+    expect(service).not.toMatch(/coordinated: incomplete\.length === 0 \|\| Boolean\(w\.coordination\)/);
+  });
+
+  // --- (7) mandatory regression coverage (the executable proof contract) ------
+
+  it('the WORK-052 integration suites carry the mandated regression markers', () => {
+    expect(existsSync(DG_STATE_TESTS)).toBe(true);
+    expect(existsSync(DG_PARALLEL_TESTS)).toBe(true);
+    expect(existsSync(DG_DETECTOR_TESTS)).toBe(true);
+    const state = readFileSync(DG_STATE_TESTS, 'utf8');
+    expect(state).toMatch(/WORK-052 — repository source of truth \(fresh-checkout reconstruction \+ fail-closed validation\)/);
+    expect(state).toMatch(/W052-AC01 — a fresh checkout reconstructs the architecture program/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: a weakened self-hosting boundary \(removed core prohibition\) is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: a cyclic dependency DAG is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: a completion without merge evidence is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: a weakened CRITICAL assurance matrix is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: an enforcement reference to a missing file is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION: schema drift \(unknown field\) is REJECTED/);
+    // PR #62 round-1 findings — the architect's three blockers.
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 1\): ONE-SIDED coordination is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 1\): a coordination record that does NOT cover the incomplete dependencies is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 1\): coordination referencing an UNSTARTED work order is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): an in_flight work order carrying MERGE EVIDENCE is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): checkpoint outcomes on an UNSTARTED \(pending\) work order are REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): a WEAKENED completion rule \(checkpoint outcomes completing work\) is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — DISCRIMINATION \(PR #62 round 1, BLOCKER 3\): a MISSING completion rule is REJECTED/);
+    expect(state).toMatch(/W052-AC02 — the merge-vs-checkpoint rule is POSITIVE: all outcomes evidenced but NOT merged stays in_flight/);
+    expect(state).toMatch(/W052-AC07 — crash\/restart\/resume: a fresh control-plane instance reconstructs the resumption view/);
+    expect(state).toMatch(/W052-AC07 — resuming a work order with no handoff record fails closed/);
+    const parallel = readFileSync(DG_PARALLEL_TESTS, 'utf8');
+    expect(parallel).toMatch(/WORK-052 — parallel eligibility, conflicts, and assurance selection/);
+    expect(parallel).toMatch(/W052-AC03 — two genuinely independent Work Items are recognized as concurrently executable/);
+    expect(parallel).toMatch(/W052-AC03 — a Work Item with an unsatisfied dependency is REJECTED from parallel execution/);
+    expect(parallel).toMatch(/W052-AC03 — shared migration surfaces are detected as a conflict/);
+    expect(parallel).toMatch(/W052-AC04 — simple → LIGHT, ordinary → STANDARD, complex → HIGH_ASSURANCE, critical → CRITICAL/);
+    expect(parallel).toMatch(/W052-AC04 — the selected profile deterministically alters checkpoint\/evidence requirements/);
+    expect(parallel).toMatch(/W052-AC04 — profile requirements DOMINATE the WORK-051 impact\/checkpoint matrix/);
+    expect(parallel).toMatch(/W052-AC04 — unknown\/unclassified surfaces fail closed to the HIGH_ASSURANCE floor/);
+    expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination/);
+    expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — a MUTUALLY declared coordination flips the frontier flags to true/);
+    expect(parallel).toMatch(/W052-AC03 \/ PR #62 round 1 BLOCKER 2 — the frontier dependency-coordination flag is truthful/);
+    const detectorTests = readFileSync(DG_DETECTOR_TESTS, 'utf8');
+    expect(detectorTests).toMatch(/WORK-052 — the governance-manifest detector \(self-hosting boundary at the checkpoint substrate\)/);
+    expect(detectorTests).toMatch(/W052-AC09 — a valid governance manifest at the bound revision PASSES with durable \/verification evidence/);
+    expect(detectorTests).toMatch(/W052-AC09 — DISCRIMINATION: a WEAKENED boundary at the bound revision FAILS the checkpoint/);
+    expect(detectorTests).toMatch(/W052-AC09 — a MISSING manifest at the bound revision fails closed/);
+    expect(detectorTests).toMatch(/W052-AC09 — requirePresent=false: a repository without governance state is not_applicable/);
+    expect(detectorTests).toMatch(/W052-AC09 — snapshot isolation: the detector reads only the bound project snapshot/);
   });
 });

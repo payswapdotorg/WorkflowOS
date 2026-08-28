@@ -122,3 +122,29 @@ The following rules are accepted development direction for future architecture v
 - Comparative trials must use the same architecture, requirements, acceptance criteria, Work Order, implementation context, prompt digest, repository baseline, and verification requirements.
 - Benchmark systems must not suppress a better-performing provider to make another provider appear equivalent.
 - Results must expose the underlying measurements as well as any derived score.
+
+### Development governance and self-hosting (WORK-052, §34)
+
+- The repository, not any chat conversation, is the durable source of truth for the
+  architecture program: the canonical machine-readable development state lives in
+  `spec/development-state/` (`governance-model.json` + `program-state.json`).
+- WorkflowOS may govern planning, execution, verification, review, and maintenance of
+  its own implementation.
+- WorkflowOS may not silently rewrite its governing architecture, its architecture
+  authority, or its foundational rules; governing-architecture changes continue through
+  the architecture-change/versioning authority (Work Order + new immutable version).
+- No self-hosted worker merges its own governing PR; PR review by the architect remains
+  the only merge gate.
+- The development-governance control plane is an application-layer capability: it holds
+  no mutation ports over architecture, work-items, workflows, verification, or reviews;
+  it issues no SQL; it creates no database tables; the frozen module set stays closed.
+- Assurance profiles (`LIGHT`, `STANDARD`, `HIGH_ASSURANCE`, `CRITICAL`) change required
+  assurance depth only — never authority semantics — and their requirements always
+  dominate the impact/checkpoint matrix (assurance only adds depth).
+- The parallel implementation protocol is repository-native: one Work Item per
+  branch/PR, dependency-eligible starts, declared change surfaces with conflict
+  detection, scope integrity, centralized architecture decisions, architect PR review
+  as the merge gate.
+- Governance state validation is fail-closed, including against code-pinned core
+  prohibitions; a repository whose development state violates an invariant is not a
+  valid governed state.

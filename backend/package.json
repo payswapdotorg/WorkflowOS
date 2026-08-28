@@ -15,7 +15,8 @@
     "arch:check": "vitest run tests/architecture",
     "start:api": "tsx src/index.ts --role=api",
     "start:worker": "tsx src/index.ts --role=worker",
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "governance:status": "tsx src/development-governance/cli.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.5",

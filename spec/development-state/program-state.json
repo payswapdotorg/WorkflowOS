@@ -1,0 +1,1414 @@
+{
+  "$schema": "https://github.com/pectoraux/WorkflowOS/blob/main/spec/development-state/README.md",
+  "schemaVersion": 1,
+  "artifact": "workflowos-development-state/program-state",
+  "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
+  "asOf": "2026-08-28",
+  "governing": {
+    "architectureVersion": "v1.0",
+    "architectureVersionState": "frozen",
+    "evolution": "append-only forward-evolution sections: §33 (project lifecycle and execution fabric, WORK-024..045) + §34 (development governance and self-hosting, WORK-052). Frozen v1.0 sections are never rewritten; governing changes require the architecture-change/versioning authority.",
+    "governingDocuments": [
+      "spec/architecture-lock.md",
+      "spec/architecture.md",
+      "spec/requirements.md",
+      "spec/work-items.md",
+      "spec/dependency-graph.md"
+    ],
+    "activeDesignPackage": "docs/superpowers/specs/2026-08-28-development-governance-design.md",
+    "authorityOwners": [
+      {
+        "authority": "/architecture",
+        "owns": "Architecture, ArchitectureVersion, assertions, per-project ADRs, Architecture Change Requests"
+      },
+      {
+        "authority": "/work-items",
+        "owns": "Work Items, dependencies, Work Order state, implementation contexts"
+      },
+      {
+        "authority": "/workflows",
+        "owns": "workflow state machine, legal transitions, orchestration, PR-intent ledger"
+      },
+      {
+        "authority": "/verification",
+        "owns": "verification runs, evidence, criterion evaluation"
+      },
+      {
+        "authority": "/reviews",
+        "owns": "architect review records and findings"
+      },
+      {
+        "authority": "/github",
+        "owns": "GitHub integration, PRs, CI ingestion"
+      },
+      {
+        "authority": "spec/development-state/",
+        "owns": "the repository-resident development-governance state (this artifact family)"
+      },
+      {
+        "authority": "docs/adr/",
+        "owns": "repository-resident ADRs for WorkflowOS's own architecture"
+      }
+    ]
+  },
+  "workOrders": [
+    {
+      "id": "WORK-001",
+      "title": "Platform and modular-monolith foundation",
+      "status": "complete",
+      "dependencies": [],
+      "mergedAs": {
+        "pr": 2,
+        "mergeCommit": "bc655621d1"
+      },
+      "surfaces": {
+        "modules": [
+          "platform"
+        ]
+      }
+    },
+    {
+      "id": "WORK-002",
+      "title": "Identity, organizations, permissions, tenant isolation",
+      "status": "complete",
+      "dependencies": [
+        "WORK-001",
+        "WORK-003"
+      ],
+      "mergedAs": {
+        "pr": 4,
+        "mergeCommit": "0f9673b586"
+      },
+      "surfaces": {
+        "modules": [
+          "auth",
+          "users",
+          "organizations",
+          "projects"
+        ]
+      },
+      "note": "the AUTH-003 requirement-level dependency on PROJ-001 was satisfied by the platform substrate; WORK-002 merged before WORK-004"
+    },
+    {
+      "id": "WORK-003",
+      "title": "PostgreSQL, Redis, object storage",
+      "status": "complete",
+      "dependencies": [
+        "WORK-001"
+      ],
+      "mergedAs": {
+        "pr": 3,
+        "mergeCommit": "441bbddcbd"
+      },
+      "surfaces": {
+        "modules": [
+          "platform"
+        ]
+      }
+    },
+    {
+      "id": "WORK-004",
+      "title": "Project and specification domains",
+      "status": "complete",
+      "dependencies": [
+        "WORK-002",
+        "WORK-003"
+      ],
+      "mergedAs": {
+        "pr": 5,
+        "mergeCommit": "6c8e1a31b2"
+      },
+      "surfaces": {
+        "modules": [
+          "projects",
+          "specifications"
+        ]
+      }
+    },
+    {
+      "id": "WORK-005",
+      "title": "Architecture management and change control",
+      "status": "complete",
+      "dependencies": [
+        "WORK-004"
+      ],
+      "mergedAs": {
+        "pr": 6,
+        "mergeCommit": "4b40327504"
+      },
+      "surfaces": {
+        "modules": [
+          "architecture"
+        ]
+      }
+    },
+    {
+      "id": "WORK-006",
+      "title": "Requirements and acceptance criteria",
+      "status": "complete",
+      "dependencies": [
+        "WORK-005",
+        "WORK-003"
+      ],
+      "mergedAs": {
+        "pr": 7,
+        "mergeCommit": "c07371941e"
+      },
+      "surfaces": {
+        "modules": [
+          "requirements"
+        ]
+      }
+    },
+    {
+      "id": "WORK-007",
+      "title": "Work items, dependencies, Work Order state",
+      "status": "complete",
+      "dependencies": [
+        "WORK-005",
+        "WORK-006"
+      ],
+      "mergedAs": {
+        "pr": 8,
+        "mergeCommit": "4a78caf5b1"
+      },
+      "surfaces": {
+        "modules": [
+          "work-items"
+        ]
+      }
+    },
+    {
+      "id": "WORK-008",
+      "title": "GitHub App and repository integration",
+      "status": "complete",
+      "dependencies": [
+        "WORK-002",
+        "WORK-004",
+        "WORK-003"
+      ],
+      "mergedAs": {
+        "pr": 9,
+        "mergeCommit": "ad557afb97"
+      },
+      "surfaces": {
+        "modules": [
+          "github"
+        ]
+      }
+    },
+    {
+      "id": "WORK-009",
+      "title": "GitHub webhook ingestion and idempotency",
+      "status": "complete",
+      "dependencies": [
+        "WORK-008",
+        "WORK-003",
+        "WORK-002"
+      ],
+      "mergedAs": {
+        "pr": 9,
+        "mergeCommit": "ad557afb97"
+      },
+      "surfaces": {
+        "modules": [
+          "github"
+        ]
+      },
+      "note": "bundled with WORK-008 in PR #9"
+    },
+    {
+      "id": "WORK-010",
+      "title": "Pull-request association and active-PR lifecycle",
+      "status": "complete",
+      "dependencies": [
+        "WORK-007",
+        "WORK-008"
+      ],
+      "mergedAs": {
+        "pr": 10,
+        "mergeCommit": "ede6a5b993"
+      },
+      "surfaces": {
+        "modules": [
+          "work-items"
+        ]
+      },
+      "note": "bundled with WORK-011 in PR #10"
+    },
+    {
+      "id": "WORK-011",
+      "title": "Canonical workflow state machine",
+      "status": "complete",
+      "dependencies": [
+        "WORK-007",
+        "WORK-010"
+      ],
+      "mergedAs": {
+        "pr": 10,
+        "mergeCommit": "ede6a5b993"
+      },
+      "surfaces": {
+        "modules": [
+          "workflows"
+        ]
+      }
+    },
+    {
+      "id": "WORK-012",
+      "title": "Agent Gateway and Agent Runs",
+      "status": "complete",
+      "dependencies": [
+        "WORK-003",
+        "WORK-002"
+      ],
+      "mergedAs": {
+        "pr": 12,
+        "mergeCommit": "33f1a58fae"
+      },
+      "surfaces": {
+        "modules": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-013",
+      "title": "LLM Gateway",
+      "status": "complete",
+      "dependencies": [
+        "WORK-003",
+        "WORK-002"
+      ],
+      "mergedAs": {
+        "pr": 11,
+        "mergeCommit": "fc9b97e808"
+      },
+      "surfaces": {
+        "modules": [
+          "llm"
+        ]
+      }
+    },
+    {
+      "id": "WORK-014",
+      "title": "Work-order generation and architect execution",
+      "status": "complete",
+      "dependencies": [
+        "WORK-006",
+        "WORK-007",
+        "WORK-013",
+        "WORK-008"
+      ],
+      "mergedAs": {
+        "pr": 13,
+        "mergeCommit": "d4fa8f45c8"
+      },
+      "surfaces": {
+        "modules": [
+          "llm"
+        ]
+      }
+    },
+    {
+      "id": "WORK-015",
+      "title": "CI ingestion and verification engine",
+      "status": "complete",
+      "dependencies": [
+        "WORK-006",
+        "WORK-008",
+        "WORK-003"
+      ],
+      "mergedAs": {
+        "pr": 14,
+        "mergeCommit": "1cbfe8c524"
+      },
+      "surfaces": {
+        "modules": [
+          "verification",
+          "github"
+        ]
+      }
+    },
+    {
+      "id": "WORK-016",
+      "title": "Architect reviews and findings",
+      "status": "complete",
+      "dependencies": [
+        "WORK-014",
+        "WORK-015",
+        "WORK-010"
+      ],
+      "mergedAs": {
+        "pr": 15,
+        "mergeCommit": "c24dcb231a"
+      },
+      "surfaces": {
+        "modules": [
+          "reviews"
+        ]
+      }
+    },
+    {
+      "id": "WORK-017",
+      "title": "Workflow orchestration through implementation",
+      "status": "complete",
+      "dependencies": [
+        "WORK-011",
+        "WORK-012",
+        "WORK-014"
+      ],
+      "mergedAs": {
+        "pr": 16,
+        "mergeCommit": "004490ca82"
+      },
+      "surfaces": {
+        "modules": [
+          "workflows"
+        ]
+      }
+    },
+    {
+      "id": "WORK-018",
+      "title": "Verification and architect-review orchestration",
+      "status": "complete",
+      "dependencies": [
+        "WORK-015",
+        "WORK-016",
+        "WORK-017"
+      ],
+      "mergedAs": {
+        "pr": 17,
+        "mergeCommit": "ced0867ae4"
+      },
+      "surfaces": {
+        "modules": [
+          "workflows",
+          "verification",
+          "reviews"
+        ]
+      }
+    },
+    {
+      "id": "WORK-019",
+      "title": "Merge gating and workflow advancement",
+      "status": "complete",
+      "dependencies": [
+        "WORK-018",
+        "WORK-010",
+        "WORK-002"
+      ],
+      "mergedAs": {
+        "pr": 18,
+        "mergeCommit": "b5514b69eb"
+      },
+      "surfaces": {
+        "modules": [
+          "workflows",
+          "github"
+        ]
+      }
+    },
+    {
+      "id": "WORK-020",
+      "title": "Audit and privileged-event trail",
+      "status": "complete",
+      "dependencies": [
+        "WORK-004",
+        "WORK-005",
+        "WORK-007",
+        "WORK-011",
+        "WORK-016",
+        "WORK-019"
+      ],
+      "mergedAs": {
+        "pr": 19,
+        "mergeCommit": "71fb390c4d"
+      },
+      "surfaces": {
+        "modules": [
+          "audit"
+        ]
+      }
+    },
+    {
+      "id": "WORK-021",
+      "title": "Notification boundary",
+      "status": "complete",
+      "dependencies": [
+        "WORK-020",
+        "WORK-004"
+      ],
+      "mergedAs": {
+        "pr": 20,
+        "mergeCommit": "ffce8fba1e"
+      },
+      "surfaces": {
+        "modules": [
+          "notifications"
+        ]
+      }
+    },
+    {
+      "id": "WORK-022",
+      "title": "WorkflowOS web application",
+      "status": "complete",
+      "dependencies": [
+        "WORK-002",
+        "WORK-004",
+        "WORK-005",
+        "WORK-006",
+        "WORK-007",
+        "WORK-019",
+        "WORK-020"
+      ],
+      "mergedAs": {
+        "pr": 21,
+        "mergeCommit": "d24b794cbd"
+      },
+      "surfaces": {
+        "modules": [
+          "frontend"
+        ]
+      }
+    },
+    {
+      "id": "WORK-023",
+      "title": "Deployable runtime",
+      "status": "complete",
+      "dependencies": [
+        "WORK-001",
+        "WORK-003",
+        "WORK-020"
+      ],
+      "mergedAs": {
+        "pr": 22,
+        "mergeCommit": "ec633d2bde"
+      },
+      "surfaces": {
+        "modules": [
+          "runtime"
+        ]
+      }
+    },
+    {
+      "id": "WORK-024",
+      "title": "End-to-end WorkflowOS development lifecycle",
+      "status": "complete",
+      "dependencies": [
+        "WORK-019",
+        "WORK-020",
+        "WORK-022",
+        "WORK-023"
+      ],
+      "mergedAs": {
+        "pr": 23,
+        "mergeCommit": "9c8f73109f"
+      },
+      "surfaces": {
+        "modules": [
+          "e2e-cross-cutting"
+        ]
+      }
+    },
+    {
+      "id": "WORK-025",
+      "title": "Autonomous Architecture Workspace",
+      "status": "complete",
+      "dependencies": [
+        "WORK-014",
+        "WORK-022",
+        "WORK-024"
+      ],
+      "mergedAs": {
+        "pr": 28,
+        "mergeCommit": "7cb39da31d"
+      },
+      "surfaces": {
+        "modules": [
+          "architecture",
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-026",
+      "title": "Autonomous Runtime, GitHub/Vercel Integration, Implementation Context",
+      "status": "complete",
+      "dependencies": [
+        "WORK-025",
+        "WORK-008",
+        "WORK-012",
+        "WORK-023"
+      ],
+      "mergedAs": {
+        "pr": 29,
+        "mergeCommit": "b85f4afd39"
+      },
+      "surfaces": {
+        "modules": [
+          "runtime",
+          "projects",
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-027",
+      "title": "Execution Provider Abstraction",
+      "status": "complete",
+      "dependencies": [
+        "WORK-026"
+      ],
+      "mergedAs": {
+        "pr": 30,
+        "mergeCommit": "53d4f00376"
+      },
+      "surfaces": {
+        "modules": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-028",
+      "title": "WorkflowOS Companion Extension",
+      "status": "complete",
+      "dependencies": [
+        "WORK-027"
+      ],
+      "mergedAs": {
+        "pr": 31,
+        "mergeCommit": "b1f22f2ad6"
+      },
+      "surfaces": {
+        "modules": [
+          "extension"
+        ]
+      }
+    },
+    {
+      "id": "WORK-029",
+      "title": "Z.ai Companion Adapter",
+      "status": "complete",
+      "dependencies": [
+        "WORK-028"
+      ],
+      "mergedAs": {
+        "pr": 32,
+        "mergeCommit": "e8e478dd0b"
+      },
+      "surfaces": {
+        "modules": [
+          "extension"
+        ]
+      }
+    },
+    {
+      "id": "WORK-030",
+      "title": "ChatGPT/Codex Companion Adapter",
+      "status": "complete",
+      "dependencies": [
+        "WORK-029"
+      ],
+      "mergedAs": {
+        "pr": 33,
+        "mergeCommit": "b8e36ecc28"
+      },
+      "surfaces": {
+        "modules": [
+          "extension"
+        ]
+      }
+    },
+    {
+      "id": "WORK-031",
+      "title": "Claude Code Companion Adapter",
+      "status": "complete",
+      "dependencies": [
+        "WORK-030"
+      ],
+      "mergedAs": {
+        "pr": 34,
+        "mergeCommit": "ebf3b19fd0"
+      },
+      "surfaces": {
+        "modules": [
+          "extension"
+        ]
+      }
+    },
+    {
+      "id": "WORK-032",
+      "title": "Native vs External Execution Benchmark",
+      "status": "complete",
+      "dependencies": [
+        "WORK-031"
+      ],
+      "mergedAs": {
+        "pr": 36,
+        "mergeCommit": "7a694bba43"
+      },
+      "surfaces": {
+        "modules": [
+          "benchmark"
+        ]
+      }
+    },
+    {
+      "id": "WORK-033",
+      "title": "Execution Policy and Fair Benchmarking",
+      "status": "complete",
+      "dependencies": [
+        "WORK-032"
+      ],
+      "mergedAs": {
+        "pr": 37,
+        "mergeCommit": "1bef6fd302"
+      },
+      "surfaces": {
+        "modules": [
+          "execution-policy",
+          "benchmark"
+        ]
+      }
+    },
+    {
+      "id": "WORK-034",
+      "title": "Persistent Agent Sessions",
+      "status": "complete",
+      "dependencies": [
+        "WORK-033",
+        "WORK-027"
+      ],
+      "mergedAs": {
+        "pr": 38,
+        "mergeCommit": "4ebe8a3daa"
+      },
+      "surfaces": {
+        "modules": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-035",
+      "title": "Agent Workspace and Git Worktrees",
+      "status": "complete",
+      "dependencies": [
+        "WORK-034",
+        "WORK-008"
+      ],
+      "mergedAs": {
+        "pr": 39,
+        "mergeCommit": "382101c710"
+      },
+      "surfaces": {
+        "modules": [
+          "platform",
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-036",
+      "title": "Tool Runtime",
+      "status": "complete",
+      "dependencies": [
+        "WORK-035"
+      ],
+      "mergedAs": {
+        "pr": 40,
+        "mergeCommit": "a21604976e"
+      },
+      "surfaces": {
+        "modules": [
+          "platform",
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-037",
+      "title": "Agent Policy and Permissions",
+      "status": "complete",
+      "dependencies": [
+        "WORK-036",
+        "WORK-002"
+      ],
+      "mergedAs": {
+        "pr": 41,
+        "mergeCommit": "43066098fe"
+      },
+      "surfaces": {
+        "modules": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-038",
+      "title": "Existing Project Onboarding",
+      "status": "complete",
+      "dependencies": [
+        "WORK-035",
+        "WORK-036",
+        "WORK-037",
+        "WORK-008"
+      ],
+      "mergedAs": {
+        "pr": 42,
+        "mergeCommit": "0cde4d633f"
+      },
+      "surfaces": {
+        "modules": [
+          "onboarding",
+          "projects"
+        ]
+      }
+    },
+    {
+      "id": "WORK-039",
+      "title": "Repository and Context Intelligence",
+      "status": "complete",
+      "dependencies": [
+        "WORK-038",
+        "WORK-034"
+      ],
+      "mergedAs": {
+        "pr": 43,
+        "mergeCommit": "80aedb9790"
+      },
+      "surfaces": {
+        "modules": [
+          "repository-intelligence"
+        ]
+      }
+    },
+    {
+      "id": "WORK-040",
+      "title": "Continuous Development Planner",
+      "status": "complete",
+      "dependencies": [
+        "WORK-039",
+        "WORK-032"
+      ],
+      "mergedAs": {
+        "pr": 44,
+        "mergeCommit": "f9629e1863"
+      },
+      "surfaces": {
+        "modules": [
+          "development-planner"
+        ]
+      }
+    },
+    {
+      "id": "WORK-041",
+      "title": "Maintenance and Project Health Engine",
+      "status": "complete",
+      "dependencies": [
+        "WORK-039",
+        "WORK-040"
+      ],
+      "mergedAs": {
+        "pr": 45,
+        "mergeCommit": "ba03ee6d1e"
+      },
+      "surfaces": {
+        "modules": [
+          "maintenance"
+        ]
+      }
+    },
+    {
+      "id": "WORK-042",
+      "title": "Cross-Mode Execution Handoff",
+      "status": "complete",
+      "dependencies": [
+        "WORK-034",
+        "WORK-027"
+      ],
+      "mergedAs": {
+        "pr": 47,
+        "mergeCommit": "0003e0b478"
+      },
+      "surfaces": {
+        "modules": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "id": "WORK-043",
+      "title": "Execution Eligibility and Constraint Engine",
+      "status": "complete",
+      "dependencies": [
+        "WORK-033",
+        "WORK-037",
+        "WORK-042"
+      ],
+      "mergedAs": {
+        "pr": 48,
+        "mergeCommit": "57db0413b6"
+      },
+      "surfaces": {
+        "modules": [
+          "execution-policy"
+        ]
+      }
+    },
+    {
+      "id": "WORK-044",
+      "title": "Adaptive Execution Router",
+      "status": "complete",
+      "dependencies": [
+        "WORK-032",
+        "WORK-033",
+        "WORK-043"
+      ],
+      "mergedAs": {
+        "pr": 53,
+        "mergeCommit": "26a4e4769b"
+      },
+      "surfaces": {
+        "modules": [
+          "execution-routing"
+        ]
+      }
+    },
+    {
+      "id": "WORK-045",
+      "title": "Agent Roles",
+      "status": "complete",
+      "dependencies": [
+        "WORK-034",
+        "WORK-036",
+        "WORK-044"
+      ],
+      "mergedAs": {
+        "pr": 59,
+        "mergeCommit": "5c7d5bb34a"
+      },
+      "surfaces": {
+        "modules": [
+          "agent-roles"
+        ]
+      }
+    },
+    {
+      "id": "WORK-046",
+      "title": "Multi-Agent Delegation (coordination, not authority)",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-045",
+        "WORK-035",
+        "WORK-037"
+      ],
+      "branch": "feat/work-046-multi-agent-delegation",
+      "pr": 60,
+      "head": "f88cac4",
+      "issue": 60,
+      "workOrder": "spec/work-orders/WORK-046.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "agents"
+        ],
+        "appLayer": [
+          "delegation"
+        ],
+        "migrations": [
+          "0057"
+        ],
+        "specDocs": [
+          "spec/work-orders/WORK-046.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/src/api/index.ts",
+          "backend/src/api/server.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/tests/helpers/test-database.ts"
+        ]
+      },
+      "surfaceFlags": [
+        "schema",
+        "publicContracts",
+        "moduleInternals"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "coordination": {
+        "with": [
+          "WORK-051",
+          "WORK-052"
+        ],
+        "reason": "shares the static-architecture suite and composition-root surfaces with the (now merged) WORK-051 — coordinated by reserved migration numbering (0052-0056 WORK-051, 0057 WORK-046); ALSO shares the static-architecture suite with the in-flight WORK-052 (both append describe blocks to the same file) — merge order is serialized by the architect: whichever PR merges second rebases its describe-block additions",
+        "adrs": []
+      },
+      "note": "implementation complete at head f88cac4; all 7 CI workflows green; awaiting architect review of PR #60. WORK-051 (the other shared-surface partner) has since MERGED as f2c996c — the coordination record is durable history for that side and MUTUAL coordination with the in-flight WORK-052."
+    },
+    {
+      "id": "WORK-047",
+      "title": "Agent Intelligence",
+      "status": "blocked",
+      "dependencies": [
+        "WORK-032",
+        "WORK-044",
+        "WORK-046"
+      ],
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "repository-intelligence",
+          "execution-routing"
+        ],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [],
+        "sharedIntegrationSurfaces": []
+      },
+      "surfaceFlags": [
+        "publicContracts",
+        "moduleInternals"
+      ],
+      "assuranceProfile": "HIGH_ASSURANCE",
+      "note": "blocked pending WORK-046 completion; explicitly out of WORK-052 scope (Issue #61)"
+    },
+    {
+      "id": "WORK-048",
+      "title": "Developer Workbench",
+      "status": "pending",
+      "dependencies": [
+        "WORK-040",
+        "WORK-041",
+        "WORK-042",
+        "WORK-044"
+      ],
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "frontend"
+        ],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [],
+        "sharedIntegrationSurfaces": []
+      },
+      "surfaceFlags": [
+        "moduleInternals",
+        "multiModule"
+      ],
+      "assuranceProfile": "STANDARD",
+      "note": "dependency-eligible (all dependencies complete); awaiting architect authorization via Work Order"
+    },
+    {
+      "id": "WORK-049",
+      "title": "Project Health and Maintenance UX",
+      "status": "blocked",
+      "dependencies": [
+        "WORK-041",
+        "WORK-048"
+      ],
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "frontend"
+        ],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [],
+        "sharedIntegrationSurfaces": []
+      },
+      "surfaceFlags": [
+        "moduleInternals"
+      ],
+      "assuranceProfile": "STANDARD",
+      "note": "blocked pending WORK-048"
+    },
+    {
+      "id": "WORK-050",
+      "title": "Unified Execution UX",
+      "status": "blocked",
+      "dependencies": [
+        "WORK-042",
+        "WORK-043",
+        "WORK-048"
+      ],
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "frontend"
+        ],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [],
+        "sharedIntegrationSurfaces": []
+      },
+      "surfaceFlags": [
+        "moduleInternals",
+        "multiModule"
+      ],
+      "assuranceProfile": "STANDARD",
+      "note": "blocked pending WORK-048"
+    },
+    {
+      "id": "WORK-051",
+      "title": "Architecture Governance and Checkpoints",
+      "status": "complete",
+      "dependencies": [
+        "WORK-005",
+        "WORK-008",
+        "WORK-015",
+        "WORK-017",
+        "WORK-018",
+        "WORK-019",
+        "WORK-044"
+      ],
+      "branch": "feat/work-051-architecture-governance-checkpoints",
+      "pr": 52,
+      "head": "a25eeef",
+      "issue": 51,
+      "workOrder": "docs/superpowers/specs/2026-08-27-architecture-governance-checkpoints-design.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [
+          "architecture",
+          "verification",
+          "workflows",
+          "github",
+          "agents",
+          "work-items"
+        ],
+        "appLayer": [
+          "architecture-checkpoints"
+        ],
+        "migrations": [
+          "0052",
+          "0053",
+          "0054",
+          "0055",
+          "0056"
+        ],
+        "specDocs": [
+          "docs/superpowers/specs/2026-08-27-architecture-governance-checkpoints-design.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/src/architecture-checkpoints/internal/detector-registry.ts",
+          "backend/src/architecture-checkpoints/index.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/tests/helpers/test-database.ts"
+        ]
+      },
+      "surfaceFlags": [
+        "schema",
+        "authorityBoundary",
+        "concurrency",
+        "externalSideEffects",
+        "publicContracts"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "coordination": {
+        "with": [
+          "WORK-046",
+          "WORK-052"
+        ],
+        "reason": "shares the static-architecture suite and composition-root surfaces with in-flight WORK-046 (migration numbering reserved per work order); WORK-052 explicitly branches from this work item's head per Issue #61; WORK-052 advances this work item's closed detector registry 6 to 7 (ADR-0006)",
+        "adrs": [
+          "docs/adr/ADR-0005-work-052-base-branch.md"
+        ]
+      },
+      "note": "Merged by the architect as f2c996c (PR #52, head a25eeef, round-4 remediation). branch/pr/head kept as the historical record of how it merged; the coordination record is durable history (WORK-046 shared surfaces were coordinated by reserved migration numbering; WORK-052 branched from this work item per ADR-0005).",
+      "mergedAs": {
+        "pr": 52,
+        "mergeCommit": "f2c996c"
+      }
+    },
+    {
+      "id": "WORK-052",
+      "title": "Development Governance & Self-Hosting Control Plane",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-038",
+        "WORK-039",
+        "WORK-040",
+        "WORK-041",
+        "WORK-045",
+        "WORK-051"
+      ],
+      "branch": "feat/work-052-development-governance",
+      "issue": 61,
+      "workOrder": "spec/work-orders/WORK-052.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [
+          "development-governance",
+          "architecture-checkpoints"
+        ],
+        "migrations": [],
+        "reservedMigrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-052.md",
+          "spec/development-state/README.md",
+          "spec/development-state/governance-model.json",
+          "spec/development-state/program-state.json",
+          "spec/architecture.md",
+          "spec/architecture-lock.md",
+          "spec/work-items.md",
+          "spec/dependency-graph.md",
+          "docs/superpowers/specs/2026-08-28-development-governance-design.md",
+          "docs/adr/"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/architecture-checkpoints/internal/detector-registry.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/package.json"
+        ]
+      },
+      "surfaceFlags": [
+        "authorityBoundary",
+        "publicContracts",
+        "documentation"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "coordination": {
+        "with": [
+          "WORK-051",
+          "WORK-046"
+        ],
+        "reason": "branched from the (now merged) WORK-051 head per Issue #61 and ADR-0005 — that side is durable history after the f2c996c merge; ALSO shares the static-architecture suite and the development-governance artifacts with the in-flight WORK-046 (both append describe blocks to backend/tests/architecture/static-architecture.test.ts) — merge order serialized by the architect, second-to-merge rebases",
+        "adrs": [
+          "docs/adr/ADR-0005-work-052-base-branch.md",
+          "docs/adr/ADR-0006-governance-manifest-detector.md"
+        ]
+      },
+      "checkpointOutcomes": [
+        {
+          "contractId": "AUTH-PRESERVATION",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "DEPENDENCY-DIRECTION",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "TENANT-ISOLATION",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "IDENTITY-IDEMPOTENCY",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "CONCURRENCY-CRASH-SAFETY",
+          "status": "evidenced",
+          "proofClasses": [
+            "dynamic"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "EXTERNAL-SIDE-EFFECTS",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "REVISION-PROVENANCE",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "MIGRATION-IMMUTABILITY",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "DUPLICATE-AUTHORITY",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "IMPLEMENTATION-COMPLETENESS",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        },
+        {
+          "contractId": "SELF-HOSTING-BOUNDARY",
+          "status": "evidenced",
+          "proofClasses": [
+            "static",
+            "dynamic",
+            "discrimination"
+          ],
+          "evidenceRef": "WORK-052 implementation PR verification: static architecture 721/721 (14 new WORK-052 invariants); real PostgreSQL 18 full sweep 103 files 2304/2304; pglite 2260 passed/44 skipped (real-PG-only); typecheck 0; lint 0 errors; governance:status CLI green; discrimination: 8 governance-state mutations + 1 substrate mutation rejected",
+          "at": "2026-08-28T11:26:35Z"
+        }
+      ],
+      "note": "implementation + PR #62 round-1 remediation (mutual coordination enforced by the validator; the truthful frontier; the explicit merge-vs-checkpoint completion rule) on feat/work-052-development-governance; all dependencies satisfied since the WORK-051 merge (f2c996c); the round-1 commit 7fa47c2 is PUSHED — all 7 CI workflows green on the first attempt and the remediation report (finding -> correction -> proof) posted on PR #62; DO NOT MERGE without architect approval",
+      "pr": 62,
+      "head": "7fa47c2"
+    }
+  ],
+  "resumption": {
+    "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
+    "activeHandoffs": [
+      {
+        "workOrderId": "WORK-046",
+        "lastVerifiedState": "Implementation complete at head f88cac4 on branch feat/work-046-multi-agent-delegation (PR #60): provider-neutral delegation coordination over the existing execution boundary; migration 0057 (0052-0056 reserved for WORK-051); six real-PG two-actor regressions green; all 7 CI workflows green on the first attempt.",
+        "nextSteps": [
+          "architect reviews PR #60 (the static-suite shared-surface partner WORK-051 has since merged — the coordination record documents the reserved numbering)",
+          "if changes requested: remediate on the same branch",
+          "if approved: architect merges PR #60; record mergedAs and set status complete; WORK-047 becomes eligible once also complete"
+        ],
+        "blockers": [],
+        "recordedAt": "2026-08-28T12:28:04Z",
+        "recordedBy": "z.ai implementation agent (WORK-046)"
+      },
+      {
+        "workOrderId": "WORK-052",
+        "lastVerifiedState": "PR #62 round-1 remediation PUSHED to the branch head (8f10f2c -> 7fa47c2) after the GitHub credential was re-provisioned; all 7 CI workflows GREEN on 7fa47c2 (first attempt). The round-1 content: the coordination contract is MUTUAL + covering (one-sided declarations are invalid state — validator-enforced with discrimination regressions), getFrontier reports TRUTHFUL coordination (every conflict mutually coordinated and every incomplete dep covered — never the mere presence of a record; the old predicate deleted and negatively pinned), and the merge-vs-checkpoint completion rule is explicit machine-readable state (completionEvent architect-merge, code-pinned: checkpoint outcomes are implementer claims that never substitute the merge; in_flight carries no mergedAs; outcomes only on started items). WORK-051 merged as f2c996c — all WORK-052 dependencies satisfied; the branch is current against main. Verified on 7fa47c2: real PostgreSQL 18 full sweep 103 files 2315/2315 zero failures; static 722/722; typecheck 0; lint 0 errors; governance:status green (46 complete, WORK-046 + WORK-052 mutually coordinated, frontier WORK-048). The round-1 remediation report (finding -> correction -> proof) is posted on PR #62.",
+        "nextSteps": [
+          "architect re-reviews PR #62 (round 2) against the three round-1 findings + the HIGH — the remediation report comment maps each finding to its correction and discriminating regressions",
+          "if changes requested: remediate on the same branch (feat/work-052-development-governance)",
+          "if approved: architect merges PR #62; record mergedAs (pr 62 + the main merge commit) and set status complete — the merge is the completion event"
+        ],
+        "blockers": [],
+        "recordedAt": "2026-08-28T13:53:35Z",
+        "recordedBy": "z.ai implementation agent (WORK-052 round 1 push)"
+      }
+    ]
+  },
+  "decisions": [
+    {
+      "id": "DESIGN-051",
+      "kind": "design",
+      "title": "Architecture Governance and Checkpoints — design",
+      "file": "docs/superpowers/specs/2026-08-27-architecture-governance-checkpoints-design.md",
+      "status": "approved-by-review"
+    },
+    {
+      "id": "LOCK-FWD",
+      "kind": "lock",
+      "title": "Forward-Evolution Invariants for the Next Architecture Version",
+      "file": "spec/architecture-lock.md",
+      "status": "frozen-direction"
+    },
+    {
+      "id": "ADR-0001",
+      "kind": "adr",
+      "title": "The development-governance state is repository-resident",
+      "file": "docs/adr/ADR-0001-repository-resident-governance-state.md",
+      "status": "accepted"
+    },
+    {
+      "id": "ADR-0002",
+      "kind": "adr",
+      "title": "Assurance profiles change depth, not authority",
+      "file": "docs/adr/ADR-0002-assurance-depth-not-authority.md",
+      "status": "accepted"
+    },
+    {
+      "id": "ADR-0003",
+      "kind": "adr",
+      "title": "Parallel protocol: surface-declaration + deterministic conflict detection",
+      "file": "docs/adr/ADR-0003-parallel-protocol-surface-declaration.md",
+      "status": "accepted"
+    },
+    {
+      "id": "ADR-0004",
+      "kind": "adr",
+      "title": "Fail-closed validation against code-pinned core prohibitions",
+      "file": "docs/adr/ADR-0004-fail-closed-validation-core-prohibitions.md",
+      "status": "accepted"
+    },
+    {
+      "id": "ADR-0005",
+      "kind": "adr",
+      "title": "WORK-052 branches from the WORK-051 head and merges main",
+      "file": "docs/adr/ADR-0005-work-052-base-branch.md",
+      "status": "accepted"
+    },
+    {
+      "id": "ADR-0006",
+      "kind": "adr",
+      "title": "The detector registry advances 6→7 with governance-manifest",
+      "file": "docs/adr/ADR-0006-governance-manifest-detector.md",
+      "status": "accepted"
+    },
+    {
+      "id": "DESIGN-052",
+      "kind": "design",
+      "title": "Development Governance & Self-Hosting Control Plane — design package",
+      "file": "docs/superpowers/specs/2026-08-28-development-governance-design.md",
+      "status": "proposed (WORK-052 PR)"
+    },
+    {
+      "id": "SPEC-34",
+      "kind": "spec",
+      "title": "§34 — Development Governance and Self-Hosting Control Plane",
+      "file": "spec/architecture.md",
+      "status": "proposed (WORK-052 PR)"
+    }
+  ]
+}

@@ -243,8 +243,21 @@ describe('WORK-051 round 2 — the governed PR creation is crash-safe + idempote
 
     const second = await stack.db.createSecondClient();
     try {
+      // PR #62 round 1 (pre-existing harness flaw, root-caused): each
+      // service's PORT must resolve the repository link through ITS OWN
+      // client. Binding serviceB's port to the SHARED client deadlocks when B
+      // wins the intent-lock race: B's port query queues behind A's
+      // lock-blocked query on A's single connection while A waits on B's
+      // open transaction — an undetectable cross-client deadlock (production
+      // uses the pool, so only this single-connection harness can hit it).
       const serviceA = service(stack.db.client);
-      const serviceB = service(second.client);
+      const serviceB = new GovernedPullRequestService(
+        second.client,
+        new GithubBackedPullRequestCreationPort(
+          new PgProjectGitHubRepositoryRepository(second.client),
+          fakeGithub,
+        ),
+      );
       const createsBefore = fakeGithub.createPullRequestCalls.length;
 
       // Both clients drive the SAME convergence key concurrently. The
@@ -485,8 +498,23 @@ describe('WORK-051 round 3 — the collision-proof convergence marker + the PROD
 
     const second = await stack.db.createSecondClient();
     try {
+      // PR #62 round 1 (pre-existing harness flaw, root-caused): serviceB's
+      // port must resolve the repository link through ITS OWN client — the
+      // shared-client port wedges when B wins the intent-lock race (see the
+      // round-2 concurrent test for the full analysis). Own adapter too: each
+      // process mints its own installation tokens.
       const serviceA = new GovernedPullRequestService(stack.db.client, productionPort());
-      const serviceB = new GovernedPullRequestService(second.client, productionPort());
+      const serviceB = new GovernedPullRequestService(
+        second.client,
+        new GithubBackedPullRequestCreationPort(
+          new PgProjectGitHubRepositoryRepository(second.client),
+          new DefaultGitHubAdapter({
+            appId: '99988877',
+            privateKey: prodPrivateKey,
+            apiBaseUrl: api.url,
+          }),
+        ),
+      );
       const createsBefore = wireCreates();
 
       // Both processes drive the SAME convergence key concurrently, each

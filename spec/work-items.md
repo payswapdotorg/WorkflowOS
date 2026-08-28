@@ -443,6 +443,19 @@ Objective: Use historical WorkflowOS evidence to recommend roles, providers, mod
 Dependencies: WORK-032, WORK-044, WORK-046
 Hard constraints remain authoritative; intelligence may rank eligible candidates but cannot bypass policy, authorization, verification, review, or GitHub authority.
 
+## 8a. DEVELOPMENT GOVERNANCE AND SELF-HOSTING
+
+### WORK-051 — Architecture Governance and Checkpoints
+Objective: Make architectural conformance executable and continuously enforceable during the existing lifecycle — immutable ArchitectureVersions carry assertion sets; deterministic detectors evaluate exact revisions at lifecycle gates; evidence persists through /verification; no second workflow/verification/architecture authority.
+Dependencies: WORK-005, WORK-008, WORK-015, WORK-017, WORK-018, WORK-019, WORK-044
+Work Order: GitHub Issue #51 + docs/superpowers/specs/2026-08-27-architecture-governance-checkpoints-design.md
+
+### WORK-052 — Development Governance & Self-Hosting Control Plane
+Objective: Make the repository the durable source of truth for the architecture program — the next architecture-version design package (Engineering Control Loop, first-class checkpoints, adaptive assurance profiles, architecture fitness evaluation, governed feedback, self-hosting boundary), the canonical machine-readable development state (spec/development-state/), and the parallel implementation protocol for concurrent stateless implementation agents.
+Dependencies: WORK-038, WORK-039, WORK-040, WORK-041, WORK-045, WORK-051
+Work Order: GitHub Issue #61 + spec/work-orders/WORK-052.md + docs/superpowers/specs/2026-08-28-development-governance-design.md
+Hard prohibitions: no second workflow/Work Item/verification/architecture authority; no chat-dependent state; no provider-specific worker protocol; no mandatory heavy process for trivial changes; no weakened v1.0 security/tenant/concurrency/idempotency.
+
 ## 8. DEVELOPER PRODUCT EXPERIENCE
 
 ### WORK-048 — Developer Workbench
@@ -497,9 +510,13 @@ Required user experience: developers see the engineering task first and executio
 46. WORK-046
 47. WORK-047
 
+### Phase 16 — Development governance and self-hosting
+48. WORK-051
+49. WORK-052
+
 ### Phase 15 — Developer product experience
-48. WORK-048
-49. WORK-049
-50. WORK-050
+50. WORK-048
+51. WORK-049
+52. WORK-050
 
 All forward work items must preserve the frozen v1.0 authority rules unless an approved architecture change creates a new immutable architecture version.

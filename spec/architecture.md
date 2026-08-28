@@ -1097,3 +1097,111 @@ A future Agent Intelligence layer may recommend or select roles, providers, mode
 * human-intervention requirements
 
 This layer must select among eligible candidates and must never override hard authorization, security, or capability constraints.
+
+# 34. Forward Architecture Evolution — Development Governance and Self-Hosting Control Plane
+
+This section records the WORK-052 design package (Issue #61; design document
+`docs/superpowers/specs/2026-08-28-development-governance-design.md`). It is an
+append-only forward-evolution section: no frozen v1.0 rule is modified. Full design:
+`docs/superpowers/specs/2026-08-28-development-governance-design.md`; machine-readable
+model: `spec/development-state/governance-model.json`.
+
+## 34.1 Repository-Resident Development State
+
+The repository — not any chat conversation — is the durable source of truth for the
+WorkflowOS architecture program. The canonical machine-readable development state lives
+in `spec/development-state/`:
+
+* `governance-model.json` — the governance model (Engineering Control Loop, assurance
+  profiles, governed checkpoint contracts, self-hosting boundary, authority map);
+  architect-owned, changed only through Work Orders.
+* `program-state.json` — the program state (governing architecture version, one record
+  per Work Order with status/dependencies/declared change surfaces/branch-PR bindings/
+  merge evidence/handoff records/checkpoint outcomes, decisions index); maintained by
+  implementers per the parallel protocol, made canonical by architect merge.
+
+A fresh checkout must be able to reconstruct the architecture program — governing
+version, Work Orders and their statuses, dependency frontier, parallelization
+eligibility, applicable checkpoints and assurance depth, constraining decisions, and
+resumption state — from these artifacts alone. The control-plane capability
+(`backend/src/development-governance/`, application layer — not a frozen module) loads
+and validates them fail-closed and answers the control-plane queries; the
+`governance:status` CLI prints the summary.
+
+## 34.2 The Engineering Control Loop
+
+The development control loop is `sense → understand → plan → check → execute → verify →
+review → release → observe → learn`. Every stage is an existing authority or capability
+(§34 of the design document maps each stage); the loop is connective tissue, not a new
+engine. The `check` stage is the architecture checkpoint (WORK-051) with adaptive
+assurance depth (§34.4); the `learn` stage is durable decisions (ADRs + the decisions
+index) plus feedback provenance on work-order records feeding the next plan. Runtime,
+user, and maintenance feedback enters governed planning only through existing producers
+(the planner, the maintenance engine, verification failures, reviews) creating governed
+Work Items.
+
+## 34.3 Architecture Checkpoints as Fitness Functions
+
+Architecture checkpoints are first-class governed control points. The governed
+checkpoint contracts — the architecture fitness functions — are defined as data in
+`governance-model.json`, one per quality attribute: authority preservation; dependency
+direction; tenant isolation; identity/idempotency; concurrency and crash safety;
+external side-effect boundaries; exact-revision/provenance integrity;
+migration/immutability safety; duplicate-authority prevention; implementation
+completeness against the Work Order; and the self-hosting boundary. Each contract
+declares its proof classes — static structural, dynamic behavioral/concurrency, and
+discrimination/mutation — with enforcement references that must exist in the repository
+(validated fail-closed). The `governance-manifest` detector (in the WORK-051 closed
+registry) evaluates the development-governance state itself at any exact revision
+through the existing revision-bound snapshot substrate.
+
+## 34.4 Adaptive Assurance Profiles
+
+Assurance profiles are `LIGHT`, `STANDARD`, `HIGH_ASSURANCE`, `CRITICAL` — a
+deterministic function of a work order's declared change surfaces (critical surfaces
+such as authority boundaries, security/tenant changes, or schema changes select
+`CRITICAL`; complex surfaces such as public contracts, concurrency, or external side
+effects select `HIGH_ASSURANCE`; module-internal changes select `STANDARD`;
+documentation/local changes select `LIGHT`; unclassified surfaces fail closed to the
+`HIGH_ASSURANCE` floor). Profiles change ASSURANCE DEPTH ONLY — which checkpoint
+contracts apply, which proof classes are required, and what evidence must be recorded —
+never authority semantics. Every profile's required checkpoint kinds dominate the
+WORK-051 impact/checkpoint matrix; assurance only adds depth. Trivial changes remain
+`LIGHT`; heavy process is never mandatory for them.
+
+## 34.5 Parallel Implementation Protocol
+
+Multiple independent implementation agents may work concurrently under the
+repository-native protocol: one Work Item per implementation branch/PR; dependency
+eligibility computed from the dependency DAG (an item is eligible only when every
+declared dependency is complete); declared change surfaces with deterministic conflict
+detection (two in-flight items sharing a surface — a module, overlapping migration
+numbering, the composition root, the static architecture suite, a shared spec document —
+are a reported conflict requiring explicit architect coordination); scope integrity (a
+worker edits only its own declared surfaces); centralized architecture decisions (Work
+Orders + ADRs are the only entry points); and PR review by the architect as the only
+merge gate. The protocol works without conversational state.
+
+## 34.6 Evidence and Decision Durability
+
+Material architectural decisions are recoverable from repository artifacts alone:
+ADRs (`docs/adr/` — the repository-resident ADR authority for WorkflowOS's own
+architecture, parallel to the runtime `/architecture` per-project ADR feature), design
+packages, Work Orders, checkpoint outcomes recorded in `program-state.json`, and the
+decisions index. PR comments and chat are ephemeral coordination, never the durable
+record.
+
+## 34.7 Self-Hosting Boundary
+
+WorkflowOS MAY govern — through its own machinery — planning its own implementation,
+executing changes, verification, review, and maintenance. WorkflowOS MAY NOT silently
+rewrite its governing architecture, its own architecture authority, or its foundational
+rules: changes to the governing architecture continue through the
+architecture-change/versioning authority (architect-issued Work Order and, at runtime,
+the Architecture Change Request → new immutable version path). No self-hosted worker
+merges its own governing PR. The boundary is machine-readable in
+`governance-model.json`, validated fail-closed against code-pinned core prohibitions,
+pinned verbatim in the static architecture suite, and enforced at checkpoints by the
+`governance-manifest` detector. Governance state is never stored outside the repository
+(PostgreSQL remains the authority for tenant runtime state; the repository is the
+authority for the self-hosting program).

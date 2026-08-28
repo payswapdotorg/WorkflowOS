@@ -183,3 +183,27 @@ WORK-050 Unified Execution UX
 ```
 
 The UX layer is a consumer of the same authoritative execution/workflow contracts and must not introduce frontend-owned workflow state.
+
+### Development governance and self-hosting
+
+WORK-005 + WORK-015 + WORK-017 + WORK-018 + WORK-019 + WORK-044 → WORK-051
+WORK-038 + WORK-039 + WORK-040 + WORK-041 + WORK-045 + WORK-051 → WORK-052
+
+```text
+WORK-051 Architecture Governance and Checkpoints
+        ↓
+WORK-052 Development Governance & Self-Hosting Control Plane
+```
+
+WORK-052 makes the repository the durable source of truth for the architecture program
+(`spec/development-state/`): the governing architecture version, the Work Order
+dependency DAG, parallelization eligibility, checkpoint contracts and assurance
+profiles, durable decisions, and resumption state. The canonical machine-readable form
+of THIS dependency graph — including statuses, merge evidence, and in-flight
+coordination — is `spec/development-state/program-state.json`; this document remains
+the human-readable design-time view.
+
+WORK-051 and WORK-052 share surfaces with the in-flight WORK-046 (the static
+architecture suite and composition root); migration numbering is reserved per work
+order (0052–0056 WORK-051, 0057 WORK-046) so all merge orders stay clean. WORK-052
+introduces no new migration.

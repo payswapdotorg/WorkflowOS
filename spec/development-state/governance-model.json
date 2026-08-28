@@ -1,0 +1,685 @@
+{
+  "$schema": "https://github.com/pectoraux/WorkflowOS/blob/main/spec/development-state/README.md",
+  "schemaVersion": 1,
+  "artifact": "workflowos-development-state/governance-model",
+  "authority": {
+    "owner": "architect (changes only through a Work Order — GitHub Issue → spec/work-orders/ — plus PR review)",
+    "designPackage": "docs/superpowers/specs/2026-08-28-development-governance-design.md",
+    "specSection": "spec/architecture.md §34 — Development Governance and Self-Hosting Control Plane",
+    "lockInvariants": "spec/architecture-lock.md — Forward-Evolution Invariants: development governance and self-hosting",
+    "decisions": [
+      "docs/adr/ADR-0001-repository-resident-governance-state.md",
+      "docs/adr/ADR-0002-assurance-depth-not-authority.md",
+      "docs/adr/ADR-0003-parallel-protocol-surface-declaration.md",
+      "docs/adr/ADR-0004-fail-closed-validation-core-prohibitions.md",
+      "docs/adr/ADR-0006-governance-manifest-detector.md"
+    ]
+  },
+  "engineeringControlLoop": {
+    "stages": [
+      {
+        "name": "sense",
+        "authority": "/github + /audit + maintenance (WORK-041)",
+        "mechanism": "webhooks, CI evidence ingestion, maintenance signals, audit events"
+      },
+      {
+        "name": "understand",
+        "authority": "onboarding (WORK-038) + repository intelligence (WORK-039)",
+        "mechanism": "project baselines, revision-bound context intelligence"
+      },
+      {
+        "name": "plan",
+        "authority": "architect Work Orders + /work-items + planner (WORK-040)",
+        "mechanism": "architect-issued Work Orders (Issues → spec/work-orders/), governed Work Item creation"
+      },
+      {
+        "name": "check",
+        "authority": "architecture checkpoints (WORK-051) + assurance profiles (WORK-052)",
+        "mechanism": "revision-bound assertion evaluation at lifecycle gates, adaptive assurance depth"
+      },
+      {
+        "name": "execute",
+        "authority": "/agents + /execution-policy + /execution-routing (+ delegation where present)",
+        "mechanism": "the execution fabric: eligibility, routing, agent runs"
+      },
+      {
+        "name": "verify",
+        "authority": "/verification + /github",
+        "mechanism": "evidence-bound verification runs, CI ingestion"
+      },
+      {
+        "name": "review",
+        "authority": "/reviews",
+        "mechanism": "architect review records and findings — the semantic authority"
+      },
+      {
+        "name": "release",
+        "authority": "/workflows + runtime",
+        "mechanism": "merge gating, convergence, deployable runtime"
+      },
+      {
+        "name": "observe",
+        "authority": "/audit + maintenance + benchmark",
+        "mechanism": "privileged-event trail, health engine, benchmark evidence"
+      },
+      {
+        "name": "learn",
+        "authority": "ADRs (docs/adr/) + this development state",
+        "mechanism": "durable decisions + feedback provenance feeding the next plan"
+      }
+    ],
+    "rule": "The loop is composed ENTIRELY of existing authorities. No stage introduces a second engine; the control plane is connective tissue (repository-resident state + deterministic queries)."
+  },
+  "assuranceProfiles": {
+    "vocabulary": [
+      "LIGHT",
+      "STANDARD",
+      "HIGH_ASSURANCE",
+      "CRITICAL"
+    ],
+    "surfaceVocabulary": [
+      "documentation",
+      "localBehavior",
+      "moduleInternals",
+      "multiModule",
+      "publicContracts",
+      "schema",
+      "concurrency",
+      "externalSideEffects",
+      "authorityBoundary",
+      "securityTenant"
+    ],
+    "selection": {
+      "rule": "first-match over the declared change-surface flags; unclassified/unknown surfaces fail closed to the HIGH_ASSURANCE floor",
+      "classification": [
+        {
+          "profile": "CRITICAL",
+          "whenAny": [
+            "authorityBoundary",
+            "securityTenant",
+            "schema"
+          ]
+        },
+        {
+          "profile": "HIGH_ASSURANCE",
+          "whenAny": [
+            "publicContracts",
+            "concurrency",
+            "externalSideEffects"
+          ]
+        },
+        {
+          "profile": "STANDARD",
+          "whenAny": [
+            "moduleInternals",
+            "multiModule"
+          ]
+        },
+        {
+          "profile": "LIGHT",
+          "whenAny": [
+            "documentation",
+            "localBehavior"
+          ]
+        }
+      ],
+      "unclassifiedDefault": "HIGH_ASSURANCE",
+      "determinism": "the same declared surfaces always select the same profile (pure function, no environment inputs)"
+    },
+    "proofClassVocabulary": [
+      "static",
+      "dynamic",
+      "discrimination"
+    ],
+    "checkpointKindVocabulary": [
+      "readiness",
+      "work_order",
+      "pr_conformance",
+      "verification_entry"
+    ],
+    "requirements": {
+      "LIGHT": {
+        "checkpointKinds": [
+          "pr_conformance"
+        ],
+        "proofClasses": [
+          "static"
+        ],
+        "evidence": [
+          "static-suite-green"
+        ],
+        "architectReviewRecord": false,
+        "impactCoverage": [
+          "low"
+        ],
+        "impactFloor": "low"
+      },
+      "STANDARD": {
+        "checkpointKinds": [
+          "work_order",
+          "pr_conformance"
+        ],
+        "proofClasses": [
+          "static",
+          "dynamic"
+        ],
+        "evidence": [
+          "static-suite-green",
+          "integration-green"
+        ],
+        "architectReviewRecord": false,
+        "impactCoverage": [
+          "low",
+          "medium"
+        ],
+        "impactFloor": "medium"
+      },
+      "HIGH_ASSURANCE": {
+        "checkpointKinds": [
+          "readiness",
+          "work_order",
+          "pr_conformance",
+          "verification_entry"
+        ],
+        "proofClasses": [
+          "static",
+          "dynamic",
+          "discrimination"
+        ],
+        "evidence": [
+          "static-suite-green",
+          "integration-green",
+          "real-postgresql-green"
+        ],
+        "architectReviewRecord": false,
+        "impactCoverage": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "impactFloor": "high"
+      },
+      "CRITICAL": {
+        "checkpointKinds": [
+          "readiness",
+          "work_order",
+          "pr_conformance",
+          "verification_entry"
+        ],
+        "proofClasses": [
+          "static",
+          "dynamic",
+          "discrimination"
+        ],
+        "evidence": [
+          "static-suite-green",
+          "integration-green",
+          "real-postgresql-green",
+          "architect-review-record"
+        ],
+        "architectReviewRecord": true,
+        "impactCoverage": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "impactFloor": "high"
+      }
+    },
+    "dominanceRule": "Each profile's required checkpoint kinds must be a superset of the kinds the WORK-051 IMPACT_CHECKPOINT_MATRIX applies at every impact level the profile covers; a profile adds assurance depth, never subtracts (ADR-0002).",
+    "authorityRule": "Profiles change REQUIRED ASSURANCE DEPTH ONLY (which checkpoint contracts apply, which proof classes are required, what evidence must be recorded). They never change authority semantics: the same /work-items, /workflows, /agents, /verification, /reviews, /architecture and provider authorities remain authoritative in every profile."
+  },
+  "checkpointContracts": [
+    {
+      "id": "AUTH-PRESERVATION",
+      "area": "authority preservation",
+      "statement": "Every governed mutation flows through its owning frozen module; the checkpoint capability orchestrates but never mutates architecture/workflow/verification state.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "PLAT-AC-01 — frozen modules exist as explicit boundaries"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/workflows/workflow-engine.integration.test.ts",
+          "marker": "workflow"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/workflows/checkpoint-gates.integration.test.ts",
+          "marker": "WORK-051 — orchestrator architecture checkpoint gates + the PR-creation boundary"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "MUTATION-PROOF — the four gates guard EVERY gated transition site in the orchestrator (counting, not first-occurrence)"
+        }
+      ]
+    },
+    {
+      "id": "DEPENDENCY-DIRECTION",
+      "area": "dependency direction",
+      "statement": "platform/ never imports domain modules; the api layer reaches modules only through public barrels; no cross-module internal/ imports; repository-detected structure rules hold at the evaluated revision.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "architecture invariants — forbidden dependency directions"
+        },
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "PLAT-AC-02 — cross-module calls use declared interfaces"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PROOF 1 — a known architecture violation (cross-module internal/ import) at the bound revision BLOCKS the PR conformance checkpoint with durable evidence"
+        }
+      ]
+    },
+    {
+      "id": "TENANT-ISOLATION",
+      "area": "tenant isolation",
+      "statement": "Tenant/project ownership is server-resolved and enforced before any detector or evaluation executes; cross-tenant access is rejected; the governance control plane holds no per-tenant data.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-002 invariants — identity/authorization module boundaries"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PROOF 9 — cross-tenant checkpoint access is rejected BEFORE detector execution (zero detector invocations)"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/security/work-026-security.integration.test.ts",
+          "marker": "security"
+        }
+      ]
+    },
+    {
+      "id": "IDENTITY-IDEMPOTENCY",
+      "area": "identity / idempotency",
+      "statement": "Durable identities with idempotent replay at every external boundary: same logical key ⇒ same durable outcome; no duplicate authorities created by retries.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/verification/orchestration-runs.integration.test.ts",
+          "marker": "WORK-051 round 1 — /verification orchestration runs (durable identity + atomic record)"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "BLOCKER 4 — two CONCURRENT same-key evaluations converge on EXACTLY ONE run + ONE evidence set"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PR #52 round 3 (HIGH) — idempotency-key reuse at a DIFFERENT revision is a DIFFERENT durable identity: fresh evaluation, never a foreign replay"
+        }
+      ]
+    },
+    {
+      "id": "CONCURRENCY-CRASH-SAFETY",
+      "area": "concurrency and crash safety",
+      "statement": "Concurrent governed operations serialize or converge (database-level fencing, unique identities, create-or-converge); a crash leaves no partial durable state; recovery converges without duplication.",
+      "severity": "blocking",
+      "proofClasses": [
+        "dynamic"
+      ],
+      "enforcement": [
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/workflows/governed-pr-creation.integration.test.ts",
+          "marker": "WORK-051 round 4 — ONE durable identity boundary for create AND adopt (the PR #52 review, BLOCKER 2 + BLOCKER 3)"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "BLOCKER 4 (DB arbitration) — two independent pg connections racing the SAME orchestration key produce exactly one run (raw SQL proof)"
+        }
+      ]
+    },
+    {
+      "id": "EXTERNAL-SIDE-EFFECTS",
+      "area": "external side-effect boundaries",
+      "statement": "External effects (PR creation, provider calls) happen only through owned ports behind governed gates, with durable intent first and idempotent create-or-converge semantics; no pre-gate capability exists.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/workflows/governed-pr-creation.integration.test.ts",
+          "marker": "WORK-051 round 2 — the governed PR creation is crash-safe + idempotent across the external side effect"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/workflows/governed-pr-creation.integration.test.ts",
+          "marker": "BLOCKER 3 (round 4) — the CONVERGENCE READ fails CLOSED on same-branch / different-SHA (non-convergent, typed — never adopted)"
+        }
+      ]
+    },
+    {
+      "id": "REVISION-PROVENANCE",
+      "area": "exact-revision / provenance integrity",
+      "statement": "Checkpoint evidence is bound to the exact implementation revision (provider-observed snapshot identity); no working-tree fallback; mutated trees under the same revision label are detectable.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PROOF 4 — two GENUINELY DIFFERENT revisions produce distinct results, and mutating the on-disk fixture does NOT change a bound revision result (BLOCKER 1)"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PROOF 11 — WorkflowOS evaluates ITSELF through the revision-bound snapshot: real detectors over the real backend tree, claim-authority evidence"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PR #52 round 2 (HIGH 1) — the provider-observed snapshot identity DIFFERS when the same revision label serves different bytes (a mutated tree is detectable in the evidence)"
+        }
+      ]
+    },
+    {
+      "id": "MIGRATION-IMMUTABILITY",
+      "area": "migration / immutability safety",
+      "statement": "Migrations are append-only, numbered, and guarded; frozen ArchitectureVersions and their assertion sets are persistence-enforced immutable; frozen history is never edited in place.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture/architecture-assertions.integration.test.ts",
+          "marker": "WORK-051 — Architecture Assertions (version-scoped, immutable, ACR-gated)"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture/architecture-assertions.integration.test.ts",
+          "marker": "PROOF 8c — assertion ROWS are append-only: direct SQL UPDATE and DELETE are trigger-rejected"
+        }
+      ]
+    },
+    {
+      "id": "DUPLICATE-AUTHORITY",
+      "area": "forbidden duplicate authorities",
+      "statement": "No second workflow engine, Work Item authority, verification/evidence authority, architecture authority, or evidence store; the frozen module set stays closed; the detector registry stays closed.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "PLAT-AC-01 — frozen modules exist as explicit boundaries"
+        },
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-051 invariants — Architecture Governance and Checkpoints"
+        },
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-052 invariants — Development Governance and Self-Hosting Control Plane"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
+          "marker": "PROOF 7a — an inconclusive BLOCKING assertion (unknown detector kind) fails closed"
+        }
+      ]
+    },
+    {
+      "id": "IMPLEMENTATION-COMPLETENESS",
+      "area": "implementation completeness against the Work Order",
+      "statement": "Every declared checkpoint contract has executable proof whose enforcement references exist in the repository; a work order's acceptance criteria are evidenced before it may be recorded complete.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-052 invariants — Development Governance and Self-Hosting Control Plane"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/development-governance/governance-state.integration.test.ts",
+          "marker": "WORK-052 — repository source of truth (fresh-checkout reconstruction + fail-closed validation)"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/development-governance/parallel-eligibility.integration.test.ts",
+          "marker": "WORK-052 — parallel eligibility, conflicts, and assurance selection"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/development-governance/governance-state.integration.test.ts",
+          "marker": "W052-AC02 — DISCRIMINATION: an enforcement reference to a missing file is REJECTED"
+        }
+      ]
+    },
+    {
+      "id": "SELF-HOSTING-BOUNDARY",
+      "area": "self-hosting boundary",
+      "statement": "WorkflowOS may govern its own implementation but may not silently rewrite its governing architecture, architecture authority, or foundational rules; the boundary is machine-readable and enforced fail-closed.",
+      "severity": "blocking",
+      "proofClasses": [
+        "static",
+        "dynamic",
+        "discrimination"
+      ],
+      "enforcement": [
+        {
+          "class": "static",
+          "file": "backend/tests/architecture/static-architecture.test.ts",
+          "marker": "WORK-052 invariants — Development Governance and Self-Hosting Control Plane"
+        },
+        {
+          "class": "dynamic",
+          "file": "backend/tests/integration/architecture-governance/governance-manifest-detector.integration.test.ts",
+          "marker": "WORK-052 — the governance-manifest detector (self-hosting boundary at the checkpoint substrate)"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/architecture-governance/governance-manifest-detector.integration.test.ts",
+          "marker": "W052-AC09 — DISCRIMINATION: a WEAKENED boundary at the bound revision FAILS the checkpoint (durable evidence)"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/development-governance/governance-state.integration.test.ts",
+          "marker": "W052-AC02 — DISCRIMINATION: a weakened self-hosting boundary (removed core prohibition) is REJECTED"
+        }
+      ]
+    }
+  ],
+  "selfHostingBoundary": {
+    "may": [
+      "plan its own implementation (architect-issued Work Orders, the planner, the dependency DAG)",
+      "execute changes to its own implementation through the execution fabric",
+      "verify its own changes (evidence-bound verification, CI ingestion)",
+      "review its own changes through /reviews (the architect's semantic authority)",
+      "maintain itself (maintenance signals feeding governed Work Items)",
+      "evaluate its own architecture conformance at any exact revision through the checkpoint substrate"
+    ],
+    "mayNot": [
+      "silently rewrite its frozen governing architecture — changes require the architecture-change/versioning authority (Work Order + new immutable version)",
+      "silently rewrite its own architecture authority or foundational rules",
+      "let a self-hosted worker merge its own governing PR — PR review by the architect is the only merge gate",
+      "introduce a second workflow engine or lifecycle authority",
+      "introduce a second Work Item authority",
+      "introduce a second verification or evidence authority",
+      "introduce a second architecture authority",
+      "weaken tenant isolation or server-side security invariants",
+      "weaken concurrency or idempotency guarantees",
+      "depend on chat/conversation state for governance",
+      "store governance state outside the repository (the repository is the durable source of truth for the self-hosting program)"
+    ],
+    "coreProhibitions": [
+      "silently rewrite its frozen governing architecture — changes require the architecture-change/versioning authority (Work Order + new immutable version)",
+      "introduce a second workflow engine or lifecycle authority",
+      "introduce a second Work Item authority",
+      "introduce a second verification or evidence authority",
+      "introduce a second architecture authority",
+      "weaken tenant isolation or server-side security invariants",
+      "weaken concurrency or idempotency guarantees",
+      "let a self-hosted worker merge its own governing PR — PR review by the architect is the only merge gate"
+    ]
+  },
+  "parallelProtocol": {
+    "authority": "docs/adr/ADR-0003-parallel-protocol-surface-declaration.md",
+    "rules": [
+      "one Work Item per implementation branch/PR",
+      "dependency eligibility: an item is eligible only when every declared dependency is complete",
+      "surface declarations + conflict detection: two in_flight work orders sharing a declared surface are a reported conflict (not parallel-safe without explicit architect coordination)",
+      "scope integrity: a worker edits only its own declared surfaces; cross-scope edits require a Work Order amendment",
+      "centralized architecture decisions: Work Orders + ADRs are the only decision entry points",
+      "PR review by the architect is the merge gate",
+      "coordination records are MUTUAL: a declared coordination between two in-flight work orders appears on BOTH records, covers every incomplete dependency the start was coordinated over, and one-sided declarations are invalid state"
+    ],
+    "surfaceKinds": [
+      "modules",
+      "appLayer",
+      "migrations",
+      "reservedMigrations",
+      "specDocs",
+      "sharedIntegrationSurfaces"
+    ]
+  },
+  "feedbackOrigins": [
+    "architect",
+    "maintenance-signal",
+    "verification-failure",
+    "user-feedback",
+    "architecture-drift",
+    "benchmark-evidence"
+  ],
+  "feedbackRule": "Runtime/user/maintenance feedback enters governed planning ONLY through existing producers (WORK-040 planner, WORK-041 maintenance engine, verification failures, reviews) creating governed Work Items; the program state records each work order's origin so the loop's learn stage is durable. No new feedback engine exists.",
+  "authorityMap": [
+    {
+      "authority": "/architecture",
+      "owns": "Architecture, ArchitectureVersion, assertions, ADRs (per-project), Architecture Change Requests"
+    },
+    {
+      "authority": "/work-items",
+      "owns": "Work Items, dependencies, Work Order state, implementation contexts"
+    },
+    {
+      "authority": "/workflows",
+      "owns": "workflow state machine, legal transitions, orchestration, PR-intent ledger"
+    },
+    {
+      "authority": "/verification",
+      "owns": "verification runs, evidence, criterion evaluation, orchestration-run identity"
+    },
+    {
+      "authority": "/reviews",
+      "owns": "architect review records and findings — the semantic authority"
+    },
+    {
+      "authority": "/github",
+      "owns": "GitHub integration, PRs, CI ingestion — the sole external repository authority"
+    },
+    {
+      "authority": "/agents + /execution-policy + /execution-routing",
+      "owns": "execution fabric: gateway, eligibility, routing"
+    },
+    {
+      "authority": "spec/development-state/ (this artifact family)",
+      "owns": "the repository-resident development-governance state for WorkflowOS itself — NOT tenant state"
+    },
+    {
+      "authority": "docs/adr/",
+      "owns": "repository-resident ADRs for WorkflowOS's own architecture — parallel to (not replacing) the runtime /architecture per-project ADR feature"
+    }
+  ],
+  "detector": {
+    "kind": "governance-manifest",
+    "registry": "the WORK-051 closed detector registry, advanced 6→7 by WORK-052 (docs/adr/ADR-0006-governance-manifest-detector.md)",
+    "defaultModelPath": "spec/development-state/governance-model.json",
+    "defaultProgramPath": "spec/development-state/program-state.json",
+    "semantics": "fail closed: missing/unreadable/invalid manifests are inconclusive; a weakened boundary, cyclic DAG, evidence-inconsistent status, unknown vocabulary, or missing enforcement references fail"
+  },
+  "completionRule": {
+    "completionEvent": "architect-merge",
+    "rule": "status 'complete' ⇔ mergedAs merge evidence (pr + mergeCommit): the architect's merge of the implementation PR into main is the ONLY completion event.",
+    "checkpointOutcomesAre": "implementer-recorded, revision-bound CLAIMS that support the architect's PR review; they never transition status and never substitute the merge — a work order with every outcome evidenced but no merge is still in_flight.",
+    "inFlightInvariant": "an in_flight work order carries a branch and NO mergedAs evidence — merged-but-in-flight is a lie about the merge.",
+    "outcomesAllowedOn": [
+      "in_flight",
+      "complete"
+    ],
+    "historicalNote": "WORK-001..WORK-051 completed before this rule was recorded; their merge evidence alone satisfies it (checkpoint outcomes were not part of their contracts)."
+  }
+}
