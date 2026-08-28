@@ -29,7 +29,11 @@ import type {
 export class DefaultArchitectureService implements ArchitectureService {
   constructor(private readonly db: DatabaseClient) {}
 
-  async freezeVersion(versionId: string, frozenBy: string): Promise<ArchitectureVersion> {
+  async freezeVersion(
+    versionId: string,
+    frozenBy: string,
+    options?: { allowEmptyAssertionSet?: boolean },
+  ): Promise<ArchitectureVersion> {
     return this.db.transaction(async (tx) => {
       const current = await tx.query<{ id: string; state: string }>(
         'SELECT id, state FROM wfos_architecture_versions WHERE id = $1 FOR UPDATE',
@@ -43,9 +47,33 @@ export class DefaultArchitectureService implements ArchitectureService {
         if (from !== 'draft') {
           throw new Error(`invalid architecture version lifecycle transition: ${from} → frozen`);
         }
+        // WORK-051 round 1 (HIGH — empty-set semantics): the assertion set
+        // closes at freeze. An EMPTY set requires the EXPLICIT
+        // allowEmptyAssertionSet declaration; with it, the durable
+        // assertionSetPolicy marker is written in the SAME UPDATE as the
+        // freeze (the version-metadata immutability trigger permits this
+        // write because OLD.state is still 'draft').
+        const assertionCount = await tx.query<{ count: string }>(
+          'SELECT COUNT(*)::text AS count FROM wfos_architecture_assertions WHERE architecture_version_id = $1',
+          [versionId],
+        );
+        const count = Number(assertionCount.rows[0]?.count ?? '0');
+        if (count === 0 && options?.allowEmptyAssertionSet !== true) {
+          throw new Error(
+            `architecture version ${versionId} has no architecture assertions — ` +
+              'freezing an assertion-less version requires the explicit ' +
+              'allowEmptyAssertionSet declaration (otherwise every governed ' +
+              'checkpoint against it fails closed: an empty rule set can ' +
+              'never prove conformance)',
+          );
+        }
+        const metadataUpdate =
+          count === 0 && options?.allowEmptyAssertionSet === true
+            ? `, metadata = COALESCE(metadata, '{}'::jsonb) || '{"assertionSetPolicy":"none-declared"}'::jsonb`
+            : '';
         await tx.query(
           `UPDATE wfos_architecture_versions
-           SET state = 'frozen', frozen_at = NOW(), frozen_by = $1
+           SET state = 'frozen', frozen_at = NOW(), frozen_by = $1${metadataUpdate}
            WHERE id = $2`,
           [frozenBy, versionId],
         );

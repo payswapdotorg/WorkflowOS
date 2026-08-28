@@ -255,9 +255,27 @@ export async function workflowRoutes(
         return reply.code(501).send({ error: 'orchestrator-not-configured' });
       }
       const executionId = generateExecutionId();
-      const result = await deps.orchestrator.beginVerification({
-        workItemId, executionId, sourceEventId: executionId,
-      });
+      let result;
+      try {
+        result = await deps.orchestrator.beginVerification({
+          workItemId, executionId, sourceEventId: executionId,
+        });
+      } catch (err) {
+        // WORK-051: the architecture checkpoint gate denied entry to
+        // VERIFYING. 409 conflict — the caller must restore conformance (or
+        // open an Architecture Change Request) before verification can
+        // begin. Duck-typed by `code` (the typed error class stays internal
+        // to /workflows; see the execution.route coded-error precedent).
+        const coded = err as { code?: string; reasons?: string[] };
+        if (coded.code === 'architecture-checkpoint-gate-denied') {
+          return reply.code(409).send({
+            error: coded.code,
+            message: (err as Error).message,
+            reasons: coded.reasons ?? [],
+          });
+        }
+        throw err;
+      }
       return reply.code(202).send({
         signalId: result.signal.id, accepted: true,
         verificationRunId: result.verificationRunId,

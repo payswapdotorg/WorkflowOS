@@ -38,6 +38,18 @@ export interface AgentRequest {
   readonly scope?: string;
   readonly input: string;
   readonly metadata?: Record<string, unknown>;
+  /**
+   * PR #52 round 2 (BLOCKER 1) — this request is PURE DATA. It carries no
+   * capability objects of any kind: a pre-gate agent execution has NO
+   * PR-creation capability (there is no port, credential, or function here
+   * or anywhere in the execution contract through which a provider could
+   * create a pull request). PR creation is a SEPARATE capability that exists
+   * ONLY at the post-gate PullRequestCreationPort → /github boundary owned
+   * by the workflow orchestrator. The round-1 policy mechanism (a request
+   * field that merely ASKED providers not to create PRs) was REMOVED: a
+   * contract request is not a capability boundary. The capability split is
+   * now structural: the execution contract has no PR semantics at all.
+   */
 }
 
 // --- Provider-independent result ---
@@ -51,7 +63,18 @@ export interface AgentExecutionResult {
   readonly provider: string;
   readonly configuration: Record<string, unknown>;
   readonly commitRef: string | null;
-  readonly pullRequestRef: string | null;
+  /**
+   * PR #52 round 2 (BLOCKER 1): there is DELIBERATELY no `pullRequestRef`
+   * field on the execution result. A provider cannot report — and the
+   * gateway cannot accept — a pull request through the agent execution
+   * contract: the pre-gate phase is structurally PR-incapable. A PR that a
+   * HUMAN or an out-of-band tool opens is an EXTERNAL observation that
+   * enters through the execution-event/webhook ingestion boundary and is
+   * adopted by the orchestrator only AFTER the architecture checkpoint gate
+   * allows it. The gateway is the capability membrane: it re-projects every
+   * provider return onto this interface, so properties outside the contract
+   * cannot cross the boundary even at runtime.
+   */
   readonly reportedTests: AgentTestReport[];
   readonly reportedBlockers: AgentBlockerReport[];
   readonly error: AgentError | null;
@@ -75,6 +98,15 @@ export interface AgentError {
   readonly provider: string;
   readonly retryable: boolean;
 }
+
+/**
+ * The agent execution contract is PR-INCAPABLE (PR #52 round 2, BLOCKER 1).
+ * The round-1 prohibition mechanism — a post-hoc check of a provider-
+ * reported PR ref AFTER `adapter.execute()` returned — was removed with the
+ * field it inspected: it detected a contract violation only after the
+ * forbidden side effect could already have happened. The structural fix
+ * removes the capability itself (see AgentRequest/AgentExecutionResult).
+ */
 
 // --- Provider adapter interface (internal) ---
 
@@ -107,6 +139,12 @@ export interface AgentRun {
   readonly outputStorageKey: string | null;
   readonly outputStorageProvider: string | null;
   readonly commitRef: string | null;
+  /**
+   * EXTERNAL PR observations ONLY (PR #52 round 2, BLOCKER 1): a run row's
+   * PR ref can be set only by the external observation ingestion boundary
+   * (execution events / webhooks) — the agent execution contract has no PR
+   * semantics, so a gateway-recorded run result can never populate it.
+   */
   readonly pullRequestRef: string | null;
   readonly reportedTests: AgentTestReport[];
   readonly reportedBlockers: AgentBlockerReport[];

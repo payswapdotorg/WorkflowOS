@@ -75,7 +75,8 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
-        architectureService: stack.architectureService,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
+      architectureService: stack.architectureService,
       },
       workItems: {
         authorizationService: stack.authorizationService,
@@ -150,7 +151,10 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
     expect(result.output).toBe('Agent completed successfully');
     expect(result.provider).toBe('fake');
     expect(result.commitRef).toBe('abc123');
-    expect(result.pullRequestRef).toBe('github:owner/repo#1');
+    // PR #52 round 2 (BLOCKER 1): the execution contract is PR-INCAPABLE —
+    // there is no pullRequestRef on the result (and the gateway's
+    // projection membrane drops any out-of-contract property).
+    expect('pullRequestRef' in result).toBe(false);
     expect(result.reportedTests).toHaveLength(1);
     expect(result.reportedTests[0]!.status).toBe('pass');
   });
@@ -179,7 +183,10 @@ describe('WORK-012 — Agent Gateway and Agent Runs', () => {
     expect(run!.status).toBe('success');
     expect(run!.output).toBe('Persist test output');
     expect(run!.commitRef).toBe('abc123');
-    expect(run!.pullRequestRef).toBe('github:owner/repo#1');
+    // PR #52 round 2 (BLOCKER 1): the run's PR-ref column is reserved for
+    // EXTERNAL observations (event/webhook ingestion) — a gateway-recorded
+    // success can never populate it.
+    expect(run!.pullRequestRef).toBeNull();
     expect(run!.reportedTests).toHaveLength(1);
     expect(run!.workItemId).toBe(wi.id);
     expect(run!.repositoryRef).toBe('owner/repo');

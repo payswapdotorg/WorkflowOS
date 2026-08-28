@@ -89,6 +89,7 @@ describe('WORK-021 -- Notification boundary', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
         architectureService: stack.architectureService,
       },
       workflow: {

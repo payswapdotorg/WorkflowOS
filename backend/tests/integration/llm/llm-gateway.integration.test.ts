@@ -65,6 +65,7 @@ describe('WORK-013 — LLM Gateway', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
         architectureService: stack.architectureService,
       },
       workItems: {

@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stack.js';
+import { AllowAllCheckpointGate } from '../../helpers/allow-all-checkpoint-gate.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger, generateExecutionId } from '@platform/index.js';
 import { CaptureStream } from '../../helpers/capture-stream.js';
 import { DefaultWorkflowEngine } from '../../../src/modules/workflows/internal/workflow-engine.js';
 import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from '../../../src/modules/workflows/internal/workflow-orchestrator.js';
+import { FakePullRequestCreationPort } from '../../helpers/fake-pr-creation-port.js';
+import { GovernedPullRequestService } from '../../../src/modules/workflows/internal/governed-pull-request-service.js';
 import { DefaultWorkItemDependencyService } from '../../../src/modules/work-items/internal/work-item-dependency-service.js';
 import { DefaultAgentGateway, FakeAgentAdapter } from '../../../src/modules/agents/internal/agent-gateway.js';
 import { PgAgentRunRepository } from '../../../src/modules/agents/internal/pg-agent-repository.js';
@@ -131,7 +134,8 @@ describe('WORK-018 — Verification and architect-review orchestration', () => {
       stack.pullRequestAssociationRepository, agentGateway, agentRunRepo,
       architectService, verificationService, reviewService, new DefaultGitHubAdapter(),
       stack.architectureVersionRepository, stack.architectureRepository,
-      stack.projectRepository, generateExecutionId,
+      stack.projectRepository, new AllowAllCheckpointGate(), generateExecutionId,
+      new GovernedPullRequestService(stack.db.client, new FakePullRequestCreationPort()),
     );
 
     const handlers = buildHandlerRegistry([createConvergenceJobHandler(orchestrator, logger)]);
@@ -148,6 +152,7 @@ describe('WORK-018 — Verification and architect-review orchestration', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
         architectureService: stack.architectureService,
       },
       workItems: {

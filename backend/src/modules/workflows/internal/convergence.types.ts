@@ -345,3 +345,337 @@ export interface MergeGateResult {
 // --- Re-export for convenience ---
 
 export type { WorkflowState, WorkflowEngine };
+
+// --- WORK-051: Architecture checkpoint gate (the lifecycle gate contract) ---
+//
+// The checkpoint capability is APPLICATION-LAYER ORCHESTRATION ONLY. It owns
+// no workflow state machine and no parallel evidence authority. This port is
+// the CONTRACT /workflows consumes: the checkpoint subsystem (wired by the
+// composition root) implements it, evaluates architectural conformance
+// against the Work Item's immutable ArchitectureVersion + assertion set
+// (owned by /architecture), persists evidence through /verification, and
+// returns a GATING RESULT.
+//
+// The gate NEVER mutates workflow state — /workflows performs the legal
+// transition only when the gate allows it (frozen architecture §13; design
+// §8: "A checkpoint never creates or mutates workflow state directly").
+
+/** The four lifecycle gates implemented in the initial increment (design §5, §11). */
+export type ArchitectureCheckpointKind =
+  | 'readiness' // before implementation assignment (READY → ASSIGNED)
+  | 'work_order' // before an implementation agent starts (ASSIGNED → agent run)
+  | 'pr_conformance' // before PR_OPEN
+  | 'verification_entry'; // before/at entry to VERIFYING
+
+export interface ArchitectureCheckpointGateInput {
+  checkpointKind: ArchitectureCheckpointKind;
+  workItemId: string;
+  /**
+   * The caller's project context. The checkpoint service resolves the
+   * authoritative project SERVER-SIDE (work item → architecture version →
+   * architecture → project) and rejects a mismatch BEFORE any detector
+   * executes — caller-controlled tenant scope is impossible by construction.
+   */
+  expectedProjectId: string;
+  /**
+   * The exact implementation revision being gated (commit SHA). REQUIRED
+   * semantically for 'pr_conformance' and 'verification_entry' (a checkpoint
+   * evaluates an exact implementation revision); null is permitted only for
+   * the pre-implementation kinds where no implementation revision exists
+   * yet. A null revision at a revision-bound gate fails closed.
+   */
+  implementationRevision?: string | null;
+  executionId: string;
+  /**
+   * Optional idempotency key derived from the convergence signal — repeated
+   * processing of the SAME signal replays the recorded checkpoint result
+   * instead of re-evaluating (a later revision is a different key and
+   * evaluates fresh).
+   */
+  idempotencyKey?: string | null;
+  /**
+   * Optional Work Order context for the pre-implementation checkpoint kinds
+   * (traceability only — the checkpoint service resolves all authoritative
+   * state server-side; this field is never trusted as identity).
+   */
+  workOrderId?: string | null;
+}
+
+export interface ArchitectureCheckpointGateResult {
+  /** Whether the gated lifecycle progression may proceed. */
+  allowed: boolean;
+  /** Whether this checkpoint kind applies to the work item's impact profile. */
+  applicable: boolean;
+  /** Checkpoint status (null when not applicable). */
+  status: 'passed' | 'passed_with_advisories' | 'blocked' | 'inconclusive' | null;
+  /** Traceability id (the /verification run id; null when not applicable). */
+  checkpointId: string | null;
+  /** Blocking findings + advisories (human-readable, deterministic order). */
+  reasons: string[];
+}
+
+/**
+ * The gate contract consumed by the WorkflowOrchestrator. Implemented by the
+ * application-layer checkpoint subsystem (src/architecture-checkpoints/),
+ * wired by the composition root.
+ */
+export interface ArchitectureCheckpointGate {
+  evaluate(input: ArchitectureCheckpointGateInput): Promise<ArchitectureCheckpointGateResult>;
+}
+
+// --- WORK-051 round 2 (PR #52 review, BLOCKER 1 + BLOCKER 2): the governed
+// PR-creation boundary ---
+//
+// The governed convergence path is a TWO-CAPABILITY protocol:
+//
+//   capability 1 — the pre-gate implementation phase: the agent execution
+//     contract is STRUCTURALLY PR-INCAPABLE (no PR field on the request or
+//     the result, no PR-creation capability handed to any provider adapter;
+//     the gateway re-projects provider returns onto the contract). The
+//     provider cannot create a PR through the platform in this phase at all
+//     — there is no policy to violate;
+//   capability 2 — PR creation, ONLY after the pr_conformance checkpoint
+//     allows it, through THIS port: the actual PR-creation boundary owned by
+//     the orchestrator's PR path, satisfied in production by the /github
+//     authority's createPullRequest (repository coordinates resolved
+//     SERVER-SIDE from the project's /github link). The port call is wrapped
+//     by the DURABLE create-or-converge protocol (GovernedPullRequestService
+//     + the wfos_pull_request_intents ledger): crash/retry/duplicate re-drives
+//     of the same (work item, implementation revision) converge on ONE PR.
+//
+// The architectural property is structural: with a blocking architecture
+// violation, ZERO createPullRequest side effects occur; a PR exists in the
+// governed lifecycle only when the gate allowed it first. A pullRequestRef
+// reported by an EXTERNAL actor (e.g. a human opening a PR on GitHub) is
+// adopted by the webhook path — and is only associated + transitioned into
+// the governed lifecycle after the same gate passes.
+
+/**
+ * The result of a governed PR creation.
+ */
+export interface CreatedPullRequest {
+  /** The provider-independent PR identity (e.g. 'github:owner/repo#12'). */
+  readonly externalPrId: string;
+  /** The PR head commit reported by the PR authority (null when unknown). */
+  readonly headCommit: string | null;
+}
+
+/**
+ * PR #52 round 3 (review, BLOCKER 3) — an EXTERNALLY OBSERVED pull request,
+ * resolved to its AUTHORITATIVE identity through the /github boundary.
+ *
+ * A raw external PR reference (`github:owner/repo#12`) is NOT an
+ * implementation revision — it cannot enter the checkpoint binding or the
+ * governed-creation identity until the external PR's authoritative head
+ * COMMIT SHA has been resolved through /github. This type carries that
+ * resolved identity.
+ */
+export interface ResolvedExternalPullRequest {
+  /** The canonical provider-independent PR identity. */
+  readonly externalPrId: string;
+  /** The PR's authoritative head commit SHA (null when the authority reports none). */
+  readonly headCommit: string | null;
+  /** The PR state at the authority (adoption into PR_OPEN requires 'open'). */
+  readonly state: 'open' | 'closed';
+  /** Whether the authority reports the PR merged. */
+  readonly merged: boolean;
+}
+
+/**
+ * The PR-creation boundary consumed by the governed PR-creation protocol.
+ * Called ONLY after the pr_conformance checkpoint gate allows progression —
+ * never before, never as an agent side effect.
+ *
+ * PR #52 round 2 (BLOCKER 2): the port is BOTH halves of the external
+ * boundary — the convergence READ and the create. The deterministic head
+ * branch (a pure function of the work item + implementation revision — see
+ * {@link governedHeadBranch}) is the convergence marker that ties them
+ * together: after a crash between the external create and the durable
+ * record, the retry finds the already-created PR by that branch and
+ * converges instead of creating a second PR.
+ *
+ * PR #52 round 4 (review, BLOCKER 3): BOTH halves validate the COMPLETE
+ * governed identity — the deterministic head BRANCH **and** the
+ * AUTHORITATIVE head SHA === the requested headRevision. A branch match
+ * with a mismatched (or missing) SHA is NON-CONVERGENT: the production port
+ * throws {@link GovernedConvergenceMismatchError} (fail closed) instead of
+ * returning a PR whose content is not the revision the architecture
+ * checkpoint gated on. The convergence claim never asserts more provenance
+ * than the external authority actually proves.
+ */
+export interface PullRequestCreationPort {
+  /**
+   * The CONVERGENCE READ: find the PR this boundary already created for the
+   * (workItemId, headRevision) pair. Returns null when no such PR exists.
+   * Read-only — no side effects.
+   *
+   * Round 4 (BLOCKER 3): a PR found on the deterministic governed branch
+   * whose AUTHORITATIVE head SHA does not equal the requested headRevision
+   * (or reports none) is NOT the converged PR — the implementation throws
+   * {@link GovernedConvergenceMismatchError} (non-convergent, fail closed).
+   */
+  findExistingPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    workItemId: string;
+    /** The EXACT implementation revision the checkpoint gated on. */
+    headRevision: string;
+  }): Promise<CreatedPullRequest | null>;
+
+  /**
+   * The CREATE: open the governed PR. The head branch is DERIVED
+   * deterministically from (workItemId, headRevision) — the convergence
+   * marker — so a create is idempotent at the provider boundary (GitHub
+   * itself rejects a second open PR for the same head).
+   *
+   * Round 4 (BLOCKER 3): the creation result's AUTHORITATIVE head SHA must
+   * equal the requested headRevision — the created PR must deliver exactly
+   * the gated implementation revision. A mismatched (or missing) head SHA
+   * throws {@link GovernedConvergenceMismatchError} and the durable record
+   * is NOT written (the external PR is left unassociated — an observable
+   * anomaly, never a false provenance claim).
+   */
+  createPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    workItemId: string;
+    /** The EXACT implementation revision the checkpoint gated on. */
+    headRevision: string;
+    title: string;
+    body?: string | null;
+  }): Promise<CreatedPullRequest>;
+
+  /**
+   * PR #52 round 3 (review, BLOCKER 3) — the EXTERNAL-OBSERVATION RESOLUTION
+   * read: resolve an externally observed PR reference to its AUTHORITATIVE
+   * identity (the PR's real head commit SHA, state, and merged flag) through
+   * /github. Read-only — no side effects.
+   *
+   * Returns null when the authority holds no such PR (an honest 404 — an
+   * unresolvable observation). Throws on a malformed reference, a missing
+   * project repository link, a reference to a repository OTHER than the
+   * project's linked repository, or any authority transport failure — the
+   * caller fails closed in every one of those cases.
+   *
+   * The orchestrator calls this BEFORE the pr_conformance gate whenever only
+   * an external PR observation (no commit revision) is available: only the
+   * resolved commit SHA may enter the checkpoint binding and the
+   * governed-creation identity.
+   */
+  resolveExternalPullRequest(input: {
+    /** The work item's project (repository coordinates are resolved SERVER-SIDE). */
+    projectId: string;
+    /** The external PR reference (e.g. 'github:owner/repo#12'). */
+    externalPrRef: string;
+  }): Promise<ResolvedExternalPullRequest | null>;
+}
+
+/**
+ * Typed error thrown by the orchestrator when a lifecycle operation is
+ * refused because the architecture checkpoint gate denied progression
+ * (WORK-051). Carries the deterministic denial reasons for the API layer
+ * (mapped to HTTP 409 by the workflow route — the route duck-types the
+ * `code` field; the class itself is NOT exported through the public barrel).
+ */
+export class ArchitectureCheckpointGateDeniedError extends Error {
+  readonly code = 'architecture-checkpoint-gate-denied';
+  readonly checkpointKind: ArchitectureCheckpointKind;
+  readonly reasons: string[];
+
+  constructor(checkpointKind: ArchitectureCheckpointKind, reasons: string[]) {
+    super(
+      `architecture checkpoint gate denied ${checkpointKind}: ${reasons.join('; ')}`,
+    );
+    this.name = 'ArchitectureCheckpointGateDeniedError';
+    this.checkpointKind = checkpointKind;
+    this.reasons = reasons;
+  }
+}
+
+/**
+ * PR #52 round 4 (review, BLOCKER 2) — typed conflict thrown by the durable
+ * governed-PR identity protocol when TWO DIFFERENT PR identities claim the
+ * SAME convergence key (work item, authoritative head revision).
+ *
+ * The ledger (`wfos_pull_request_intents`) permits exactly ONE recorded PR
+ * identity per key: whichever governed path records first (create or adopt)
+ * wins, and the other path CONVERGES on the recorded identity. A path that
+ * arrives with a DIFFERENT PR for the same key is not a convergence — it is
+ * an identity conflict, and it fails CLOSED (no association, no PR_OPEN).
+ * The work item stays in its current lifecycle state; the conflict is
+ * observable (logged with both identities) and never silently resolves into
+ * a second PR association.
+ */
+export class GovernedPrIdentityConflictError extends Error {
+  readonly code = 'governed-pr-identity-conflict';
+  readonly workItemId: string;
+  readonly headRevision: string;
+  readonly recordedExternalPrId: string;
+  readonly claimedExternalPrId: string;
+
+  constructor(input: {
+    workItemId: string;
+    headRevision: string;
+    recordedExternalPrId: string;
+    claimedExternalPrId: string;
+  }) {
+    super(
+      `governed-pr-identity-conflict: the convergence key (work item ${input.workItemId}, ` +
+        `head revision ${input.headRevision}) is already durably bound to ` +
+        `${input.recordedExternalPrId}; the observed PR ${input.claimedExternalPrId} is a ` +
+        'DIFFERENT identity for the same key — one (work item, authoritative head commit) ' +
+        'converges on exactly one PR association (fail closed)',
+    );
+    this.name = 'GovernedPrIdentityConflictError';
+    this.workItemId = input.workItemId;
+    this.headRevision = input.headRevision;
+    this.recordedExternalPrId = input.recordedExternalPrId;
+    this.claimedExternalPrId = input.claimedExternalPrId;
+  }
+}
+
+/**
+ * PR #52 round 4 (review, BLOCKER 3) — typed failure thrown by the governed
+ * convergence boundary when the external authority's answer does not PROVE
+ * the provenance the governed path requires:
+ *
+ *   - the convergence read found an OPEN PR on the deterministic governed
+ *     head branch, but the PR's ACTUAL head commit differs from the
+ *     requested implementation revision (same branch, different SHA — a
+ *     stale or force-pushed branch must never be adopted as the converged
+ *     PR for the gated revision); or
+ *   - the authority returned no head SHA at all (unprovable provenance).
+ *
+ * A branch match with a mismatched SHA is NON-CONVERGENT: the protocol fails
+ * closed instead of associating a PR whose content is not the revision the
+ * architecture checkpoint gated on.
+ */
+export class GovernedConvergenceMismatchError extends Error {
+  readonly code = 'governed-pr-convergence-mismatch';
+  readonly workItemId: string;
+  readonly headRevision: string;
+  readonly governedBranch: string;
+  readonly observedHeadCommit: string | null;
+
+  constructor(input: {
+    workItemId: string;
+    headRevision: string;
+    governedBranch: string;
+    observedHeadCommit: string | null;
+    reason: string;
+  }) {
+    super(
+      `governed-pr-convergence-mismatch: ${input.reason} ` +
+        `(work item ${input.workItemId}, gated revision ${input.headRevision}, ` +
+        `governed branch ${input.governedBranch}, observed head commit ` +
+        `${input.observedHeadCommit ?? 'none'}) — the convergence marker matches but the ` +
+        'authoritative head SHA does not correspond to the requested governed revision ' +
+        '(non-convergent, fail closed)',
+    );
+    this.name = 'GovernedConvergenceMismatchError';
+    this.workItemId = input.workItemId;
+    this.headRevision = input.headRevision;
+    this.governedBranch = input.governedBranch;
+    this.observedHeadCommit = input.observedHeadCommit;
+  }
+}

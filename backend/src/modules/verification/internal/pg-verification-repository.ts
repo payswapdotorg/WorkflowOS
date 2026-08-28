@@ -17,6 +17,16 @@ import type {
   CriterionEvidenceMappingRepository,
 } from './verification.types.js';
 
+/**
+ * WORK-051 round 1 (BLOCKER 4): the minimal query capability the verification
+ * repositories need. Satisfied by BOTH the pooled {@link DatabaseClient} and a
+ * transaction-scoped DatabaseTx — the atomic orchestration record
+ * (recordOrchestrationRun) constructs these repositories against the ACTIVE
+ * TRANSACTION so the run row, every evidence row, and the finalization commit
+ * or abort as ONE unit.
+ */
+type QueryCapable = Pick<DatabaseClient, 'query'>;
+
 // ===========================================================================
 // VerificationRun repository (VERIFY-001).
 //
@@ -28,17 +38,19 @@ import type {
 // ===========================================================================
 
 export class PgVerificationRunRepository implements VerificationRunRepository {
-  constructor(private readonly db: DatabaseClient) {}
+  constructor(private readonly db: QueryCapable) {}
 
   async create(input: CreateVerificationRunInput): Promise<VerificationRun> {
     const result = await this.db.query<RunRow>(
       `INSERT INTO wfos_verification_runs
          (project_id, work_item_id, work_order_id, architecture_version_id,
-          source, source_ref, status, execution_id, started_at, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, NOW(), $8)
+          source, source_ref, status, execution_id, started_at, metadata,
+          orchestration_key)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, NOW(), $8, $9)
        RETURNING id, project_id, work_item_id, work_order_id, architecture_version_id,
-                 source, source_ref, status, execution_id, started_at, finished_at,
-                 summary, error_metadata, metadata, created_at, updated_at`,
+                 source, source_ref, orchestration_key, status, execution_id,
+                 started_at, finished_at, summary, error_metadata, metadata,
+                 created_at, updated_at`,
       [
         input.projectId,
         input.workItemId,
@@ -48,6 +60,7 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
         input.sourceRef ?? null,
         input.executionId,
         JSON.stringify(input.metadata ?? {}),
+        input.orchestrationKey ?? null,
       ],
     );
     return mapRun(result.rows[0]!);
@@ -56,8 +69,9 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
   async findById(id: string): Promise<VerificationRun | null> {
     const result = await this.db.query<RunRow>(
       `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,
-              source, source_ref, status, execution_id, started_at, finished_at,
-              summary, error_metadata, metadata, created_at, updated_at
+              source, source_ref, orchestration_key, status, execution_id,
+              started_at, finished_at, summary, error_metadata, metadata,
+              created_at, updated_at
        FROM wfos_verification_runs WHERE id = $1`,
       [id],
     );
@@ -68,12 +82,102 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
   async listForWorkItem(workItemId: string): Promise<VerificationRun[]> {
     const result = await this.db.query<RunRow>(
       `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,
-              source, source_ref, status, execution_id, started_at, finished_at,
-              summary, error_metadata, metadata, created_at, updated_at
+              source, source_ref, orchestration_key, status, execution_id,
+              started_at, finished_at, summary, error_metadata, metadata,
+              created_at, updated_at
        FROM wfos_verification_runs WHERE work_item_id = $1 ORDER BY created_at DESC`,
       [workItemId],
     );
     return result.rows.map(mapRun);
+  }
+
+  async findByOrchestrationKey(orchestrationKey: string): Promise<VerificationRun | null> {
+    const result = await this.db.query<RunRow>(
+      `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,
+              source, source_ref, orchestration_key, status, execution_id,
+              started_at, finished_at, summary, error_metadata, metadata,
+              created_at, updated_at
+       FROM wfos_verification_runs WHERE orchestration_key = $1`,
+      [orchestrationKey],
+    );
+    if (result.rows.length === 0) return null;
+    return mapRun(result.rows[0]!);
+  }
+
+  /**
+   * WORK-051 round 1 (BLOCKER 4): the create-or-converge insert. Concurrent
+   * callers with the same orchestration_key are arbitrated by the UNIQUE
+   * partial index: the loser's INSERT ... ON CONFLICT DO NOTHING returns no
+   * row, and the winner's committed row is selected and returned with
+   * created=false. (An in-flight uncommitted winner makes the loser WAIT on
+   * the index entry until the winner's transaction resolves — the standard
+   * PostgreSQL unique-index arbitration.)
+   */
+  async insertOrGetOrchestrationRun(
+    input: CreateVerificationRunInput,
+  ): Promise<{ run: VerificationRun; created: boolean }> {
+    const inserted = await this.db.query<RunRow>(
+      `INSERT INTO wfos_verification_runs
+         (project_id, work_item_id, work_order_id, architecture_version_id,
+          source, source_ref, status, execution_id, started_at, metadata,
+          orchestration_key)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, NOW(), $8, $9)
+       ON CONFLICT (orchestration_key) WHERE orchestration_key IS NOT NULL DO NOTHING
+       RETURNING id, project_id, work_item_id, work_order_id, architecture_version_id,
+                 source, source_ref, orchestration_key, status, execution_id,
+                 started_at, finished_at, summary, error_metadata, metadata,
+                 created_at, updated_at`,
+      [
+        input.projectId,
+        input.workItemId,
+        input.workOrderId ?? null,
+        input.architectureVersionId,
+        input.source,
+        input.sourceRef ?? null,
+        input.executionId,
+        JSON.stringify(input.metadata ?? {}),
+        input.orchestrationKey ?? null,
+      ],
+    );
+    if (inserted.rows.length > 0) {
+      return { run: mapRun(inserted.rows[0]!), created: true };
+    }
+    const existing = await this.findByOrchestrationKey(input.orchestrationKey!);
+    if (!existing) {
+      // Unreachable barring a concurrent delete (no delete path exists).
+      throw new Error(
+        `orchestration run: insert-or-get found no run for key ${input.orchestrationKey}`,
+      );
+    }
+    return { run: existing, created: false };
+  }
+
+  /**
+   * WORK-051 round 1 (BLOCKER 4): the CAS finalize. Exactly one writer's
+   * terminal UPDATE lands; concurrent losers get no row (the caller
+   * re-reads and observes the winner's terminal row).
+   */
+  async finalize(
+    id: string,
+    input: {
+      status: 'completed' | 'failed';
+      summary: Record<string, unknown>;
+      errorMetadata?: Record<string, unknown> | null;
+    },
+  ): Promise<VerificationRun | null> {
+    const result = await this.db.query<RunRow>(
+      `UPDATE wfos_verification_runs
+       SET status = $1, finished_at = NOW(), summary = $2,
+           error_metadata = $3, started_at = COALESCE(started_at, NOW())
+       WHERE id = $4 AND status IN ('pending', 'running')
+       RETURNING id, project_id, work_item_id, work_order_id, architecture_version_id,
+                 source, source_ref, orchestration_key, status, execution_id,
+                 started_at, finished_at, summary, error_metadata, metadata,
+                 created_at, updated_at`,
+      [input.status, JSON.stringify(input.summary), input.errorMetadata ?? null, id],
+    );
+    if (result.rows.length === 0) return null;
+    return mapRun(result.rows[0]!);
   }
 
   async update(id: string, input: UpdateVerificationRunInput): Promise<VerificationRun | null> {
@@ -90,8 +194,9 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
     const result = await this.db.query<RunRow>(
       `UPDATE wfos_verification_runs SET ${sets.join(', ')} WHERE id = $1
        RETURNING id, project_id, work_item_id, work_order_id, architecture_version_id,
-                 source, source_ref, status, execution_id, started_at, finished_at,
-                 summary, error_metadata, metadata, created_at, updated_at`,
+                 source, source_ref, orchestration_key, status, execution_id,
+                 started_at, finished_at, summary, error_metadata, metadata,
+                 created_at, updated_at`,
       params,
     );
     if (result.rows.length === 0) return null;
@@ -107,7 +212,7 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
 // ===========================================================================
 
 export class PgEvidenceRepository implements EvidenceRepository {
-  constructor(private readonly db: DatabaseClient) {}
+  constructor(private readonly db: QueryCapable) {}
 
   async create(input: CreateEvidenceInput, authority: EvidenceAuthority): Promise<Evidence> {
     // `authority` is a SERVER-SIDE parameter — it is NOT part of
@@ -188,7 +293,7 @@ export class PgEvidenceRepository implements EvidenceRepository {
 // ===========================================================================
 
 export class PgCriterionEvidenceMappingRepository implements CriterionEvidenceMappingRepository {
-  constructor(private readonly db: DatabaseClient) {}
+  constructor(private readonly db: QueryCapable) {}
 
   async create(input: CreateMapInput): Promise<CriterionEvidenceMapping> {
     const result = await this.db.query<MappingRow>(
@@ -289,6 +394,7 @@ interface RunRow {
   architecture_version_id: string;
   source: string;
   source_ref: string | null;
+  orchestration_key: string | null;
   status: string;
   execution_id: string;
   started_at: Date | null;
@@ -309,6 +415,7 @@ function mapRun(row: RunRow): VerificationRun {
     architectureVersionId: row.architecture_version_id,
     source: row.source,
     sourceRef: row.source_ref,
+    orchestrationKey: row.orchestration_key,
     status: row.status as VerificationRunStatus,
     executionId: row.execution_id,
     startedAt: row.started_at,

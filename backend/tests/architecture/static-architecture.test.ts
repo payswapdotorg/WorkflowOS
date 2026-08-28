@@ -1229,6 +1229,15 @@ describe('WORK-005 invariants — architecture module boundaries', () => {
       // WORK-025: re-exported for transaction-scoped plan apply
       'PgArchitectureRepository',
       'PgArchitectureVersionRepository',
+      // WORK-051: version-scoped architecture assertions (owned by
+      // /architecture; read by the checkpoint subsystem through the
+      // public-barrel ArchitectureAssertionReader).
+      'ArchitectureAssertion',
+      'ArchitectureAssertionSeverity',
+      'ArchitectureAssertionScope',
+      'CreateArchitectureAssertionInput',
+      'ArchitectureAssertionRepository',
+      'ArchitectureAssertionReader',
     ]);
     const exported: string[] = [];
     for (const m of archIndex.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
@@ -11198,7 +11207,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-043 execution-eligibility constraint migration — ALTER + INDEX only, no planner-owned table)').toMatch(/^0051_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-4 adoption-origin column on the governed PR-intent ledger — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0056_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -14535,6 +14544,1323 @@ describe('WORK-043 invariants — Execution Eligibility and Constraint Engine (�
     expect(handoff).toMatch(/R4-#1\. advisory gate ELIGIBLE \+ a saturated window/);
     expect(handoff).toMatch(/handoff-admission-rejected/);
     expect(handoff).toMatch(/the obligation stays PENDING \(recoverable\)/);
+  });
+});
+
+// =============================================================================
+// WORK-051 — Architecture Governance and Checkpoints
+// (issue #51: an executable architecture-conformance substrate around the
+// existing lifecycle — /architecture owns versions+assertions, /verification
+// owns evidence, /workflows owns transitions, the checkpoint capability is
+// application-layer orchestration ONLY).
+// =============================================================================
+
+describe('WORK-051 invariants — Architecture Governance and Checkpoints', () => {
+  const AC_DIR = join(BACKEND_ROOT, 'src', 'architecture-checkpoints');
+  const AC_INTERNAL = join(AC_DIR, 'internal');
+  const AC_DETECTORS = join(AC_INTERNAL, 'detectors');
+  const AC_TYPES = join(AC_DIR, 'types.ts');
+  const AC_SERVICE = join(AC_INTERNAL, 'default-checkpoint-service.ts');
+  const AC_REGISTRY = join(AC_INTERNAL, 'detector-registry.ts');
+  const ORCHESTRATOR = join(MODULES_DIR, 'workflows', 'internal', 'workflow-orchestrator.ts');
+  const CONVERGENCE_TYPES = join(MODULES_DIR, 'workflows', 'internal', 'convergence.types.ts');
+  const ARCH_TYPES = join(MODULES_DIR, 'architecture', 'internal', 'architecture.types.ts');
+  const ARCH_REPO = join(MODULES_DIR, 'architecture', 'internal', 'pg-architecture-repository.ts');
+  const ARCH_BARREL = join(MODULES_DIR, 'architecture', 'index.ts');
+  const VER_TYPES = join(MODULES_DIR, 'verification', 'internal', 'verification.types.ts');
+  const VER_SERVICE = join(MODULES_DIR, 'verification', 'internal', 'verification-service.ts');
+  const VER_REPO = join(MODULES_DIR, 'verification', 'internal', 'pg-verification-repository.ts');
+  const VER_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0053_verification_orchestration_key.sql',
+  );
+  const IMPACT_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0054_work_item_architecture_impact.sql',
+  );
+  const AGENT_TYPES = join(MODULES_DIR, 'agents', 'internal', 'agent.types.ts');
+  const AGENT_GATEWAY = join(MODULES_DIR, 'agents', 'internal', 'agent-gateway.ts');
+  const OPENAI_AGENT_ADAPTER = join(MODULES_DIR, 'agents', 'internal', 'openai-agent-adapter.ts');
+  const PR_PORT = join(MODULES_DIR, 'workflows', 'internal', 'github-pr-creation-port.ts');
+  const GOVERNED_PR_SERVICE = join(MODULES_DIR, 'workflows', 'internal', 'governed-pull-request-service.ts');
+  const PR_INTENT_MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0055_governed_pull_request_intents.sql',
+  );
+  const GOVERNED_PR_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'workflows', 'governed-pr-creation.integration.test.ts',
+  );
+  const SNAPSHOT_PROVIDER = join(AC_INTERNAL, 'github-snapshot-provider.ts');
+  const SNAPSHOT_TREE = join(AC_DETECTORS, 'snapshot-tree.ts');
+  const ARCH_SERVICE = join(MODULES_DIR, 'architecture', 'internal', 'architecture-service.ts');
+  const WORK_ITEM_REPO = join(MODULES_DIR, 'work-items', 'internal', 'pg-work-item-repository.ts');
+  const WORKFLOW_TYPES = join(MODULES_DIR, 'workflows', 'internal', 'workflow.types.ts');
+  const MIGRATION_0052 = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0052_architecture_assertions.sql',
+  );
+  const GATE_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'workflows', 'checkpoint-gates.integration.test.ts',
+  );
+  const CHECKPOINT_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'architecture-governance', 'checkpoint-service.integration.test.ts',
+  );
+  const ASSERTION_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'architecture', 'architecture-assertions.integration.test.ts',
+  );
+  const ORCH_RUNS_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'verification', 'orchestration-runs.integration.test.ts',
+  );
+  const GITHUB_REST_CLIENT = join(MODULES_DIR, 'github', 'internal', 'github-rest-client.ts');
+  const GITHUB_ADAPTER = join(MODULES_DIR, 'github', 'internal', 'pg-github-repository.ts');
+  const GITHUB_FAKE = join(MODULES_DIR, 'github', 'internal', 'fake-github-adapter.ts');
+  const REST_ADAPTER_TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'github', 'github-rest-adapter.integration.test.ts',
+  );
+  const SCRIPTED_GITHUB_API = join(
+    BACKEND_ROOT, 'tests', 'helpers', 'scripted-github-api.ts',
+  );
+
+  function strip(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function listAcFiles(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const entry of readdirSync(d).sort()) {
+        const full = join(d, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) out.push(full);
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  const AC_FILES = listAcFiles(AC_DIR);
+
+  // --- (1) NO second workflow/state-machine authority -----------------------
+
+  it('NO second workflow/state-machine authority — the checkpoint subsystem owns no state machine, no engine, no transition map', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      // The workflow-transition DETECTOR legitimately READS the authority's
+      // LEGAL_TRANSITIONS literal (that is its evaluation). What checkpoint
+      // code must NEVER do is DECLARE its own map — a second state machine.
+      expect(src, `${f}: no LEGAL_TRANSITIONS declaration in checkpoint code`).not.toMatch(
+        /(?:const|let|var)\s+LEGAL_TRANSITIONS/,
+      );
+      expect(src, `${f}: no WorkflowEngine implementation`).not.toMatch(/implements\s+WorkflowEngine/);
+      expect(src, `${f}: no workflow-transition SQL`).not.toMatch(/wfos_workflow_executions|wfos_workflow_transitions/);
+      // The checkpoint vocabulary is its OWN closed set — it never re-declares
+      // WorkflowState or a competing state enum.
+      expect(src, `${f}: no competing workflow-state enum`).not.toMatch(
+        /type\s+\w*\s*=\s*'(draft|ready|assigned|implementing)'\s*\|/,
+      );
+    }
+    // The gate contract explicitly says the gate NEVER mutates workflow state
+    // (raw source — the prose lives in the doc comment).
+    const gateTypesRaw = readFileSync(CONVERGENCE_TYPES, 'utf8');
+    expect(gateTypesRaw).toMatch(/NEVER mutates workflow state/);
+    // LEGAL_TRANSITIONS itself is unchanged — still exactly the frozen 15-state map.
+    const wf = readFileSync(WORKFLOW_TYPES, 'utf8');
+    expect(wf).toMatch(/verified: \[\], \/\/ terminal/);
+    expect(wf).toMatch(/architecture_change_request: \[\], \/\/ terminal until architecture change is resolved/);
+  });
+
+  // --- (2) NO second verification/evidence authority --------------------------
+
+  it('NO second verification/evidence authority — migration 0052 creates only the /architecture assertion table; checkpoint evidence flows through /verification', () => {
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/CREATE TABLE wfos_architecture_assertions/);
+    // The ONLY table created is the assertion table — NO evidence store.
+    const created = [...migration.matchAll(/CREATE TABLE (\w+)/g)].map((m) => m[1]);
+    expect(created).toEqual(['wfos_architecture_assertions']);
+    // No migration anywhere creates a checkpoint/evidence-adjacent table.
+    const migrationsDir = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+    for (const f of readdirSync(migrationsDir).filter((x) => x.endsWith('.sql'))) {
+      const text = strip(readFileSync(join(migrationsDir, f), 'utf8'));
+      expect(text, `${f}: no parallel checkpoint/evidence store`).not.toMatch(
+        /CREATE TABLE[^\n]*(checkpoint|conformance)/i,
+      );
+    }
+    // Checkpoint code never declares a competing evidence repository/run
+    // implementation — it consumes the VerificationService public contract.
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no evidence-table SQL`).not.toMatch(/wfos_evidence|wfos_verification_runs/);
+      expect(src, `${f}: no VerificationService implementation`).not.toMatch(
+        /implements\s+VerificationService/,
+      );
+    }
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // PR #52 round 1 (BLOCKER 4 + crash safety): the ENTIRE evidence record —
+    // run + evidence rows + terminal finalization — is ONE atomic
+    // recordOrchestrationRun transaction (no createRun/attachEvidence/
+    // finalize sequence that a crash can leave partial).
+    expect(svc).toMatch(/verificationService\.recordOrchestrationRun/);
+    expect(svc, 'no stepwise evidence persistence in the checkpoint service').not.toMatch(
+      /verificationService\.createRun/,
+    );
+    expect(svc, 'no stepwise evidence attachment in the checkpoint service').not.toMatch(
+      /verificationService\.attachEvidence/,
+    );
+    // /verification owns the orchestration-record contract (the durable
+    // identity + the atomic record on the existing authority).
+    const verTypes = strip(readFileSync(VER_TYPES, 'utf8'));
+    expect(verTypes).toMatch(/finalizeOrchestrationRun/);
+    expect(verTypes).toMatch(/recordOrchestrationRun/);
+    expect(verTypes).toMatch(/findOrchestrationRun/);
+    expect(readFileSync(VER_TYPES, 'utf8')).toMatch(/SOLE evidence authority/);
+    // Migration 0053: the durable orchestration identity — a UNIQUE partial
+    // index owned by /verification (NO new evidence store: no table).
+    const verMigration = strip(readFileSync(VER_MIGRATION, 'utf8'));
+    expect(verMigration).toMatch(/orchestration_key TEXT/);
+    expect(verMigration).toMatch(/CREATE UNIQUE INDEX wfos_verification_runs_orchestration_key_uidx/);
+    expect(
+      [...verMigration.matchAll(/CREATE TABLE (\w+)/g)].map((m) => m[1]),
+      '0053 creates NO table',
+    ).toEqual([]);
+    // The repository implements create-or-converge (ON CONFLICT DO NOTHING)
+    // + the CAS finalize; the service wraps them in ONE transaction.
+    const verRepo = strip(readFileSync(VER_REPO, 'utf8'));
+    expect(verRepo).toMatch(/ON CONFLICT \(orchestration_key\)/);
+    expect(verRepo).toMatch(/findByOrchestrationKey/);
+    expect(verRepo).toMatch(/WHERE id = \$\d+ AND status IN \('pending', 'running'\)/);
+    const verService = strip(readFileSync(VER_SERVICE, 'utf8'));
+    expect(verService).toMatch(/this\.db\.transaction/);
+    expect(verService).toMatch(/insertOrGetOrchestrationRun/);
+  });
+
+  // --- (3) NO second architecture authority -----------------------------------
+
+  it('NO second architecture authority — assertions are owned by /architecture; the checkpoint subsystem holds only READ-ONLY reader ports', () => {
+    // The assertion repository + types live ONLY under /architecture.
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no assertion-repository implementation`).not.toMatch(
+        /implements\s+ArchitectureAssertionRepository/,
+      );
+      expect(src, `${f}: no assertion-table SQL`).not.toMatch(/wfos_architecture_assertions/);
+      expect(src, `${f}: no ArchitectureService implementation`).not.toMatch(
+        /implements\s+ArchitectureService/,
+      );
+    }
+    // The /architecture types declare the reader + the append-only repo
+    // (create/find/list ONLY — no update, no delete).
+    const archTypes = strip(readFileSync(ARCH_TYPES, 'utf8'));
+    expect(archTypes).toMatch(/interface ArchitectureAssertionRepository/);
+    expect(archTypes).toMatch(/interface ArchitectureAssertionReader/);
+    const repoIface = archTypes.slice(
+      archTypes.indexOf('interface ArchitectureAssertionRepository'),
+      archTypes.indexOf('interface ArchitectureAssertionReader'),
+    );
+    expect(repoIface).toMatch(/create\(/);
+    expect(repoIface).toMatch(/findById\(/);
+    expect(repoIface).toMatch(/listForVersion\(/);
+    expect(repoIface, 'no update method on the assertion contract').not.toMatch(/\bupdate\(/);
+    expect(repoIface, 'no delete method on the assertion contract').not.toMatch(/\bdelete\(/);
+    // The reader is exported through the /architecture public barrel.
+    const barrel = readFileSync(ARCH_BARREL, 'utf8');
+    expect(barrel).toMatch(/ArchitectureAssertionReader/);
+    // The checkpoint service consumes the reader — never the repository.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/assertionReader/);
+    expect(svc, 'the checkpoint service takes no assertion repository').not.toMatch(
+      /assertionRepository/,
+    );
+  });
+
+  // --- (4)+(5)+(6) NO direct writes from checkpoint code ----------------------
+
+  it('checkpoint code cannot DIRECTLY write workflow state, architecture definitions, or verification tables', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      // No SQL at all in the checkpoint subsystem.
+      expect(src, `${f}: checkpoint code issues no SQL`).not.toMatch(
+        /\b(INSERT INTO|UPDATE|DELETE FROM|SELECT)\b/,
+      );
+      // No workflow-state mutation capability.
+      expect(src, `${f}: no WorkflowEngine dependency`).not.toMatch(/WorkflowEngine/);
+      expect(src, `${f}: no workflow transition invocation`).not.toMatch(/\.transition\(/);
+      // No architecture mutation capability.
+      expect(src, `${f}: no transitionState/freeze/approve calls`).not.toMatch(
+        /transitionState|freezeVersion|approveChangeAndCreateReplacement|rejectChangeRequest/,
+      );
+    }
+    // The service's reader ports are structurally read-only (findById only).
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    for (const reader of ['ArchitectureVersionReader', 'ArchitectureReader', 'WorkItemReader']) {
+      const block = types.slice(
+        types.indexOf(`interface ${reader}`),
+        types.indexOf('}', types.indexOf(`interface ${reader}`) + 1),
+      );
+      expect(block, `${reader}: findById only`).toMatch(/findById\(/);
+      expect(block, `${reader}: no mutation methods`).not.toMatch(/\b(create|update|delete|transition)\b/);
+    }
+    // Evidence persistence goes through the /verification public barrel import.
+    const svcImports = readFileSync(AC_SERVICE, 'utf8');
+    expect(svcImports).toMatch(/from '@platform\/logger\.js'/);
+    expect(svcImports, 'the checkpoint service imports from module barrels only').not.toMatch(
+      /from '@modules\/[^']+'\/internal\//,
+    );
+  });
+
+  // --- (7) detector imports use public barrels only ---------------------------
+
+  it('detectors import through public barrels only (no module internal/ bypasses)', () => {
+    const detectorFiles = listAcFiles(AC_DETECTORS);
+    expect(detectorFiles.length).toBeGreaterThanOrEqual(7); // 6 detectors + file-tree helper
+    for (const f of [...detectorFiles, AC_REGISTRY]) {
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1]!;
+        if (spec.startsWith('@modules/')) {
+          // Public barrels ONLY: '@modules/<name>/index.js' or '@modules/<name>'.
+          expect(spec, `${f}: detector imports must use the module barrel`).toMatch(
+            /^@modules\/[\w-]+(\/index\.js)?$/,
+          );
+        }
+      }
+    }
+    // The same rule holds for the whole checkpoint subsystem.
+    for (const f of AC_FILES) {
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1]!;
+        if (spec.startsWith('@modules/')) {
+          expect(spec, `${f}: checkpoint code must use the module barrel`).toMatch(
+            /^@modules\/[\w-]+(\/index\.js)?$/,
+          );
+        }
+      }
+    }
+  });
+
+  // --- (8) NO detector/provider credential coupling ----------------------------
+
+  it('detectors hold no provider or credential coupling', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no pg/pglite/redis drivers`).not.toMatch(
+        /from '(pg|@electric-sql\/pglite|ioredis)'/,
+      );
+      expect(src, `${f}: no secrets/credential access`).not.toMatch(
+        /secretStore|SecretStore|apiToken|apiKey|credential/i,
+      );
+      expect(src, `${f}: no environment-variable credential reads`).not.toMatch(/process\.env/);
+    }
+    // The detector contract states it in prose (types.ts).
+    const types = readFileSync(AC_TYPES, 'utf8');
+    expect(types).toMatch(/never hold credentials or provider coupling/);
+  });
+
+  // --- (9) NO caller-controlled tenant scope ------------------------------------
+
+  it('tenant/project scope is SERVER-RESOLVED and validated BEFORE detector execution', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // The server-side resolution chain: workItem → version → architecture → project.
+    expect(svc).toMatch(/workItemReader\.findById/);
+    expect(svc).toMatch(/architectureVersionReader\.findById/);
+    expect(svc).toMatch(/architectureReader\.findById/);
+    // The tenant guard compares the CALLER'S expectation against the resolved
+    // project and throws BEFORE any detector runs.
+    expect(svc).toMatch(/CrossTenantCheckpointAccessError/);
+    // CODE-ORDER proof (stripped source): the tenant throw precedes BOTH the
+    // assertion-set read and the detector lookup — no detector can run for a
+    // cross-tenant caller.
+    const tenantThrow = svc.indexOf('throw new CrossTenantCheckpointAccessError');
+    const assertionRead = svc.indexOf('this.deps.assertionReader.listForVersion');
+    const detectorLookup = svc.indexOf('this.deps.detectors.get');
+    expect(tenantThrow).toBeGreaterThanOrEqual(0);
+    expect(assertionRead).toBeGreaterThanOrEqual(0);
+    expect(detectorLookup).toBeGreaterThanOrEqual(0);
+    expect(tenantThrow, 'the tenant guard fires before assertions are read').toBeLessThan(assertionRead);
+    expect(tenantThrow, 'the tenant guard fires before any detector is resolved').toBeLessThan(detectorLookup);
+    // The prose contract lives in the raw source (doc comments).
+    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/BEFORE any detector execution/);
+    // The gate input type documents the same contract (raw source — prose).
+    const gateTypes = readFileSync(CONVERGENCE_TYPES, 'utf8');
+    expect(gateTypes).toMatch(/SERVER-SIDE/);
+    expect(gateTypes).toMatch(/caller-controlled tenant scope is impossible by construction/);
+    // The orchestrator passes the SERVER-RESOLVED signal.projectId (never a
+    // client-supplied project id) as the expected project.
+    const orch = strip(readFileSync(ORCHESTRATOR, 'utf8'));
+    expect(orch).toMatch(/expectedProjectId: signal\.projectId/);
+  });
+
+  // --- (10) NO new lifecycle states ----------------------------------------------
+
+  it('NO new lifecycle states — the gate contract is a gate, not a state; WorkflowState is untouched', () => {
+    const wf = readFileSync(WORKFLOW_TYPES, 'utf8');
+    // The frozen 15 states, exactly (counting assertion — mutation-proof).
+    const states = [...wf.matchAll(/^\s{2}\| '(\w+)';?$/gm)].map((m) => m[1]!);
+    expect(states).toHaveLength(15);
+    expect(states).toContain('verified');
+    expect(states).toContain('architecture_change_request');
+    // The checkpoint kinds are NOT workflow states.
+    const gateTypes = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    const kinds = gateTypes.slice(
+      gateTypes.indexOf('export type ArchitectureCheckpointKind'),
+      gateTypes.indexOf('export interface ArchitectureCheckpointGateInput'),
+    );
+    expect(kinds).toMatch(/'readiness'/);
+    expect(kinds).toMatch(/'work_order'/);
+    expect(kinds).toMatch(/'pr_conformance'/);
+    expect(kinds).toMatch(/'verification_entry'/);
+    // The orchestrator still performs EVERY transition through the engine
+    // (the boundary prose lives in the raw source doc comment).
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    expect(strip(orch)).toMatch(/this\.workflowEngine\.transition\(/);
+    expect(orch).toMatch(/NEVER mutates wfos_workflow_executions directly/);
+  });
+
+  // --- (11) NO scheduler-driven checkpoint execution -------------------------------
+
+  it('NO scheduler-driven checkpoint execution in the initial increment', () => {
+    for (const f of AC_FILES) {
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: no scheduler`).not.toMatch(/setInterval|setTimeout|cron|schedule\(/);
+      // No queue producers — checkpoint evaluation is caller-invoked only.
+      expect(src, `${f}: no queue coupling`).not.toMatch(/enqueue\(/);
+    }
+  });
+
+  // --- (12) the lifecycle gates are enforced at EVERY transition site (counting) -----
+
+  it('MUTATION-PROOF — the four gates guard EVERY gated transition site in the orchestrator (counting, not first-occurrence)', () => {
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    // PR #52 round 1 (BLOCKER 2): the three former pr_conformance call sites
+    // CONSOLIDATED into the single governed PR-creation boundary
+    // (openGovernedPullRequest) — 6 gate invocations (readiness ×1,
+    // work_order ×2, pr_conformance ×1 inside openGovernedPullRequest,
+    // verification_entry ×2) + 1 private method definition = 7 occurrences.
+    const gateCalls = [...orch.matchAll(/this\.runArchitectureCheckpointGate\(/g)].length;
+    expect(gateCalls, 'all four gate kinds × all sites must evaluate the gate').toBe(6);
+    const gateDefs = [...orch.matchAll(/private async runArchitectureCheckpointGate\(/g)].length;
+    expect(gateDefs).toBe(1);
+
+    // The pr_conformance gate lives INSIDE the governed PR-creation boundary,
+    // and the ONLY PR-creation entry (the governed create-or-converge service
+    // call) is strictly AFTER the gate check — code-order proof (BLOCKER 2).
+    // The service (not the orchestrator) holds the port: the port call itself
+    // is pinned in the governed-pull-request-service invariant below.
+    const boundaryStart = orch.indexOf('private async openGovernedPullRequest(');
+    expect(boundaryStart).toBeGreaterThanOrEqual(0);
+    const boundary = orch.slice(boundaryStart, orch.indexOf('\n  }', boundaryStart));
+    const gateCheck = boundary.indexOf('this.runArchitectureCheckpointGate(');
+    const deniedReturn = boundary.indexOf('if (!prGate.allowed)');
+    const governedCall = boundary.indexOf('this.governedPullRequests.open(');
+    expect(gateCheck).toBeGreaterThanOrEqual(0);
+    expect(deniedReturn).toBeGreaterThan(gateCheck);
+    expect(governedCall, 'the governed PR-creation call is INSIDE the boundary').toBeGreaterThan(deniedReturn);
+    // The boundary is the ONLY governed PR-creation entry in the orchestrator.
+    expect([...orch.matchAll(/this\.governedPullRequests\.open\(/g)].length).toBe(1);
+
+    // Every pr_open transition is gated by the boundary (3 sites: initiate,
+    // correction, agent_run_completed — each immediately preceded by an
+    // openGovernedPullRequest call).
+    const prOpenTransitions = [...orch.matchAll(/this\.transition\(signal, 'pr_open'\)/g)].length;
+    expect(prOpenTransitions).toBe(3);
+    const boundaryCalls = [...orch.matchAll(/await this\.openGovernedPullRequest\(/g)].length;
+    expect(boundaryCalls, 'every PR-open path goes through the governed boundary').toBe(3);
+
+    const assignedTransitions = [...orch.matchAll(/this\.transition\(signal, 'assigned'\)/g)].length;
+    expect(assignedTransitions).toBe(1);
+    const readinessGates = [...orch.matchAll(/'readiness'/g)].length;
+    expect(readinessGates).toBeGreaterThanOrEqual(2); // the gate call + the denial log
+
+    const workOrderGates = [...orch.matchAll(/'work_order', null, workOrder\.id\)/g)].length;
+    expect(workOrderGates, 'both agent-launch sites gate on work_order').toBe(2);
+
+    const verifyingTransitions = [...orch.matchAll(/toState: 'verifying'|transition\(signal, 'verifying'\)/g)].length;
+    expect(verifyingTransitions).toBe(2);
+    const verificationEntryGates = [...orch.matchAll(/checkpointKind: 'verification_entry'/g)].length;
+    expect(verificationEntryGates, 'both verification-entry paths gate').toBe(2);
+
+    // The direct beginVerification path throws the typed denial (fail closed
+    // with a durable reason), and the route maps it to 409.
+    expect(orch).toMatch(/ArchitectureCheckpointGateDeniedError/);
+    const route = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'workflow.route.ts'), 'utf8');
+    expect(route).toMatch(/architecture-checkpoint-gate-denied/);
+    expect(route).toMatch(/reply\.code\(409\)/);
+    // Gate errors fail closed in the orchestrator helper.
+    expect(orch).toMatch(/FAIL CLOSED/);
+  });
+
+  // --- the detector registry is closed and matches the design ------------------
+
+  it('the detector registry registers EXACTLY the six initial detector kinds (closed set)', () => {
+    const registry = strip(readFileSync(AC_REGISTRY, 'utf8'));
+    expect(registry).toMatch(/'repository-structure'/);
+    expect(registry).toMatch(/'schema-migration'/);
+    expect(registry).toMatch(/'authority-ownership'/);
+    expect(registry).toMatch(/'interface-contract'/);
+    expect(registry).toMatch(/'workflow-transition'/);
+    expect(registry).toMatch(/'runtime-configuration'/);
+    const kinds = [...registry.matchAll(/'([a-z-]+)',/g)].map((m) => m[1]!);
+    const declared = kinds.filter((k) =>
+      ['repository-structure', 'schema-migration', 'authority-ownership', 'interface-contract', 'workflow-transition', 'runtime-configuration'].includes(k),
+    );
+    expect(declared).toHaveLength(6);
+    // No other file registers detectors (single enumerable seam).
+    for (const f of AC_FILES) {
+      if (f === AC_REGISTRY) continue;
+      const src = strip(readFileSync(f, 'utf8'));
+      expect(src, `${f}: detectors register only in the registry`).not.toMatch(
+        /registry\.set\(d\.detectorKind/,
+      );
+    }
+  });
+
+  // --- the impact matrix is pinned as data ---------------------------------------
+
+  it('the impact/checkpoint applicability matrix matches the design (frequency control, never rule weakening)', () => {
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(
+      /readiness: \['high'\],\s*work_order: \['medium', 'high'\],\s*pr_conformance: \['low', 'medium', 'high'\],\s*verification_entry: \['high'\],/,
+    );
+    // The fail-closed default: unknown/absent impact derives 'high'
+    // (raw source — the prose lives in the doc comment).
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/FAIL-CLOSED[\s\S]{0,20}default 'high'/);
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/return 'high';/);
+    // Impact controls frequency ONLY — the checkpoint never downgrades
+    // severity (raw source — the prose lives in the doc comment; flexible
+    // whitespace to span the wrapped comment line).
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(
+      /never weakens[\s\S]{0,40}underlying architecture[\s\S]{0,20}rules/,
+    );
+  });
+
+  // --- the fail-closed aggregation is pinned --------------------------------------
+
+  it('the aggregation is fail-closed: blocking fail OR inconclusive ⇒ blocked; advisory never blocks', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/blockingFindings\.length > 0/);
+    expect(svc).toMatch(/'passed_with_advisories'/);
+    expect(svc).toMatch(/'passed'/);
+    // An inconclusive blocking assertion is a DENIAL (the design §7 rule):
+    // the ONLY statuses excluded from the findings loop are pass and
+    // not_applicable — a blocking 'inconclusive' falls through to
+    // blockingFindings exactly like a blocking 'fail'.
+    expect(svc).toMatch(
+      /if \(e\.status === 'not_applicable' \|\| e\.status === 'pass'\) continue;\s*const line =[\s\S]{0,160}if \(e\.severity === 'blocking'\) \{\s*blockingFindings\.push\(line\);\s*\} else \{\s*advisories\.push\(line\);/,
+    );
+    // A detector crash is inconclusive — never a pass.
+    expect(readFileSync(AC_SERVICE, 'utf8')).toMatch(/detector crash is an INCONCLUSIVE evaluation/);
+  });
+
+  // --- evidence immutability + revision binding ------------------------------------
+
+  it('checkpoint evidence is revision-bound, append-only, and finalized exactly once', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // PR #52 round 1: the evidence rows are built as data and recorded
+    // atomically; each row pins the exact revision.
+    expect(svc).toMatch(/headSha: result\.implementationRevision/);
+    expect(readFileSync(VER_TYPES, 'utf8')).toMatch(/NOTHING is appended/);
+    const ver = strip(readFileSync(VER_SERVICE, 'utf8'));
+    expect(ver).toMatch(/finalized exactly once/);
+    expect(ver).toMatch(/orchestration runs are finalized exactly once/);
+    // BLOCKER 4: the durable identity (unique, indexed) — never a metadata scan.
+    expect(strip(readFileSync(AC_SERVICE, 'utf8'))).not.toMatch(/listRunsForWorkItem/);
+    expect(svc).toMatch(/findOrchestrationRun/);
+    expect(svc).toMatch(/orchestrationKey\(/);
+  });
+
+  // --- the self-hosting boundary -----------------------------------------------------
+
+  it('self-hosting: WorkflowOS can evaluate itself but gains NO unchecked authority over its governing architecture', () => {
+    // The checkpoint subsystem has NO path to mutate architecture: no
+    // ArchitectureService dependency, no version transitions, reader-only
+    // ports (already asserted above), and /architecture owns every write.
+    const archRepo = strip(readFileSync(ARCH_REPO, 'utf8'));
+    expect(archRepo).toMatch(/class PgArchitectureAssertionRepository/);
+    // The frozen version's assertion set is closed at the PERSISTENCE level.
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/wfos_arch_assertions_draft_only/);
+    expect(migration).toMatch(/wfos_arch_assertions_protect/);
+    expect(migration).toMatch(/append-only/i);
+    // The runtime self-hosting regression exists and evaluates the REAL tree.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/PROOF 11 — WorkflowOS evaluates ITSELF/);
+    expect(tests).toMatch(/claim-authority/);
+  });
+
+  // --- PR #52 round 1, BLOCKER 1: the EXACT-REVISION snapshot read boundary ------------
+
+  it('BLOCKER 1 — detectors read ONLY the revision-bound snapshot: NO filesystem access, NO working-tree fallback (fail-closed reads)', () => {
+    // (a) NO detector touches the filesystem at all — every read flows through
+    // the RepositorySnapshot port (the /github authority's exact-revision
+    // content reads).
+    for (const f of listAcFiles(AC_DETECTORS)) {
+      const src = readFileSync(f, 'utf8');
+      expect(src, `${f}: detectors import no filesystem APIs`).not.toMatch(
+        /from 'node:fs'/,
+      );
+      expect(strip(src), `${f}: detectors call no filesystem APIs`).not.toMatch(
+        /\b(readdirSync|readFileSync|statSync|walkFiles)\(/,
+      );
+    }
+    // (b) The snapshot contract exists and is the ONLY repository input on
+    // DetectorInput; without a bound snapshot, repository-backed assertions
+    // are not_applicable — never a working-tree read.
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(/interface RepositorySnapshot/);
+    expect(types).toMatch(/interface RepositorySnapshotReader/);
+    expect(types).toMatch(/snapshot: RepositorySnapshot \| null;/);
+    expect(readFileSync(AC_TYPES, 'utf8')).toMatch(/never silently read the current working tree instead/);
+    // (c) The service opens the snapshot ONLY for revision-bound kinds, and a
+    // failed/absent snapshot is a fail-closed context denial.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/snapshotReader\.openSnapshot/);
+    expect(svc).toMatch(/REVISION_BOUND_KINDS/);
+    expect(svc).toMatch(/no linked repository/);
+    // (d) The production snapshot provider delegates to the EXISTING /github
+    // authority (getFileContent/listDir) with SERVER-SIDE repository
+    // resolution (no caller-supplied coordinates) and fail-closed reads.
+    const provider = readFileSync(SNAPSHOT_PROVIDER, 'utf8');
+    expect(provider).toMatch(/findByProject/);
+    expect(provider).toMatch(/getFileContent/);
+    expect(provider).toMatch(/listDir/);
+    expect(provider).toMatch(/SnapshotReadError/);
+    expect(provider).not.toMatch(/from 'node:fs'/);
+    // (e) The walker: missing roots, unreadable dirs/files, and listed-but-
+    // unreadable files are ALL typed failures (never empty scans).
+    const walker = readFileSync(SNAPSHOT_TREE, 'utf8');
+    expect(walker).toMatch(/'root-missing'/);
+    expect(walker).toMatch(/'unreadable'/);
+    expect(walker).toMatch(/'inconsistent'/);
+    expect(readFileSync(SNAPSHOT_TREE, 'utf8')).toMatch(/vacuous PASS|zero files vacuously/i);
+  });
+
+  // --- PR #52 round 2, BLOCKER 1: the STRUCTURAL capability split ------------------------
+  //
+  // `pullRequestPolicy: 'prohibited'` was NOT a capability boundary — the
+  // gateway checked the provider's REPORTED result after execute() returned,
+  // so a misbehaving provider's actual PR side effect had already happened.
+  // The round-2 fix removes the capability itself: the agent execution
+  // contract carries NO PR semantics at all, and the ONLY PR-creation
+  // capability is the post-gate PullRequestCreationPort → /github path.
+  it('BLOCKER 1 (round 2) — the agent execution contract is STRUCTURALLY PR-INCAPABLE; the only PR-creation capability is the post-gate port', () => {
+    const agentTypes = readFileSync(AGENT_TYPES, 'utf8');
+
+    // (a) The execution request + result interfaces contain NO pull-request
+    // semantics (extract each interface body precisely, from the
+    // comment-stripped source — the invariant pins the FIELDS, not the
+    // documentation; the persistence row type still carries the
+    // external-observation column).
+    const agentTypesCode = strip(agentTypes);
+    const extractInterface = (src: string, name: string): string => {
+      const start = src.indexOf(`export interface ${name} {`);
+      expect(start, `${name} must exist`).toBeGreaterThanOrEqual(0);
+      let depth = 0;
+      for (let i = start; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        if (src[i] === '}') {
+          depth--;
+          if (depth === 0) return src.slice(start, i);
+        }
+      }
+      return src.slice(start);
+    };
+    const requestIface = extractInterface(agentTypesCode, 'AgentRequest');
+    const resultIface = extractInterface(agentTypesCode, 'AgentExecutionResult');
+    expect(requestIface, 'the execution request carries no PR semantics').not.toMatch(/pullRequest/i);
+    expect(resultIface, 'the execution result carries no PR semantics').not.toMatch(/pullRequest/i);
+
+    // (b) The round-1 policy mechanism is GONE ENTIRELY (a contract request
+    // is not a capability boundary — there is no policy left to violate).
+    expect(agentTypes).not.toMatch(/pullRequestPolicy/);
+    expect(agentTypes).not.toMatch(/AgentPullRequestProhibitedError/);
+
+    // (c) The gateway is the CAPABILITY MEMBRANE: it contains NO PR
+    // vocabulary at all, and it re-projects provider returns onto the
+    // contract (out-of-contract properties cannot cross — runtime proof,
+    // not just compile-time).
+    const gateway = strip(readFileSync(AGENT_GATEWAY, 'utf8'));
+    expect(gateway, 'the gateway has no PR vocabulary').not.toMatch(/pullRequest/i);
+    expect(gateway).toMatch(/const projected: AgentExecutionResult = \{/);
+
+    // (d) The provider adapters hold NO PR vocabulary (the production
+    // adapter no longer fabricates a hallucinated PR identity).
+    const openaiAdapter = strip(readFileSync(OPENAI_AGENT_ADAPTER, 'utf8'));
+    expect(openaiAdapter).not.toMatch(/pullRequest/i);
+
+    // (e) THE CAPABILITY SPLIT (counting): NO file under /agents or the
+    // checkpoint subsystem references ANY PR-creation surface. The ONLY
+    // PR-creation capability in the codebase is the /workflows PR port →
+    // /github path.
+    const forbiddenDirs = [join(MODULES_DIR, 'agents'), AC_DIR];
+    for (const dir of forbiddenDirs) {
+      for (const f of listAcFiles(dir)) {
+        const src = strip(readFileSync(f, 'utf8'));
+        expect(
+          src,
+          `${f}: the agent/checkpoint subsystem must hold NO PR-creation capability`,
+        ).not.toMatch(/createPullRequest|findPullRequestByHead|PullRequestCreationPort|findExistingPullRequest/);
+      }
+    }
+
+    // (f) The side-effecting-provider regression exists (capability probes +
+    // smuggled PR ref + provider-side operation counting).
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/SIDE-EFFECTING provider cannot create a PR/);
+    expect(gates).toMatch(/CAPABILITY MEMBRANE/);
+    expect(gates).toMatch(/github:evil\/smuggle#666/);
+    expect(gates).toMatch(/requestFunctionProps/);
+
+    // (g) The composition root wires the /github-backed implementations and
+    // NO agent adapter receives any platform capability.
+    const app = readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8');
+    expect(app).toMatch(/GithubBackedPullRequestCreationPort/);
+    expect(app).toMatch(/GovernedPullRequestService/);
+    expect(app).toMatch(/GithubRepositorySnapshotProvider/);
+    expect(app).toMatch(/createOpenAiAgentAdapterFromEnv/);
+  });
+
+  // --- PR #52 round 2, BLOCKER 2: crash-safe idempotent governed PR creation --------------
+
+  it('BLOCKER 2 (round 2) — governed PR creation is DURABLY idempotent across the external side effect (create-or-converge on a unique intent ledger)', () => {
+    // (a) Migration 0055: the durable intent ledger — the convergence key is
+    // (work item, implementation revision) with a UNIQUE constraint, and a
+    // 'created' intent must carry the PR identity.
+    const migration = strip(readFileSync(PR_INTENT_MIGRATION, 'utf8'));
+    expect(migration).toMatch(/CREATE TABLE wfos_pull_request_intents/);
+    expect(migration).toMatch(/UNIQUE \(work_item_id, head_revision\)/);
+    expect(migration).toMatch(/CHECK \(status IN \('pending', 'created'\)\)/);
+    expect(migration).toMatch(/status <> 'created' OR external_pr_id IS NOT NULL/);
+
+    // (b) The service protocol: ONE transaction, lock-or-insert (FOR UPDATE
+    // + ON CONFLICT DO NOTHING), the terminal fast-path (zero external
+    // calls), the CONVERGENCE READ before any create, and the durable
+    // record in the SAME transaction as the create.
+    const service = strip(readFileSync(GOVERNED_PR_SERVICE, 'utf8'));
+    expect(service).toMatch(/this\.db\.transaction/);
+    expect(service).toMatch(/FOR UPDATE/);
+    expect(service).toMatch(/ON CONFLICT \(work_item_id, head_revision\) DO NOTHING/);
+    expect(service).toMatch(/findExistingPullRequest/);
+    expect(service).toMatch(/this\.port\.createPullRequest\(/);
+    // Code-order proof INSIDE the protocol: the convergence read strictly
+    // precedes the create, and the durable record strictly follows it.
+    const convergenceRead = service.indexOf('await this.port.findExistingPullRequest(');
+    const createCall = service.indexOf('await this.port.createPullRequest(');
+    expect(convergenceRead).toBeGreaterThanOrEqual(0);
+    expect(createCall).toBeGreaterThan(convergenceRead);
+    // The port's create is called EXACTLY ONCE in the service.
+    expect([...service.matchAll(/this\.port\.createPullRequest\(/g)].length).toBe(1);
+
+    // (c) The port contract has BOTH halves of the external boundary (the
+    // convergence read + the create), with the DETERMINISTIC head branch
+    // (a pure function of the convergence key) as the convergence marker.
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/interface PullRequestCreationPort/);
+    expect(convergence).toMatch(/findExistingPullRequest/);
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/export function governedHeadBranch/);
+    // PR #52 round 3 (BLOCKER 2): the marker is a COLLISION-RESISTANT DIGEST
+    // of the COMPLETE key (sha256 over the canonical JSON encoding) — the
+    // truncated-identifier form is gone.
+    expect(prPort).toMatch(/createHash\('sha256'\)/);
+    expect(prPort).toMatch(/JSON\.stringify\(\[workItemId, headRevision\]\)/);
+    expect(prPort).toMatch(/wfos\/governed\/\$\{digest\}/);
+    expect(prPort, 'NO truncated identifier may participate in the branch identity').not.toMatch(/slice\(0, 12\)/);
+    expect(prPort).toMatch(/findPullRequestByHead/);
+    expect(prPort).toMatch(/createPullRequest\(/);
+    expect(prPort).toMatch(/findByProject/);
+
+    // (d) The /github authority owns the convergence read contract + the
+    // one-open-PR-per-head identity semantics (the fake enforces it).
+    const ghTypes = readFileSync(join(MODULES_DIR, 'github', 'internal', 'github.types.ts'), 'utf8');
+    expect(ghTypes).toMatch(/findPullRequestByHead/);
+    expect(ghTypes).toMatch(/at most ONE OPEN pull request/);
+    const ghFake = readFileSync(join(MODULES_DIR, 'github', 'internal', 'fake-github-adapter.ts'), 'utf8');
+    expect(ghFake).toMatch(/pull request already exists/);
+    expect(ghFake).toMatch(/createPullRequestCalls/);
+    expect(ghFake).toMatch(/findPullRequestByHeadCalls/);
+
+    // (e) The crash/retry + concurrency regressions exist (provider-side
+    // operation counting, the exact crash interleaving, two-client races).
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/crash AFTER the external create/);
+    expect(prTests).toMatch(/crash BEFORE the external create/);
+    expect(prTests).toMatch(/concurrent duplicate drives/);
+    expect(prTests).toMatch(/createSecondClient/);
+    expect(prTests).toMatch(/simulated crash AFTER/);
+    // The workflow-level crash/retry regression exists (orchestrator path).
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/workflow crash\/retry/);
+    expect(gates).toMatch(/crashAfterCreate/);
+  });
+
+  // --- PR #52 round 2, HIGH 1: the exact-ref contract + the provider-observed identity ----
+
+  it('HIGH (round 2) — the /github EXACT-REF contract is pinned, and the durable evidence records the PROVIDER-OBSERVED snapshot identity', () => {
+    // (a) The /github content-read contract explicitly guarantees exact-ref
+    // resolution (verbatim pass-through; NO branch/worktree fallback).
+    const ghTypes = readFileSync(join(MODULES_DIR, 'github', 'internal', 'github.types.ts'), 'utf8');
+    expect(ghTypes).toMatch(/EXACT-REF RESOLUTION CONTRACT/);
+    expect(ghTypes).toMatch(/MUST NEVER silently fall[\s\S]{0,12}back to the default branch/);
+    expect(ghTypes).toMatch(/no branch\/worktree fallback/);
+
+    // (b) The snapshot provider passes the bound revision VERBATIM (both
+    // read surfaces), and computes the provider-observed identity from the
+    // PROVIDER-computed content digests.
+    const provider = readFileSync(SNAPSHOT_PROVIDER, 'utf8');
+    expect([...provider.matchAll(/ref: this\.revision,/g)].length).toBe(2);
+    expect(provider).toMatch(/identity\(\): RepositorySnapshotIdentity/);
+    expect(provider).toMatch(/result\.contentDigest/);
+    expect(provider).toMatch(/treeDigest/);
+
+    // (c) The snapshot contract exposes the identity (types) and the durable
+    // evidence records it (service) — next to the revision string.
+    const types = strip(readFileSync(AC_TYPES, 'utf8'));
+    expect(types).toMatch(/interface RepositorySnapshotIdentity/);
+    expect(types).toMatch(/identity\(\): RepositorySnapshotIdentity/);
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/snapshot\.identity\(\)/);
+    expect(svc).toMatch(/snapshotIdentity: result\.snapshotIdentity \?\? null/);
+
+    // (d) The regressions exist (identity durable + replayed; a mutated tree
+    // under the same label is detectable).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/provider-observed snapshot identity DIFFERS/);
+    expect(tests).toMatch(/snapshotIdentity/);
+  });
+
+  // --- PR #52 round 2, HIGH 2: replay is semantically equivalent --------------------------
+
+  it('HIGH (round 2) — replay RECONSTRUCTS the per-assertion evaluations through /verification (no summary-only reduction)', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    // The replay reads the evidence authority + rebuilds the evaluation list.
+    expect(svc).toMatch(/listEvidenceForRun/);
+    expect(svc).toMatch(/evidenceType === 'architecture-assertion'/);
+    // The evidence rows carry the FULL evaluation (summary added in round 2).
+    expect(svc).toMatch(/summary: e\.summary,/);
+    // The degraded path (evidence unreadable / legacy) falls back to the
+    // summary's evaluation summaries — never a silent empty list.
+    expect(svc).toMatch(/evaluationsFromSummary/);
+    // The regression exists: the replayed result is field-by-field equal.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/SEMANTICALLY EQUIVALENT/);
+    expect(tests).toMatch(/replay\.evaluations\[i\]!\.assertionRowId\)/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 1: the PRODUCTION /github REST authority --------------------
+
+  it('BLOCKER 1 (round 3) — the production /github adapter implements the GOVERNED PR boundary over the REAL REST API (no stubbed authority behind the crash-safe protocol)', () => {
+    // (a) The REST client exists and holds the REAL GitHub App auth: RS256
+    //     JWT signing (createSign), installation-token minting, token
+    //     caching, and a typed fail-closed error surface.
+    const client = strip(readFileSync(GITHUB_REST_CLIENT, 'utf8'));
+    expect(client).toMatch(/createSign\('RSA-SHA256'\)/);
+    expect(client).toMatch(/\/app\/installations\//);
+    expect(client).toMatch(/access_tokens/);
+    expect(client).toMatch(/expires_at/);
+    expect(client).toMatch(/GitHubApiTransportError/);
+    expect(client).toMatch(/GitHubApiHttpError/);
+
+    // (b) The production adapter implements the five governed-boundary
+    //     surfaces through the REAL client (each performs a REST call — the
+    //     method bodies reference the client, not a stub throw). NOTE: the
+    //     adapter source is checked RAW (not comment-stripped) — its doc
+    //     comments contain URLs whose '//' would corrupt the naive stripper.
+    const adapter = readFileSync(GITHUB_ADAPTER, 'utf8');
+    expect(adapter).toMatch(/class DefaultGitHubAdapter implements GitHubAdapter/);
+    expect(adapter).toMatch(/new GitHubRestClient\(\{ appId, privateKey, apiBaseUrl \}\)/);
+    // The credential gate: unconfigured ⇒ the deterministic fail-closed error
+    // (PR #52 round 4: the message names the SecretStore keys — the platform
+    // SecretStore is the ONLY credential authority; the adapter performs
+    // ZERO environment access).
+    expect(adapter).toMatch(/github-not-configured: the live GitHub API requires the GitHub App credentials/);
+    expect(adapter).toMatch(/SecretStore keys GITHUB_APP_ID \+ GITHUB_APP_PRIVATE_KEY/);
+    // The REAL REST paths for the governed operations: the PR path template
+    // (create + convergence read + PR resolution), the convergence-read
+    // query (fully-qualified head + open state), the create payload fields,
+    // and the exact-ref content-read query.
+    expect(adapter).toMatch(/`\/repos\/\$\{encodeURIComponent\(input\.owner\)\}\/\$\{encodeURIComponent\(input\.repository\)\}\/pulls`/);
+    expect(adapter).toMatch(/\?head=\$\{encodeURIComponent\(`\$\{input\.owner\}:\$\{input\.head\}`\)\}&state=open/);
+    expect(adapter).toMatch(/head: input\.head,/);
+    expect(adapter).toMatch(/base: input\.base,/);
+    expect(adapter).toMatch(/\?ref=\$\{encodeURIComponent\(ref\)\}/);
+    expect(adapter).toMatch(/requireRestClient\(\)/);
+    // The /github contract + the fake honor the honest-404 adoption semantics
+    // (the fake resolves REGISTERED PRs authoritatively; strict mode 404s).
+    const ghFake = readFileSync(GITHUB_FAKE, 'utf8');
+    expect(ghFake).toMatch(/strictPullRequestLookup/);
+    expect(ghFake).toMatch(/seedExternalPullRequest/);
+
+    // (c) The EXPLICIT scope statement: the provisioning/merge surfaces are
+    //     OUTSIDE the WORK-051 governed boundary and say so (never silently
+    //     stubbed — the narrowing is a decision, documented at every site).
+    expect(adapter).toMatch(/outside the WORK-051 governed boundary/);
+    expect(adapter).toMatch(/WORK-026 follow-on/);
+    expect(adapter).toMatch(/WORK-019 follow-on/);
+
+    // (d) The production-shaped regressions exist: the REAL adapter against
+    //     a scripted local GitHub REST API (RSA keypair + JWT signature
+    //     VERIFICATION + wire-level assertions + the crash/recovery proof).
+    const restTests = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restTests).toMatch(/REAL RS256 signature/);
+    expect(restTests).toMatch(/createVerify\('RSA-SHA256'\)/);
+    expect(restTests).toMatch(/422 duplicate-open-PR rejection VERBATIM/);
+    expect(restTests).toMatch(/REAL convergence-read query/);
+    expect(restTests).toMatch(/passes the ref through VERBATIM/);
+    expect(restTests).toMatch(/FAILS CLOSED on every governed surface/);
+    const scripted = readFileSync(SCRIPTED_GITHUB_API, 'utf8');
+    expect(scripted).toMatch(/A pull request already exists for/);
+    expect(scripted).toMatch(/class ScriptedGitHubApi/);
+
+    // (e) The crash/recovery + two-process convergence proofs re-run against
+    //     the PRODUCTION-shaped adapter (real HTTP wire counting).
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/PRODUCTION-shaped governed PR boundary/);
+    expect(prTests).toMatch(/EXACTLY ONE wire create/);
+    expect(prTests).toMatch(/two independent clients \(two processes\)/);
+    expect(prTests).toMatch(/new DefaultGitHubAdapter\(/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 2: the collision-proof convergence marker -------------------
+
+  it('BLOCKER 2 (round 3) — the governed head branch is a COLLISION-RESISTANT DIGEST of the COMPLETE convergence key (no truncated-identifier collision domain)', () => {
+    const prPortSrc = readFileSync(PR_PORT, 'utf8');
+    const prPort = strip(prPortSrc);
+    // (a) The digest construction: sha256 over the canonical JSON encoding of
+    //     BOTH complete components, under the fixed governed prefix.
+    expect(prPort).toMatch(/export function governedHeadBranch\(workItemId: string, headRevision: string\): string \{/);
+    expect(prPort).toMatch(/JSON\.stringify\(\[workItemId, headRevision\]\)/);
+    expect(prPort).toMatch(/createHash\('sha256'\)\.update\(canonicalKey/);
+    expect(prPort).toMatch(/return `wfos\/governed\/\$\{digest\}`/);
+    // (b) NO truncation anywhere in the identity derivation (the round-2
+    //     collision domain is structurally gone).
+    expect(prPort, 'no slice/truncation in the convergence marker').not.toMatch(/\.slice\(0, 12\)/);
+    // (c) The collision regression exists: two keys sharing 12-char prefixes
+    //     on BOTH components map to DIFFERENT branches.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/CRYPTOGRAPHIC DIGEST of the COMPLETE key/);
+    expect(prTests).toMatch(/CANNOT collide/);
+  });
+
+  // --- PR #52 round 3, BLOCKER 3: revision-correct external PR adoption ---------------------
+
+  it('BLOCKER 3 (round 3) — external PR adoption resolves the AUTHORITATIVE head commit through /github BEFORE the gate; a raw PR reference NEVER enters the checkpoint or the creation identity', () => {
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+
+    // (a) The forbidden mixed-revision expression is GONE: the gate revision
+    //     is never the raw external PR reference.
+    expect(orch, 'the gate revision must never be the raw PR ref').not.toMatch(/commitRef \?\? externalPrRef/);
+
+    // (b) The resolution read precedes the gate in the adoption path: the
+    //     orchestrator resolves through the governed boundary FIRST, and the
+    //     resolved SHA is what the gate evaluates + what the creation
+    //     identity binds.
+    const orchCode = strip(orch);
+    const resolveIdx = orchCode.indexOf('await this.governedPullRequests.resolveExternalPullRequest(');
+    const gateIdx = orchCode.indexOf("this.checkpointGateInput(signal, 'pr_conformance', gateRevision)");
+    expect(resolveIdx).toBeGreaterThanOrEqual(0);
+    expect(gateIdx).toBeGreaterThan(resolveIdx);
+    // PR #52 round 4: the resolved head commit is the gate revision whenever
+    // no agent-reported commit ref exists (and when BOTH exist, the resolved
+    // head MUST equal the commit ref — the revision-mismatch guard below).
+    expect(orchCode).toMatch(/gateRevision = commitRef \?\? resolved\.headCommit;/);
+    // (c) Fail-closed branches: unresolvable (null), no head SHA, merged,
+    //     closed — every one returns false BEFORE the gate runs.
+    expect(orchCode).toMatch(/convergence\.pr\.adoption_unresolvable/);
+    expect(orchCode).toMatch(/!resolved\.headCommit \|\| resolved\.merged \|\| resolved\.state !== 'open'/);
+    // The association carries the RESOLVED head SHA (never the PR ref) —
+    // round 4: through the ADOPTED identity from the durable ledger.
+    expect(orchCode).toMatch(/headCommit: adopted\.headCommit \?\? adoptionIdentity\.headCommit,/);
+
+    // (d) The port resolves through /github with server-side repository
+    //     resolution + the repo-ownership guard; malformed refs throw.
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/async resolveExternalPullRequest\(/);
+    expect(prPort).toMatch(/getPullRequestInfo\(/);
+    expect(prPort).toMatch(/not the project's linked repository/);
+    expect(prPort).toMatch(/not a canonical GitHub PR reference/);
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/interface ResolvedExternalPullRequest/);
+    expect(convergence).toMatch(/resolveExternalPullRequest/);
+
+    // (e) The regressions exist: the resolved SHA gates (never the raw ref),
+    //     a violating tree at the resolved SHA blocks, and every
+    //     unresolvable shape fails closed.
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/RESOLVED authoritative HEAD SHA \(never the raw PR reference\)/);
+    expect(gates).toMatch(/VIOLATING tree at the external PR/);
+    expect(gates).toMatch(/UNRESOLVABLE external PR \(absent \/ closed \/ merged/);
+  });
+
+  // --- PR #52 round 3, HIGH: the revision-participating checkpoint identity ----------------
+
+  it('HIGH (round 3) — the durable checkpoint identity includes the architecture version + the EXACT revision (idempotency-key reuse across a revision change can never replay a foreign result)', () => {
+    // (a) The key composes EVERY semantic dimension of the claim.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/'architecture-checkpoint',/);
+    expect(svc).toMatch(/input\.workItemId,/);
+    expect(svc).toMatch(/architectureVersionId,/);
+    expect(svc).toMatch(/input\.checkpointKind,/);
+    expect(svc).toMatch(/input\.implementationRevision \?\? 'rev:none',/);
+    expect(svc).toMatch(/input\.idempotencyKey \?\? 'signal:none',/);
+    // The replay lookup AND the durable record use the same composed key.
+    expect(svc).toMatch(/this\.orchestrationKey\(input, version\.id\)/);
+    expect(svc).toMatch(/this\.orchestrationKey\(input, result\.architectureVersionId\)/);
+
+    // (b) The regression exists: same key + different revision → a FRESH
+    //     evaluation (its own run, its own verdict); same key + same
+    //     revision → the exact replay.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/DIFFERENT durable identity: fresh evaluation, never a foreign replay/);
+    expect(tests).toMatch(/NOT the old 'blocked' verdict/);
+    expect(tests).toMatch(/expect\(checkpointRuns\)\.toHaveLength\(2\)/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 1: the credential AUTHORITY is the SecretStore -------------
+
+  it('BLOCKER 1 (round 4) — the production adapter performs ZERO environment access; the platform SecretStore is the ONLY credential authority (composed at the composition root)', () => {
+    const adapter = readFileSync(GITHUB_ADAPTER, 'utf8');
+    const adapterCode = strip(adapter);
+
+    // (a) The adapter has NO process.env access at all — the round-3 second
+    //     credential mechanism (raw environment reads) is structurally gone.
+    expect(adapterCode, 'the adapter must not read process.env').not.toContain('process.env');
+
+    // (b) /github owns the canonical secret KEY NAMES, and the credential
+    //     resolution goes THROUGH the SecretStore boundary
+    //     (getSecret(ref(...)) — the existing platform mechanism, SEC-001).
+    expect(adapterCode).toMatch(/export const GITHUB_APP_ID_SECRET_KEY = 'GITHUB_APP_ID';/);
+    expect(adapterCode).toMatch(/export const GITHUB_APP_PRIVATE_KEY_SECRET_KEY = 'GITHUB_APP_PRIVATE_KEY';/);
+    expect(adapterCode).toMatch(/export async function resolveGitHubAppCredentials\(/);
+    expect(adapterCode).toMatch(/secretStore\.getSecret\(secretStore\.ref\(GITHUB_APP_ID_SECRET_KEY\)\)/);
+    expect(adapterCode).toMatch(/secretStore\.getSecret\(\s*secretStore\.ref\(GITHUB_APP_PRIVATE_KEY_SECRET_KEY\),?\s*\)/);
+
+    // (c) The composition root wires the adapter through the SecretStore:
+    //     resolve → inject explicitly (app.ts).
+    const appTs = strip(readFileSync(join(BACKEND_ROOT, 'src', 'app.ts'), 'utf8'));
+    expect(appTs).toMatch(/const secretStore: SecretStore = new EnvSecretStore\(\);/);
+    expect(appTs).toMatch(/await resolveGitHubAppCredentials\(secretStore\)/);
+    expect(appTs).toMatch(/const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter\(\{/);
+    expect(appTs).toMatch(/\.\.\.\(githubAppCredentials \?\? \{\}\),/);
+
+    // (d) The regressions exist: the SecretStore resolution, the production
+    //     wiring shape over the real REST wire, the missing-credential null,
+    //     and the env-alone-never-configures proof.
+    const restTests = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restTests).toMatch(/the credential AUTHORITY is the platform SecretStore/);
+    expect(restTests).toMatch(/resolves BOTH credentials THROUGH the SecretStore/);
+    expect(restTests).toMatch(/the PRODUCTION WIRING SHAPE/);
+    expect(restTests).toMatch(/env credentials alone NEVER configure it/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 2: ONE durable identity boundary for create AND adopt -------
+
+  it('BLOCKER 2 (round 4) — external PR adoption converges through the SAME durable identity boundary as creation: one (work item, authoritative head commit) ⇒ exactly one PR identity/association', () => {
+    // (a) Migration 0056: the explicit durable adoption origin on the intent
+    //     ledger (the round-3 gap — adoption bypassed the ledger entirely).
+    const migration = strip(readFileSync(join(
+      BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+      '0056_pr_intent_adoption_origin.sql',
+    ), 'utf8'));
+    expect(migration).toMatch(/ADD COLUMN origin TEXT NOT NULL DEFAULT 'created'/);
+    expect(migration).toMatch(/CHECK \(origin IN \('created', 'adopted'\)\)/);
+    expect(migration).toMatch(/all governed paths[\s\S]{0,200}converge on EXACTLY ONE PR identity\/association/i);
+
+    // (b) The service: the ADOPT protocol — the SAME lock-or-insert + CAS on
+    //     the (work item, head revision) intent row; a different PR claiming
+    //     a recorded key is a TYPED conflict; the head-commit guard.
+    const service = strip(readFileSync(GOVERNED_PR_SERVICE, 'utf8'));
+    expect(service).toMatch(/async adopt\(input: \{/);
+    expect(service).toMatch(/GovernedPrIdentityConflictError/);
+    expect(service).toMatch(/'adopted'/);
+    expect(service).toMatch(/input\.headCommit !== input\.headRevision/);
+    expect(service).toMatch(/markCreated\(tx, intent\.id, observed, 'adopted'\)/);
+    expect(service).toMatch(/markCreated\(tx, intent\.id, existing, 'created'\)/);
+
+    // (c) The typed errors live on the convergence contract.
+    const convergence = strip(readFileSync(CONVERGENCE_TYPES, 'utf8'));
+    expect(convergence).toMatch(/class GovernedPrIdentityConflictError/);
+    expect(convergence).toMatch(/class GovernedConvergenceMismatchError/);
+
+    // (d) The orchestrator: the adoption path routes through the durable
+    //     ledger (governedPullRequests.adopt) — NOT a read-then-associate
+    //     race; the revision-mismatch guard (an observed PR whose head is not
+    //     the gated commit ref fails closed).
+    const orch = strip(readFileSync(ORCHESTRATOR, 'utf8'));
+    expect(orch).toMatch(/this\.governedPullRequests\.adopt\(\{/);
+    expect(orch).toMatch(/convergence\.pr\.adoption_revision_mismatch/);
+    expect(orch).toMatch(/convergence\.pr\.adoption_failed/);
+    expect(orch).toMatch(/convergence\.pr\.adopted/);
+
+    // (e) The association layer converges for the same PR: create() serializes
+    //     writers on the WORK ITEM row (FOR UPDATE — the one-active-per-WI
+    //     serialization domain), returns the EXISTING active row for a
+    //     re-observed PR, and the unique-index race loser CONVERGES on the
+    //     winner's committed row (no churn, no duplicate, no hard failure).
+    const wiRepoRaw = readFileSync(WORK_ITEM_REPO, 'utf8');
+    const wiRepo = strip(wiRepoRaw);
+    expect(wiRepo).toMatch(/SELECT id FROM wfos_work_items WHERE id = \$1 FOR UPDATE/);
+    expect(wiRepo).toMatch(/WHERE work_item_id = \$1 AND status = 'active'\s*\n?\s*FOR UPDATE/);
+    expect(wiRepo).toMatch(/r\.external_pr_id === input\.externalPrId/);
+    expect(wiRepo).toMatch(/e\.code === '23505' && e\.constraint === 'wfos_pr_assoc_one_active_per_wi'/);
+    expect(wiRepoRaw).toMatch(/CONVERGENCE ON CONFLICT/);
+
+    // (f) The regressions exist: the adoption identity protocol (converge /
+    //     conflict / cross-path), the two-client concurrent adoption, the
+    //     two-concurrent-signals workflow proof, and the durable origin
+    //     assertion.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/ONE durable identity boundary for create AND adopt/);
+    expect(prTests).toMatch(/TYPED identity conflict/);
+    expect(prTests).toMatch(/CROSS-PATH convergence/);
+    expect(prTests).toMatch(/TWO CONCURRENT clients adopting the SAME external PR/);
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    expect(gates).toMatch(/TWO CONCURRENT agent_run_completed signals carrying the SAME external PR/);
+    expect(gates).toMatch(/origin: 'adopted'/);
+  });
+
+  // --- PR #52 round 4, BLOCKER 3: the authoritative head-SHA validation --------------------
+
+  it('BLOCKER 3 (round 4) — convergence validates the governed branch AND the authoritative head SHA === the gated revision (a branch match with a mismatched SHA is non-convergent, fail closed)', () => {
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+
+    // (a) The CONVERGENCE READ validates the complete identity: a found PR on
+    //     the governed branch whose head SHA differs (or is missing) throws
+    //     the typed mismatch error — never adopted.
+    expect(prPort).toMatch(/if \(!found\.headSha\) \{/);
+    expect(prPort).toMatch(/found\.headSha !== input\.headRevision/);
+    expect(prPort).toMatch(/GovernedConvergenceMismatchError/);
+    expect(prPort).toMatch(/which is NOT the gated implementation revision/);
+
+    // (b) The CREATE result carries the SAME provenance invariant: a created
+    //     PR whose head is not the gated revision fails closed and the
+    //     durable record is NOT written.
+    expect(prPort).toMatch(/if \(!result\.headSha\) \{/);
+    expect(prPort).toMatch(/result\.headSha !== input\.headRevision/);
+
+    // (c) The test authorities model BRANCH HEADS (a pushed branch pointing
+    //     at an exact commit) so the validation exercises real semantics.
+    const ghFake = readFileSync(GITHUB_FAKE, 'utf8');
+    expect(ghFake).toMatch(/setBranchHead\(/);
+    const scripted = readFileSync(SCRIPTED_GITHUB_API, 'utf8');
+    expect(scripted).toMatch(/setBranchHead\(/);
+
+    // (d) The regressions exist: same-branch/different-SHA non-convergence,
+    //     the create-result validation, and the matching-SHA convergence.
+    const prTests = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(prTests).toMatch(/the CONVERGENCE READ fails CLOSED on same-branch \/ different-SHA/);
+    expect(prTests).toMatch(/the CREATE result is validated too/);
+    expect(prTests).toMatch(/a matching branch \+ matching SHA CONVERGES/);
+  });
+
+  // --- PR #52 round 4, HIGH 1: fail-closed replay reconstruction ---------------------------
+
+  it('HIGH 1 (round 4) — replay FAILS CLOSED on a /verification read failure; ONLY a genuinely empty/legacy evidence set falls back to the summary', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+
+    // (a) The read failure THROWS (the fail-closed marker in the catch) — no
+    //     silent downgrade to the summary-derived evaluation list.
+    expect(svc).toMatch(/the \/verification evidence read failed/);
+    expect(svc).toMatch(/cannot be reconstructed honestly \(fail closed/);
+    // The catch is a THROW, not a fallback: no evaluationsFromSummary call
+    // may appear inside the catch block.
+    const catchIdx = svc.indexOf('} catch (err) {');
+    const catchEnd = svc.indexOf('throw new Error(', catchIdx);
+    const catchBlock = svc.slice(catchIdx, svc.indexOf('}', svc.indexOf(';', catchEnd)));
+    expect(catchIdx).toBeGreaterThan(-1);
+    expect(catchBlock, 'the catch must throw, not fall back').not.toContain('evaluationsFromSummary');
+
+    // (b) The LEGITIMATE fallback remains: only a SUCCESSFUL read that
+    //     genuinely yields no architecture-assertion rows (legacy/empty).
+    //     (Checked on the RAW source — the marker lives in a comment.)
+    const svcRaw = readFileSync(AC_SERVICE, 'utf8');
+    expect(svcRaw).toMatch(/EXPECTED legacy\/empty evidence/);
+    expect(svc).toMatch(/evaluationsFromSummary/);
+
+    // (c) The regression exists: read failure ⇒ fail closed (with the healthy
+    //     control + the legacy fallback distinction).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/a \/verification READ FAILURE during replay FAILS CLOSED/);
+    expect(tests).toMatch(/EXPECTED LEGACY\/EMPTY[\s\S]{0,40}evidence is a LEGITIMATE summary fallback/);
+  });
+
+  // --- PR #52 round 1, BLOCKER 2 (superseded by the round-2 split above) ------------------
+
+  it('BLOCKER 2 — the governed PR-creation boundary: the port is the ONLY creation site; the orchestrator adopts external PRs only post-gate', () => {
+    // (a) The orchestrator NEVER persists a provider-reported PR association
+    // before the gate: the only association writes happen inside
+    // openGovernedPullRequest (post-gate), and agent result PR refs are
+    // treated as external observations adopted only post-gate.
+    const orch = readFileSync(ORCHESTRATOR, 'utf8');
+    expect(orch).toMatch(/pullRequestAssociationRepository\.create/);
+    const associationWrites = [...orch.matchAll(/this\.pullRequestAssociationRepository\.create\(/g)].length;
+    expect(associationWrites).toBe(2); // the external-adoption + the creation result — both inside the boundary
+    expect(orch).toMatch(/EXTERNAL[\s\S]{0,200}PR observation/);
+    // The production port is the /github-backed implementation.
+    const prPort = strip(readFileSync(PR_PORT, 'utf8'));
+    expect(prPort).toMatch(/findByProject/);
+  });
+
+  // --- PR #52 round 1, BLOCKER 3: serialized assertion attach vs freeze ------------------
+
+  it('BLOCKER 3 — assertion attachment is SERIALIZED against version freezing at the database boundary', () => {
+    // (a) The repository's create() runs in ONE transaction with a FOR SHARE
+    // lock on the version row — the same serialization domain as the freeze
+    // path's FOR UPDATE.
+    const repo = strip(readFileSync(ARCH_REPO, 'utf8'));
+    expect(repo).toMatch(/SELECT state FROM wfos_architecture_versions WHERE id = \$1 FOR SHARE/);
+    expect(repo).toMatch(/this\.db\.transaction/);
+    // (b) The migration-0052 trigger takes the SAME lock (every insert path,
+    // including direct SQL, serializes).
+    const migration = strip(readFileSync(MIGRATION_0052, 'utf8'));
+    expect(migration).toMatch(/WHERE id = NEW\.architecture_version_id\s+\n?\s*FOR SHARE/);
+    // (c) The freeze path locks the row FOR UPDATE inside its transaction.
+    const archService = strip(readFileSync(ARCH_SERVICE, 'utf8'));
+    expect(archService).toMatch(/FOR UPDATE/);
+    // (d) The two-connection regressions exist (freeze-wins + attach-wins
+    // interleavings on independent pg connections).
+    const tests = readFileSync(ASSERTION_TESTS, 'utf8');
+    expect(tests).toMatch(/BLOCKER 3 — FREEZE WINS/);
+    expect(tests).toMatch(/BLOCKER 3 — ATTACH WINS/);
+    expect(tests).toMatch(/createSecondClient/);
+  });
+
+  // --- PR #52 round 1, HIGH: the protected impact profile ---------------------------------
+
+  it('HIGH — the impact profile is a GOVERNED MONOTONIC work-item declaration (mutable metadata is not a governance input)', () => {
+    // (a) The derivation reads the governed column ONLY.
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/workItem\.architectureImpact/);
+    expect(svc, 'the derivation must not read mutable metadata').not.toMatch(
+      /metadata\?\.architectureImpact/,
+    );
+    // (b) Migration 0054: the column + the monotonic trigger (strengthening
+    // only; weakening/clearing rejected even via direct SQL).
+    const migration = strip(readFileSync(IMPACT_MIGRATION, 'utf8'));
+    expect(migration).toMatch(/ADD COLUMN architecture_impact TEXT/);
+    expect(migration).toMatch(/wfos_work_items_impact_monotonic/);
+    expect(migration).toMatch(/new_rank < old_rank/);
+    // (c) The update contract CANNOT touch the column: UpdateWorkItemInput
+    // has no architectureImpact field, and the update() builder never sets
+    // architecture_impact.
+    const wiTypes = strip(readFileSync(join(MODULES_DIR, 'work-items', 'internal', 'work-item.types.ts'), 'utf8'));
+    const updateIface = wiTypes.slice(
+      wiTypes.indexOf('interface UpdateWorkItemInput'),
+      wiTypes.indexOf('}', wiTypes.indexOf('interface UpdateWorkItemInput') + 1),
+    );
+    expect(updateIface, 'UpdateWorkItemInput cannot declare the impact field').not.toMatch(/architectureImpact/);
+    const wiRepo = strip(readFileSync(WORK_ITEM_REPO, 'utf8'));
+    expect(wiRepo, 'update() never writes the impact column').not.toMatch(
+      /architecture_impact = \$/,
+    );
+    // (d) The regression exists (metadata downgrade is inert; SQL weakening
+    // is trigger-rejected).
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/mutable metadata can NEVER downgrade/);
+    expect(tests).toMatch(/direct SQL WEAKENING/);
+  });
+
+  // --- PR #52 round 1, HIGH: the explicit empty-assertion-set semantics --------------------
+
+  it('HIGH — an EMPTY assertion set fails closed unless the Architecture authority explicitly declared it at freeze time', () => {
+    const svc = strip(readFileSync(AC_SERVICE, 'utf8'));
+    expect(svc).toMatch(/assertions\.length === 0/);
+    expect(svc).toMatch(/assertionSetPolicy === 'none-declared'/);
+    expect(svc).toMatch(/empty rule set/);
+    // The freeze-time declaration gate + the durable marker.
+    const archService = strip(readFileSync(ARCH_SERVICE, 'utf8'));
+    expect(archService).toMatch(/allowEmptyAssertionSet/);
+    expect(archService).toMatch(/assertionSetPolicy.*none-declared/);
+    // The governed population path: assertion create/list routes exist.
+    const route = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'architecture.route.ts'), 'utf8');
+    expect(route).toMatch(/architecture-versions\/:versionId\/assertions/);
+    // The regressions exist.
+    const tests = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    expect(tests).toMatch(/no declaration fails closed/);
+    expect(tests).toMatch(/EXPLICIT no-assertions declaration/);
+    expect(tests).toMatch(/governed population path/);
+  });
+
+  // --- the mandatory regression coverage exists ---------------------------------------
+
+  it('the mandatory WORK-051 regression coverage exists (all 11 proofs mapped to executable tests)', () => {
+    const gates = readFileSync(GATE_TESTS, 'utf8');
+    const service = readFileSync(CHECKPOINT_TESTS, 'utf8');
+    const assertions = readFileSync(ASSERTION_TESTS, 'utf8');
+    // 1 — violation detected before PR creation.
+    expect(service).toMatch(/PROOF 1 —/);
+    expect(gates).toMatch(/ZERO PR-creation side effects/);
+    expect(gates).toMatch(/AFTER the gate passes/);
+    // 2 — determinism.
+    expect(service).toMatch(/PROOF 2 —/);
+    // 3 — evidence binding.
+    expect(service).toMatch(/PROOF 3 —/);
+    // 4 — distinct immutable revision-bound results.
+    expect(service).toMatch(/PROOF 4 —/);
+    // 5 — blocking failures prevent the workflow transition.
+    expect(gates).toMatch(/PROOF 5 —/);
+    // 6 — advisory failures do not block.
+    expect(service).toMatch(/PROOF 6 —/);
+    expect(gates).toMatch(/PROOF 6 \(lifecycle\)/);
+    // 7 — inconclusive blocking assertions fail closed.
+    expect(service).toMatch(/PROOF 7a —/);
+    expect(service).toMatch(/PROOF 7c —/);
+    expect(service).toMatch(/PROOF 7d —/);
+    // 8 — intentional architecture changes never mutate frozen versions.
+    expect(assertions).toMatch(/PROOF 8a —/);
+    expect(assertions).toMatch(/PROOF 8b —/);
+    expect(assertions).toMatch(/PROOF 8c —/);
+    expect(assertions).toMatch(/PROOF 8d —/);
+    // 9 — cross-tenant rejection before detector execution.
+    expect(service).toMatch(/PROOF 9 —/);
+    // 10 — checkpoint code cannot directly write workflow/architecture/verification.
+    //      (That is THIS block: invariants (1)-(6) above are the executable proof.)
+    // 11 — self-hosting without unchecked authority.
+    expect(service).toMatch(/PROOF 11 —/);
+    // PR #52 round 1 regressions: the exact-revision binding, the
+    // PR-creation boundary, the concurrency proofs, the orchestration-record
+    // contract, and the fail-closed reads.
+    expect(service).toMatch(/BLOCKER 1 — an UNRESOLVABLE revision/);
+    expect(service).toMatch(/mutating the on-disk fixture/);
+    expect(service).toMatch(/BLOCKER 4 — two CONCURRENT same-key evaluations/);
+    expect(gates).toMatch(/BLOCKER 2 — with a BLOCKING architecture violation/);
+    expect(gates).toMatch(/BLOCKER 2 — with a CONFORMANT revision/);
+    expect(gates).toMatch(/EXACTLY ONE PR is created and only AFTER the gate passes/);
+    expect(gates).toMatch(/PR-creation side-effect count is ZERO/);
+    expect(assertions).toMatch(/BLOCKER 3 — FREEZE WINS/);
+    expect(assertions).toMatch(/BLOCKER 3 — ATTACH WINS/);
+    const orchRuns = readFileSync(ORCH_RUNS_TESTS, 'utf8');
+    expect(orchRuns).toMatch(/ATOMICALLY/);
+    expect(orchRuns).toMatch(/crash safety/);
+    expect(orchRuns).toMatch(/UNIQUE identity/);
+    // PR #52 round 2 regressions: the structural capability split, the
+    // crash-safe idempotent governed PR creation, the exact-ref contract +
+    // provider-observed snapshot identity, and the semantically-equivalent
+    // replay.
+    expect(gates).toMatch(/BLOCKER 1 \(round 2\) — a SIDE-EFFECTING provider/);
+    expect(gates).toMatch(/CAPABILITY MEMBRANE/);
+    expect(gates).toMatch(/BLOCKER 2 \(round 2, workflow crash\/retry\)/);
+    const governedPr = readFileSync(GOVERNED_PR_TESTS, 'utf8');
+    expect(governedPr).toMatch(/crash AFTER the external create/);
+    expect(governedPr).toMatch(/crash BEFORE the external create/);
+    expect(governedPr).toMatch(/concurrent duplicate drives, real PostgreSQL/);
+    expect(governedPr).toMatch(/duplicate-key guard/);
+    expect(service).toMatch(/SEMANTICALLY EQUIVALENT/);
+    expect(service).toMatch(/provider-observed snapshot identity DIFFERS/);
+    // PR #52 round 3 regressions: the production REST authority (real client
+    // + scripted GitHub API + JWT verification + wire-level crash/recovery),
+    // the collision-proof convergence marker, the revision-correct external
+    // PR adoption, and the revision-participating checkpoint identity.
+    const restAdapter = readFileSync(REST_ADAPTER_TESTS, 'utf8');
+    expect(restAdapter).toMatch(/REAL RS256 signature/);
+    expect(restAdapter).toMatch(/422 duplicate-open-PR rejection VERBATIM/);
+    expect(restAdapter).toMatch(/the installation token is MINTED ONCE and cached/);
+    expect(governedPr).toMatch(/PRODUCTION-shaped governed PR boundary/);
+    expect(governedPr).toMatch(/CRYPTOGRAPHIC DIGEST of the COMPLETE key/);
+    expect(governedPr).toMatch(/two independent clients \(two processes\)/);
+    expect(gates).toMatch(/BLOCKER 3 \(round 3\) — an external PR observation gates on the RESOLVED authoritative HEAD SHA/);
+    expect(gates).toMatch(/UNRESOLVABLE external PR/);
+    expect(service).toMatch(/DIFFERENT durable identity: fresh evaluation, never a foreign replay/);
   });
 });
 

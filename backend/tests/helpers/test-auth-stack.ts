@@ -9,6 +9,7 @@ import {
   PgArchitectureVersionRepository,
   PgArchitectureDecisionRepository,
   PgArchitectureChangeRequestRepository,
+  PgArchitectureAssertionRepository,
 } from '../../src/modules/architecture/internal/pg-architecture-repository.js';
 import { DefaultArchitectureService } from '../../src/modules/architecture/internal/architecture-service.js';
 import {
@@ -51,6 +52,8 @@ export interface TestAuthStack {
   specificationVersionRepository: PgSpecificationVersionRepository;
   architectureRepository: PgArchitectureRepository;
   architectureVersionRepository: PgArchitectureVersionRepository;
+  /** WORK-051: the assertion store owned by /architecture (append-only). */
+  architectureAssertionRepository: PgArchitectureAssertionRepository;
   architectureDecisionRepository: PgArchitectureDecisionRepository;
   architectureChangeRequestRepository: PgArchitectureChangeRequestRepository;
   architectureService: DefaultArchitectureService;
@@ -103,6 +106,7 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const specificationVersionRepository = new PgSpecificationVersionRepository(db.client);
   const architectureRepository = new PgArchitectureRepository(db.client);
   const architectureVersionRepository = new PgArchitectureVersionRepository(db.client);
+  const architectureAssertionRepository = new PgArchitectureAssertionRepository(db.client);
   const architectureDecisionRepository = new PgArchitectureDecisionRepository(db.client);
   const architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(db.client);
   const architectureService = new DefaultArchitectureService(db.client);
@@ -148,6 +152,7 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     specificationVersionRepository,
     architectureRepository,
     architectureVersionRepository,
+    architectureAssertionRepository,
     architectureDecisionRepository,
     architectureChangeRequestRepository,
     architectureService,

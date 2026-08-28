@@ -107,6 +107,7 @@ import {
   PgArchitectureVersionRepository,
   PgArchitectureDecisionRepository,
   PgArchitectureChangeRequestRepository,
+  PgArchitectureAssertionRepository,
 } from './modules/architecture/internal/pg-architecture-repository.js';
 import { DefaultArchitectureService } from './modules/architecture/internal/architecture-service.js';
 import type {
@@ -146,7 +147,18 @@ import type { AppConfig } from './config.js';
 import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
 import type { WorkflowEngine } from '@modules/workflows/index.js';
 import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from './modules/workflows/internal/workflow-orchestrator.js';
-import type { WorkflowOrchestrator } from '@modules/workflows/index.js';
+import type { WorkflowOrchestrator, ArchitectureCheckpointGate } from '@modules/workflows/index.js';
+// WORK-051: the application-layer architecture checkpoint subsystem (the
+// lifecycle gate implementation consumed by the workflow orchestrator).
+import {
+  DefaultArchitectureCheckpointService,
+  createDefaultDetectorRegistry,
+  GithubRepositorySnapshotProvider,
+} from '@root/architecture-checkpoints/index.js';
+// WORK-051 round 2 (BLOCKER 2): the durable governed PR-creation protocol
+// over the PR-creation port (the /github authority's createPullRequest).
+import { GithubBackedPullRequestCreationPort } from './modules/workflows/internal/github-pr-creation-port.js';
+import { GovernedPullRequestService } from './modules/workflows/internal/governed-pull-request-service.js';
 import { DefaultAgentGateway } from './modules/agents/internal/agent-gateway.js';
 import type { AgentGateway } from '@modules/agents/index.js';
 import { PgAgentRunRepository } from './modules/agents/internal/pg-agent-repository.js';
@@ -166,7 +178,12 @@ import { DefaultVerificationService } from './modules/verification/internal/veri
 import type { VerificationService } from '@modules/verification/index.js';
 import { DefaultReviewService } from './modules/reviews/internal/review-service.js';
 import type { ReviewService } from '@modules/reviews/index.js';
-import { DefaultGitHubAdapter, PgGitHubInstallationRepository, PgWebhookEventRepository } from './modules/github/internal/pg-github-repository.js';
+import {
+  DefaultGitHubAdapter,
+  PgGitHubInstallationRepository,
+  PgWebhookEventRepository,
+  resolveGitHubAppCredentials,
+} from './modules/github/internal/pg-github-repository.js';
 import { PgCiEvidenceIngestionRepository } from './modules/github/internal/pg-ci-evidence-repository.js';
 import { DefaultCiEvidenceIngestionService } from './modules/github/internal/ci-evidence-ingestion-service.js';
 import type { CiEvidenceIngestionService } from '@modules/github/index.js';
@@ -356,6 +373,8 @@ export interface AppDeps {
   architectureDecisionRepository?: ArchitectureDecisionRepository;
   /** WORK-005: architecture change request repository. */
   architectureChangeRequestRepository?: ArchitectureChangeRequestRepository;
+  /** WORK-051: the assertion store owned by /architecture (append-only). */
+  architectureAssertionRepository?: PgArchitectureAssertionRepository;
   /** WORK-005: architecture service (freeze, approve change → replacement version). */
   architectureService?: ArchitectureService;
   /** WORK-006: requirement repository. */
@@ -663,6 +682,7 @@ export async function buildApp(
   let architectureVersionRepository: ArchitectureVersionRepository | undefined;
   let architectureDecisionRepository: ArchitectureDecisionRepository | undefined;
   let architectureChangeRequestRepository: ArchitectureChangeRequestRepository | undefined;
+  let architectureAssertionRepository: PgArchitectureAssertionRepository | undefined;
   let architectureService: ArchitectureService | undefined;
   let requirementRepository: RequirementRepository | undefined;
   let requirementDependencyRepository: RequirementDependencyRepository | undefined;
@@ -776,11 +796,23 @@ export async function buildApp(
   let planningEvaluateJobHandlerRef:
     | import('@platform/index.js').JobHandler
     | undefined;
-  const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter();
   // PRODUCTION READINESS: the SecretStore is needed for the GitHub webhook
   // route (signature validation). Hoist it out of the database block so the
   // webhook route can be wired even if other DB-dependent services aren't.
   const secretStore: SecretStore = new EnvSecretStore();
+  // WORK-051 round 4 (PR #52 review, BLOCKER 1) — the platform SecretStore is
+  // the ONLY credential authority for the production /github adapter: /github
+  // owns the canonical secret key names; the composition root resolves the
+  // GitHub App credentials through the SecretStore (resolveGitHubAppCredentials)
+  // and injects them EXPLICITLY. The adapter itself performs ZERO environment
+  // access — there is exactly ONE credential access mechanism in the platform.
+  const githubAppCredentials = await resolveGitHubAppCredentials(secretStore);
+  const githubAdapter: GitHubAdapter = new DefaultGitHubAdapter({
+    ...(githubAppCredentials ?? {}),
+    // NON-SECRET configuration (the public API endpoint override) may come
+    // from the environment — it is not a credential and carries no authority.
+    apiBaseUrl: process.env.GITHUB_API_BASE_URL,
+  });
   if (database) {
     userRepository = new PgUserRepository(database);
     membershipRepo = new PgMembershipRepository(database);
@@ -795,6 +827,9 @@ export async function buildApp(
     architectureVersionRepository = new PgArchitectureVersionRepository(database);
     architectureDecisionRepository = new PgArchitectureDecisionRepository(database);
     architectureChangeRequestRepository = new PgArchitectureChangeRequestRepository(database);
+    // WORK-051: the assertion store owned by /architecture (append-only; the
+    // public-barrel reader view is what the checkpoint subsystem receives).
+    architectureAssertionRepository = new PgArchitectureAssertionRepository(database);
     architectureService = new DefaultArchitectureService(database);
     requirementRepository = new PgRequirementRepository(database);
     requirementDependencyRepository = new PgRequirementDependencyRepository(database);
@@ -924,9 +959,55 @@ export async function buildApp(
       logger,
       database,
     );
+    // --- /github module: project↔GitHub repository provisioning (SUB-C). ---
+    // (Assigned BEFORE the orchestrator block: the WORK-051 wiring below —
+    // the revision-bound snapshot reader and the governed PR-creation port —
+    // resolves repository coordinates through this authority row.)
+    projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(database);
+
     // WORK-017/018: workflow orchestrator (convergence loop). Requires
     // Redis for the queue — constructed only when redisClient is available.
     if (redisClient) {
+      // WORK-051: the architecture checkpoint gate — the application-layer
+      // checkpoint service evaluates architectural conformance (assertion
+      // set owned by /architecture; evidence persisted through
+      // /verification) and returns the gating result the orchestrator
+      // consumes before each gated lifecycle transition. The readers are
+      // the STRUCTURALLY NARROWED read-only views (no mutation capability).
+      //
+      // WORK-051 round 1 (BLOCKER 1): the snapshot reader opens EXACT-REVISION
+      // repository snapshots through the /github authority's content reads
+      // (repository coordinates resolved server-side from the project's
+      // /github link) — detectors never read the working tree.
+      const architectureCheckpointGate: ArchitectureCheckpointGate =
+        new DefaultArchitectureCheckpointService({
+          workItemReader: workItemRepository,
+          architectureVersionReader: architectureVersionRepository,
+          architectureReader: architectureRepository,
+          assertionReader: architectureAssertionRepository,
+          verificationService,
+          snapshotReader: new GithubRepositorySnapshotProvider(
+            projectGitHubRepositoryRepository,
+            githubAdapter,
+          ),
+          detectors: createDefaultDetectorRegistry(),
+          logger,
+        });
+      // WORK-051 round 2 (PR #52 review, BLOCKER 2): the ACTUAL PR-creation
+      // boundary — the durable create-or-converge protocol over the
+      // PullRequestCreationPort → /github path. The orchestrator creates a
+      // governed PR ONLY after the pr_conformance checkpoint allows it
+      // (never as a pre-gate agent side effect — the agent execution
+      // contract is PR-incapable), and at most ONE PR per
+      // (work item, implementation revision) across crashes and retries.
+      const pullRequestCreationPort = new GithubBackedPullRequestCreationPort(
+        projectGitHubRepositoryRepository,
+        githubAdapter,
+      );
+      const governedPullRequests = new GovernedPullRequestService(
+        database,
+        pullRequestCreationPort,
+      );
       orchestrator = new DefaultWorkflowOrchestrator(
         database, logger, queue, workflowEngine,
         workItemRepository, workOrderRepository, depService,
@@ -936,7 +1017,8 @@ export async function buildApp(
         architectService,
         verificationService, reviewService, githubAdapter,
         architectureVersionRepository, architectureRepository,
-        projectRepository, generateExecutionId,
+        projectRepository, architectureCheckpointGate, generateExecutionId,
+        governedPullRequests,
       );
     }
     authProvider = new ApiKeyAuthProvider(database, secretStore);
@@ -983,9 +1065,6 @@ export async function buildApp(
         reason: 'VERCEL_API_TOKEN not set; runtime deployments surface not-configured',
       });
     }
-
-    // --- /github module: project↔GitHub repository provisioning (SUB-C). ---
-    projectGitHubRepositoryRepository = new PgProjectGitHubRepositoryRepository(database);
 
     // --- /work-items module: ImplementationContextBuilder (SUB-D). ---
     // The builder consumes the 10 repository deps + 4 optional callback
@@ -1851,6 +1930,7 @@ export async function buildApp(
       architectureVersionRepository,
       architectureDecisionRepository,
       architectureChangeRequestRepository,
+      architectureAssertionRepository,
       architectureService,
       requirementRepository,
       requirementDependencyRepository,

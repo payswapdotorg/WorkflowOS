@@ -32,6 +32,9 @@ export type {
 } from './internal/workflow.types.js';
 // WORK-017: Convergence orchestration types.
 // WORK-019: Merge gating + advancement types.
+// WORK-051: Architecture checkpoint gate contract (implemented by the
+// application-layer checkpoint subsystem; /workflows CONSUMES it and performs
+// the legal lifecycle transition only when the gate allows).
 export type {
   SignalType,
   SignalProcessingState,
@@ -40,6 +43,15 @@ export type {
   ConvergenceSignalRepository,
   WorkflowOrchestrator,
   MergeGateResult,
+  ArchitectureCheckpointKind,
+  ArchitectureCheckpointGateInput,
+  ArchitectureCheckpointGateResult,
+  ArchitectureCheckpointGate,
+  // WORK-051 round 1 (PR #52 review, BLOCKER 2): the PR-creation boundary
+  // consumed by the orchestrator — called ONLY after the pr_conformance
+  // checkpoint allows progression.
+  PullRequestCreationPort,
+  CreatedPullRequest,
 } from './internal/convergence.types.js';
 
 /**

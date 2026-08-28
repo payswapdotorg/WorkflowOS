@@ -82,6 +82,7 @@ describe('WORK-014 — Architect execution and Work Order generation', () => {
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
         architectureService: stack.architectureService,
       },
       workItems: {

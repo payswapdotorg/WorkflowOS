@@ -208,6 +208,7 @@ test.beforeAll(async () => {
       architectureVersionRepository: stack.architectureVersionRepository,
       architectureDecisionRepository: stack.architectureDecisionRepository,
       architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+      architectureAssertionRepository: stack.architectureAssertionRepository,
       architectureService: stack.architectureService,
     },
     requirements: {
@@ -334,10 +335,12 @@ test.describe('WORKFLOWOS — WORK-027 External Execution Handoff Browser E2E', 
     expect(versionRes.statusCode).toBe(201);
     const versionId = (versionRes.json() as { id: string }).id;
 
+    // WORK-051 round 1: the governed no-assertions declaration.
     const freezeRes = await server.inject({
       method: 'POST',
       url: `/architecture-versions/${versionId}/freeze`,
       headers: { 'x-api-key': API_KEY },
+      payload: { allowEmptyAssertionSet: true },
     });
     expect(freezeRes.statusCode).toBe(200);
 

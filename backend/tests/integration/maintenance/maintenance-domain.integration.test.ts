@@ -374,6 +374,7 @@ describe('WORK-041 — Maintenance + Project Health Engine (15 frozen regression
         architectureVersionRepository: stack.architectureVersionRepository,
         architectureDecisionRepository: stack.architectureDecisionRepository,
         architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+        architectureAssertionRepository: stack.architectureAssertionRepository,
         architectureService: stack.architectureService,
       },
       workItems: {

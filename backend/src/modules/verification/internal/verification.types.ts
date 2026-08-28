@@ -160,6 +160,15 @@ export interface VerificationRun {
   readonly source: string;
   /** Provider-independent reference (commit SHA, PR ref, etc.). */
   readonly sourceRef: string | null;
+  /**
+   * WORK-051 round 1 (BLOCKER 4): the durable orchestration identity owned
+   * by /verification. When an orchestration-produced run is created with a
+   * logical idempotency key, the key is stored here and made UNIQUE by a
+   * partial index (migration 0053) — one orchestration run per key,
+   * persistence-enforced. Runs created through the ordinary verification
+   * pipeline carry null.
+   */
+  readonly orchestrationKey: string | null;
   /** Lifecycle status — see {@link VerificationRunStatus}. */
   readonly status: VerificationRunStatus;
   /** Execution/correlation ID (architecture §35). */
@@ -182,6 +191,12 @@ export interface CreateVerificationRunInput {
   sourceRef?: string | null;
   executionId: string;
   metadata?: Record<string, unknown>;
+  /**
+   * WORK-051 round 1 (BLOCKER 4): the durable orchestration idempotency
+   * identity. Unique across runs (partial unique index). Ordinary
+   * verification runs omit it.
+   */
+  orchestrationKey?: string | null;
 }
 
 export interface UpdateVerificationRunInput {
@@ -198,6 +213,36 @@ export interface VerificationRunRepository {
   findById(id: string): Promise<VerificationRun | null>;
   listForWorkItem(workItemId: string): Promise<VerificationRun[]>;
   update(id: string, input: UpdateVerificationRunInput): Promise<VerificationRun | null>;
+  /**
+   * WORK-051 round 1 (BLOCKER 4): find the orchestration run by its durable
+   * idempotency identity. Pure read.
+   */
+  findByOrchestrationKey(orchestrationKey: string): Promise<VerificationRun | null>;
+  /**
+   * WORK-051 round 1 (BLOCKER 4): the create-or-converge insert.
+   * `INSERT ... ON CONFLICT (orchestration_key) DO NOTHING` — concurrent
+   * callers with the same key are arbitrated by the unique partial index:
+   * exactly one caller's insert lands; every other caller receives the
+   * winner's row (created=false). Throws on unique violations against OTHER
+   * constraints (never silently swallows errors).
+   */
+  insertOrGetOrchestrationRun(
+    input: CreateVerificationRunInput,
+  ): Promise<{ run: VerificationRun; created: boolean }>;
+  /**
+   * WORK-051 round 1: finalize with a CAS predicate — the terminal
+   * transition happens in a single UPDATE guarded by the current status.
+   * Returns null when the run is missing; `already-terminal` callers
+   * re-read and observe the existing terminal row.
+   */
+  finalize(
+    id: string,
+    input: {
+      status: 'completed' | 'failed';
+      summary: Record<string, unknown>;
+      errorMetadata?: Record<string, unknown> | null;
+    },
+  ): Promise<VerificationRun | null>;
 }
 
 // --- CriterionEvidenceMapping ---
@@ -387,4 +432,87 @@ export interface VerificationService {
    * Pure read — no mutation, no evaluation.
    */
   listMappingsForRun(verificationRunId: string): Promise<CriterionEvidenceMapping[]>;
+
+  /**
+   * WORK-051 — finalize a VerificationRun produced by an application-layer
+   * orchestration capability (e.g. the architecture checkpoint subsystem).
+   *
+   * /verification remains the SOLE evidence authority: this is the ONLY way
+   * an orchestration-produced run reaches a terminal state. It records the
+   * terminal status + summary through /verification's own repository — the
+   * caller never writes verification tables directly.
+   *
+   * Constraints (fail closed):
+   * - the run must exist;
+   * - the run must be in a non-terminal state ('pending' | 'running');
+   * - the target status must be terminal ('completed' | 'failed').
+   *
+   * PR #52 round 1 (BLOCKER 4): the terminal transition is a CAS UPDATE
+   * (single statement guarded by the current status) — concurrent
+   * finalizations are arbitrated by the database: exactly one writer's
+   * UPDATE lands; the loser observes the winner's terminal row.
+   *
+   * This does NOT evaluate criteria, map evidence, derive requirement
+   * statuses, or mutate workflow state. Checkpoint evidence attached through
+   * {@link attachEvidence} remains `claim`-authority by the frozen evidence
+   * hierarchy (§2.2, §15) — machine-produced conformance evidence is traceable
+   * context, never authoritative criterion PASS.
+   */
+  finalizeOrchestrationRun(input: {
+    verificationRunId: string;
+    status: 'completed' | 'failed';
+    summary?: Record<string, unknown>;
+    errorMetadata?: Record<string, unknown> | null;
+  }): Promise<VerificationRun>;
+
+  /**
+   * WORK-051 round 1 (BLOCKER 4) — find an orchestration run by its durable
+   * idempotency identity. Pure read owned by /verification; this is the
+   * replay lookup for orchestration producers (the checkpoint subsystem no
+   * longer scans run metadata — the identity is a first-class, unique,
+   * indexed column).
+   */
+  findOrchestrationRun(orchestrationKey: string): Promise<VerificationRun | null>;
+
+  /**
+   * WORK-051 round 1 (BLOCKER 4 + crash safety) — the ATOMIC orchestration
+   * record. Everything an orchestration producer (e.g. the architecture
+   * checkpoint subsystem) persists for one logical evaluation — the run row
+   * (with its durable orchestration identity), every evidence row, and the
+   * terminal finalization — is written in ONE database transaction:
+   *
+   *   create-or-converge the run (UNIQUE orchestration_key arbitrates
+   *     concurrent callers: exactly one run per key)
+   *   → attach the evidence rows (claim authority — the orchestration path
+   *     is never authoritative evidence)
+   *   → finalize the run to the requested terminal status.
+   *
+   * Convergence semantics:
+   * - `created: true` — this caller won the create-or-converge race; the
+   *   returned run carries THIS evaluation's evidence + terminal summary.
+   * - `created: false` — a run already exists for the key:
+   *     - terminal → returned unchanged (the caller replays the recorded
+   *       result; NOTHING is appended — the existing run is immutable
+   *       history);
+   *     - non-terminal (a partial reservation left by a pre-transactional
+   *       writer or an adopted legacy row) → the transaction ADOPTS it: the
+   *       evidence rows are attached and the run is finalized, reconciling
+   *       the partial state in one atomic step.
+   *
+   * A crash at ANY point leaves NOTHING (the transaction aborts) — partial
+   * or pending checkpoint evidence cannot persist. The caller never writes
+   * verification tables directly.
+   */
+  recordOrchestrationRun(input: {
+    /** Identical to {@link CreateVerificationRunInput} + the durable key. */
+    run: CreateVerificationRunInput & { orchestrationKey: string };
+    /** Evidence rows attached atomically with the run + finalization. */
+    evidence: ReadonlyArray<Omit<CreateEvidenceInput, 'projectId' | 'verificationRunId'>>;
+    /** The terminal finalization (status is always terminal). */
+    finalize: {
+      status: 'completed' | 'failed';
+      summary: Record<string, unknown>;
+      errorMetadata?: Record<string, unknown> | null;
+    };
+  }): Promise<{ run: VerificationRun; created: boolean }>;
 }

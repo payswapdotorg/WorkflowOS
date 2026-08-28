@@ -136,6 +136,7 @@ import { DefaultExecutionService } from '../../src/modules/agents/internal/execu
 import { DefaultExecutionPromptBuilder } from '../../src/modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from '../../src/modules/work-items/internal/execution-task-service.js';
 import type { FastifyInstance } from 'fastify';
+import { AllowAllCheckpointGate } from '../helpers/allow-all-checkpoint-gate.js';
 
 let stack: TestAuthStack;
 let server: FastifyInstance;
@@ -409,7 +410,9 @@ test.beforeAll(async () => {
     stack.architectureVersionRepository,
     stack.architectureRepository,
     stack.projectRepository,
+    new AllowAllCheckpointGate(),
     generateExecutionId,
+    new GovernedPullRequestService(stack.db.client, new FakePullRequestCreationPort()),
   );
 
   // WORK-026 (SUB-B): /runtime module — DeploymentService + RuntimeStatusService.
@@ -492,6 +495,7 @@ test.beforeAll(async () => {
       architectureVersionRepository: stack.architectureVersionRepository,
       architectureDecisionRepository: stack.architectureDecisionRepository,
       architectureChangeRequestRepository: stack.architectureChangeRequestRepository,
+      architectureAssertionRepository: stack.architectureAssertionRepository,
       architectureService: stack.architectureService,
     },
     workItems: {
@@ -839,10 +843,12 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     // ---------------------------------------------------------------
     // 8. Freeze the architecture version.
     // ---------------------------------------------------------------
+    // WORK-051 round 1: the governed no-assertions declaration.
     const freezeRes = await server.inject({
       method: 'POST',
       url: `/architecture-versions/${versionId}/freeze`,
       headers: { 'x-api-key': API_KEY },
+      payload: { allowEmptyAssertionSet: true },
     });
     expect(freezeRes.statusCode).toBe(200);
     expect((freezeRes.json() as { state: string }).state).toBe('frozen');
@@ -924,9 +930,11 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     expect(agentRuns.some((r) => r.id === firstAgentRunId)).toBe(true);
 
     // ---------------------------------------------------------------
-    // 13. WorkItemPage renders the AgentRun + the FakeAgentAdapter's
-    //     synthetic PR ref. (FakeAgentAdapter returns
-    //     pullRequestRef: 'github:owner/repo#1'.)
+    // 13. WorkItemPage renders the AgentRun. PR #52 round 2 (BLOCKER 1):
+    //     the agent execution contract is PR-INCAPABLE — the run has NO
+    //     synthetic PR ref (the FakeAgentAdapter no longer fabricates one;
+    //     a run's PR ref can only come from external observation ingestion).
+    //     The implementation commit ref is rendered instead.
     // ---------------------------------------------------------------
     await page.goto(`/work-items/${workItemId}`);
     await page.waitForTimeout(1500);
@@ -934,8 +942,10 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     await expect(page.locator('body')).toContainText('Agent Runs');
     // The run status (success) is rendered as a status badge.
     await expect(page.locator('body')).toContainText(/success/i);
-    // The PR ref from FakeAgentAdapter is rendered in the run card.
-    await expect(page.locator('body')).toContainText(/github:owner\/repo#1/i);
+    // The implementation commit ref (FakeAgentAdapter → 'abc123') is rendered.
+    await expect(page.locator('body')).toContainText(/abc123/i);
+    // NO fabricated PR ref — the agent run is PR-incapable by contract.
+    await expect(page.locator('body')).not.toContainText(/github:owner\/repo#1/i);
 
     // ---------------------------------------------------------------
     // 13b. Drive the workflow forward so begin-verification can legally
@@ -1336,3 +1346,5 @@ test.describe('WORKFLOWOS — WORK-026 Autonomous Implementation Browser E2E', (
     expect(eventTypes).toContain('WORKFLOW_TRANSITION');
   });
 });
+import { FakePullRequestCreationPort } from '../helpers/fake-pr-creation-port.js';
+import { GovernedPullRequestService } from '../../src/modules/workflows/internal/governed-pull-request-service.js';

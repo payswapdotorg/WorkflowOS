@@ -25,6 +25,16 @@ export interface WorkItem {
   /** Completion flag: when true, dependent work items become eligible (DEP-AC-02). */
   readonly completed: boolean;
   readonly metadata: Record<string, unknown>;
+  /**
+   * WORK-051 round 1 (PR #52 review, HIGH — protected impact): the GOVERNED
+   * architecture-impact declaration. Declared at creation; deliberately NOT
+   * part of UpdateWorkItemInput; persistence-enforced MONOTONIC (the
+   * migration-0054 trigger allows only strengthening — low → medium → high —
+   * and rejects any weakening or clearing, even via direct SQL). Mutable
+   * `metadata` is not a governance input. Unset (null) derives fail-closed
+   * to 'high' (the strictest checkpoint frequency) at evaluation time.
+   */
+  readonly architectureImpact: 'low' | 'medium' | 'high' | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -40,6 +50,8 @@ export interface CreateWorkItemInput {
   assignee?: string;
   executionMetadata?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /** The governed architecture-impact declaration (WORK-051 round 1). */
+  architectureImpact?: 'low' | 'medium' | 'high' | null;
 }
 
 export interface UpdateWorkItemInput {

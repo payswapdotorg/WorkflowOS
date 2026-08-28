@@ -12,7 +12,11 @@
  *
  * The provider name is "llm-agent" so the AgentGateway can route requests
  * to it. In production, the agent generates implementation code via the LLM
- * and reports a synthetic commit_ref + pull_request_ref.
+ * and reports a synthetic commit_ref. PR #52 round 2 (BLOCKER 1): the
+ * adapter is PR-INCAPABLE — it never fabricates a pull-request reference
+ * (the round-1 synthetic `github:workflowos/repo#<random>` was removed: a
+ * hallucinated PR identity must never enter the governed path). PR creation
+ * is the orchestrator's separate post-gate capability.
  */
 import type {
   AgentProviderAdapter,
@@ -47,7 +51,7 @@ export class OpenAiAgentAdapter implements AgentProviderAdapter {
   }
 
   async execute(request: AgentRequest): Promise<AgentExecutionResult> {
-    const systemPrompt = `You are an implementation agent for WorkflowOS. Your task is to implement the given work order. Generate the implementation code, a commit message, and a pull request reference. Return JSON with fields: code, commit_message, pr_title.`;
+    const systemPrompt = `You are an implementation agent for WorkflowOS. Your task is to implement the given work order. Generate the implementation code and a commit message. Return JSON with fields: code, commit_message.`;
     const userPrompt = `Work Item: ${request.workItemId}\nWork Order: ${request.workOrderId ?? 'N/A'}\nInput: ${request.input ?? 'Implement the work order'}`;
 
     const body = {
@@ -89,7 +93,6 @@ export class OpenAiAgentAdapter implements AgentProviderAdapter {
 
       const content = data.choices?.[0]?.message?.content ?? '';
       const commitRef = `agent-${request.executionId.slice(0, 8)}`;
-      const pullRequestRef = `github:workflowos/repo#${Math.floor(Math.random() * 10000)}`;
 
       return {
         status: 'success',
@@ -100,7 +103,6 @@ export class OpenAiAgentAdapter implements AgentProviderAdapter {
         provider: this.providerName,
         configuration: request.configuration,
         commitRef,
-        pullRequestRef,
         reportedTests: [{ name: 'agent-compilation', status: 'pass' }],
         reportedBlockers: [],
         error: null,

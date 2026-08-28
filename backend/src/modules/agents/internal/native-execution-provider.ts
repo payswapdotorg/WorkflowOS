@@ -258,7 +258,6 @@ export class NativeExecutionProvider implements ExecutionProvider {
       executionId: task.executionId,
       agentRunId: run.id,
       commitRef: result.commitRef,
-      pullRequestRef: result.pullRequestRef,
     });
 
     return {
@@ -268,7 +267,11 @@ export class NativeExecutionProvider implements ExecutionProvider {
       status: 'completed',
       agentRunId: run.id,
       commitRef: result.commitRef,
-      pullRequestRef: result.pullRequestRef,
+      // PR #52 round 2 (BLOCKER 1): the agent execution contract is
+      // PR-incapable — there is no provider-reported PR ref to forward.
+      // (An externally observed PR reaches the execution subsystem through
+      // the event-ingestion boundary, not through agent execution results.)
+      pullRequestRef: null,
       startedAt: result.startedAt,
       completedAt: result.completedAt,
     };

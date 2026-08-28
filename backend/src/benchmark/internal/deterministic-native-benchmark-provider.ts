@@ -70,6 +70,10 @@ export class DeterministicNativeBenchmarkProvider implements ExecutionProvider {
     const startedAt = new Date(now.getTime() - 60_000);
 
     // Finalize the run with a synthetic success result.
+    // PR #52 round 2 (BLOCKER 1): the execution result is PR-incapable —
+    // no pullRequestRef on the agent run (the synthetic PR ref below is
+    // BENCHMARK TELEMETRY on the submission only, mimicking an external
+    // provider's observation report; it never enters the governed path).
     await this.opts.agentRunRepository.updateSuccess(run.id, {
       status: 'success',
       output: `Deterministic native execution (${this.opts.variant}) for ${task.workItemLabel}.`,
@@ -79,7 +83,6 @@ export class DeterministicNativeBenchmarkProvider implements ExecutionProvider {
       provider: task.provider,
       configuration: { model: task.model, variant: this.opts.variant },
       commitRef,
-      pullRequestRef,
       reportedTests: [{ name: 'deterministic-test', status: 'pass' }],
       reportedBlockers: [],
       error: null,

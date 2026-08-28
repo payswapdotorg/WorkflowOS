@@ -157,6 +157,39 @@ export interface CreatePullRequestResult {
   headSha: string;
 }
 
+// --- WORK-051 round 2 (PR #52 review, BLOCKER 2): the PR CONVERGENCE READ ---
+//
+// The governed PR-creation protocol (the /workflows orchestrator's
+// post-checkpoint PR boundary) must be CRASH-SAFE across the external GitHub
+// mutation: if the process dies after GitHub created the PR but before the
+// result is durably recorded, a retry must CONVERGE on the already-created
+// PR rather than open a second one. Convergence needs an exact, read-only
+// lookup of the existing PR by its DETERMINISTIC head branch (the convergence
+// marker derived from the logical work item + implementation revision).
+// This mirrors the real GitHub REST capability
+// (GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open).
+
+/** Input for {@link GitHubAdapter.findPullRequestByHead}. */
+export interface FindPullRequestByHeadInput {
+  owner: string;
+  repository: string;
+  /** The head branch name to look up (the governed convergence marker). */
+  head: string;
+  installationId: string;
+}
+
+/** Result of {@link GitHubAdapter.findPullRequestByHead}. */
+export interface FindPullRequestByHeadResult {
+  owner: string;
+  repository: string;
+  /** The PR number assigned by GitHub. */
+  number: number;
+  /** SHA of the PR head commit. */
+  headSha: string;
+  /** The PR state ('open' when found through the open-PR lookup). */
+  state: 'open' | 'closed';
+}
+
 /** Input for {@link GitHubAdapter.getBranch}. */
 export interface GetBranchInput {
   owner: string;

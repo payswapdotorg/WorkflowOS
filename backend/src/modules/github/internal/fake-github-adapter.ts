@@ -56,6 +56,8 @@ import type {
   CreatePullRequestResult,
   CreateRepositoryInput,
   CreateRepositoryResult,
+  FindPullRequestByHeadInput,
+  FindPullRequestByHeadResult,
   GetBranchInput,
   GetBranchResult,
   GetFileContentInput,
@@ -88,6 +90,84 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   // the setup.
   private files = new Map<string, string>();
   private dirs = new Map<string, RepoDirEntry[]>();
+
+  // --- WORK-051 round 2 (PR #52 review, BLOCKER 2): the open-PR registry ---
+  //
+  // Mirrors GitHub's own identity semantics: at most ONE OPEN pull request
+  // per (owner, repository, head) triple. A second createPullRequest for the
+  // same head while its PR is open FAILS exactly like GitHub's HTTP 422
+  // ("A pull request already exists for...") — the fake never silently opens
+  // a duplicate. This is what makes the crash/retry convergence regressions
+  // honest: a converged retry cannot accidentally mint a second PR.
+  private openPullRequests = new Map<string, {
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+  }>();
+  private nextPrNumber = 1;
+
+  /**
+   * PR #52 round 4 (review, BLOCKER 3) — the BRANCH-HEAD registry: models a
+   * pushed branch pointing at an exact commit (what the WORK-026 governed
+   * branch provisioning does in production). `createPullRequest` reports the
+   * REGISTERED head SHA for the branch — mirroring GitHub, where a created
+   * PR's head is whatever commit the branch actually points at — so the
+   * production port's authoritative-head-SHA validation exercises real
+   * semantics (match ⇒ converge; mismatch ⇒ typed fail-closed).
+   */
+  private readonly branchHeads = new Map<string, string>();
+
+  /**
+   * PR #52 round 4: register a branch's head commit (a pushed branch). Tests
+   * seed the GOVERNED branch (governedHeadBranch(workItemId, headRevision))
+   * at the exact gated revision before driving the governed create path.
+   */
+  setBranchHead(owner: string, repository: string, branch: string, sha: string): this {
+    this.branchHeads.set(`${owner}/${repository}/${branch}`, sha);
+    return this;
+  }
+
+  /**
+   * WORK-051 round 3 (PR #52 review, BLOCKER 3): when set, an unregistered
+   * PR number resolves to an HONEST null (a 404 at the authority) instead of
+   * the legacy synthetic info — the adoption fail-closed regressions use
+   * this to prove an unresolvable observation can never enter the checkpoint.
+   */
+  strictPullRequestLookup = false;
+
+  /**
+   * WORK-051 round 3: seed an EXTERNAL pull request (a PR opened by a human
+   * or an out-of-band tool — NOT the governed boundary). The adoption
+   * resolution path reads its authoritative identity (number, head SHA,
+   * state) through getPullRequestInfo.
+   */
+  seedExternalPullRequest(input: {
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+    state?: 'open' | 'closed';
+    merged?: boolean;
+  }): this {
+    this.externalPullRequests.push({ ...input, state: input.state ?? 'open', merged: input.merged ?? false });
+    return this;
+  }
+  private readonly externalPullRequests: Array<{
+    owner: string;
+    repository: string;
+    number: number;
+    head: string;
+    headSha: string;
+    state: 'open' | 'closed';
+    merged: boolean;
+  }> = [];
+
+  /** Operation counters (provider-side counting for the governed PR-creation regressions). */
+  readonly createPullRequestCalls: string[] = [];
+  readonly findPullRequestByHeadCalls: string[] = [];
 
   /** sha256 hex of text (reproducibility — matches the production digest). */
   private static digest(text: string): string {
@@ -149,7 +229,42 @@ export class FakeGitHubAdapter implements GitHubAdapter {
     owner: string,
     repo: string,
     prNumber: number,
-  ): Promise<GitHubPullRequestInfo> {
+  ): Promise<GitHubPullRequestInfo | null> {
+    // WORK-051 round 3 (PR #52 review, BLOCKER 3): the two PR registries are
+    // AUTHORITATIVE when they hold the PR — the adoption path resolves REAL
+    // registered PRs to their authoritative identity (number, head SHA,
+    // state, merged) through this read. Unregistered numbers keep the legacy
+    // synthetic behavior (backward compatibility for the pre-existing
+    // suites) unless strictPullRequestLookup is set (the adoption
+    // fail-closed regressions need an honest 404 → null).
+    const external = this.externalPullRequests.find(
+      (pr) => pr.owner === owner && pr.repository === repo && pr.number === prNumber,
+    );
+    if (external) {
+      return {
+        prNumber,
+        title: `Fake PR #${prNumber} for ${owner}/${repo}`,
+        state: external.state,
+        branch: external.head,
+        baseBranch: 'main',
+        headCommit: external.headSha,
+        merged: external.merged,
+      };
+    }
+    for (const pr of this.openPullRequests.values()) {
+      if (pr.owner === owner && pr.repository === repo && pr.number === prNumber) {
+        return {
+          prNumber,
+          title: `Fake PR #${prNumber} for ${owner}/${repo}`,
+          state: 'open',
+          branch: pr.head,
+          baseBranch: 'main',
+          headCommit: pr.headSha,
+          merged: false,
+        };
+      }
+    }
+    if (this.strictPullRequestLookup) return null;
     return {
       prNumber,
       title: `Fake PR #${prNumber} for ${owner}/${repo}`,
@@ -207,12 +322,54 @@ export class FakeGitHubAdapter implements GitHubAdapter {
   async createPullRequest(
     input: CreatePullRequestInput,
   ): Promise<CreatePullRequestResult> {
+    this.createPullRequestCalls.push(input.head);
+    const key = `${input.owner}/${input.repository}/${input.head}`;
+    if (this.openPullRequests.has(key)) {
+      // GitHub's real semantics (HTTP 422): at most one OPEN PR per
+      // (head, base). A governed-path duplicate create is a BUG — the
+      // convergence protocol must find + adopt the existing PR instead.
+      throw new Error(
+        `github-fake: a pull request already exists for head '${input.head}' ` +
+          `in ${input.owner}/${input.repository} (GitHub rejects duplicate open PRs for the same head)`,
+      );
+    }
+    const number = this.nextPrNumber++;
+    // Round 4 (BLOCKER 3): the created PR's head SHA is the commit the
+    // branch POINTS AT (the registered branch head) — falling back to the
+    // legacy deterministic SHA for unregistered branches (backward
+    // compatibility with the pre-round-4 suites).
+    const headSha = this.branchHeads.get(`${input.owner}/${input.repository}/${input.head}`)
+      ?? `fakesha${sha8(input.head)}`;
+    this.openPullRequests.set(key, {
+      owner: input.owner,
+      repository: input.repository,
+      number,
+      head: input.head,
+      headSha,
+    });
     return {
       owner: input.owner,
       repository: input.repository,
-      number: 1,
-      url: `https://github.com/${input.owner}/${input.repository}/pull/1`,
-      headSha: `fakesha${sha8(input.head)}`,
+      number,
+      url: `https://github.com/${input.owner}/${input.repository}/pull/${number}`,
+      headSha,
+    };
+  }
+
+  async findPullRequestByHead(
+    input: FindPullRequestByHeadInput,
+  ): Promise<FindPullRequestByHeadResult | null> {
+    this.findPullRequestByHeadCalls.push(input.head);
+    const found = this.openPullRequests.get(
+      `${input.owner}/${input.repository}/${input.head}`,
+    );
+    if (!found) return null;
+    return {
+      owner: found.owner,
+      repository: found.repository,
+      number: found.number,
+      headSha: found.headSha,
+      state: 'open',
     };
   }
 
