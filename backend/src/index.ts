@@ -361,6 +361,35 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-046: Multi-Agent Delegation routes — the bounded coordination
+      // surface (create-or-converge a plan for ONE Work Item, read the
+      // structured state, drive/retry/interrupt). Wired when the delegation
+      // services + the work-item/architecture repositories are present (the
+      // delegation layer itself consumes only the EXISTING execution
+      // boundary + the WORK-045 catalog — there is no second engine and no
+      // scheduler; drive is always an explicit call).
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.workItemRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.delegationPlanService &&
+      app.deps.delegationCoordinator
+        ? {
+            delegation: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              workItemRepository: app.deps.workItemRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              delegationPlanService: app.deps.delegationPlanService,
+              delegationCoordinator: app.deps.delegationCoordinator,
+              // The EXISTING registry — provider validation mirrors the
+              // existing execution route (no new selection semantics).
+              agentProviderRegistryService: app.deps.agentProviderRegistryService,
+            },
+          }
+        : {}),
       // WORK-037: Agent Policy & Permissions routes. Backend-authorized
       // (project.read / project.admin). The engine never imports the
       // authorization service — only this route layer calls

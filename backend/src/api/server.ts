@@ -25,6 +25,7 @@ import { benchmarkRoutes, type BenchmarkRouteDeps } from './routes/benchmark.rou
 import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/execution-policy.route.js';
 import { executionRoutingRoutes, type ExecutionRoutingRouteDeps } from './routes/execution-routing.route.js';
 import { agentRolesRoutes, type AgentRolesRouteDeps } from './routes/agent-roles.route.js';
+import { delegationRoutes, type DelegationRouteDeps } from './routes/delegation.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
 import {
@@ -109,6 +110,10 @@ export interface ServerDeps extends JobsRouteDeps {
    *  role-catalog surface (backend-authorized project.read; advisory
    *  configuration only — never workflow authority). */
   agentRoles?: AgentRolesRouteDeps;
+  /** WORK-046: Multi-Agent Delegation routes — the bounded coordination
+   *  surface (create/get/drive/retry/interrupt; backend-authorized; every
+   *  delegated execution goes through the EXISTING execution boundary). */
+  delegation?: DelegationRouteDeps;
   /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
   agentPolicy?: AgentPolicyRouteDeps;
   /** WORK-038: Existing Project Onboarding routes (connect + analyze a
@@ -235,6 +240,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.agentRoles) {
     await agentRolesRoutes(app, deps.agentRoles);
+  }
+  if (deps.auth && deps.delegation) {
+    await delegationRoutes(app, deps.delegation);
   }
   if (deps.auth && deps.agentPolicy) {
     await agentPolicyRoutes(app, deps.agentPolicy);

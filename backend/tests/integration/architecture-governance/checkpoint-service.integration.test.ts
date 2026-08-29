@@ -1101,7 +1101,10 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // PR #52 round 4: 0056 is the explicit durable adoption origin on
           // the /workflows governed PR-intent ledger (round 2's 0055 is the
           // create-or-converge identity itself).
-          expectedLastMigrationNumber: 56,
+          // WORK-046 integration (PR #60): 0057 is the delegation
+          // coordination ledger — the 0052–0056 reservation resolved exactly
+          // as coordinated, so the self-host head pin advances to 0057.
+          expectedLastMigrationNumber: 57,
         },
       },
     ]);

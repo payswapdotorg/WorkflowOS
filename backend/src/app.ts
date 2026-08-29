@@ -306,6 +306,17 @@ import type { AdaptiveExecutionRouterService } from './execution-routing/index.j
 // contract layer (application-layer role model at src/agent-roles/, the
 // §33.9 bounded slice: declarative, deterministic, authority-free).
 import { DefaultAgentRoleCatalogService } from './agent-roles/index.js';
+// WORK-046: the application-layer delegation domain (coordination, not
+// authority — consumes the EXISTING execution boundary + the WORK-045 role
+// catalog via their public barrels).
+import {
+  DefaultDelegationPlanService,
+  DefaultDelegationCoordinator,
+} from './delegation/index.js';
+import type {
+  DelegationCoordinator,
+  DelegationPlanService,
+} from './delegation/index.js';
 import type { AgentRoleCatalogService } from './agent-roles/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
@@ -467,6 +478,14 @@ export interface AppDeps {
   /** WORK-027: submits tasks through the ExecutionProvider boundary (native →
    *  AgentGateway; external → secure handoff package). PRODUCTION MUST WIRE THIS. */
   executionService?: ExecutionService;
+  /** WORK-046: the delegation plan service (create-or-converge plans for ONE
+   *  Work Item). Present when the execution services + role catalog are
+   *  configured (they are static/unconditional in production). */
+  delegationPlanService?: DelegationPlanService;
+  /** WORK-046: the delegation coordinator (dispatch/observe/retry/interrupt —
+   *  coordination only; every execution goes through the EXISTING
+   *  ExecutionService). */
+  delegationCoordinator?: DelegationCoordinator;
   /** WORK-027: one-time, short-lived handoff token boundary for external packages. */
   executionHandoffService?: ExecutionHandoffService;
   /** WORK-027 (PR #30 fix #2): scoped event-ingestion callback token boundary. */
@@ -726,6 +745,9 @@ export async function buildApp(
   let executionRecordRepository: ExecutionRecordRepository | undefined;
   let executionTaskService: ExecutionTaskService | undefined;
   let executionService: ExecutionService | undefined;
+  // WORK-046: the delegation coordination services (application layer).
+  let delegationPlanService: DelegationPlanService | undefined;
+  let delegationCoordinator: DelegationCoordinator | undefined;
   let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
   // WORK-032 start-delivery durability: the generic OutboxRelay for the
   // benchmark start-delivery outbox. Injected into the WorkerHost below —
@@ -1462,6 +1484,26 @@ export async function buildApp(
       logger,
       sessionService: executionSessionService,
     });
+    // WORK-046: the delegation coordination layer — composed AFTER the
+    // existing execution services (it CONSUMES them; there is no second
+    // engine). Every delegated execution is submitted through
+    // executionService.submit() on a task built by executionTaskService for
+    // the SAME Work Item; attempt outcomes are OBSERVED from the existing
+    // execution record; the coordinator never mutates workflow state and
+    // never schedules anything (drive is explicit).
+    delegationPlanService = new DefaultDelegationPlanService({
+      db: database,
+      workItemRepository,
+      roleCatalog: agentRoleCatalogService,
+    });
+    delegationCoordinator = new DefaultDelegationCoordinator({
+      db: database,
+      executionTaskService: executionTaskService!,
+      executionService,
+      executionRecordRepository,
+      agentRunRepository: agentRunRepository!,
+      logger,
+    });
     executionHandoffService = new PolicyGatedExecutionHandoffService({
       inner: new DefaultExecutionHandoffService({
         executionRecordRepository,
@@ -1977,6 +2019,10 @@ export async function buildApp(
       executionRecordRepository,
       executionTaskService,
       executionService,
+      // WORK-046: the delegation coordination services (application layer —
+      // coordination, not authority).
+      delegationPlanService,
+      delegationCoordinator,
       executionHandoffService,
       executionCallbackService,
       executionEventIngestionService,

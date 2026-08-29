@@ -11212,7 +11212,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-051 round-4 adoption-origin column on the governed PR-intent ledger — /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0056_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-046 delegation coordination ledger 0057 — after the merged WORK-051 migrations 0052–0056: /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0057_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -17085,5 +17085,319 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(detectorTests).toMatch(/W052-AC09 — DISCRIMINATION \(post-merge correction, BLOCKER 3\): a manifest that does not PARSE is INCONCLUSIVE per ADR-0006/);
     expect(detectorTests).toMatch(/W052-AC09 — requirePresent=false: a repository without governance state is not_applicable/);
     expect(detectorTests).toMatch(/W052-AC09 — snapshot isolation: the detector reads only the bound project snapshot/);
+  });
+});
+
+// =============================================================================
+// WORK-046 invariants — Multi-Agent Delegation (§33.9 forward slice)
+//
+// THE DELEGATION LAYER IS COORDINATION, NOT AUTHORITY. This describe is the
+// PR CONFORMANCE CHECKPOINT the WORK-046 Work Order requires: it proves the
+// preservation matrix (P1–P8) STRUCTURALLY and hunts FORBIDDEN DUPLICATION —
+// a second workflow engine ("no hidden lifecycle state"), a second execution
+// engine, a second role catalog, a second eligibility/routing engine, a
+// scheduler, or a new authority for execution history.
+// =============================================================================
+
+describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not authority)', () => {
+  const DELEGATION_DIR = join(BACKEND_ROOT, 'src', 'delegation');
+  const DELEGATION_INTERNAL = join(DELEGATION_DIR, 'internal');
+  const DELEGATION_TYPES = join(DELEGATION_DIR, 'types.ts');
+  const DELEGATION_BARREL = join(DELEGATION_DIR, 'index.ts');
+  const PLAN_SERVICE = join(DELEGATION_INTERNAL, 'delegation-plan-service.ts');
+  const COORDINATOR = join(DELEGATION_INTERNAL, 'delegation-coordinator.ts');
+  const REPO = join(DELEGATION_INTERNAL, 'pg-delegation-repository.ts');
+  const ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'delegation.route.ts');
+  const MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0057_delegation_plans.sql',
+  );
+  const TESTS = join(
+    BACKEND_ROOT, 'tests', 'integration', 'delegation', 'delegation-plans.integration.test.ts',
+  );
+  const DELEGATION_TESTS_DIR = join(BACKEND_ROOT, 'tests', 'integration', 'delegation');
+  // The attempt-generation race regression (architect round-3 correction).
+  const RACE_TESTS = join(DELEGATION_TESTS_DIR, 'delegation-attempt-generation-race.integration.test.ts');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const WORK_ORDER = join(BACKEND_ROOT, '..', 'spec', 'work-orders', 'WORK-046.md');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readDelegationFiles(): { path: string; code: string; raw: string }[] {
+    const out: { path: string; code: string; raw: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir).sort()) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const raw = readFileSync(full, 'utf8');
+          out.push({ path: full, code: stripCodeComments(raw), raw });
+        }
+      }
+    };
+    walk(DELEGATION_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module ------------------------
+
+  it('the delegation domain exists at src/delegation/ and is NOT a frozen module (the set stays 17)', () => {
+    expect(existsSync(DELEGATION_DIR), 'src/delegation/ must exist').toBe(true);
+    expect(existsSync(DELEGATION_BARREL), 'src/delegation/index.ts must exist').toBe(true);
+    expect(existsSync(DELEGATION_TYPES), 'src/delegation/types.ts must exist').toBe(true);
+    expect(existsSync(DELEGATION_INTERNAL), 'src/delegation/internal/ must exist').toBe(true);
+    expect(existsSync(PLAN_SERVICE), 'the plan service must exist').toBe(true);
+    expect(existsSync(COORDINATOR), 'the coordinator must exist').toBe(true);
+    expect(existsSync(REPO), 'the delegation repository must exist').toBe(true);
+    expect(existsSync(join(MODULES_DIR, 'delegation'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'delegation must not be a frozen module').not.toContain('/delegation');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) NO HIDDEN LIFECYCLE STATE (the architect's required invariant) ----
+
+  it('NO hidden lifecycle state — delegation declares NO workflow vocabulary, NO transition map, NO engine, and NEVER writes the workflow tables', () => {
+    for (const f of readDelegationFiles()) {
+      // No workflow-state vocabulary (the frozen WorkflowState set).
+      expect(f.code, `${f.path}: no workflow-state vocabulary`).not.toMatch(
+        /'(draft|ready|assigned|implementing|pr_open|verifying|architect_review|changes_requested|implementation_blocked|verification_failed|approved|merged|verified|cancelled_work|rejected)'/,
+      );
+      // No second state machine: no LEGAL_TRANSITIONS declaration, no engine.
+      expect(f.code, `${f.path}: no transition map`).not.toMatch(/LEGAL_TRANSITIONS/);
+      expect(f.code, `${f.path}: no workflow engine`).not.toMatch(/implements\s+WorkflowEngine|extends\s+DefaultWorkflowEngine/);
+      expect(f.code, `${f.path}: no workflow engine import`).not.toMatch(/workflow-engine/);
+      // No workflow-table SQL (read or write — delegation never even reads
+      // workflow state as an authority).
+      expect(f.code, `${f.path}: no workflow table SQL`).not.toMatch(
+        /wfos_workflow_executions|wfos_workflow_transitions/,
+      );
+      // No WorkflowOrchestrator/engine reference at all.
+      expect(f.code, `${f.path}: no orchestrator import`).not.toMatch(/WorkflowOrchestrator|@modules\/workflows/);
+    }
+    // The coordination statuses are a DISJOINT, closed vocabulary.
+    const typesRaw = readFileSync(DELEGATION_TYPES, 'utf8');
+    const types = stripCodeComments(typesRaw);
+    expect(types).toMatch(/export type DelegationPlanStatus = 'active' \| 'completed' \| 'abandoned';/);
+    expect(types).toMatch(/\| 'pending'\s*\n?\s*\| 'dispatched'\s*\n?\s*\| 'succeeded'\s*\n?\s*\| 'failed'\s*\n?\s*\| 'unresolved'\s*\n?\s*\| 'cancelled';/);
+    // (Checked on the RAW source — the marker lives in the doc comment.)
+    expect(typesRaw).toMatch(/NOT a Work Item lifecycle/);
+    // The regression proves it end-to-end (no workflow rows after delegation).
+    const tests = readFileSync(TESTS, 'utf8');
+    expect(tests).toMatch(/NO hidden lifecycle state — delegation NEVER writes the workflow tables/);
+  });
+
+  // --- (c) ONE Work Item + the EXISTING execution boundary (P1 + P3 + AC03) --
+
+  it('every delegated execution goes through the EXISTING ExecutionService on a task built by the EXISTING ExecutionTaskService (exactly ONE submit call site; no provider/gateway anywhere)', () => {
+    const coordinatorCode = stripCodeComments(readFileSync(COORDINATOR, 'utf8'));
+    // The one submit call site — through the injected EXISTING service.
+    expect([...coordinatorCode.matchAll(/this\.deps\.executionService\.submit\(/g)].length).toBe(1);
+    // The task comes from the EXISTING builder.
+    expect(coordinatorCode).toMatch(/this\.deps\.executionTaskService\.build\(/);
+    // The deterministic dispatch idempotency key (the exactly-once boundary).
+    expect(coordinatorCode).toMatch(/delegation-unit-\$\{unit\.id\}-attempt-\$\{attemptNo\}/);
+    // NO provider/gateway/registry implementation or import.
+    for (const f of readDelegationFiles()) {
+      expect(f.code, `${f.path}: no AgentGateway`).not.toMatch(/AgentGateway/);
+      expect(f.code, `${f.path}: no provider implementation`).not.toMatch(/implements\s+ExecutionProvider|NativeExecutionProvider|ExternalExecutionProvider/);
+      expect(f.code, `${f.path}: no provider registry`).not.toMatch(/AgentProviderRegistry/);
+      expect(f.code, `${f.path}: no agent adapter`).not.toMatch(/AgentProviderAdapter/);
+    }
+    // The migration binds plans to ONE existing Work Item.
+    const migration = readFileSync(MIGRATION, 'utf8');
+    expect(migration).toMatch(/work_item_id UUID NOT NULL REFERENCES wfos_work_items\(id\)/);
+    expect(migration).toMatch(/UNIQUE \(work_item_id, plan_key\)/);
+    // ONE execution identity per delegated execution.
+    expect(migration).toMatch(/UNIQUE \(unit_id, attempt_no\)/);
+    expect(migration).toMatch(/UNIQUE \(execution_id\)/);
+    // Delegation owns NO execution-history authority tables — only
+    // coordination tables referencing existing identities.
+    expect(migration).toMatch(/CREATE TABLE wfos_delegation_plans/);
+    expect(migration).toMatch(/CREATE TABLE wfos_delegation_units/);
+    expect(migration).toMatch(/CREATE TABLE wfos_delegation_attempts/);
+  });
+
+  // --- (d) the EXISTING role catalog consumed, never redefined (P4 + AC02) ---
+
+  it('WORK-045 roles are CONSUMED (resolved + pinned) — delegation authors no role definitions and redefines no semantics', () => {
+    const planServiceCode = stripCodeComments(readFileSync(PLAN_SERVICE, 'utf8'));
+    expect(planServiceCode).toMatch(/roleCatalog\.resolveRole\(/);
+    expect(planServiceCode).toMatch(/DELEGATION_UNKNOWN_ROLE/);
+    // The pin: (roleId, revision) captured at creation.
+    expect(planServiceCode).toMatch(/roleId: resolution\.role\.identity,/);
+    expect(planServiceCode).toMatch(/roleRevision: resolution\.role\.lifecycle\.revision,/);
+    for (const f of readDelegationFiles()) {
+      // No role AUTHORING: no role-definition/catalog construction.
+      expect(f.code, `${f.path}: no role definitions`).not.toMatch(
+        /AGENT_ROLE_CATALOG|AgentRoleDefinition|displayName:\s*'/,
+      );
+      // The AgentRoleId type import only (no redeclaration).
+      expect(f.code, `${f.path}: no AgentRoleId redeclaration`).not.toMatch(
+        /export type AgentRoleId/,
+      );
+    }
+    const types = stripCodeComments(readFileSync(DELEGATION_TYPES, 'utf8'));
+    expect(types).toMatch(/import type \{ AgentRoleId \} from '\.\.\/agent-roles\/index\.js';/);
+    // The regression proves the pinning + the unknown-role fail-closed.
+    const tests = readFileSync(TESTS, 'utf8');
+    expect(tests).toMatch(/pins the WORK-045 role identity \+ revision/);
+    expect(tests).toMatch(/DELEGATION_UNKNOWN_ROLE/);
+  });
+
+  // --- (e) NO second eligibility/routing/verification/review engine ----------
+
+  it('NO forbidden duplication: no execution-policy, no execution-routing, no verification, no reviews, no llm, no scheduler', () => {
+    for (const f of readDelegationFiles()) {
+      expect(f.code, `${f.path}: no eligibility/policy import`).not.toMatch(
+        /execution-policy|ExecutionPolicyService|CapabilityRequirement/,
+      );
+      expect(f.code, `${f.path}: no routing import`).not.toMatch(
+        /execution-routing|AdaptiveExecutionRouter|RoutingRank/,
+      );
+      expect(f.code, `${f.path}: no verification authority`).not.toMatch(
+        /@modules\/verification|VerificationService/,
+      );
+      expect(f.code, `${f.path}: no review authority`).not.toMatch(
+        /@modules\/reviews|ReviewService/,
+      );
+      expect(f.code, `${f.path}: no llm`).not.toMatch(/@modules\/llm/);
+      // NO SCHEDULER (W046-AC12): no timers, no cron, no background loops.
+      expect(f.code, `${f.path}: no scheduler`).not.toMatch(
+        /setInterval|setTimeout|cron\(|WorkerHost|Queue\(/,
+      );
+      // No credential/env access.
+      expect(f.code, `${f.path}: no env access`).not.toMatch(/process\.env/);
+      expect(f.code, `${f.path}: no secret store`).not.toMatch(/SecretStore|getSecret/);
+      // Barrel-only frozen-module imports (no internal/ paths).
+      expect(f.code, `${f.path}: no module internal imports`).not.toMatch(
+        /@modules\/[a-z-]+\/internal\//,
+      );
+    }
+    // Drive is EXPLICIT: the coordinator exposes drivePlan, not a loop.
+    const coordinatorCode = stripCodeComments(readFileSync(COORDINATOR, 'utf8'));
+    expect(coordinatorCode).toMatch(/drivePlan\(/);
+  });
+
+  // --- (f) the durable-intent-first dispatch protocol (P3 + AC04) -------------
+
+  it('the crash-safe dispatch protocol: durable intent BEFORE submission; observe-or-resubmit convergence on the re-drive', () => {
+    const coordinatorCode = stripCodeComments(readFileSync(COORDINATOR, 'utf8'));
+    // DURABLE INTENT FIRST: the allocation transaction precedes the submit.
+    const allocateIdx = coordinatorCode.indexOf('allocateAttempt(');
+    const submitIdx = coordinatorCode.indexOf('this.deps.executionService.submit(');
+    expect(allocateIdx).toBeGreaterThan(-1);
+    expect(submitIdx).toBeGreaterThan(allocateIdx);
+    // The re-drive: observe the record; re-submit only when ABSENT.
+    expect(coordinatorCode).toMatch(/findByExecutionId\(/);
+    expect(coordinatorCode).toMatch(/redriveInFlightUnit/);
+    // Outcomes are OBSERVED from the existing record (the authority), incl.
+    // the native operation ledger for limbo resolution.
+    expect(coordinatorCode).toMatch(/observeExecution\(/);
+    expect(coordinatorCode).toMatch(/agentRunRepository\.findByExecutionId\(/);
+    // The repository: attempt allocation under the unit row lock.
+    const repoCode = stripCodeComments(readFileSync(REPO, 'utf8'));
+    expect(repoCode).toMatch(/FOR UPDATE OF u/);
+    expect(repoCode).toMatch(/attempt_count = attempt_count \+ 1/);
+    expect(repoCode).toMatch(/INSERT INTO wfos_delegation_attempts/);
+  });
+
+  // --- (g) the coordination-only interruption + sequencing --------------------
+
+  it('interruption cancels PENDING units without touching in-flight executions; sequencing is dependency-gated coordination', () => {
+    const coordinatorCode = stripCodeComments(readFileSync(COORDINATOR, 'utf8'));
+    expect(coordinatorCode).toMatch(/cancelPendingUnits\(/);
+    // The guard: only PENDING units are cancelled.
+    const repoCode = stripCodeComments(readFileSync(REPO, 'utf8'));
+    expect(repoCode).toMatch(/WHERE plan_id = \$1 AND status = 'pending'/);
+    // Sequencing: dispatch only when every dependency succeeded.
+    expect(coordinatorCode).toMatch(/dependsOn\.every\(\(dep\) => byKey\.get\(dep\)\?\.status === 'succeeded'\)/);
+  });
+
+  // --- (h) the composition + the HTTP surface mirror the existing patterns ---
+
+  it('the composition root wires delegation AFTER the existing execution services; the route authorizes + validates providers exactly like the existing execution route', () => {
+    const appCode = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(appCode).toMatch(/new DefaultDelegationPlanService\(/);
+    expect(appCode).toMatch(/new DefaultDelegationCoordinator\(/);
+    // Composed AFTER the execution service exists (the dependency direction).
+    const execIdx = appCode.indexOf('executionService = new DefaultExecutionService(');
+    const delegIdx = appCode.indexOf('new DefaultDelegationCoordinator(');
+    expect(execIdx).toBeGreaterThan(-1);
+    expect(delegIdx).toBeGreaterThan(execIdx);
+
+    const routeCode = stripCodeComments(readFileSync(ROUTE, 'utf8'));
+    expect(routeCode).toMatch(/requireProjectAuthorization/);
+    expect(routeCode).toMatch(/isProviderConfigured/);
+    expect(routeCode).toMatch(/isExternalProviderSupported/);
+    expect(routeCode).toMatch(/work-item-not-in-project/);
+    // NO routing semantics of its own: the route validates, never selects.
+    expect(routeCode).not.toMatch(/AdaptiveExecutionRouter|ExecutionPolicyService/);
+  });
+
+  // --- (i) the migration numbering reservation is documented ------------------
+
+  it('migration 0057 documents the 0052–0056 reservation (RESOLVED — WORK-051 merged as f2c996c, so 0052–0056 are the merged WORK-051 migrations beneath this file); the WORK-046 work order exists with the pre-implementation checkpoint', () => {
+    const migration = readFileSync(MIGRATION, 'utf8');
+    expect(migration).toMatch(/0052–0056 were reserved for the[\s\S]{0,40}then-pending WORK-051 branch \(PR #52\)/);
+    expect(migration).toMatch(/MERGED[\s\S]{0,20}\(f2c996c\)/);
+    expect(migration).toMatch(/the reservation[\s\S]{0,40}resolved exactly as coordinated/);
+    // The work order: the pre-implementation preservation matrix (P1–P8) +
+    // the forbidden-duplication conformance requirements.
+    const order = readFileSync(WORK_ORDER, 'utf8');
+    expect(order).toMatch(/Pre-implementation architectural checkpoint/);
+    for (const p of ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8']) {
+      expect(order).toMatch(new RegExp(`\\| ${p} \\|`));
+    }
+    expect(order).toMatch(/no hidden lifecycle state/);
+    expect(order).toMatch(/FORBIDDEN DUPLICATION/);
+  });
+
+  // --- (j) the regression evidence is pinned -----------------------------------
+
+  it('the WORK-046 two-actor regression matrix is pinned (all six architect-required proofs + the semantics regressions)', () => {
+    const tests = readFileSync(TESTS, 'utf8');
+    // The six required two-actor PostgreSQL proofs.
+    expect(tests).toMatch(/TWO-ACTOR #1 — the SAME delegation request from two actors converges on ONE authoritative plan/);
+    expect(tests).toMatch(/TWO-ACTOR #2 — concurrent dispatch of the SAME unit → exactly ONE attempt \+ ONE execution/);
+    expect(tests).toMatch(/TWO-ACTOR #3a — crash BEFORE the execution submit/);
+    expect(tests).toMatch(/TWO-ACTOR #3b — crash AFTER the execution submit/);
+    expect(tests).toMatch(/TWO-ACTOR #4 \+ #5 — partial failure → RECOVERABLE plan; retry preserves the unit \+ role identity/);
+    expect(tests).toMatch(/native\/external mix → the same logical Work Item/);
+    // The semantics regressions.
+    expect(tests).toMatch(/fail-closed validation: unknown work item, unknown role/);
+    expect(tests).toMatch(/interruption — the plan is abandoned, PENDING units are cancelled/);
+    expect(tests).toMatch(/structured state for WORK-047/);
+    // The migration pin advanced (WORK-040's last-migration expectation).
+    const staticSelf = readFileSync(join(BACKEND_ROOT, 'tests', 'architecture', 'static-architecture.test.ts'), 'utf8');
+    expect(staticSelf).toMatch(/the last migration is the WORK-046 delegation coordination ledger 0057/);
+  });
+
+  // --- (k) the attempt-generation fence (architect round-3 correction) ---------
+
+  it('the unit-state mutation in recordAttemptOutcome is ATTEMPT-FENCED — a stale attempt-N result cannot change a unit whose current attempt is N+1 (the retry contract)', () => {
+    const repoCode = stripCodeComments(readFileSync(REPO, 'utf8'));
+    // THE FENCE: the unit mutation is additionally fenced on the recorded
+    // attempt BEING the unit's current attempt (attempt_no = attempt_count —
+    // the allocation invariant). Without it, a late result for a superseded
+    // attempt could flip the unit (and through it the plan-completion check)
+    // while the retry's attempt was still executing.
+    expect(repoCode).toMatch(/AND EXISTS \(\s*SELECT 1\s*FROM wfos_delegation_attempts a\s*WHERE a\.id = \$3\s*AND a\.unit_id = u\.id\s*AND a\.attempt_no = u\.attempt_count\s*\)/);
+    // The guarded status CAS stays (terminal unit states are never rewritten).
+    expect(repoCode).toMatch(/u\.status IN \('dispatched', 'failed', 'unresolved'\)/);
+    // The regression: the two-actor race file carries the SAME fence in its
+    // mirrored production SQL (the blocked-then-reevaluated interleaving).
+    const race = readFileSync(RACE_TESTS, 'utf8');
+    expect(race).toMatch(/a\.attempt_no = u\.attempt_count/);
+    expect(race).toMatch(/FOR UPDATE/);
+    expect(race).toMatch(/still-blocked/); // the proof of contention
+    // The architect's three required scenarios, by title.
+    expect(race).toMatch(/stale attempt 1 SUCCESS: the unit REMAINS dispatched on attempt 2/);
+    expect(race).toMatch(/stale attempt 1 FAILURE: the unit REMAINS dispatched on attempt 2/);
+    expect(race).toMatch(/attempt 2 resolves → the unit takes the attempt-2 outcome → the plan may complete/);
+    // The interruption race guard regression stays pinned (round-1).
+    expect(readFileSync(join(DELEGATION_TESTS_DIR, 'delegation-interruption-race.integration.test.ts'), 'utf8'))
+      .toMatch(/rejects a stale dispatch after interruption/);
   });
 });

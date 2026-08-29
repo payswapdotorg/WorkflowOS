@@ -907,7 +907,7 @@
       ],
       "branch": "feat/work-046-multi-agent-delegation",
       "pr": 60,
-      "head": "f88cac4",
+      "head": "8433f24",
       "issue": 60,
       "workOrder": "spec/work-orders/WORK-046.md",
       "origin": "architect",
@@ -947,7 +947,7 @@
         "reason": "shares the static-architecture suite and composition-root surfaces with the (now merged) WORK-051 — coordinated by reserved migration numbering (0052-0056 WORK-051, 0057 WORK-046); ALSO shares the static-architecture suite with the in-flight WORK-052 (both append describe blocks to the same file) — merge order is serialized by the architect: whichever PR merges second rebases its describe-block additions",
         "adrs": []
       },
-      "note": "implementation complete at head f88cac4; all 7 CI workflows green; awaiting architect review of PR #60. WORK-051 (the other shared-surface partner) has since MERGED as f2c996c — the coordination record is durable history for that side and MUTUAL coordination with the in-flight WORK-052."
+      "note": "round-3 correction complete: the architect's round-3 review of PR #60 (CHANGES REQUIRED on head 20e72f6) found the attempt-generation race in PgDelegationRepository.recordAttemptOutcome — the attempt outcome row was fenced by attemptId but the unit-state mutation was fenced only by unit_id + status IN('dispatched','failed','unresolved'), so a LATE attempt-1 result arriving after a retry allocated attempt 2 could flip the unit (and through it the plan-completion check) while attempt 2 was still executing. Fixed by the ATTEMPT-GENERATION FENCE (commit 8433f24): the unit UPDATE now additionally requires the recorded attempt to BE the unit's current attempt (a.attempt_no = u.attempt_count — the allocation invariant), making a result for a superseded attempt structurally incapable of changing the unit's current state; no schema change (the fence lives in the durable operation itself). The required two-actor PostgreSQL regression (delegation-attempt-generation-race.integration.test.ts, two independent connections, the stale recorder's unit UPDATE genuinely BLOCKED on the retry's row lock with a contention probe) covers all three architect-required directions — stale SUCCESS and stale FAILURE both leave the unit dispatched on attempt 2; attempt 2 resolving takes the unit's outcome and may complete the plan — with the discrimination proven (all three tests FAIL on the unfenced repository). Static invariant (k) added (735 -> 736) pinning the fence + the regression. Everything else from the prior rounds stands: the round-1 remediation (0e15abf + 75ca9b6) retained verbatim, the merge-based integration onto main@0541d13 (a52b2e4), the ARCH-SELF-006 pin advance (20e72f6), and the resolved migration reservation (0052-0056 WORK-051, 0057 WORK-046). Full re-verification on real PostgreSQL 18 recorded in the PR #60 round-3 report; awaiting the architect's re-review of the resulting head."
     },
     {
       "id": "WORK-047",
@@ -1319,14 +1319,14 @@
     "activeHandoffs": [
       {
         "workOrderId": "WORK-046",
-        "lastVerifiedState": "Implementation complete at head f88cac4 on branch feat/work-046-multi-agent-delegation (PR #60): provider-neutral delegation coordination over the existing execution boundary; migration 0057 (0052-0056 reserved for WORK-051); six real-PG two-actor regressions green; all 7 CI workflows green on the first attempt.",
+        "lastVerifiedState": "Round-3 correction complete on branch feat/work-046-multi-agent-delegation (PR #60, head 8433f24): the attempt-generation race found by the architect's round-3 review is closed — recordAttemptOutcome's unit-state mutation is now ATTEMPT-FENCED (a.attempt_no = u.attempt_count), so a stale attempt-1 result (SUCCESS or FAILURE) arriving after a retry allocated attempt 2 leaves the unit dispatched on attempt 2, and only the current attempt's outcome can change the unit or complete the plan; the two-actor real-PostgreSQL regression (two independent connections, contention-proven blocked interleaving) covers all three required directions and FAILS on the unfenced repository (discrimination proven); static invariant (k) pins the fence (736/736). Full re-verification: typecheck 0; lint 0 errors; delegation real-PG 15/15; governance suites 90/91 (the 1 = the documented pre-existing merged-finalization pin failure, WORK-052 scope); full real-PG sweep 2356 passed / 1 failed (the same pre-existing); pglite 2312/44-skipped/1-failed (same); governance:status exit 0.",
         "nextSteps": [
-          "architect reviews PR #60 (the static-suite shared-surface partner WORK-051 has since merged — the coordination record documents the reserved numbering)",
+          "architect re-reviews PR #60 on the round-3 head (8433f24 — the attempt-generation fence + the two-actor regression)",
           "if changes requested: remediate on the same branch",
-          "if approved: architect merges PR #60; record mergedAs and set status complete; WORK-047 becomes eligible once also complete"
+          "if approved: architect merges PR #60; record mergedAs and set status complete (post-merge finalization per §34.8/ADR-0007); WORK-047 becomes eligible once complete"
         ],
         "blockers": [],
-        "recordedAt": "2026-08-28T12:28:04Z",
+        "recordedAt": "2026-08-28T20:30:00Z",
         "recordedBy": "z.ai implementation agent (WORK-046)"
       }
     ]
