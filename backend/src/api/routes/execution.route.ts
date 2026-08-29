@@ -624,4 +624,47 @@ export async function executionRoutes(
       }
     });
   });
+
+  // GET /execution/:executionId/cross-mode-handoff — WORK-050: the READ side
+  // of the WORK-042 cross-mode handoff log.
+  //
+  // The unified execution UX renders the AUTHORITATIVE handoff state (was
+  // this execution handed off? from which mode to which? why? with what
+  // resulting status?) — this endpoint exposes the append-only handoff log
+  // row (the authority's own record) with NO mutation of any kind. Responses:
+  //   200 {handoff: null} — the execution genuinely never handed off (the
+  //        authority's empty answer, NEVER a failed read);
+  //   200 {handoff: {...}} — the safe handoff record (toSafeHandoff's
+  //        secret-free field set);
+  //   404 — the execution record does not exist;
+  //   403 — the caller lacks project.read on the execution's project
+  //        (resolved server-side from the record — cross-project callers are
+  //        rejected BEFORE any handoff data is queried, mirroring the POST);
+  //   503 — the cross-mode handoff service is not wired (mirroring the POST).
+  app.get('/execution/:executionId/cross-mode-handoff', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const crossModeHandoffService = deps.crossModeHandoffService;
+      if (!crossModeHandoffService) {
+        return reply.code(503).send({
+          error: 'cross-mode-handoff-unavailable',
+          message: 'the cross-mode handoff service is not configured',
+        });
+      }
+      const { executionId } = req.params as { executionId: string };
+      // Authorize against the execution's project BEFORE querying the
+      // handoff log — cross-project callers get 403 regardless of any
+      // executionId knowledge (the POST route's guard, read-side).
+      const record = await deps.executionRecordRepository.findByExecutionId(executionId);
+      if (!record) {
+        return reply.code(404).send({ error: 'execution-not-found' });
+      }
+      const user = await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId: record.projectId,
+      });
+      if (!user) return;
+      const handoff = await crossModeHandoffService.getHandoffForExecution(executionId);
+      return reply.code(200).send({ handoff: handoff ? toSafeHandoff(handoff) : null });
+    });
+  });
 }

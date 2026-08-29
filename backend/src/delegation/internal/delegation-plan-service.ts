@@ -159,6 +159,12 @@ export class DefaultDelegationPlanService {
   async getPlan(workItemId: string, planKey: string): Promise<DelegationPlan | null> {
     return this.repo.findPlan(workItemId, planKey);
   }
+
+  // WORK-050: the READ side for the unified execution UX — a pure repository
+  // passthrough ([] is a GENUINE empty result; no validation, no writes).
+  async listPlansForWorkItem(workItemId: string): Promise<DelegationPlan[]> {
+    return this.repo.listPlansForWorkItem(workItemId);
+  }
 }
 
 /**

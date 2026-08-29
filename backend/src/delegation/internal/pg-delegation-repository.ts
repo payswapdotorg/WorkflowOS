@@ -209,6 +209,29 @@ export class PgDelegationRepository {
     return this.readPlan(this.db, workItemId, planKey);
   }
 
+  /**
+   * WORK-050: list ALL delegation plans (with units) for a Work Item — the
+   * READ side of the coordination data (ordered by creation, the durable
+   * order; the plans of ONE work item are all parallel logical plans). A
+   * work item with no plans answers [] (a GENUINE empty result). Pure read:
+   * no locks, no CAS, no writes.
+   */
+  async listPlansForWorkItem(workItemId: string): Promise<DelegationPlan[]> {
+    const plans = await this.db.query<PlanRowQ>(
+      `SELECT ${PLAN_COLUMNS}
+       FROM wfos_delegation_plans
+       WHERE work_item_id = $1
+       ORDER BY created_at, id`,
+      [workItemId],
+    );
+    const result: DelegationPlan[] = [];
+    for (const row of plans.rows) {
+      const units = await this.readUnits(this.db, row.id);
+      result.push(mapPlan(row, units));
+    }
+    return result;
+  }
+
   private async readUnits(q: Queryable, planId: string): Promise<DelegationUnit[]> {
     const result = await q.query<UnitRowQ>(
       `${UNIT_SELECT} WHERE u.plan_id = $1 ORDER BY u.unit_key`,

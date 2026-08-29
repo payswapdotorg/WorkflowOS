@@ -475,16 +475,20 @@ test.describe('WORKFLOWOS — WORK-027 External Execution Handoff Browser E2E', 
     expect(dialogText.toLowerCase()).not.toContain('api_key');
 
     // ---------------------------------------------------------------
-    // 7. Close the dialog → the Executions card shows the external
+    // 7. Close the dialog → the unified execution section shows the external
     //    execution with its status (safe metadata only).
     // ---------------------------------------------------------------
     await page.keyboard.press('Escape');
     await expect(handoffDialog).toBeHidden();
 
-    // The Executions card (Implementation tab) shows the external execution
-    // with its status — WorkflowOS shows handoff-ready.
-    await expect(page.getByText('Executions')).toBeVisible();
-    await expect(page.getByText('External · zai').first()).toBeVisible();
+    // The WORK-050 unified execution section (Implementation tab) shows the
+    // external execution with its status — WorkflowOS shows handoff-ready.
+    // (The former "Executions" card was superseded by the unified section:
+    // the same authoritative execution record, rendered as "Actually
+    // selected" with the record's own provider/mode.)
+    await expect(page.getByTestId('execution-actually-selected')).toBeVisible();
+    await expect(page.getByTestId('execution-actually-selected')).toContainText('External');
+    await expect(page.getByTestId('execution-actually-selected')).toContainText('zai');
     // StatusBadge humanizes backend states ('handoff_ready' → 'Handoff Ready').
     await expect(page.getByText(/Handoff Ready|Submitted/i).first()).toBeVisible();
 

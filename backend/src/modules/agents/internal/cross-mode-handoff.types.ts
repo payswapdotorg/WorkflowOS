@@ -491,6 +491,17 @@ export interface PendingCrossModeHandoff {
  * workflow/verification/review state, and NEVER persists secrets.
  */
 export interface CrossModeHandoffService {
+  /**
+   * WORK-050: the READ side of the cross-mode handoff log — the append-only
+   * handoff record for an execution (null when none exists; ONE row per
+   * execution by the UNIQUE(execution_record_id) constraint). Read-only by
+   * construction: this NEVER mutates the handoff log, the execution record,
+   * or any obligation — it exists so the unified execution UX (and any other
+   * consumer) can render the AUTHORITATIVE handoff state without going
+   * through the mutation boundary.
+   */
+  getHandoffForExecution(executionId: string): Promise<CrossModeHandoffRecord | null>;
+
   handoff(
     executionId: string,
     input: CrossModeHandoffInput,

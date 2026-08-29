@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-29",
+  "asOf": "2026-08-29T15:01:10Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1051,7 +1051,7 @@
     {
       "id": "WORK-049",
       "title": "Project Health and Maintenance UX",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-041",
         "WORK-048"
@@ -1074,15 +1074,21 @@
         "moduleInternals"
       ],
       "assuranceProfile": "STANDARD",
-      "note": "activated after the WORK-048 merge (5c48257): the Project Health and Maintenance UX — the Workbench extended to surface maintenance and health information as a CONSUMER of existing backend authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-049.md). FRONTEND-ONLY read-model composition: the health derivation is a pure presentation function over the AUTHORITATIVE facts the Workbench already loads (the maintenance authority's signals with their own severity/category/evidence, the verification authority's failed runs, the dependency authority's unsatisfied dependencies, the runtime authority's provider status, the execution records, the deployments). NO second maintenance engine, NO second health authority, NO frontend policy/prioritization engine, NO second Work Item store, NO workflow state machine in the frontend; maintenance findings remain visibly SIGNALS/RECOMMENDATIONS unless an authoritative Work Item exists (open maintenance work vs completed work always distinguishable). Lightweight for normal projects (a compact all-healthy state; no critical-system governance forced onto every project). Read-only (ZERO mutation calls); no migration (the last stays 0057).",
+      "note": "Merged by the architect as 07ac9cc68b088c91c17a61cf2b3943d784a2aeb5 (PR #77, squash-merged at branch head 4fb0c19 on 2026-08-29T13:44:03Z; the merge tree is IDENTICAL to the approved head). The post-merge finalization (§34.8/ADR-0007) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, the active handoff removed (merged work is not resumable), and the work-order document status updated. branch/pr/head kept as the historical record of how it merged. The architect's review accepted the health UX architecture (the pure facts→findings derivation with the authorities' own severity verbatim, the health-incomplete gap discipline, the visibly distinct completed-maintenance-work section, the zero-mutation read-only view, the 8 static no-new-authority invariants, and the browser-level tenant isolation) and merged it unchanged. The PR's first backend CI attempt failed with one cross-mode-handoff convergence-test timing flake (the waitFor helper's hard-coded 20s deadline on a starved runner) — discriminated on four legs (zero causal surface, not reproducible locally, the deadline mechanism, same-commit re-run green) and re-verified 9/9 checks green on the identical head.",
       "branch": "feat/work-049-project-health-maintenance-ux",
       "workOrder": "spec/work-orders/WORK-049.md",
-      "runtimeImpactBinding": "medium"
+      "runtimeImpactBinding": "medium",
+      "pr": 77,
+      "head": "4fb0c19",
+      "mergedAs": {
+        "pr": 77,
+        "mergeCommit": "07ac9cc68b088c91c17a61cf2b3943d784a2aeb5"
+      }
     },
     {
       "id": "WORK-050",
       "title": "Unified Execution UX",
-      "status": "pending",
+      "status": "in_flight",
       "dependencies": [
         "WORK-042",
         "WORK-043",
@@ -1091,19 +1097,33 @@
       "origin": "architect",
       "surfaces": {
         "modules": [
-          "frontend"
+          "frontend",
+          "agents"
         ],
-        "appLayer": [],
+        "appLayer": [
+          "delegation"
+        ],
         "migrations": [],
-        "specDocs": [],
-        "sharedIntegrationSurfaces": []
+        "specDocs": [
+          "spec/work-orders/WORK-050.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/api/routes/execution.route.ts",
+          "backend/src/api/routes/delegation.route.ts",
+          "backend/src/api/routes/work-items.route.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "frontend/src/api/client.ts"
+        ]
       },
       "surfaceFlags": [
-        "moduleInternals",
-        "multiModule"
+        "publicContracts",
+        "moduleInternals"
       ],
-      "assuranceProfile": "STANDARD",
-      "note": "dependency-eligible (all dependencies complete after the WORK-048 merge 5c48257); awaiting architect authorization via Work Order"
+      "assuranceProfile": "HIGH_ASSURANCE",
+      "note": "activated after the WORK-049 merge (07ac9cc): the Unified Execution UX — the Work Item's unified execution section, a CONSUMER of existing authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-050.md). The developer experiences native/API and external execution as ONE coherent capability from the Work Item perspective: current state, provider/model/mode, agent role, why-this-route, constraints, the WORK-044 routing + WORK-047 intelligence recommendations (ALWAYS advisory — never a decision), what was ACTUALLY selected (the execution record's own values), the WORK-042 handoff state, the verification state, and the next action. Read-only frontend composition (HIGH_ASSURANCE: the two new public GET endpoints are public contracts; static + dynamic + discrimination proofs) (a pure facts→view derivation helper + the unified section with per-surface read-states); the ONLY backend surface is TWO new read-only GET endpoints exposing otherwise-unreachable authoritative facts (the cross-mode-handoff record read + the delegation-plan list); every mutation stays behind the EXISTING execution boundary; NO new engine/store/state machine of any kind; no migration (the last stays 0057).",
+      "branch": "feat/work-050-unified-execution-ux",
+      "workOrder": "spec/work-orders/WORK-050.md",
+      "runtimeImpactBinding": "high"
     },
     {
       "id": "WORK-051",
@@ -1370,18 +1390,15 @@
     "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
     "activeHandoffs": [
       {
-        "workOrderId": "WORK-049",
-        "lastVerifiedState": "STARTED on branch feat/work-049-project-health-maintenance-ux (off main@5c48257 — the merged WORK-048, whose post-merge finalization is carried by this same change per §34.8/ADR-0007): the derived work order spec/work-orders/WORK-049.md + the governed activation. Scope established from the repository (not prior reports): the Workbench already loads every health-relevant authority (maintenance health with the authority's own severity/category/advisory evidence, verification runs, the work graph with unsatisfied dependencies, runtime provider status, executions, deployments) — WORK-049 is a frontend-only read-model extension: a pure fact-based health derivation helper (frontend/src/lib/health.ts) + the Workbench Health tab (findings with what/why/severity/evidence, open maintenance work vs completed maintenance work, the all-healthy lightweight state, per-surface read-state rendering).",
+        "workOrderId": "WORK-050",
+        "lastVerifiedState": "IMPLEMENTED on branch feat/work-050-unified-execution-ux: the two read-only backend GETs (the cross-mode-handoff record read on the execution routes + the delegation-plans list on the delegation routes — both GET-only, project.read, server-side scoped) + the work-item GET's server-resolved projectId (the project-scoped advisory reads become addressable) + the pure execution-view derivation helper (frontend/src/lib/execution-view.ts — actuallySelected comes ONLY from the execution record; the routing/intelligence advisories stay structurally distinct) + the Workbench's WorkItemPage unified execution section (current state / actually-selected vs advisory routing+intelligence / constraints / handoff / delegated units / verification / next action — per-surface read-states with explicit per-surface error testids) + the regressions (16 lib tests + 19 page tests + 14 API integration tests + 9 static invariants + 4 browser E2E tests) + the CI workflow.",
         "nextSteps": [
-          "implement the pure health derivation helper (facts in → findings out; deterministic; no policy engine)",
-          "implement the Workbench Health tab (findings / maintenance work / what-next; read-states everywhere)",
-          "adversarial regressions: tenant isolation, failed-vs-empty health reads, no fabricated signals, stale UI, recommendations cannot mutate, findings vs completed work",
-          "static architecture pins: no new frontend authority, pure derivation, read-only, no second stores",
-          "full verification: typecheck, lint, frontend tests, static suite, real-PG sweep, browser E2E; open the PR"
+          "run the FULL verification stack (both typechecks/lints, the entire frontend suite, the static suite, the development-governance suite, the FULL real-PG sweep, the browser E2E set)",
+          "open the PR with the exact SHAs and the evidence (do NOT merge; the architect is the sole merge authority)"
         ],
         "blockers": [],
-        "recordedAt": "2026-08-29T11:30:00Z",
-        "recordedBy": "the WORK-049 implementation agent"
+        "recordedAt": "2026-08-29T15:01:10Z",
+        "recordedBy": "main-implementation-agent"
       }
     ]
   },

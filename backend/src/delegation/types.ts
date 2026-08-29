@@ -230,6 +230,15 @@ export interface DelegationPlanService {
 
   /** The authoritative plan (with units), or null when none exists. */
   getPlan(workItemId: string, planKey: string): Promise<DelegationPlan | null>;
+
+  /**
+   * WORK-050: ALL authoritative plans (with units) for a Work Item, ordered
+   * by creation — the READ side for the unified execution UX (where multiple
+   * delegated agents exist, the delegated execution units render from these
+   * records). A work item with no plans answers [] (a GENUINE empty result,
+   * never an error). Pure read: no validation, no writes, no coordination.
+   */
+  listPlansForWorkItem(workItemId: string): Promise<DelegationPlan[]>;
 }
 
 /**

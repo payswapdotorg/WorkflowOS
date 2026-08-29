@@ -227,6 +227,40 @@ export async function delegationRoutes(app: FastifyInstance, deps: DelegationRou
     });
   });
 
+  // --- list the work item's delegation plans (WORK-050 read side) ----------
+
+  // GET /projects/:projectId/work-items/:workItemId/delegation-plans
+  //    — ALL authoritative plans (with units) for the Work Item, ordered by
+  //      creation. The unified execution UX renders the delegated execution
+  //      units from these records (roles, modes, providers, statuses — the
+  //      authority's own values). READ-ONLY: no drive, no retry, no
+  //      interrupt — those stay behind their explicit POST boundaries.
+  //      [] is a GENUINE empty answer (the work item has no delegation
+  //      plans), never an error in disguise.
+  app.get('/projects/:projectId/work-items/:workItemId/delegation-plans', async (req, reply) => {
+    return runAuthed(req, async () => {
+      const { projectId, workItemId } = req.params as {
+        projectId: string; workItemId: string;
+      };
+      const user = await requireProjectAuthorization(req, reply, deps, {
+        permission: 'project.read',
+        projectId,
+      });
+      if (!user) return;
+
+      const actualProjectId = await resolveProjectForWorkItem(workItemId);
+      if (!actualProjectId) {
+        return reply.code(404).send({ error: 'work-item-not-found' });
+      }
+      if (actualProjectId !== projectId) {
+        return reply.code(403).send({ error: 'work-item-not-in-project' });
+      }
+
+      const plans = await deps.delegationPlanService.listPlansForWorkItem(workItemId);
+      return { plans: plans.map(serializePlan) };
+    });
+  });
+
   // --- drive the plan (EXPLICIT — no scheduler) ------------------------------
 
   app.post('/projects/:projectId/work-items/:workItemId/delegation-plans/:planKey/drive', async (req, reply) => {

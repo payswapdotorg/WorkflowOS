@@ -476,6 +476,16 @@ export class DefaultCrossModeHandoffService implements CrossModeHandoffService {
       deps.handoffClaimHeartbeatMs ?? Math.max(1, Math.floor(this.claimLeaseMs / 3));
   }
 
+  // WORK-050: the READ side of the cross-mode handoff log — a pure
+  // repository passthrough (the log row IS the authoritative handoff state;
+  // null when the execution never handed off). Read-only: no mutation of the
+  // handoff log, the execution record, or any obligation.
+  async getHandoffForExecution(
+    executionId: string,
+  ): Promise<CrossModeHandoffRecord | null> {
+    return this.deps.crossModeHandoffRepository.findByExecutionId(executionId);
+  }
+
   async handoff(
     executionId: string,
     input: CrossModeHandoffInput,

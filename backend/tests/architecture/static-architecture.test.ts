@@ -12047,8 +12047,21 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
   it('A5. the cross-mode-handoff route is POST-only (NO GET mutation)', () => {
     const routeSrc = readFileSync(EXECUTION_ROUTE, 'utf8');
     expect(routeSrc, 'the route registers a POST handler').toMatch(/app\.post\('\/execution\/:executionId\/cross-mode-handoff'/);
-    // No GET handler on the cross-mode-handoff path (no read-as-mutation).
-    expect(routeSrc, 'no GET mutation on the cross-mode-handoff path').not.toMatch(/app\.get\('\/execution\/:executionId\/cross-mode-handoff'/);
+    // WORK-050 added a GET READ on the same path (the unified execution UX's
+    // handoff-state read — a pure repository read, never a mutation). The
+    // invariant's discrimination is preserved: the GET must NEVER call the
+    // handoff MUTATION and must authorize with project.read (the POST keeps
+    // project.write). A read-as-mutation would still fail both checks.
+    const getStart = routeSrc.indexOf("app.get('/execution/:executionId/cross-mode-handoff'");
+    expect(getStart, 'the WORK-050 read route must be present').toBeGreaterThan(-1);
+    // The GET is the LAST route in the file — the tail from its registration
+    // to EOF is exactly the GET handler (no other route follows).
+    const getSection = routeSrc.slice(getStart);
+    expect(getSection, 'the GET must never invoke the handoff mutation').not.toMatch(/\.handoff\(/);
+    expect(getSection, 'the GET must authorize with project.read (not project.write)').toMatch(/permission: 'project\.read'/);
+    expect(getSection, 'the GET must not accept project.write').not.toMatch(/permission: 'project\.write'/);
+    // The MUTATION stays POST-only: no PUT/PATCH/DELETE on the path.
+    expect(routeSrc, 'no PUT/PATCH/DELETE mutation on the cross-mode-handoff path').not.toMatch(/app\.(put|patch|delete)\('\/execution\/:executionId\/cross-mode-handoff'/);
   });
 
   // -------------------------------------------------------------------------
@@ -18168,5 +18181,257 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
     // The workbench route is STILL GET-only (WORK-049 changed nothing there).
     const routeCode = readFileSync(join(routesDir, 'workbench.route.ts'), 'utf8');
     expect(routeCode).not.toMatch(/app\.(post|put|patch|delete)\(/);
+  });
+});
+
+// ===========================================================================
+// WORK-050 — Unified Execution UX (a consumer of existing authorities, never
+// an authority itself). The Work Item's unified execution section is a
+// read-model presentation over the SAME authoritative responses the page
+// already loads; the derivation is the PURE helper in
+// frontend/src/lib/execution-view.ts (facts in → view out; the
+// actually-selected identity is read ONLY from the execution record's own
+// fields — a recommendation is structurally never the selection). No frontend
+// execution/routing/intelligence/delegation/handoff authority, no state
+// machines, no second stores — and the ONLY backend surface is two new
+// read-only GET endpoints (the cross-mode-handoff record read + the
+// delegation-plans list) extending their owning modules' existing route files.
+// ===========================================================================
+describe('WORK-050 invariants — Unified Execution UX (consumer, never authority)', () => {
+  const FRONTEND_SRC = join(BACKEND_ROOT, '..', 'frontend', 'src');
+  const SECTION = join(FRONTEND_SRC, 'components', 'execution', 'UnifiedExecutionSection.tsx');
+  const VIEW_LIB = join(FRONTEND_SRC, 'lib', 'execution-view.ts');
+  const VIEW_LIB_TESTS = join(FRONTEND_SRC, 'lib', 'execution-view.test.ts');
+  const PAGE = join(FRONTEND_SRC, 'pages', 'WorkItemPage.tsx');
+  const PAGE_TESTS = join(FRONTEND_SRC, 'pages', 'WorkItemPage.test.tsx');
+  const WORK_ORDER = join(BACKEND_ROOT, '..', 'spec', 'work-orders', 'WORK-050.md');
+  const FRONTEND_FILES = [SECTION, VIEW_LIB, PAGE];
+
+  // --- (a) the derivation is PURE (no fetch/state/persistence/engine) ---------
+
+  it('ADVERSARIAL #10/#11 (structural): the execution-view helper is a PURE presentation function — no fetch, no state, no persistence, no engine', () => {
+    const src = readFileSync(VIEW_LIB, 'utf8');
+    for (const forbidden of [
+      /apiGet\s*\(/,
+      /apiPost\s*\(/,
+      /apiPatch\s*\(/,
+      /apiDelete\s*\(/,
+      /\bfetch\s*\(/,
+      /localStorage/,
+      /sessionStorage/,
+      /useState|useEffect|useMemo|useRef/,
+      /new\s+Request\b/,
+    ]) {
+      expect(src, `lib/execution-view.ts must be pure presentation (forbidden: ${forbidden})`).not.toMatch(forbidden);
+    }
+    // It derives from the AUTHORITATIVE types (the api client's own records).
+    expect(src).toMatch(/from '@\/api\/client'/);
+  });
+
+  it('ADVERSARIAL #10/#11/#12 (structural): NO frontend execution/provider-selection/routing/intelligence/delegation/handoff authority, NO state machines, NO second stores', () => {
+    for (const file of FRONTEND_FILES) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      // No engines of any kind (the work order's authority model).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not define an execution/routing/intelligence/delegation/handoff engine`).not.toMatch(
+        /\bExecutionEngine\b|\bProviderSelectionEngine\b|\bRoutingEngine\b|\bEligibilityEngine\b|\bRankingEngine\b|\bIntelligenceEngine\b|\bDelegationEngine\b|\bHandoffEngine\b/,
+      );
+      // No workflow/execution state machines (state comes from the records).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not define state transitions`).not.toMatch(
+        /\bLEGAL_TRANSITIONS\b|\blegalTransitions\b|\btransitionMap\b|\bnextState\b|\btoState\s*:/,
+      );
+      // No persisted second stores (execution/workflow/delegation/handoff).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not persist a second store`).not.toMatch(
+        /localStorage\.setItem|localStorage\.getItem|sessionStorage\.setItem/,
+      );
+      // No direct database/provider access (the frontend never touches them).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not touch the database or provider SDKs`).not.toMatch(
+        /DatabaseClient|api\.github\.com|api\.openai\.com|from\s+'pg'|require\('pg'\)|\bpglite\b/i,
+      );
+      // No score/eligibility computation (the backend authorities own those).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not compute scores or eligibility`).not.toMatch(
+        /computeScore|score\s*[+*]|rankCandidates|evaluateEligibility|normalizeScore|weight\s*[+*]/,
+      );
+    }
+  });
+
+  // --- (b) recommendation ≠ selection (the authority model's core rule) -------
+
+  it('ADVERSARIAL #1/#2/#13 (structural): the actually-selected identity comes ONLY from the execution record — recommendation fields are never the selection', () => {
+    const src = readFileSync(VIEW_LIB, 'utf8');
+    // actuallySelected is derived ONLY from the current execution record.
+    expect(src).toMatch(/const actuallySelected[\s\S]{0,200}currentExecution\.provider/);
+    expect(src).toMatch(/currentExecution\.model/);
+    // The advisory structures are kept structurally distinct.
+    expect(src).toMatch(/routingAdvisory/);
+    expect(src).toMatch(/intelligenceAdvisory/);
+    // The ONLY cross-reference is the presentation comparison (a badge fact).
+    expect(src).toMatch(/selectionDiffersFromRoutingRecommendation/);
+    // The view NEVER assigns a recommendation's provider/model/mode INTO
+    // actuallySelected (no such expression exists).
+    expect(src).not.toMatch(/actuallySelected\s*=\s*\{[^}]*routing/);
+    expect(src).not.toMatch(/actuallySelected\s*=\s*\{[^}]*intelligence/);
+    // The component renders the advisory framing explicitly.
+    const section = readFileSync(SECTION, 'utf8');
+    expect(section).toMatch(/never the selection/);
+    expect(section).toMatch(/recommendations never decide this/);
+    expect(section).toMatch(/Actually selected/);
+    expect(section).toMatch(/Routing recommends/);
+    expect(section).toMatch(/Intelligence recommends/);
+  });
+
+  // --- (c) ZERO mutations from the unified view (read-only by construction) ---
+
+  it('the unified execution section performs ZERO mutations (the existing execution boundary owns every mutation)', () => {
+    for (const file of [SECTION, VIEW_LIB]) {
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(BACKEND_ROOT, file)} must not call API mutations`).not.toMatch(
+        /apiPost\s*\(|apiPatch\s*\(|apiDelete\s*\(|\.start\s*\(|\.prepareHandoff\s*\(|\.handoff\s*\(|\.drivePlan\s*\(|\.retryUnit\s*\(|\.interruptPlan\s*\(|\.transition\s*\(|\.converge\s*\(|\.beginVerification\s*\(/,
+      );
+    }
+    // The section's api usage is the READ surface only.
+    const section = readFileSync(SECTION, 'utf8');
+    expect(section).toMatch(/execution\.listForWorkItem/);
+    expect(section).toMatch(/executionRouting\.getRecommendation/);
+    expect(section).toMatch(/agentIntelligence\.getExecutionRecommendation/);
+    expect(section).toMatch(/crossModeHandoff\.getForExecution/);
+    expect(section).toMatch(/delegationPlans\.listForWorkItem/);
+    // The delegation mutations are NOT surfaced (drive/retry/interrupt stay
+    // behind their own boundaries).
+    expect(section).not.toMatch(/drivePlan|retryUnit|interruptPlan/);
+  });
+
+  // --- (d) the per-surface read-state discipline (failure ≠ empty) ------------
+
+  it('ADVERSARIAL #4-#7 (structural): every contributing surface keeps loading/success/error distinct (settleRead, never a catch-degradation)', () => {
+    const section = readFileSync(SECTION, 'utf8');
+    expect(section).toMatch(/settleRead/);
+    // No .catch(() => ...) degradations in the unified section.
+    expect(section).not.toMatch(/\.catch\(\s*\(\)\s*=>\s*(\[\]|null|\{\})\s*\)/);
+    // The per-surface error testids exist (errors are explicit, per surface).
+    for (const testid of [
+      'execution-records-unavailable',
+      'routing-recommendation-unavailable',
+      'intelligence-recommendation-unavailable',
+      'policy-constraints-unavailable',
+      'handoff-state-unavailable',
+      'delegation-plans-unavailable',
+      'verification-runs-unavailable',
+      'workflow-state-unavailable',
+    ]) {
+      expect(section, `the section must render the explicit ${testid} error state`).toContain(testid);
+    }
+  });
+
+  // --- (e) the adversarial regression coverage is pinned by title -------------
+
+  it('the WORK-050 adversarial coverage is pinned by title in the frontend suites (the work order\'s required matrix)', () => {
+    const pageTests = readFileSync(PAGE_TESTS, 'utf8');
+    // #1/#2 recommendation ≠ selection (both discriminations).
+    expect(pageTests).toMatch(/recommendation ≠ selection: with NO execution, NOTHING is "selected"/);
+    expect(pageTests).toMatch(/the selection shown is the RECORD\\'s own provider/);
+    // #3 native/external parity.
+    expect(pageTests).toMatch(/native and external executions render from the SAME authoritative model/);
+    // #4-#7 the failed-read error discriminations.
+    expect(pageTests).toMatch(/a FAILED execution read renders an explicit error, never "No execution"/);
+    expect(pageTests).toMatch(/FAILED routing\/intelligence reads render explicit errors/);
+    expect(pageTests).toMatch(/a FAILED handoff read renders an explicit error, never "No cross-mode handoff"/);
+    expect(pageTests).toMatch(/a FAILED verification read renders an explicit error, never "No verification runs"/);
+    // #8 refresh consistency + #9 tenant isolation (the 403 topology).
+    expect(pageTests).toMatch(/refresh consistency: a fresh execution response re-derives the section/);
+    expect(pageTests).toMatch(/the tenant-isolation 403 topology: EVERY read rejected → errors only, zero data, never fabricated empties/);
+    // The zero-mutation proof.
+    expect(pageTests).toMatch(/ZERO mutations during render/);
+    // The pure-helper suite: determinism + refresh consistency.
+    const libTests = readFileSync(VIEW_LIB_TESTS, 'utf8');
+    expect(libTests).toMatch(/DETERMINISM: the SAME facts always produce the SAME view/);
+    expect(libTests).toMatch(/REFRESH CONSISTENCY: fresh facts produce the fresh view/);
+    expect(libTests).toMatch(/recommendation ≠ selection: with NO execution, NOTHING is selected/);
+    expect(libTests).toMatch(/provider\/model identity comes from the authoritative execution record/);
+    expect(libTests).toMatch(/native and external render from the SAME model/);
+  });
+
+  // --- (f) the work order exists with the non-negotiable rules ----------------
+
+  it('the WORK-050 work order exists with the non-negotiable consumer rules and the adversarial matrix', () => {
+    const order = readFileSync(WORK_ORDER, 'utf8');
+    expect(order).toMatch(/The frontend CONSUMES those authorities\. It must NOT recreate them/);
+    expect(order).toMatch(/WORK-044 routing recommendation\s+≠ execution decision/);
+    expect(order).toMatch(/WORK-047 intelligence recommendation ≠ execution decision/);
+    expect(order).toMatch(/A recommendation becomes reality only when an authoritative execution/);
+    expect(order).toMatch(/Native and external execution are represented through the EXISTING\s+execution\s+model/);
+    expect(order).toMatch(/The frontend must NOT create:/);
+    expect(order).toMatch(/a frontend execution state machine/);
+    expect(order).toMatch(/a provider-selection engine/);
+    expect(order).toMatch(/contributing read keeps `loading` \/ `success\(data\)` \/ `error` distinct/);
+    expect(order).toMatch(/Tenant\/authorization safety/);
+    expect(order).toMatch(/WORK-050 is UX\s+integration over existing authorities/);
+  });
+
+  // --- (g) the backend surface: exactly the two read-only GETs ----------------
+
+  it('the backend surface is exactly TWO new read-only GET endpoints in the EXISTING route files (no new route files, GET-only, project-authorized)', () => {
+    const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    // The route FILE set is unchanged (32 files — WORK-050 adds endpoints to
+    // the existing execution + delegation route files, never new files).
+    const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
+    expect(routeFiles.length).toBe(32);
+    expect(routeFiles).toContain('execution.route.ts');
+    expect(routeFiles).toContain('delegation.route.ts');
+    expect(routeFiles).toContain('work-items.route.ts');
+
+    // The cross-mode-handoff READ: GET-only, project.read, server-side scope.
+    const executionCode = readFileSync(join(routesDir, 'execution.route.ts'), 'utf8');
+    expect(executionCode).toMatch(/app\.get\('\/execution\/:executionId\/cross-mode-handoff'/);
+    expect(executionCode).toMatch(/getHandoffForExecution/);
+    expect(executionCode).toMatch(/permission: 'project\.read'/);
+    // The read route performs NO mutation of its own.
+    const readRoute = executionCode.split("app.get('/execution/:executionId/cross-mode-handoff'")[1] ?? '';
+    expect(readRoute.length).toBeGreaterThan(0);
+    expect(readRoute.split('});')[0]).not.toMatch(/app\.(post|put|patch|delete)\(/);
+
+    // The delegation-plans list READ: GET-only, project.read, the
+    // work-item-in-project guard (mirroring the existing GET-by-planKey).
+    const delegationCode = readFileSync(join(routesDir, 'delegation.route.ts'), 'utf8');
+    expect(delegationCode).toMatch(/app\.get\('\/projects\/:projectId\/work-items\/:workItemId\/delegation-plans'/);
+    expect(delegationCode).toMatch(/listPlansForWorkItem/);
+    expect(delegationCode).toMatch(/work-item-not-in-project/);
+    // The delegation route group's GETs remain read-only (the mutations are
+    // the pre-existing POSTs — unchanged).
+    const delegationGets = delegationCode.match(/app\.get\([^)]+\)/g) ?? [];
+    expect(delegationGets.length).toBe(2); // GET by planKey + GET the list
+
+    // The work-item GET carries the project (the server-side chain fact).
+    const workItemsCode = readFileSync(join(routesDir, 'work-items.route.ts'), 'utf8');
+    expect(workItemsCode).toMatch(/\{ \.\.\.wi, projectId \}/);
+
+    // The cross-mode handoff service read is a pure repository passthrough
+    // (the log row IS the authoritative handoff state).
+    const serviceCode = readFileSync(
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'default-cross-mode-handoff-service.ts'),
+      'utf8',
+    );
+    expect(serviceCode).toMatch(/async getHandoffForExecution/);
+    expect(serviceCode).toMatch(/crossModeHandoffRepository\.findByExecutionId/);
+
+    // The delegation service list is a pure repository passthrough.
+    const planServiceCode = readFileSync(
+      join(BACKEND_ROOT, 'src', 'delegation', 'internal', 'delegation-plan-service.ts'),
+      'utf8',
+    );
+    expect(planServiceCode).toMatch(/async listPlansForWorkItem/);
+    expect(planServiceCode).toMatch(/this\.repo\.listPlansForWorkItem/);
+  });
+
+  // --- (h) the WORK-049 precedent is intact (no regression of the health UX) ---
+
+  it('the WORK-049 Health-tab surfaces remain intact (WORK-050 changed nothing there)', () => {
+    const healthLib = join(FRONTEND_SRC, 'lib', 'health.ts');
+    expect(existsSync(healthLib)).toBe(true);
+    const workbenchPage = join(FRONTEND_SRC, 'pages', 'WorkbenchPage.tsx');
+    const page = readFileSync(workbenchPage, 'utf8');
+    expect(page).toMatch(/deriveHealthFindings/);
+    expect(page).toMatch(/splitMaintenanceWork/);
+    expect(page).toMatch(/health-incomplete/);
   });
 });

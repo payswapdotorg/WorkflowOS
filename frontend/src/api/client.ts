@@ -366,6 +366,13 @@ export const requirements = {
 export interface WorkItem {
   id: string;
   architectureVersionId: string;
+  /**
+   * WORK-050: the work item's PROJECT — present on the single-work-item GET
+   * (resolved server-side through the authoritative traceability chain), so
+   * consumers can address the project-scoped read surfaces (the WORK-047
+   * intelligence + WORK-046 delegation reads). Never a client-supplied scope.
+   */
+  projectId?: string;
   workItemId: string;
   title: string;
   objective?: string | null;
@@ -2674,5 +2681,91 @@ export const executionRouting = {
       `/work-items/${workItemId}/execution/routing/recommendation`,
     );
     return body.routing;
+  },
+};
+
+// --- WORK-050: the unified execution UX read surfaces -------------------------
+//
+// Two READ-ONLY endpoints exposing authoritative facts the frontend could not
+// otherwise reach: the WORK-042 cross-mode handoff log row (the handoff state)
+// and the WORK-046 delegation plans list. Both consume existing authorities —
+// the frontend renders their own values verbatim; it never derives handoff or
+// delegation state of its own.
+
+/** The safe (secret-free) WORK-042 cross-mode handoff log row. */
+export interface CrossModeHandoffView {
+  id: string;
+  executionId: string;
+  fromMode: 'native' | 'external';
+  toMode: 'native' | 'external';
+  reason: string | null;
+  actor: string | null;
+  source: string | null;
+  previousStatus: string;
+  resultingStatus: string;
+  authorized: boolean;
+  policyDecision: string | null;
+  idempotencyKey: string;
+  createdAt: string;
+}
+
+/** A WORK-046 delegation plan unit (the authority's own values, verbatim). */
+export interface DelegationUnitView {
+  id: string;
+  unitKey: string;
+  role: { roleId: string; roleRevision: string };
+  mode: 'native' | 'external';
+  provider: string;
+  model: string | null;
+  dependsOn: string[];
+  status: string;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A WORK-046 delegation plan with its units (serialized plan shape). */
+export interface DelegationPlanView {
+  id: string;
+  workItemId: string;
+  planKey: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  units: DelegationUnitView[];
+}
+
+export const crossModeHandoff = {
+  /**
+   * The WORK-042 handoff record for an execution. `{ handoff: null }` is the
+   * authority's GENUINE empty answer (the execution never handed off) — a
+   * failed read throws (the api client surfaces the backend error), never a
+   * fabricated null. READ-ONLY.
+   */
+  getForExecution: async (
+    executionId: string,
+  ): Promise<CrossModeHandoffView | null> => {
+    const body = await apiGet<{ handoff: CrossModeHandoffView | null }>(
+      `/execution/${executionId}/cross-mode-handoff`,
+    );
+    return body.handoff ?? null;
+  },
+};
+
+export const delegationPlans = {
+  /**
+   * ALL delegation plans (with units) for a Work Item — the WORK-046
+   * authority's own records. `[]` is a GENUINE empty answer. READ-ONLY: the
+   * drive/retry/interrupt mutations stay behind their own explicit boundaries
+   * (never called from the unified execution view).
+   */
+  listForWorkItem: async (
+    projectId: string,
+    workItemId: string,
+  ): Promise<DelegationPlanView[]> => {
+    const body = await apiGet<{ plans: DelegationPlanView[] }>(
+      `/projects/${projectId}/work-items/${workItemId}/delegation-plans`,
+    );
+    return body.plans ?? [];
   },
 };

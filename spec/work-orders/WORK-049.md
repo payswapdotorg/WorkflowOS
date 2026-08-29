@@ -1,9 +1,9 @@
 # WORK-049 — Project Health and Maintenance UX
 
-Status: IN FLIGHT — on branch `feat/work-049-project-health-maintenance-ux` (off
-main@5c48257 — the merged WORK-048, whose post-merge finalization §34.8/ADR-0007
-is carried by this same change). Derived from the architect's authorization; this
-document is the governing work order.
+Status: COMPLETE — merged by the architect as `07ac9cc68b088c91c17a61cf2b3943d784a2aeb5`
+(PR #77, squash-merged at branch head `4fb0c19` on 2026-08-29T13:44:03Z; the merge
+tree is identical to the approved head). Post-merge finalization recorded per
+§34.8/ADR-0007 (carried by the WORK-050 branch, the established precedent).
 Architecture: frozen v1.0 authority model (the health UX is a CONSUMER of existing
 authorities, never an authority itself)
 Dependencies: WORK-041 (maintenance and project health engine), WORK-048

@@ -102,7 +102,12 @@ export async function workItemsRoutes(
       });
       const wi = await deps.workItemRepository.findById(workItemId);
       if (!wi) return reply.code(404).send({ error: 'not-found' });
-      return wi;
+      // WORK-050: include the work item's PROJECT (resolved server-side
+      // through the authoritative chain for this very authorization) so
+      // consumers can address the project-scoped read surfaces (the WORK-047
+      // intelligence + WORK-046 delegation reads). An authoritative fact of
+      // the traceability chain, never a client-supplied scope.
+      return { ...wi, projectId };
     });
   });
 

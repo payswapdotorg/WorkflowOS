@@ -2,7 +2,6 @@ import { Play, GitMerge, CheckCircle2, FlaskConical, FileCheck, Activity, Rocket
 import { LoadingState } from '@/components/domain/loading-state';
 import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
-import { AdvisoryCard } from '@/components/domain/advisory-card';
 import { useParams, Link } from 'react-router-dom';
 import { useEffect, useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,6 +12,7 @@ import { StatusBadge } from '@/components/domain/status-badge';
 import { WorkflowTimeline } from '@/components/domain/workflow-timeline';
 import { ExecutionModeDialog } from '@/components/execution/ExecutionModeDialog';
 import { ExternalExecutionDialog } from '@/components/execution/ExternalExecutionDialog';
+import { UnifiedExecutionSection } from '@/components/execution/UnifiedExecutionSection';
 import {
   workItems, workflow, agentRuns, reviews, verification, audit,
   execution, executionProviders,
@@ -47,8 +47,9 @@ export default function WorkItemPage() {
   const [dependencyItems, setDependencyItems] = useState<Record<string, WorkItem | null>>({});
   const [mergeReadiness, setMergeReadiness] = useState<MergeGateResult | null>(null);
 
-  // WORK-027: execution mode selection + external handoff state.
-  const [executions, setExecutions] = useState<ExecutionSummary[]>([]);
+  // WORK-027: execution mode selection + external handoff state. (WORK-050:
+  // the unified execution section owns the disciplined execution reads —
+  // the page keeps only the provider readiness list for the mode dialog.)
   const [executionProviderList, setExecutionProviderList] = useState<ExecutionProviderInfo[]>([]);
   const [modeDialogOpen, setModeDialogOpen] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
@@ -59,6 +60,13 @@ export default function WorkItemPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+
+  // WORK-050: the post-action refresh tick — the unified execution section
+  // owns its own disciplined reads; every authoritative action (a workflow
+  // transition, an execution start, an external-handoff status change)
+  // bumps the tick so the section re-reads the fresh backend truth (a stale
+  // "No execution" can never survive an action that created one).
+  const [executionRefreshTick, setExecutionRefreshTick] = useState(0);
 
   const loadAll = useCallback(async () => {
     if (!workItemId) return;
@@ -87,9 +95,8 @@ export default function WorkItemPage() {
       const ars = await agentRuns.listForWorkItem(workItemId).catch(() => []);
       setAgentRunList(ars);
 
-      // WORK-027: safe execution metadata + provider readiness (safe data).
-      const execs = await execution.listForWorkItem(workItemId).catch(() => []);
-      setExecutions(execs);
+      // WORK-027: provider readiness for the mode dialog (safe data; the
+      // execution records themselves render in the unified section).
       const eprovs = await executionProviders.listGlobal().catch(() => []);
       setExecutionProviderList(eprovs);
 
@@ -146,6 +153,7 @@ export default function WorkItemPage() {
     try {
       await action();
       await loadAll();
+      setExecutionRefreshTick((t) => t + 1);
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : (err as Error).message);
     } finally {
@@ -185,6 +193,7 @@ export default function WorkItemPage() {
         });
       }
       await loadAll();
+      setExecutionRefreshTick((t) => t + 1);
     } catch (err) {
       setStartError(err instanceof ApiError ? err.message : (err as Error).message);
     } finally {
@@ -417,9 +426,17 @@ export default function WorkItemPage() {
 
         {/* Implementation Tab */}
         <TabsContent value="implementation" className="space-y-4">
-          {/* WORK-048: the ADVISORY routing recommendation (WORK-044) —
-              rendered strictly as a recommendation, never a decision. */}
-          <AdvisoryCard workItemId={workItemId ?? ''} workItemLabel={workItem.workItemId} />
+          {/* WORK-050: the unified execution section — native and external as
+              ONE coherent capability (current state, actually-selected vs
+              advisory routing/intelligence, constraints, handoff, delegated
+              units, verification, next action — per-surface read-states). */}
+          <UnifiedExecutionSection
+            workItemId={workItemId ?? ''}
+            workItemLabel={workItem.workItemId}
+            projectId={workItem.projectId ?? null}
+            refreshKey={executionRefreshTick}
+            onOpenExternalHandoff={setExternalDialogExecution}
+          />
 
           {/* Work Orders */}
           <Card>
@@ -436,39 +453,6 @@ export default function WorkItemPage() {
                         <StatusBadge value={wo.state} />
                       </div>
                       {wo.scope && <p className="mt-1 text-sm">{wo.scope}</p>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Executions (WORK-027: native + external, safe metadata) */}
-          <Card>
-            <CardHeader><CardTitle className="text-sm">Executions</CardTitle></CardHeader>
-            <CardContent>
-              {executions.length === 0 ? (
-                <EmptyState title="No executions" description="Start implementation to create an execution (native or external)." />
-              ) : (
-                <div className="space-y-2">
-                  {executions.map((ex) => (
-                    <div key={ex.executionId} className="flex items-center justify-between rounded-md border p-3">
-                      <div>
-                        <p className="text-sm font-medium">
-                          {ex.mode === 'external' ? 'External' : 'Native'} · {ex.provider}
-                          {ex.model ? <span className="text-muted-foreground"> ({ex.model})</span> : null}
-                        </p>
-                        <p className="font-mono text-xs text-muted-foreground">{ex.executionId}</p>
-                        {ex.repository && <p className="text-xs text-muted-foreground">repo: {ex.repository}</p>}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <StatusBadge value={ex.status} />
-                        {ex.mode === 'external' && (ex.status === 'handoff_ready' || ex.status === 'submitted') && (
-                          <Button size="sm" variant="outline" onClick={() => setExternalDialogExecution(ex)}>
-                            External Handoff
-                          </Button>
-                        )}
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -641,7 +625,7 @@ export default function WorkItemPage() {
         open={externalDialogExecution !== null}
         onOpenChange={(open) => { if (!open) setExternalDialogExecution(null); }}
         executionSummary={externalDialogExecution}
-        onStatusChange={loadAll}
+        onStatusChange={() => { void loadAll(); setExecutionRefreshTick((t) => t + 1); }}
       />
     </div>
   );
