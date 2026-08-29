@@ -492,6 +492,13 @@ export interface ExecutionRecordRepository {
   findById(id: string): Promise<ExecutionRecord | null>;
   findByExecutionId(executionId: string): Promise<ExecutionRecord | null>;
   listForWorkItem(workItemId: string): Promise<ExecutionRecord[]>;
+  /**
+   * WORK-048: read-only project-scoped list (newest first) — scoped by the
+   * AUTHORITATIVE project_id column on the row itself. Consumed by the
+   * Workbench read model; a pure SELECT. Optional limit (the audit
+   * listForProject convention; default applied by the repository).
+   */
+  listForProject(projectId: string, opts?: { limit?: number }): Promise<ExecutionRecord[]>;
   updateStatus(id: string, input: UpdateExecutionStatusInput): Promise<ExecutionRecord | null>;
   /**
    * WORK-042: transition an existing execution record's mode + status (+ the

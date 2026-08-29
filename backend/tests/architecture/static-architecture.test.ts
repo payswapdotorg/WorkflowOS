@@ -17708,3 +17708,289 @@ describe('WORK-047 invariants — Agent Intelligence (advisory/ranking only, nev
     expect(order).toMatch(/a second role catalog/);
   });
 });
+
+// ===========================================================================
+// WORK-048 — Developer Workbench (a consumer of backend authorities, never
+// an authority). The workbench is the primary human-facing engineering
+// workspace: a thin READ-MODEL composition layer in the backend
+// (src/api/routes/workbench.route.ts — GET only, project.read, server-side
+// project scoping, composed from the OWNING repositories/services) plus the
+// frontend workspace (frontend/src/pages/WorkbenchPage.tsx and friends —
+// read-only consumer).
+// ===========================================================================
+describe('WORK-048 invariants — Developer Workbench (consumer, never authority)', () => {
+  const FRONTEND_SRC = join(BACKEND_ROOT, '..', 'frontend', 'src');
+  const WB_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'workbench.route.ts');
+  const WB_API_TESTS = join(BACKEND_ROOT, 'tests', 'integration', 'workbench', 'workbench.api.integration.test.ts');
+  const WB_PAGE = join(FRONTEND_SRC, 'pages', 'WorkbenchPage.tsx');
+  const WB_BOARD = join(FRONTEND_SRC, 'components', 'workbench', 'work-graph-board.tsx');
+  const WB_LIB = join(FRONTEND_SRC, 'lib', 'work-graph.ts');
+  const WB_READ_STATE = join(FRONTEND_SRC, 'lib', 'read-state.ts');
+  const WB_PAGE_TESTS = join(FRONTEND_SRC, 'pages', 'WorkbenchPage.test.tsx');
+  const WB_ADVISORY = join(FRONTEND_SRC, 'components', 'domain', 'advisory-card.tsx');
+  const CLIENT_TS = join(FRONTEND_SRC, 'api', 'client.ts');
+  const WORK_ORDER = join(BACKEND_ROOT, '..', 'spec', 'work-orders', 'WORK-048.md');
+
+  // The WORK-048 frontend surfaces (the workbench page + components + helpers).
+  const WB_FRONTEND_FILES = [WB_PAGE, WB_BOARD, WB_LIB, WB_READ_STATE, WB_ADVISORY];
+
+  // --- (a) the backend read model is READ-ONLY + server-authorized ----------
+
+  it('the workbench route exposes GET endpoints only (no mutation surface, ever)', () => {
+    const routeCode = readFileSync(WB_ROUTE, 'utf8');
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/work-graph'/);
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/executions'/);
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/pr-associations'/);
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/verification-runs'/);
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/reviews'/);
+    // READ-ONLY: no write verb is registered on the workbench route.
+    expect(routeCode).not.toMatch(/app\.(post|put|patch|delete)\(/);
+  });
+
+  it('every workbench route handler authorizes SERVER-SIDE before any data is queried (project.read + requireProjectAuthorization)', () => {
+    const routeCode = readFileSync(WB_ROUTE, 'utf8');
+    const handlerCount = (routeCode.match(/app\.get\(/g) ?? []).length;
+    const authCount = (routeCode.match(/requireProjectAuthorization\(/g) ?? []).length;
+    expect(handlerCount).toBe(5);
+    // EVERY handler authorizes (one requireProjectAuthorization per handler —
+    // authorization before query, the no-cross-tenant-oracle rule).
+    expect(authCount).toBe(handlerCount);
+    expect(routeCode).toMatch(/permission: 'project.read'/);
+  });
+
+  it('the workbench route NEVER touches the database directly — it composes the OWNING repositories/services through their declared interfaces', () => {
+    const routeCode = readFileSync(WB_ROUTE, 'utf8');
+    // No DatabaseClient, no SQL, no platform import: composition only.
+    expect(routeCode).not.toMatch(/DatabaseClient/);
+    expect(routeCode).not.toMatch(/@platform\//);
+    expect(routeCode).not.toMatch(/\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b/);
+    // The owning authorities are consumed through module interfaces.
+    expect(routeCode).toMatch(/from '@modules\/work-items\/index\.js'/);
+    expect(routeCode).toMatch(/from '@modules\/agents\/index\.js'/);
+    expect(routeCode).toMatch(/from '@modules\/workflows\/index\.js'/);
+    expect(routeCode).toMatch(/from '@modules\/verification\/index\.js'/);
+    expect(routeCode).toMatch(/from '@modules\/reviews\/index\.js'/);
+  });
+
+  it('the listForProject read additions are SELECT-only reads on the OWNING repositories (no second store, no mutation)', () => {
+    // The five owning repositories that gained listForProject reads.
+    const repos = [
+      join(BACKEND_ROOT, 'src', 'modules', 'work-items', 'internal', 'pg-work-item-repository.ts'),
+      join(BACKEND_ROOT, 'src', 'modules', 'agents', 'internal', 'pg-execution-repository.ts'),
+      join(BACKEND_ROOT, 'src', 'modules', 'reviews', 'internal', 'pg-review-repository.ts'),
+      join(BACKEND_ROOT, 'src', 'modules', 'verification', 'internal', 'pg-verification-repository.ts'),
+    ];
+    for (const repo of repos) {
+      const src = readFileSync(repo, 'utf8');
+      // The listForProject method body (up to the next method) is a pure SELECT.
+      const idx = src.indexOf('async listForProject(');
+      expect(idx, `${repo} must define listForProject`).toBeGreaterThan(-1);
+      // The method body ends at the NEXT member declaration.
+      const rest = src.slice(idx + 1);
+      const rel = rest.search(/\n  (?:async |readonly |private |public |[a-zA-Z]+\()/);
+      const next = rel === -1 ? -1 : idx + 1 + rel;
+      const body = src.slice(idx, next === -1 ? idx + 1600 : next);
+      expect(body, `${repo}: listForProject must SELECT`).toMatch(/SELECT/);
+      expect(body, `${repo}: listForProject must be read-only`).not.toMatch(/\bINSERT\b|\bUPDATE\b|\bDELETE\b/);
+    }
+    // The PR-association repository is in the same file as work items (checked above).
+    const workItemsRepo = readFileSync(repos[0]!, 'utf8');
+    expect(workItemsRepo.match(/async listForProject\(/g)?.length).toBe(2); // work items + pr associations
+  });
+
+  // --- (b) the frontend workbench performs NO mutations ----------------------
+
+  it('ADVERSARIAL #2 (structural): the workbench frontend performs ZERO mutation calls (read-only consumer)', () => {
+    for (const file of [...WB_FRONTEND_FILES]) {
+      const src = readFileSync(file, 'utf8');
+      expect(
+        src,
+        `${relative(BACKEND_ROOT, file)} must not call API mutations`,
+      ).not.toMatch(/apiPost\s*\(|apiPatch\s*\(|apiDelete\s*\(|\.transition\(|\.converge\(|\.beginVerification\(|\.requestMerge\(/);
+    }
+  });
+
+  it('the workbench client namespace is READ-ONLY (apiGet only — no mutation methods)', () => {
+    const client = readFileSync(CLIENT_TS, 'utf8');
+    // Extract the workbench namespace block.
+    const start = client.indexOf('export const workbench = {');
+    const end = client.indexOf('\n};', start);
+    const block = client.slice(start, end);
+    expect(block).toMatch(/apiGet/);
+    expect(block).not.toMatch(/apiPost|apiPatch|apiFetch\(.*method/);
+    // The advisory namespaces are read-only too.
+    const routingStart = client.indexOf('export const executionRouting = {');
+    const routingBlock = client.slice(routingStart, client.indexOf('\n};', routingStart));
+    expect(routingBlock).not.toMatch(/apiPost|apiPatch/);
+    const intelStart = client.indexOf('export const agentIntelligence = {');
+    const intelBlock = client.slice(intelStart, client.indexOf('\n};', intelStart));
+    expect(intelBlock).not.toMatch(/apiPost|apiPatch/);
+  });
+
+  // --- (c) no frontend authority, no SDKs, no second stores ------------------
+
+  it('the workbench frontend owns NO authorization (no permission logic, no role logic)', () => {
+    for (const file of WB_FRONTEND_FILES) {
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(BACKEND_ROOT, file)} must not implement authorization`).not.toMatch(
+        /\bauthorize\s*\(|\bcheckPermission\b|\bisAuthorized\b|\bhasPermission\b|\broleGuard\b/,
+      );
+    }
+  });
+
+  it('the workbench frontend owns NO workflow/execution/verification/review authority (no state machines, no evaluation, no verdicts)', () => {
+    for (const file of WB_FRONTEND_FILES) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not define workflow transitions`).not.toMatch(
+        /\bLEGAL_TRANSITIONS\b|\blegalTransitions\b|\btransitionMap\b|toState\s*:/,
+      );
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not evaluate verification evidence`).not.toMatch(
+        /\bderiveCriterionStatus\b|\bevaluateCriterion\b|\bevaluateForRun\b/,
+      );
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not decide review outcomes`).not.toMatch(
+        /\bapproveReview\b|\bfinalizeReview\b|outcome\s*=\s*['"]APPROVE/,
+      );
+    }
+  });
+
+  it('the workbench frontend has NO provider SDKs, NO database access, NO direct GitHub API (no second GitHub authority)', () => {
+    for (const file of WB_FRONTEND_FILES) {
+      for (const specifier of extractSpecifiers(file)) {
+        const pkg = specifier.startsWith('@')
+          ? specifier.split('/', 2).slice(0, 2).join('/')
+          : specifier.split('/')[0]!;
+        expect(
+          ['pg', 'pglite', '@electric-sql/pglite', 'ioredis', '@octokit/rest', '@octokit/graphql', '@octokit/webhooks'],
+          `${relative(BACKEND_ROOT, file)} must not import provider SDK "${specifier}"`,
+        ).not.toContain(pkg);
+      }
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(BACKEND_ROOT, file)} must not call the GitHub API directly`).not.toMatch(
+        /api\.github\.com|github\.com\/login/,
+      );
+    }
+  });
+
+  it('the workbench frontend persists NO authoritative state (no localStorage writes — the API key remains the ONLY local storage, owned by auth)', () => {
+    for (const file of WB_FRONTEND_FILES) {
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(BACKEND_ROOT, file)} must not write localStorage`).not.toMatch(
+        /localStorage\.setItem|localStorage\.removeItem/,
+      );
+      expect(src, `${relative(BACKEND_ROOT, file)} must not read cached authoritative state`).not.toMatch(
+        /localStorage\.getItem/,
+      );
+    }
+  });
+
+  // --- (d) recommendation ≠ decision (the advisory framing is structural) ----
+
+  it('ADVERSARIAL #3 (structural): the advisory card renders RECOMMENDATIONS with explicit advisory framing — never a selection', () => {
+    const src = readFileSync(WB_ADVISORY, 'utf8');
+    expect(src).toMatch(/Recommends/);
+    expect(src).toMatch(/Advisory only/i);
+    expect(src).toMatch(/never decides/i);
+    // The card NEVER renders an authoritative selection claim.
+    expect(src).not.toMatch(/selected provider|Provider selected|selection committed/i);
+  });
+
+  // --- (e) the adversarial + tenant-isolation coverage is pinned by title ----
+
+  it('the adversarial + tenant-isolation coverage is pinned by title in the API suite (the work order\'s required matrix)', () => {
+    const tests = readFileSync(WB_API_TESTS, 'utf8');
+    expect(tests).toMatch(/ADVERSARIAL #1 \(tenant isolation\)/);
+    expect(tests).toMatch(/ADVERSARIAL #1 \(no cross-project data leakage\)/);
+    expect(tests).toMatch(/ADVERSARIAL #4 \(refresh\/re-query\)/);
+    expect(tests).toMatch(/ADVERSARIAL #9: the changes rollup carries the AUTHORITATIVE GitHub-derived PR identity/);
+    expect(tests).toMatch(/ADVERSARIAL #10: the verification rollup returns the \/verification authority/);
+    expect(tests).toMatch(/unauthenticated requests are 401/);
+    expect(tests).toMatch(/an unknown project id is 403/);
+  });
+
+  // --- (f) the work order exists with the architectural rule -----------------
+
+  it('the WORK-048 work order exists with the non-negotiable consumer rule and the adversarial matrix', () => {
+    const order = readFileSync(WORK_ORDER, 'utf8');
+    expect(order).toMatch(/The frontend MUST NOT recreate authoritative state/);
+    expect(order).toMatch(/Backend authorities → API\/read models → Developer Workbench/);
+    expect(order).toMatch(/Recommendation ≠ decision/i);
+    expect(order).toMatch(/The Workbench cannot read another project/);
+    expect(order).toMatch(/no frontend scheduler, policy engine, or\s+recommendation engine/);
+  });
+
+  // --- (g) the workbench is WIRED into the composition root ------------------
+
+  it('the workbench route group is registered in the server + wired in the production composition root', () => {
+    const serverCode = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'server.ts'), 'utf8');
+    expect(serverCode).toMatch(/workbenchRoutes/);
+    expect(serverCode).toMatch(/workbench\?: WorkbenchRouteDeps/);
+    const indexCode = readFileSync(join(BACKEND_ROOT, 'src', 'index.ts'), 'utf8');
+    expect(indexCode).toMatch(/workbench:\s*\{/);
+    // The frontend route + nav are registered.
+    const appCode = readFileSync(join(FRONTEND_SRC, 'App.tsx'), 'utf8');
+    expect(appCode).toMatch(/\/projects\/:projectId\/workbench/);
+    const shellCode = readFileSync(join(FRONTEND_SRC, 'components', 'shell', 'AppShell.tsx'), 'utf8');
+    expect(shellCode).toMatch(/label: 'Workbench'/);
+  });
+
+  // --- (h) the architect's PR #76 review correction: a FAILED authority read
+  //         can NEVER become empty state (provenance must survive to the UI) --
+
+  it('ADVERSARIAL (PR #76 review correction): the Workbench page NEVER swallows a failed authority read into empty data (no .catch(() => null/[]) degradation)', () => {
+    const src = readFileSync(WB_PAGE, 'utf8');
+    // Code only (comments may cite the forbidden pattern documentarily).
+    const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The swallowing pattern the architect's review found is structurally
+    // GONE: no read on this page may degrade a rejection into null/[].
+    expect(codeOnly).not.toMatch(/\.catch\(\s*\(\s*\)\s*=>\s*null\s*\)/);
+    expect(codeOnly).not.toMatch(/\.catch\(\s*\(\s*\)\s*=>\s*\[\s*\]\s*\)/);
+    // Every authority read settles through the explicit read-state model.
+    expect(codeOnly).toMatch(/settleRead\(/);
+  });
+
+  it('the read-state model distinguishes loading / success / error — success([]) (a genuine empty answer) can never conflate with error', () => {
+    const src = readFileSync(WB_READ_STATE, 'utf8');
+    expect(src).toMatch(/'loading'/);
+    expect(src).toMatch(/'success'/);
+    expect(src).toMatch(/'error'/);
+    // settleRead maps rejections to { status: 'error' } — never to data.
+    expect(src).toMatch(/status: 'error'/);
+    // There is NO fallback-unwrap helper that could turn an error back into
+    // a fake empty/default value.
+    expect(src).not.toMatch(/fallback/);
+  });
+
+  it('the discriminating failure ≠ empty regressions are pinned by title in the frontend suite (the review correction\'s required proofs)', () => {
+    const tests = readFileSync(WB_PAGE_TESTS, 'utf8');
+    expect(tests).toMatch(/failure ≠ empty/);
+    expect(tests).toMatch(/PR #76 review correction/);
+    // The per-surface discrimination matrix: for each rollup, BOTH branches.
+    for (const [emptyTitle, unavailableText] of [
+      ['No executions', 'Executions unavailable'],
+      ['No changes', 'Changes unavailable'],
+      ['No verification runs', 'Verification runs unavailable'],
+      ['No reviews', 'Reviews unavailable'],
+      ['No deployments', 'Deployments unavailable'],
+      ['No activity', 'Activity unavailable'],
+    ] as const) {
+      expect(tests, `the empty branch for "${emptyTitle}"`).toMatch(
+        new RegExp(`emptyTitle: '${emptyTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`),
+      );
+      expect(tests, `the unavailable branch for "${unavailableText}"`).toMatch(
+        new RegExp(`unavailableText: /${unavailableText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/i`),
+      );
+    }
+    // The generated discriminating titles (the it.each cases).
+    expect(tests).toMatch(/when the authority returns an EMPTY list \(genuine empty, never an error\)/);
+    expect(tests).toMatch(/renders an explicit error — never "\$\{emptyTitle\}" — when the authority read FAILS/);
+    // The workflow authority's next-item selection: a FAILED query must
+    // never render as a false "none eligible".
+    expect(tests).toMatch(/getNextWorkItem: a FAILED read renders "Next work item unavailable" — never a false "none eligible"/);
+    expect(tests).toMatch(/getNextWorkItem: success\(null\) renders "No eligible next work item" \(the authority answered none\)/);
+    // The attention derivation withholds the all-clear when a feed failed.
+    expect(tests).toMatch(/a FAILED contributing read → "Attention assessment incomplete" — never a false all-clear/);
+    // The graph error is explicit (banner + ErrorState), never "No work items".
+    expect(tests).toMatch(/the work graph: a FAILED read renders the explicit unavailable error — never "No work items"/);
+  });
+});

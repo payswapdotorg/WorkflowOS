@@ -304,6 +304,9 @@ class CrashAfterReserveRepo implements ExecutionRecordRepository {
   listForWorkItem(workItemId: string): Promise<ExecutionRecord[]> {
     return this.real.listForWorkItem(workItemId);
   }
+  listForProject(projectId: string, opts?: { limit?: number }): Promise<ExecutionRecord[]> {
+    return this.real.listForProject(projectId, opts);
+  }
   updateStatus(id: string, input: Parameters<ExecutionRecordRepository['updateStatus']>[1]): Promise<ExecutionRecord | null> {
     return this.real.updateStatus(id, input);
   }

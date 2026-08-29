@@ -91,6 +91,24 @@ export class PgVerificationRunRepository implements VerificationRunRepository {
     return result.rows.map(mapRun);
   }
 
+  /**
+   * WORK-048: project-scoped read — scoped by the AUTHORITATIVE project_id
+   * column on the row itself; a pure SELECT consumed by the Workbench read
+   * model. Newest first.
+   */
+  async listForProject(projectId: string, opts?: { limit?: number }): Promise<VerificationRun[]> {
+    const limit = opts?.limit ?? 100;
+    const result = await this.db.query<RunRow>(
+      `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,
+              source, source_ref, orchestration_key, status, execution_id,
+              started_at, finished_at, summary, error_metadata, metadata,
+              created_at, updated_at
+       FROM wfos_verification_runs WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [projectId, limit],
+    );
+    return result.rows.map(mapRun);
+  }
+
   async findByOrchestrationKey(orchestrationKey: string): Promise<VerificationRun | null> {
     const result = await this.db.query<RunRow>(
       `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,

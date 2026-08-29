@@ -30,6 +30,7 @@ import {
   agentIntelligenceRoutes,
   type AgentIntelligenceRouteDeps,
 } from './routes/agent-intelligence.route.js';
+import { workbenchRoutes, type WorkbenchRouteDeps } from './routes/workbench.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
 import {
@@ -124,6 +125,10 @@ export interface ServerDeps extends JobsRouteDeps {
    *  only — hard constraints always dominate; the decomposition is data
    *  submitted through the EXISTING WORK-046 boundary). */
   agentIntelligence?: AgentIntelligenceRouteDeps;
+  /** WORK-048: Developer Workbench read-model routes — the READ-ONLY thin
+   *  composition layer (work graph + project rollups; backend-authorized
+   *  project.read; consumes the OWNING authorities — never a second domain). */
+  workbench?: WorkbenchRouteDeps;
   /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
   agentPolicy?: AgentPolicyRouteDeps;
   /** WORK-038: Existing Project Onboarding routes (connect + analyze a
@@ -256,6 +261,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.agentIntelligence) {
     await agentIntelligenceRoutes(app, deps.agentIntelligence);
+  }
+  if (deps.auth && deps.workbench) {
+    await workbenchRoutes(app, deps.workbench);
   }
   if (deps.auth && deps.agentPolicy) {
     await agentPolicyRoutes(app, deps.agentPolicy);

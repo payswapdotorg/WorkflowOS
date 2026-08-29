@@ -154,6 +154,10 @@ export class DefaultVerificationService implements VerificationService {
     return this.runRepo.listForWorkItem(workItemId);
   }
 
+  async listRunsForProject(projectId: string, opts?: { limit?: number }): Promise<VerificationRun[]> {
+    return this.runRepo.listForProject(projectId, opts);
+  }
+
   async listEvidenceForRun(verificationRunId: string): Promise<Evidence[]> {
     return this.evidenceRepo.listForVerificationRun(verificationRunId);
   }

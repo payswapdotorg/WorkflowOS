@@ -81,6 +81,24 @@ export class PgReviewRepository implements ReviewRepository {
     return result.rows.map(mapReview);
   }
 
+  /**
+   * WORK-048: project-scoped read — scoped by the AUTHORITATIVE project_id
+   * column on the row itself; a pure SELECT consumed by the Workbench read
+   * model. Newest first.
+   */
+  async listForProject(projectId: string, opts?: { limit?: number }): Promise<Review[]> {
+    const limit = opts?.limit ?? 100;
+    const result = await this.db.query<ReviewRow>(
+      `SELECT id, project_id, work_item_id, work_order_id, architecture_version_id,
+              pull_request_association_id, architect_execution_id, source, reviewer,
+              execution_id, status, outcome, summary, review_input, metadata,
+              started_at, completed_at, created_at, updated_at
+       FROM wfos_reviews WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [projectId, limit],
+    );
+    return result.rows.map(mapReview);
+  }
+
   async finalize(id: string, input: FinalizeReviewInput): Promise<Review | null> {
     // Finalization is idempotent-rejecting: if the review is already completed,
     // the UPDATE matches 0 rows (WHERE status = 'in_progress') and returns null.

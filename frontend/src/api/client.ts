@@ -1303,6 +1303,8 @@ export interface StartExecutionResponse {
 
 export interface ExecutionSummary {
   executionId: string;
+  /** WORK-048: present on the project-wide workbench rollup (the record's own work-item reference). */
+  workItemId?: string;
   mode: ExecutionMode;
   provider: string;
   model: string | null;
@@ -2438,5 +2440,239 @@ export const executionPolicy = {
         `/projects/${projectId}/provider-access-profiles`,
         input,
       ).then((b) => b.profile),
+  },
+};
+
+// --- WORK-048: Developer Workbench read model ---------------------------------
+//
+// The workbench is a CONSUMER of backend authorities: every method below is a
+// READ (apiGet only — never a mutation). The work graph, the project rollups,
+// the maintenance/planning reads, and the advisory recommendation reads all
+// come from backend endpoints that authorize server-side within the caller's
+// project context. The frontend never derives authoritative state from them.
+
+/** A work-graph node — the authoritative WorkItem fields + the live graph facts. */
+export interface WorkGraphNode {
+  id: string;
+  architectureVersionId: string;
+  workItemId: string;
+  title: string;
+  objective?: string | null;
+  scope?: string | null;
+  outOfScope?: string | null;
+  architectureConstraints?: string | null;
+  assignee?: string | null;
+  executionMetadata?: Record<string, unknown>;
+  completed: boolean;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+  /** Current workflow state from the backend WorkflowEngine (null before the first transition). */
+  currentState: string | null;
+  /** Dependency ids NOT yet satisfied (from the backend dependency authority). */
+  unsatisfiedDependencies: string[];
+}
+
+/** A directed dependency edge: `workItemId` depends on `dependsOnId`. */
+export interface WorkGraphEdge {
+  workItemId: string;
+  dependsOnId: string;
+}
+
+/** The project engineering graph (WORK-048 read model). */
+export interface WorkGraph {
+  projectId: string;
+  nodes: WorkGraphNode[];
+  edges: WorkGraphEdge[];
+}
+
+export const workbench = {
+  /** The project engineering graph (nodes + edges + per-node facts). READ-ONLY. */
+  getWorkGraph: async (projectId: string): Promise<WorkGraph> => {
+    const body = await apiGet<{ workGraph: WorkGraph }>(`/projects/${projectId}/work-graph`);
+    return body.workGraph;
+  },
+  /** The project execution rollup (SAFE shape — no prompt/package). READ-ONLY. */
+  listExecutions: async (projectId: string, limit?: number): Promise<ExecutionSummary[]> => {
+    const q = limit ? `?limit=${limit}` : '';
+    const body = await apiGet<{ executions: ExecutionSummary[] }>(`/projects/${projectId}/executions${q}`);
+    return body.executions ?? [];
+  },
+  /** The project changes rollup (authoritative GitHub-derived PR identities). READ-ONLY. */
+  listPrAssociations: async (projectId: string, limit?: number): Promise<PrAssociation[]> => {
+    const q = limit ? `?limit=${limit}` : '';
+    const body = await apiGet<{ prAssociations: PrAssociation[] }>(`/projects/${projectId}/pr-associations${q}`);
+    return body.prAssociations ?? [];
+  },
+  /** The project verification rollup (the /verification authority's own runs). READ-ONLY. */
+  listVerificationRuns: async (projectId: string, limit?: number): Promise<VerificationRun[]> => {
+    const q = limit ? `?limit=${limit}` : '';
+    const body = await apiGet<{ verificationRuns: VerificationRun[] }>(`/projects/${projectId}/verification-runs${q}`);
+    return body.verificationRuns ?? [];
+  },
+  /** The project review rollup (the /reviews authority's own records). READ-ONLY. */
+  listReviews: async (projectId: string, limit?: number): Promise<Review[]> => {
+    const q = limit ? `?limit=${limit}` : '';
+    const body = await apiGet<{ reviews: Review[] }>(`/projects/${projectId}/reviews${q}`);
+    return body.reviews ?? [];
+  },
+};
+
+// --- WORK-041 maintenance reads (consumed by the Workbench Maintenance section) ---
+
+/** A maintenance signal — a planner-originated work item carrying maintenance metadata. */
+export interface MaintenanceSignalItem {
+  workItemId: string;
+  workItemHumanId: string;
+  title: string;
+  objective: string | null;
+  scope: string | null;
+  completed: boolean;
+  planner: {
+    source: string;
+    priority: string;
+    rationale: string;
+    whyNow: string;
+    expectedImpact: string;
+    maintenance?: {
+      category: string;
+      severity?: string;
+      advisoryId?: string;
+      affectedCount?: number;
+      detectorSource?: string;
+    };
+  };
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MaintenanceHealth {
+  architectureVersionId: string;
+  totalSignals: number;
+  byCategory: Record<string, number>;
+  bySeverity: Record<string, number>;
+  signals: MaintenanceSignalItem[];
+}
+
+export const maintenance = {
+  /** The project maintenance health summary (requires the architecture version). READ-ONLY. */
+  getHealth: (projectId: string, architectureVersionId: string) =>
+    apiGet<MaintenanceHealth>(
+      `/projects/${projectId}/maintenance/health?architectureVersionId=${architectureVersionId}`,
+    ),
+};
+
+// --- WORK-040 planning reads (consumed by the Workbench "what's next") ----------
+
+/** A planner-originated work item recommendation (the planner authority's record). */
+export interface PlanningRecommendationItem {
+  workItemId: string;
+  workItemHumanId: string;
+  title: string;
+  objective: string | null;
+  scope: string | null;
+  completed: boolean;
+  planner: {
+    source: string;
+    priority: string;
+    rationale: string;
+    whyNow: string;
+    expectedImpact: string;
+  };
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export const planning = {
+  /** The planner's recommendations for the version (planner-originated work items). READ-ONLY. */
+  listRecommendations: async (
+    projectId: string,
+    architectureVersionId: string,
+  ): Promise<PlanningRecommendationItem[]> => {
+    const body = await apiGet<{ recommendations: PlanningRecommendationItem[] }>(
+      `/projects/${projectId}/planning/recommendations?architectureVersionId=${architectureVersionId}`,
+    );
+    return body.recommendations ?? [];
+  },
+};
+
+// --- WORK-044 / WORK-047 advisory reads (RECOMMENDATIONS — never decisions) ----
+//
+// These mirror the advisory endpoints. The workbench renders them strictly as
+// RECOMMENDATIONS ("Agent Intelligence recommends X"): an authoritative
+// execution decision exists only when an execution record says so — the
+// frontend NEVER converts a recommendation into a selection.
+
+/** The WORK-047 agent-intelligence execution recommendation (advisory). */
+export interface AgentIntelligenceRecommendation {
+  mode: string;
+  projectId?: string;
+  workItemId?: string;
+  recommended: {
+    identity: { provider: string; model: string; executionMode: string };
+    score: number;
+    routingRank?: number;
+  } | null;
+  ranked: Array<{
+    identity: { provider: string; model: string; executionMode: string };
+    score: number;
+  }>;
+  fallbacks: Array<{ provider: string; model: string; executionMode: string }>;
+  provenance: {
+    headline: string;
+    reasons: Array<{ dimension: string; detail: string }>;
+    rejectedAlternatives: Array<{ provider: string; model: string; executionMode: string; reason: string }>;
+    confidence?: string;
+  };
+  warnings: string[];
+}
+
+export const agentIntelligence = {
+  /** The WORK-047 execution recommendation. ADVISORY — never a decision. READ-ONLY. */
+  getExecutionRecommendation: async (
+    projectId: string,
+    workItemId: string,
+  ): Promise<AgentIntelligenceRecommendation> => {
+    const body = await apiGet<{ intelligence: AgentIntelligenceRecommendation }>(
+      `/projects/${projectId}/work-items/${workItemId}/agent-intelligence/execution`,
+    );
+    return body.intelligence;
+  },
+};
+
+/** The WORK-044 routing recommendation (advisory — the ranked eligible set). */
+export interface RoutingRecommendation {
+  mode: string;
+  ranked: Array<{
+    identity: { provider: string; model: string; executionMode: string };
+    score: number;
+  }>;
+  selected: {
+    identity: { provider: string; model: string; executionMode: string };
+    score: number;
+  } | null;
+  explanation: {
+    selectionReason: string;
+    methodology: string;
+    eligibleCount: number;
+    excluded: Array<{
+      identity: { provider: string; model: string; executionMode: string };
+    }>;
+    tieBreakDecided: boolean;
+  };
+  decisionId?: string;
+}
+
+export const executionRouting = {
+  /**
+   * The WORK-044 routing recommendation. ADVISORY — never a decision; the
+   * authoritative selection happens only when an execution is actually
+   * submitted through the execution boundary. READ-ONLY.
+   */
+  getRecommendation: async (workItemId: string): Promise<RoutingRecommendation> => {
+    const body = await apiGet<{ routing: RoutingRecommendation }>(
+      `/work-items/${workItemId}/execution/routing/recommendation`,
+    );
+    return body.routing;
   },
 };

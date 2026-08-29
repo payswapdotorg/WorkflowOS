@@ -13,6 +13,7 @@ import {
   CircleUser,
   PanelsTopLeft,
   Gauge,
+  MonitorCog,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useAuth } from '@/hooks/useAuth';
@@ -65,6 +66,9 @@ const GLOBAL_NAV: NavItem[] = [
 ];
 
 const PROJECT_NAV: NavItem[] = [
+  // WORK-048: the Developer Workbench — the primary human-facing engineering
+  // workspace (a consumer of backend authorities, never one itself).
+  { to: 'workbench', label: 'Workbench', icon: MonitorCog, match: (p) => p.startsWith('workbench') },
   { to: '', label: 'Overview', icon: FolderKanban, match: (p) => p === '' || p === '/' },
   { to: 'architect', label: 'Architect', icon: Sparkles, match: (p) => p.startsWith('architect') },
   { to: 'architecture', label: 'Architecture', icon: Boxes, match: (p) => p.startsWith('architecture') },
@@ -195,7 +199,7 @@ function SidebarNav({ _pid, project, onNavigate }: SidebarNavProps) {
 
 function useBreadcrumbs(): { items: { label: string; to?: string }[] } {
   const location = useLocation();
-  void 0; const { _pid: _pid = "" } = useParams<{ _pid: string }>();
+  const { projectId: _pid = "" } = useParams<{ projectId: string }>();
   const path = location.pathname;
   const items: { label: string; to?: string }[] = [
     { label: 'WorkflowOS', to: '/' },
@@ -260,7 +264,7 @@ interface AppShellProps {
 export function AppShell({ children }: AppShellProps) {
   const { clearApiKey } = useAuth();
   const navigate = useNavigate();
-  void 0; const { _pid: _pid = "" } = useParams<{ _pid: string }>();
+  const { projectId: _pid = "" } = useParams<{ projectId: string }>();
   
   
   const [project, setProject] = React.useState<any | null>(null);

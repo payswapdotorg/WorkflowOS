@@ -568,6 +568,7 @@ describe('WORK-026 — ImplementationContext + start-implementation', () => {
     const partialNullRepo: WorkItemRepository = {
       create: (i) => realWiRepo.create(i),
       findByArchitectureVersion: (id) => realWiRepo.findByArchitectureVersion(id),
+      listForProject: (pid) => realWiRepo.listForProject(pid),
       update: (id, i) => realWiRepo.update(id, i),
       findById: async (id: string) => {
         if (id === wi.id) return realWiRepo.findById(id);

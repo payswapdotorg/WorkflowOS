@@ -212,6 +212,13 @@ export interface VerificationRunRepository {
   create(input: CreateVerificationRunInput): Promise<VerificationRun>;
   findById(id: string): Promise<VerificationRun | null>;
   listForWorkItem(workItemId: string): Promise<VerificationRun[]>;
+  /**
+   * WORK-048: read-only project-scoped list (newest first) — scoped by the
+   * AUTHORITATIVE project_id column on the row itself. Consumed by the
+   * Workbench read model; a pure SELECT. Optional limit (the audit
+   * listForProject convention; default applied by the repository).
+   */
+  listForProject(projectId: string, opts?: { limit?: number }): Promise<VerificationRun[]>;
   update(id: string, input: UpdateVerificationRunInput): Promise<VerificationRun | null>;
   /**
    * WORK-051 round 1 (BLOCKER 4): find the orchestration run by its durable
@@ -416,6 +423,13 @@ export interface VerificationService {
    * actual verification data (PR #21 issue 3). Pure read — no mutation.
    */
   listRunsForWorkItem(workItemId: string): Promise<VerificationRun[]>;
+
+  /**
+   * WORK-048: list VerificationRuns for a whole PROJECT (newest first) — the
+   * Workbench rollup read. Pure read — no mutation, no evaluation; the
+   * frontend renders this only through /verification's own authority.
+   */
+  listRunsForProject(projectId: string, opts?: { limit?: number }): Promise<VerificationRun[]>;
 
   /**
    * List every Evidence record attached to a VerificationRun.

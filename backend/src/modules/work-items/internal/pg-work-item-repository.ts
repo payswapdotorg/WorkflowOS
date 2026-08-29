@@ -83,6 +83,27 @@ export class PgWorkItemRepository implements WorkItemRepository {
     return result.rows.map(mapWi);
   }
 
+  /**
+   * WORK-048: project-scoped read through the AUTHORITATIVE chain
+   * (work-item → architecture-version → architecture → project) — a pure
+   * SELECT consumed by the Workbench read model. Deterministic order by the
+   * human work-item id (the selectNextWorkItem convention).
+   */
+  async listForProject(projectId: string): Promise<WorkItem[]> {
+    const result = await this.db.query<WiRow>(
+      `SELECT wi.id, wi.architecture_version_id, wi.work_item_id, wi.title, wi.objective, wi.scope,
+              wi.out_of_scope, wi.architecture_constraints, wi.assignee, wi.execution_metadata,
+              wi.completed, wi.metadata, wi.architecture_impact, wi.created_at, wi.updated_at
+       FROM wfos_work_items wi
+       JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+       JOIN wfos_architectures a ON a.id = av.architecture_id
+       WHERE a.project_id = $1
+       ORDER BY wi.work_item_id`,
+      [projectId],
+    );
+    return result.rows.map(mapWi);
+  }
+
   async update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null> {
     const sets: string[] = [];
     const params: unknown[] = [id];
@@ -408,6 +429,29 @@ export class PgPullRequestAssociationRepository implements PullRequestAssociatio
        FROM wfos_pull_request_associations WHERE work_item_id = $1
        ORDER BY created_at`,
       [workItemId],
+    );
+    return result.rows.map(mapPr);
+  }
+
+  /**
+   * WORK-048: project-scoped read through the AUTHORITATIVE chain
+   * (work-item → architecture-version → architecture → project) — a pure
+   * SELECT consumed by the Workbench read model. Newest first (the changes
+   * rollup is a recent-first view).
+   */
+  async listForProject(projectId: string, opts?: { limit?: number }): Promise<PullRequestAssociation[]> {
+    const limit = opts?.limit ?? 100;
+    const result = await this.db.query<PrRow>(
+      `SELECT pr.id, pr.work_item_id, pr.external_pr_id, pr.provider, pr.repository_ref,
+              pr.branch, pr.base_branch, pr.head_commit, pr.status, pr.created_at, pr.superseded_at
+       FROM wfos_pull_request_associations pr
+       JOIN wfos_work_items wi ON wi.id = pr.work_item_id
+       JOIN wfos_architecture_versions av ON av.id = wi.architecture_version_id
+       JOIN wfos_architectures a ON a.id = av.architecture_id
+       WHERE a.project_id = $1
+       ORDER BY pr.created_at DESC
+       LIMIT $2`,
+      [projectId, limit],
     );
     return result.rows.map(mapPr);
   }

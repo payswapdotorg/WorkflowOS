@@ -1,11 +1,13 @@
-import { Play, GitMerge, CheckCircle2, FlaskConical, FileCheck, Activity, Rocket } from 'lucide-react';
+import { Play, GitMerge, CheckCircle2, FlaskConical, FileCheck, Activity, Rocket, Target, ListTree, ShieldCheck } from 'lucide-react';
 import { LoadingState } from '@/components/domain/loading-state';
 import { ErrorState } from '@/components/domain/error-state';
 import { EmptyState } from '@/components/domain/empty-state';
-import { useParams } from 'react-router-dom';
+import { AdvisoryCard } from '@/components/domain/advisory-card';
+import { useParams, Link } from 'react-router-dom';
 import { useEffect, useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '@/components/domain/status-badge';
 import { WorkflowTimeline } from '@/components/domain/workflow-timeline';
@@ -19,6 +21,7 @@ import {
   type Review, type ReviewFinding, type AuditEvent,
   type VerificationRun, type VerificationEvidence,
   type ExecutionMode, type ExecutionSummary, type ExecutionProviderInfo,
+  type WorkItemDependency, type MergeGateResult,
   ApiError,
 } from '@/api/client';
 
@@ -37,6 +40,12 @@ export default function WorkItemPage() {
   const [auditList, setAuditList] = useState<AuditEvent[]>([]);
   const [verRuns, setVerRuns] = useState<VerificationRun[]>([]);
   const [verEvidence, setVerEvidence] = useState<Record<string, VerificationEvidence[]>>({});
+
+  // WORK-048: dependencies (the dependency authority) + merge gates (the
+  // workflow authority's own readiness picture).
+  const [dependencies, setDependencies] = useState<WorkItemDependency[]>([]);
+  const [dependencyItems, setDependencyItems] = useState<Record<string, WorkItem | null>>({});
+  const [mergeReadiness, setMergeReadiness] = useState<MergeGateResult | null>(null);
 
   // WORK-027: execution mode selection + external handoff state.
   const [executions, setExecutions] = useState<ExecutionSummary[]>([]);
@@ -92,6 +101,20 @@ export default function WorkItemPage() {
 
       const runs = await verification.listRunsForWorkItem(workItemId).catch(() => []);
       setVerRuns(runs);
+
+      // WORK-048: the dependency authority's rows + each dependency's own
+      // record (for the human id + completion flag — never derived here).
+      const deps = await workItems.listDependencies(workItemId).catch(() => []);
+      setDependencies(deps);
+      const depMap: Record<string, WorkItem | null> = {};
+      await Promise.all(deps.map(async (d) => {
+        depMap[d.dependsOnId] = await workItems.get(d.dependsOnId).catch(() => null);
+      }));
+      setDependencyItems(depMap);
+
+      // WORK-048: the workflow authority's merge-readiness picture.
+      const gates = await workflow.getMergeReadiness(workItemId).catch(() => null);
+      setMergeReadiness(gates);
 
       // Fetch evidence for each verification run
       const evMap: Record<string, VerificationEvidence[]> = {};
@@ -187,6 +210,136 @@ export default function WorkItemPage() {
         <p className="mt-1 font-mono text-xs text-muted-foreground">{workItem.id}</p>
       </div>
 
+      {/* WORK-048: the objective card — the authoritative WorkItem fields
+          (objective / scope / out-of-scope / constraints / assignee),
+          rendered verbatim from the backend record. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Target className="h-4 w-4" />
+            Objective
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Objective</div>
+            <p className="mt-1 text-sm">{workItem.objective || <span className="text-muted-foreground">Not specified</span>}</p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Scope</div>
+              <p className="mt-1 text-sm">{workItem.scope || <span className="text-muted-foreground">Not specified</span>}</p>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Out of scope</div>
+              <p className="mt-1 text-sm">{workItem.outOfScope || <span className="text-muted-foreground">Not specified</span>}</p>
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Architecture constraints</div>
+            <p className="mt-1 text-sm">{workItem.architectureConstraints || <span className="text-muted-foreground">None recorded</span>}</p>
+          </div>
+          {workItem.assignee && (
+            <div className="flex items-center gap-2 text-sm">
+              <Badge variant="secondary">Assignee</Badge>
+              <span>{workItem.assignee}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* WORK-048: the dependencies card — the dependency authority's rows,
+          each rendered with the dependency's own completion flag. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <ListTree className="h-4 w-4" />
+            Dependencies
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {dependencies.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No dependencies — this item blocks on nothing.</p>
+          ) : (
+            <div className="space-y-2">
+              {dependencies.map((d) => {
+                const dep = dependencyItems[d.dependsOnId];
+                return (
+                  <div key={d.id} className="flex items-center justify-between rounded-md border p-3">
+                    <div className="flex items-center gap-2">
+                      <Link
+                        to={`/work-items/${d.dependsOnId}`}
+                        className="font-mono text-xs text-primary underline-offset-4 hover:underline"
+                      >
+                        {dep ? dep.workItemId : d.dependsOnId.slice(0, 8)}
+                      </Link>
+                      <span className="text-sm text-muted-foreground">
+                        {dep ? dep.title : 'Dependency record unavailable'}
+                      </span>
+                    </div>
+                    {dep ? (
+                      dep.completed ? (
+                        <Badge variant="success">Satisfied</Badge>
+                      ) : (
+                        <Badge variant="destructive">Not satisfied</Badge>
+                      )
+                    ) : (
+                      <Badge variant="secondary">Unknown</Badge>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* WORK-048: the merge gates card — the workflow authority's own
+          merge-readiness verdict (facts only; nothing derived here). */}
+      {mergeReadiness && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ShieldCheck className="h-4 w-4" />
+              Merge Gates
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              {mergeReadiness.ready ? (
+                <Badge variant="success">Ready to merge</Badge>
+              ) : (
+                <Badge variant="warning">Not ready</Badge>
+              )}
+              <span className="text-xs text-muted-foreground">
+                The workflow authority's merge-readiness verdict.
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant={mergeReadiness.hasApprovedReview ? 'success' : 'secondary'}>
+                Approved review: {mergeReadiness.hasApprovedReview ? 'yes' : 'no'}
+              </Badge>
+              <Badge variant={mergeReadiness.hasActivePrAssociation ? 'success' : 'secondary'}>
+                Active PR: {mergeReadiness.hasActivePrAssociation ? 'yes' : 'no'}
+              </Badge>
+              <Badge variant={mergeReadiness.verificationSatisfied ? 'success' : 'secondary'}>
+                Verification: {mergeReadiness.verificationSatisfied ? 'satisfied' : 'not satisfied'}
+              </Badge>
+              <Badge variant={mergeReadiness.dependenciesSatisfied ? 'success' : 'secondary'}>
+                Dependencies: {mergeReadiness.dependenciesSatisfied ? 'satisfied' : 'not satisfied'}
+              </Badge>
+            </div>
+            {mergeReadiness.reasons.length > 0 && (
+              <ul className="list-disc pl-5 text-xs text-muted-foreground">
+                {mergeReadiness.reasons.map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Workflow Timeline */}
       {workflowState && (
         <Card>
@@ -264,6 +417,10 @@ export default function WorkItemPage() {
 
         {/* Implementation Tab */}
         <TabsContent value="implementation" className="space-y-4">
+          {/* WORK-048: the ADVISORY routing recommendation (WORK-044) —
+              rendered strictly as a recommendation, never a decision. */}
+          <AdvisoryCard workItemId={workItemId ?? ''} workItemLabel={workItem.workItemId} />
+
           {/* Work Orders */}
           <Card>
             <CardHeader><CardTitle className="text-sm">Work Orders</CardTitle></CardHeader>

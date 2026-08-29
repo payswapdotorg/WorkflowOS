@@ -415,6 +415,34 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-048: Developer Workbench read-model routes — the READ-ONLY thin
+      // composition layer over the OWNING authorities (work items +
+      // dependencies + workflow states, executions, pr-associations,
+      // verification runs, reviews). Backend-authorized project.read with
+      // server-side project scoping; never a second business domain.
+      ...(app.deps.authorizationService &&
+      app.deps.workItemRepository &&
+      app.deps.workItemDependencyRepository &&
+      app.deps.workItemDependencyService &&
+      app.deps.workflowEngine &&
+      app.deps.executionRecordRepository &&
+      app.deps.pullRequestAssociationRepository &&
+      app.deps.verificationService &&
+      app.deps.reviewService
+        ? {
+            workbench: {
+              authorizationService: app.deps.authorizationService,
+              workItemRepository: app.deps.workItemRepository,
+              workItemDependencyRepository: app.deps.workItemDependencyRepository,
+              dependencyService: app.deps.workItemDependencyService,
+              workflowEngine: app.deps.workflowEngine,
+              executionRecordRepository: app.deps.executionRecordRepository,
+              pullRequestAssociationRepository: app.deps.pullRequestAssociationRepository,
+              verificationService: app.deps.verificationService,
+              reviewService: app.deps.reviewService,
+            },
+          }
+        : {}),
       // WORK-037: Agent Policy & Permissions routes. Backend-authorized
       // (project.read / project.admin). The engine never imports the
       // authorization service — only this route layer calls

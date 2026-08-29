@@ -186,15 +186,15 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
     // Evaluating the merged pair as candidates surfaces only the LIVE
-    // in-flight item (WORK-047, sharing the static-architecture suite) as an
-    // informational conflict partner — never each other (both complete; the
-    // in-flight-only conflict scan excludes them). The frontier is the
-    // authoritative live view: WORK-047 is the only in-flight item and has
-    // ZERO active conflicts.
-    expect(a046.conflictsWith.every((c) => c.workOrderId === 'WORK-047')).toBe(true);
-    expect(a052.conflictsWith.every((c) => c.workOrderId === 'WORK-047')).toBe(true);
+    // in-flight item (WORK-048, declared across frontend/work-items/agents/
+    // reviews/verification/github) as an informational conflict partner —
+    // never each other (both complete; the in-flight-only conflict scan
+    // excludes them). The frontier is the authoritative live view: WORK-048 is
+    // the only in-flight item and has ZERO active conflicts.
+    expect(a046.conflictsWith.every((c) => c.workOrderId === 'WORK-048')).toBe(true);
+    expect(a052.conflictsWith.every((c) => c.workOrderId === 'WORK-048')).toBe(true);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-047']);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-048']);
     expect(frontier.inFlight[0]!.conflicts).toEqual([]);
   });
 
@@ -422,13 +422,13 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: WORK-048 is the dependency-eligible item; WORK-047 is in flight; 049/050 are blocked on WORK-048', () => {
+  it('W052-AC03 — the REAL frontier: WORK-048 is in flight (activated after the WORK-047 merge); 049/050 are blocked on WORK-048; nothing is dependency-eligible', () => {
     const frontier = realService.getFrontier();
-    expect(frontier.dependencyEligible.map((w) => w.id)).toEqual(['WORK-048']);
-    // WORK-047 was activated after the WORK-046 merge (all dependencies
+    expect(frontier.dependencyEligible.map((w) => w.id)).toEqual([]);
+    // WORK-048 was activated after the WORK-047 merge (all dependencies
     // complete) — it is the in-flight item, not a blocked one.
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-047']);
-    expect(frontier.inFlight[0]!.branch).toBe('feat/work-047-agent-intelligence');
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-048']);
+    expect(frontier.inFlight[0]!.branch).toBe('feat/work-048-developer-workbench');
     const blockedIds = frontier.blocked.map((w) => w.id);
     expect(blockedIds).toContain('WORK-049');
     expect(blockedIds).toContain('WORK-050');

@@ -177,6 +177,21 @@ export class PgExecutionRecordRepository implements ExecutionRecordRepository {
     return result.rows.map(rowToRecord);
   }
 
+  /**
+   * WORK-048: project-scoped read — scoped by the AUTHORITATIVE project_id
+   * column on the row itself (tenant isolation by construction); a pure
+   * SELECT consumed by the Workbench read model. Newest first.
+   */
+  async listForProject(projectId: string, opts?: { limit?: number }): Promise<ExecutionRecord[]> {
+    const limit = opts?.limit ?? 100;
+    const result = await this.db.query<ExecutionRow>(
+      `SELECT ${RECORD_COLUMNS} FROM wfos_executions
+       WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [projectId, limit],
+    );
+    return result.rows.map(rowToRecord);
+  }
+
   async updateStatus(
     id: string,
     input: UpdateExecutionStatusInput,

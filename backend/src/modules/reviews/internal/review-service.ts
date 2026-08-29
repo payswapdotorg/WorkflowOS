@@ -101,6 +101,10 @@ export class DefaultReviewService implements ReviewService {
     return this.reviewRepo.listForWorkItem(workItemId);
   }
 
+  async listReviewsForProject(projectId: string, opts?: { limit?: number }): Promise<Review[]> {
+    return this.reviewRepo.listForProject(projectId, opts);
+  }
+
   async addFinding(input: CreateFindingInput): Promise<ReviewFinding> {
     // Verify the review exists + is still in_progress (findings cannot be
     // added to a finalized review — the outcome + supporting findings are

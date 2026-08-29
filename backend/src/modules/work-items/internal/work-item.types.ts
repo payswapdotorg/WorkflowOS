@@ -90,6 +90,13 @@ export interface WorkItemRepository {
   create(input: CreateWorkItemInput): Promise<WorkItem>;
   findById(id: string): Promise<WorkItem | null>;
   findByArchitectureVersion(architectureVersionId: string): Promise<WorkItem[]>;
+  /**
+   * WORK-048: read-only project-scoped list — every work item of the project
+   * through the AUTHORITATIVE work-item → architecture-version → architecture
+   * → project chain (the same chain every route uses to resolve a work item's
+   * project). Consumed by the Workbench read model; a pure SELECT.
+   */
+  listForProject(projectId: string): Promise<WorkItem[]>;
   update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null>;
 }
 
@@ -174,6 +181,14 @@ export interface PullRequestAssociationRepository {
   create(input: CreatePrAssociationInput): Promise<PullRequestAssociation>;
   findById(id: string): Promise<PullRequestAssociation | null>;
   listForWorkItem(workItemId: string): Promise<PullRequestAssociation[]>;
+  /**
+   * WORK-048: read-only project-scoped list (newest first) through the
+   * AUTHORITATIVE work-item → architecture-version → architecture → project
+   * chain (the associations carry no denormalized project column). Consumed
+   * by the Workbench read model; a pure SELECT. Optional limit (the audit
+   * listForProject convention; default applied by the repository).
+   */
+  listForProject(projectId: string, opts?: { limit?: number }): Promise<PullRequestAssociation[]>;
   /** Supersede the currently-active PR for a work item (sets it to 'superseded'). */
   supersedeActive(workItemId: string): Promise<void>;
   /** Get the active PR for a work item (or null). */

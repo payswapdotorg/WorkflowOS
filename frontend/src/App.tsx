@@ -4,6 +4,7 @@ import AppShell from './components/shell/AppShell';
 import LoginPage from './pages/LoginPage';
 import ProjectListPage from './pages/ProjectListPage';
 import ProjectOverviewPage from './pages/ProjectOverviewPage';
+import WorkbenchPage from './pages/WorkbenchPage';
 import ArchitecturePage from './pages/ArchitecturePage';
 import ArchitectPage from './pages/ArchitectPage';
 import RequirementsPage from './pages/RequirementsPage';
@@ -67,6 +68,16 @@ export default function App() {
         element={
           <AppShell>
             <RequirementsPage />
+          </AppShell>
+        }
+      />
+      {/* WORK-048: the Developer Workbench — the primary engineering workspace
+          (a consumer of backend authorities; read-only). */}
+      <Route
+        path="/projects/:projectId/workbench"
+        element={
+          <AppShell>
+            <WorkbenchPage />
           </AppShell>
         }
       />

@@ -127,6 +127,7 @@ import type {
   WorkItemRequirementRepository,
   WorkItemCriterionRepository,
   WorkItemDependencyRepository,
+  WorkItemDependencyService,
   PullRequestAssociationRepository,
   WorkOrderRepository,
 } from '@modules/work-items/index.js';
@@ -414,6 +415,9 @@ export interface AppDeps {
   workItemCriterionRepository?: WorkItemCriterionRepository;
   /** WORK-007: work item dependency repository. */
   workItemDependencyRepository?: WorkItemDependencyRepository;
+  /** WORK-048: the dependency-eligibility AUTHORITY (unsatisfied-dependency
+   *  reads for the Workbench graph; the satisfaction rule is never duplicated). */
+  workItemDependencyService?: WorkItemDependencyService;
   /** WORK-007: PR association repository. */
   pullRequestAssociationRepository?: PullRequestAssociationRepository;
   /** WORK-007: work order repository. */
@@ -727,6 +731,7 @@ export async function buildApp(
   let workItemRequirementRepository: WorkItemRequirementRepository | undefined;
   let workItemCriterionRepository: WorkItemCriterionRepository | undefined;
   let workItemDependencyRepository: WorkItemDependencyRepository | undefined;
+  let workItemDependencyService: WorkItemDependencyService | undefined;
   let pullRequestAssociationRepository: PullRequestAssociationRepository | undefined;
   let workOrderRepository: WorkOrderRepository | undefined;
   let auditService: AuditService | undefined;
@@ -898,6 +903,7 @@ export async function buildApp(
     // The hook is best-effort (wrapped in try/catch + log) so a callback
     // failure NEVER breaks the core transition.
     const depService = new DefaultWorkItemDependencyService(database);
+    workItemDependencyService = depService;
     workflowEngine = new DefaultWorkflowEngine(
       database, logger,
       (wiId: string) => depService.canBeginImplementation(wiId),
@@ -2014,6 +2020,7 @@ export async function buildApp(
       workItemRequirementRepository,
       workItemCriterionRepository,
       workItemDependencyRepository,
+      workItemDependencyService,
       pullRequestAssociationRepository,
       workOrderRepository,
       auditService,

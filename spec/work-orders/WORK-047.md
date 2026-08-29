@@ -1,6 +1,6 @@
 # WORK-047 — Agent Intelligence
 
-Status: IMPLEMENTED — delivered on branch `feat/work-047-agent-intelligence` (off main@1f2bef9 — the merged WORK-046); awaiting architect review. The same change carries the owed WORK-046 post-merge finalization (§34.8/ADR-0007) + this derived work order + the governed activation of WORK-047.
+Status: COMPLETE — merged by the architect as `e2b665cc63b53558b894ba10000d01e8af139ca0` (PR #75, squash-merged at branch head `0320fe0` on 2026-08-29; the merge tree is identical to the approved review-remediated head). The post-merge finalization (§34.8/ADR-0007) — complete + `mergedAs {pr: 75, mergeCommit: e2b665c…}` + handoff removed — is recorded in the canonical state and was carried by the WORK-048 activation change.
 Architecture: frozen v1.0 authority model + the §33.9 Agent Intelligence direction
 Dependencies: WORK-032 (benchmark evidence), WORK-044 (adaptive execution router),
 WORK-046 (multi-agent delegation)

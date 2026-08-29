@@ -69,6 +69,9 @@ class InterceptableWorkItemRepository implements WorkItemRepository {
   async findByArchitectureVersion(architectureVersionId: string): Promise<WorkItem[]> {
     return this.real.findByArchitectureVersion(architectureVersionId);
   }
+  async listForProject(projectId: string): Promise<WorkItem[]> {
+    return this.real.listForProject(projectId);
+  }
   async update(id: string, input: UpdateWorkItemInput): Promise<WorkItem | null> {
     return this.real.update(id, input);
   }

@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-28",
+  "asOf": "2026-08-29",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -956,7 +956,7 @@
     {
       "id": "WORK-047",
       "title": "Agent Intelligence",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-032",
         "WORK-044",
@@ -964,7 +964,11 @@
       ],
       "branch": "feat/work-047-agent-intelligence",
       "pr": 75,
-      "head": "1b5a6ac",
+      "head": "0320fe0",
+      "mergedAs": {
+        "pr": 75,
+        "mergeCommit": "e2b665cc63b53558b894ba10000d01e8af139ca0"
+      },
       "workOrder": "spec/work-orders/WORK-047.md",
       "origin": "architect",
       "surfaces": {
@@ -991,34 +995,54 @@
       ],
       "assuranceProfile": "HIGH_ASSURANCE",
       "runtimeImpactBinding": "high",
-      "note": "activated after the WORK-046 merge (1f2bef9): the advisory/ranking intelligence layer over the EXISTING authorities (§33.9) — consumes the WORK-044 routing result's already-eligible ranked set, the WORK-045 role catalog, and read-only historical evidence from the EXISTING stores (wfos_executions terminal outcomes + the W046-AC10 delegation structured state + the benchmark evidence carried through the consumed recommendation); NO migration, NO new tables (the last migration stays 0057); STATELESS and DETERMINISTIC with full provenance. The work order was ABSENT and is derived per the architect's authorization from §33.9 + the dependency graph + the W045-AC14/W046-AC10 forward-compatibility contracts (spec/work-orders/WORK-047.md). Surfaces declared truthfully at activation: the slice adds the agent-intelligence application layer and consumes the execution-routing public contract; repository-intelligence (in the original reservation) is NOT touched by this implementation. Adversarial coverage: hard constraints always dominate intelligence (policy/capability/routing exclusions of the historically best candidate, the ineligible-candidate seam), fail-closed semantics, tenant isolation, determinism, provenance, no-mutation, no-second-authority."
+      "note": "Merged by the architect as e2b665cc63b53558b894ba10000d01e8af139ca0 (PR #75, squash-merged at branch head 0320fe0 on 2026-08-29T04:10:50Z; the merge tree is IDENTICAL to the approved review-remediated head). The post-merge finalization (§34.8/ADR-0007) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, the active handoff removed (merged work is not resumable), and the work-order document status updated. branch/pr/head kept as the historical record of how it merged. The architect's review found the intelligence implementation directionally correct and merged it after one governance-scope correction (the merged-finalization audit's architect-merge evidence matcher once accepted ANY subject beginning with WORK-NNN, misclassifying the 1ccc45f finalization squash as merge evidence for its own work order) — remediated on the same branch (0320fe0): the matcher now recognizes the SPECIFIC colon-separated convention (WORK-NNN: title), both legitimate merge shapes preserved, the discriminating regression added; the intelligence layer itself merged unchanged."
     },
     {
       "id": "WORK-048",
       "title": "Developer Workbench",
-      "status": "pending",
+      "status": "in_flight",
       "dependencies": [
         "WORK-040",
         "WORK-041",
         "WORK-042",
         "WORK-044"
       ],
+      "branch": "feat/work-048-developer-workbench",
+      "pr": 76,
+      "head": "d1fa4b9",
+      "workOrder": "spec/work-orders/WORK-048.md",
       "origin": "architect",
       "surfaces": {
         "modules": [
-          "frontend"
+          "frontend",
+          "work-items",
+          "agents",
+          "reviews",
+          "verification",
+          "github"
         ],
         "appLayer": [],
         "migrations": [],
-        "specDocs": [],
-        "sharedIntegrationSurfaces": []
+        "specDocs": [
+          "spec/work-orders/WORK-048.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/api/server.ts",
+          "backend/src/index.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "frontend/src/App.tsx",
+          "frontend/src/components/shell/AppShell.tsx",
+          "frontend/src/api/client.ts"
+        ]
       },
       "surfaceFlags": [
         "moduleInternals",
-        "multiModule"
+        "multiModule",
+        "publicContracts"
       ],
-      "assuranceProfile": "STANDARD",
-      "note": "dependency-eligible (all dependencies complete); awaiting architect authorization via Work Order"
+      "assuranceProfile": "HIGH_ASSURANCE",
+      "runtimeImpactBinding": "high",
+      "note": "activated after the WORK-047 merge (e2b665c): the Developer Workbench — the primary human-facing engineering workspace as a CONSUMER of backend authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-048.md). Thin read-model composition ONLY: the workbench never owns workflow/authorization/execution/verification/review state; the new HTTP surface is READ-ONLY project-scoped (project.read + server-side project resolution); module changes are read-only listForProject additions on the OWNING services/repositories (work-items, agents, reviews, verification, github); the frontend renders authoritative data with WORK-044/WORK-047 recommendations visibly distinct from decisions. No migration (the last stays 0057)."
     },
     {
       "id": "WORK-049",
@@ -1335,16 +1359,16 @@
     "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
     "activeHandoffs": [
       {
-        "workOrderId": "WORK-047",
-        "lastVerifiedState": "IMPLEMENTED on branch feat/work-047-agent-intelligence (off main@1f2bef9 — the merged WORK-046): the derived work order spec/work-orders/WORK-047.md + the advisory/ranking intelligence layer at src/agent-intelligence/ (recommendExecution: the re-ranking of the WORK-044 router's already-eligible set with the observed execution-history signal from wfos_executions — composite 0.6 routing + 0.4 history, neutral prior, §14 sufficiency, the fail-closed ineligible-candidate seam, total-order tie-breaks, ordered fallbacks; recommendDelegation: the deterministic task-profile-driven decomposition over the WORK-045 catalog with assignments from the ranking and the W046-AC10 role history annotating never dropping; full provenance: reasons + evidence windows + constraintsApplied with the §22 decisionId + rejectedAlternatives with the authority's reasons). READ-ONLY (SELECT-only evidence over EXISTING stores; no migration — the last stays 0057); stateless; deterministic. The same change carries the WORK-046 post-merge finalization (complete + mergedAs {pr: 60, mergeCommit: 1f2bef9…} + handoff removed per §34.8/ADR-0007). PR #75 ARCHITECT REVIEW (REQUEST CHANGES — one narrow governance correction, remediated on the same branch): the merged-finalization audit's architect-merge evidence matcher (ARCHITECT_MERGE_SUBJECT_RE) accepted ANY subject beginning with WORK-NNN, so the WORK-052 post-merge finalization commit 1ccc45f ('WORK-052 post-merge corrective finalization — …') was misclassified as merge evidence for its own work order — a provenance/audit-model defect (NOT a stale expected-value pin, as the delivery report had characterized it; that characterization is withdrawn). Corrected: the matcher now recognizes the SPECIFIC colon-separated architect-merge convention ('WORK-NNN: title' — exactly what governance-model.json postMergeFinalization.enforcement and ADR-0007 record; both legitimate shapes preserved: classic 'Merge pull request #N from …' + the colon convention); a discriminating regression added proving finalization/state-only WORK-NNN subjects never enter the evidence (the real 1ccc45f subject + generic shapes + the audit-level no-binding proof); the check NOT weakened (the matcher strictly narrows accepted evidence) and NO expected-SHA re-pinning (the REAL-repository audit's exact-equality assertion was already the truth; the matcher now classifies it). Verified after the correction: typecheck 0; lint 0 errors; static 747/747; agent-intelligence 46/46 on real PG 18 + pglite; merged-finalization 11/11; development-governance 52/52; architecture-governance 40/40; FULL real-PG 18 sweep 110 files — 2415 passed / 0 failed; pglite sweep 2371 passed / 44 skipped / 0 failed; governance:status exit 0 (48 complete, WORK-047 in flight, merged finalized 3/3, frontier WORK-048).",
+        "workOrderId": "WORK-048",
+        "lastVerifiedState": "REVIEW CORRECTION DELIVERED on branch feat/work-048-developer-workbench (off main@e2b665c): the PR #76 REQUEST CHANGES verdict ordered ONE narrow frontend correction — failed authority reads were being degraded into empty state (loadAll()'s .catch(() => null)/.catch(() => []) turned an execution/changes/verification/reviews/deployments failure into 'No …' and a failed getNextWorkItem() into 'No eligible next work item') — remediated at d1fa4b9 WITHOUT redesigning the Workbench: the read-state model (frontend/src/lib/read-state.ts) gives every authoritative surface loading / success(data) / error with success([]) structurally distinct from error; loadAll() settles every read through settleRead() and the swallowing pattern is structurally gone; every surface renders loading → LoadingState, genuine-empty → the 'No …' EmptyState, error → an explicit '… unavailable — <authority> could not be reached (<reason>)' ErrorState; a failed getNextWorkItem() renders 'Next work item unavailable' (never a false 'none eligible'); the attention derivation withholds the all-clear when a contributing read failed; maintenance distinguishes error from the legitimate 'No architecture version' absence. Discriminating regressions: WorkbenchPage.test.tsx 2 → 27 tests proving BOTH branches per surface (API [] → 'No executions'; API throws → 'Executions unavailable' — and likewise for changes/verification/reviews/deployments/activity/graph/runtime/maintenance/planner/project/next-work-item/attention). Static architecture 761 → 764 (no .catch degradation; the three-state read model; the discriminating titles pinned). Browser E2E strengthened: the UNWIRED runtime authority's failures now provably render as 'Deployments unavailable'/'Runtime status unavailable' errors and tenant-isolation 403s as 'Executions unavailable'/'Next work item unavailable' — never the fabricated empty texts. VERIFIED: frontend 67/67 + typecheck 0 + lint 0 errors; backend typecheck 0 / lint 0 errors; static 764/764; browser e2e work-048 5/5 + work-027/032 green; FULL real-PG 18 sweep 111 files 2443/2443 (2440 + the 3 new static invariants); pglite sweep 2399 passed / 0 failed / 44 real-PG-only skipped; the work order carries the review remediation record. The five GET-only endpoints, the requireProjectAuthorization ordering, the project-scoped queries, the safe execution projection, and the recommendation-as-recommendation semantics are UNCHANGED (accepted by the review).",
         "nextSteps": [
-          "architect re-reviews PR #75 after the merge-evidence matcher correction (the intelligence layer is unchanged; the correction is governance-scope only)",
-          "if further changes requested: remediate on the same branch (feat/work-047-agent-intelligence)",
-          "if approved: architect merges the PR; record mergedAs and set status complete (post-merge finalization per §34.8/ADR-0007); WORK-048 remains the frontier item awaiting its own architect authorization"
+          "awaiting the architect's re-review of PR #76 (the review correction is pushed at d1fa4b9; the backend read model and all accepted surfaces are unchanged)",
+          "if further changes requested: remediate on the same branch (feat/work-048-developer-workbench)",
+          "if approved: the architect merges; post-merge finalization per §34.8/ADR-0007 (complete + mergedAs {pr, mergeCommit} + head = the squashed branch head + handoff removal + governance:status truthful)"
         ],
         "blockers": [],
-        "recordedAt": "2026-08-29T02:45:00Z",
-        "recordedBy": "z.ai implementation agent (WORK-047)"
+        "recordedAt": "2026-08-29T07:29:00Z",
+        "recordedBy": "the WORK-048 implementation agent (review correction round)"
       }
     ]
   },

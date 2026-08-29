@@ -136,6 +136,13 @@ export interface ReviewRepository {
   create(input: CreateReviewInput): Promise<Review>;
   findById(id: string): Promise<Review | null>;
   listForWorkItem(workItemId: string): Promise<Review[]>;
+  /**
+   * WORK-048: read-only project-scoped list (newest first) — scoped by the
+   * AUTHORITATIVE project_id column on the row itself. Consumed by the
+   * Workbench read model; a pure SELECT. Optional limit (the audit
+   * listForProject convention; default applied by the repository).
+   */
+  listForProject(projectId: string, opts?: { limit?: number }): Promise<Review[]>;
   /** Finalize a review — set the immutable outcome + completed_at. */
   finalize(id: string, input: FinalizeReviewInput): Promise<Review | null>;
 }
@@ -252,6 +259,12 @@ export interface ReviewService {
 
   /** List Review history for a Work Item (newest first). */
   listReviewsForWorkItem(workItemId: string): Promise<Review[]>;
+
+  /**
+   * WORK-048: list Review history for a whole PROJECT (newest first) — the
+   * Workbench rollup read; a pure read over the authoritative store.
+   */
+  listReviewsForProject(projectId: string, opts?: { limit?: number }): Promise<Review[]>;
 
   /**
    * Add a Finding to a Review. The review must be 'in_progress' (findings
