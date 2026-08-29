@@ -15,8 +15,9 @@
  *      completed) from the backend read model;
  *   3. the rollups render authoritative records (execution, PR identity,
  *      verification run, review) — and the UNWIRED surfaces (deployments,
- *      maintenance) render explicit "unavailable" ERRORS, never fake
- *      "No …" empty states (the PR #76 review correction);
+ *      the WORK-049 Health tab's maintenance authority) render explicit
+ *      "unavailable" ERRORS, never fake "No …" empty states (the PR #76
+ *      review correction);
  *   4. the drill-down: Workbench → work item page → the WORK-048 sections
  *      (Objective, Dependencies, Merge Gates, the ADVISORY recommendation);
  *   5. browser-level tenant isolation: user A opening user B's project
@@ -371,13 +372,17 @@ test('the rollups render the AUTHORITATIVE records (execution, GitHub-derived PR
   await expect(page.getByText(/Deployments unavailable/i)).toBeVisible();
   await expect(page.getByText('No deployments', { exact: true })).toHaveCount(0);
 
-  // Maintenance: the architecture walk SUCCEEDS (wired, frozen version) but
-  // the maintenance authority itself is UNWIRED — an explicit error naming
-  // the maintenance authority, never "No architecture version" and never a
-  // fabricated "no signals".
-  await page.getByRole('tab', { name: /Maintenance/i }).click();
+  // Health (WORK-049): the architecture walk SUCCEEDS (wired, frozen version)
+  // but the maintenance authority itself is UNWIRED — the Health tab renders
+  // the explicit "Maintenance health unavailable" error naming the
+  // maintenance authority AND withholds the all-healthy conclusion
+  // ("Health assessment incomplete" naming maintenance), never "No
+  // architecture version" and never a fabricated "No health findings".
+  await page.getByRole('tab', { name: /Health/i }).click();
   await expect(page.getByText(/Maintenance health unavailable — the maintenance authority/i)).toBeVisible();
+  await expect(page.getByText(/Health assessment incomplete/i)).toBeVisible();
   await expect(page.getByText('No architecture version', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/No health findings/i)).toHaveCount(0);
 });
 
 test('the drill-down: Workbench → work item page → the WORK-048 sections (Objective, Dependencies, Merge Gates, ADVISORY recommendation)', async ({ page }) => {

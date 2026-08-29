@@ -42,8 +42,10 @@ import {
   type Architecture,
   type ArchitectureVersion,
   type MaintenanceHealth,
+  type MaintenanceSignalItem,
   type Project,
   type ProjectRuntimeStatus,
+  type VerificationRun,
   type WorkGraph,
 } from '@/api/client';
 import WorkbenchPage from './WorkbenchPage';
@@ -169,7 +171,7 @@ describe('WORK-048 WorkbenchPage (initial render)', () => {
       'Verification',
       'Reviews',
       'Deployments',
-      'Maintenance',
+      'Health',
       'Activity',
     ]) {
       expect(screen.getByRole('tab', { name: new RegExp(label, 'i') }), `tab ${label}`).toBeInTheDocument();
@@ -304,12 +306,12 @@ describe('WORK-048 failure ≠ empty (the architect\'s PR #76 review correction)
     expect(screen.getByText(/Runtime status unavailable/i)).toBeInTheDocument();
   });
 
-  // The maintenance authority: three DISTINCT outcomes —
-  // error (walk or read failed), success(null) (no architecture version),
-  // success(health) (the authority assessed the version).
+  // The maintenance authority (the Health tab's maintenance-work + what-next
+  // cards): three DISTINCT outcomes — error (walk or read failed),
+  // success(null) (no architecture version), success(health).
   it('maintenance: the architecture walk FAILING renders an error — never "No architecture version"', async () => {
     vi.mocked(architecture.listForProject).mockRejectedValueOnce(new Error('Not authorized'));
-    renderWorkbench('maintenance');
+    renderWorkbench('health');
     expect(
       await screen.findByText(/Maintenance health unavailable — the architecture authority/i),
     ).toBeInTheDocument();
@@ -317,7 +319,7 @@ describe('WORK-048 failure ≠ empty (the architect\'s PR #76 review correction)
   });
 
   it('maintenance: no architecture version (a legitimate absence) renders "No architecture version"', async () => {
-    renderWorkbench('maintenance');
+    renderWorkbench('health');
     expect(await screen.findByText('No architecture version')).toBeInTheDocument();
     expect(screen.queryByTestId('maintenance-unavailable')).not.toBeInTheDocument();
   });
@@ -326,7 +328,7 @@ describe('WORK-048 failure ≠ empty (the architect\'s PR #76 review correction)
     vi.mocked(architecture.listForProject).mockResolvedValueOnce([arch]);
     vi.mocked(architecture.listVersions).mockResolvedValueOnce([frozenVersion]);
     vi.mocked(maintenance.getHealth).mockRejectedValueOnce(new Error('Not found'));
-    renderWorkbench('maintenance');
+    renderWorkbench('health');
     expect(
       await screen.findByText(/Maintenance health unavailable — the maintenance authority/i),
     ).toBeInTheDocument();
@@ -354,5 +356,187 @@ describe('WORK-048 failure ≠ empty (the architect\'s PR #76 review correction)
     expect(
       await screen.findByText(/Project details unavailable — the backend could not be reached/i),
     ).toBeInTheDocument();
+  });
+});
+
+// --- 3. WORK-049: the Health tab (Project Health & Maintenance UX) -------------
+//
+// The adversarial matrix from the work order: failed health reads are DISTINCT
+// from genuine empty health; missing signals are not fabricated; open
+// maintenance findings remain distinguishable from actual completed Work
+// Items; the all-healthy conclusion is withheld whenever a contributing read
+// failed (tenant isolation's 403 topology included).
+describe('WORK-049 the Health tab (failure ≠ empty; findings vs completed work; no fabricated signals)', () => {
+  const signal = (overrides: Record<string, unknown> & { workItemId: string }): MaintenanceSignalItem =>
+    ({
+      workItemHumanId: `WI-${overrides.workItemId.slice(3, 7)}`,
+      title: `title ${overrides.workItemId}`,
+      objective: null,
+      scope: null,
+      completed: false,
+      planner: {
+        source: 'maintenance',
+        priority: 'medium',
+        rationale: 'rationale',
+        whyNow: 'why now',
+        expectedImpact: 'impact',
+      },
+      ...overrides,
+    }) as MaintenanceSignalItem;
+
+  const maintenanceSignalFixture = (workItemId: string, severity: string | null, completed = false): MaintenanceSignalItem =>
+    signal({
+      workItemId,
+      completed,
+      title: `Maintenance ${workItemId}`,
+      planner: {
+        source: 'maintenance',
+        priority: severity ?? 'medium',
+        rationale: 'rationale',
+        whyNow: `why ${workItemId}`,
+        expectedImpact: 'impact',
+        maintenance: { category: 'ci-regression', severity: severity ?? undefined, advisoryId: 'ADV-1', affectedCount: 3, detectorSource: 'ci-evidence' },
+      },
+    });
+
+  const healthWithSignals = (...signals: MaintenanceSignalItem[]): MaintenanceHealth => {
+    const byCategory: Record<string, number> = {};
+    const bySeverity: Record<string, number> = {};
+    for (const s of signals) {
+      const cat = s.planner.maintenance?.category ?? 'unknown';
+      byCategory[cat] = (byCategory[cat] ?? 0) + 1;
+      const sev = s.planner.maintenance?.severity ?? 'unknown';
+      bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
+    }
+    return { architectureVersionId: 'ver-1', totalSignals: signals.length, byCategory, bySeverity, signals };
+  };
+
+  const walkSucceeds = (): void => {
+    vi.mocked(architecture.listForProject).mockResolvedValue([arch]);
+    vi.mocked(architecture.listVersions).mockResolvedValue([frozenVersion]);
+  };
+
+  const failedRun = (workItemId: string): VerificationRun => ({
+    id: `run-${workItemId}`, projectId, workItemId, workOrderId: null, architectureVersionId: 'ver-1',
+    source: 'github-ci', sourceRef: null, status: 'failed', executionId: 'exec-1',
+    startedAt: null, finishedAt: null, summary: { criteriaFail: 2 }, errorMetadata: null,
+    createdAt: '', updatedAt: '',
+  });
+
+  // ADVERSARIAL #2 (health): genuine empty health vs failed health reads.
+  it('health findings: all reads successful + quiet → "No health findings" (provable, lightweight)', async () => {
+    walkSucceeds();
+    renderWorkbench('health');
+    expect(await screen.findByText(/No health findings — the authorities report nothing unhealthy/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('health-incomplete')).not.toBeInTheDocument();
+  });
+
+  it('health findings: a FAILED contributing read → "Health assessment incomplete" — never a false all-clear', async () => {
+    walkSucceeds();
+    vi.mocked(workbench.listVerificationRuns).mockRejectedValueOnce(new Error('Not authorized'));
+    renderWorkbench('health');
+    expect(await screen.findByTestId('health-incomplete')).toBeInTheDocument();
+    expect(screen.getByText(/Health assessment incomplete/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not be assessed: verification\./i)).toBeInTheDocument();
+    expect(screen.queryByText(/No health findings — the authorities report nothing unhealthy/i)).not.toBeInTheDocument();
+  });
+
+  // ADVERSARIAL #1/#3 (tenant isolation + no fabrication): a 403 topology —
+  // EVERY authority read rejected — renders ONLY errors; no finding, no
+  // empty-state all-clear, and no data is ever fabricated.
+  it('health findings: EVERY read rejected (the tenant-isolation 403 topology) → errors only, never "No health findings"', async () => {
+    vi.mocked(projects.get).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(workbench.getWorkGraph).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(workbench.listExecutions).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(workbench.listVerificationRuns).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(runtime.getStatus).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(runtime.listDeployments).mockRejectedValueOnce(new Error('403'));
+    vi.mocked(architecture.listForProject).mockRejectedValueOnce(new Error('403'));
+    renderWorkbench('health');
+    expect(await screen.findByTestId('health-incomplete')).toBeInTheDocument();
+    // The gap names EVERY failed surface (no data was assessable).
+    expect(screen.getByText(/could not be assessed: work graph, executions, verification, deployments, runtime, maintenance\./i)).toBeInTheDocument();
+    expect(screen.queryByText(/No health findings — the authorities report nothing unhealthy/i)).not.toBeInTheDocument();
+  });
+
+  // The findings render WHAT/WHY/SEVERITY/EVIDENCE from the authorities' own
+  // records — severity is the authority's own value, never computed.
+  it('health findings: render from authoritative facts with the authority\'s own severity and evidence', async () => {
+    walkSucceeds();
+    vi.mocked(maintenance.getHealth).mockResolvedValueOnce(healthWithSignals(maintenanceSignalFixture('wi-crit', 'critical')));
+    vi.mocked(workbench.listVerificationRuns).mockResolvedValueOnce([failedRun('wi-failx')]);
+    renderWorkbench('health');
+    // The maintenance finding (what + why + the authority's severity).
+    expect(await screen.findByText('Maintenance: Maintenance wi-crit')).toBeInTheDocument();
+    expect(screen.getByText(/why wi-crit · Evidence: WI-crit \(ci-regression\) · advisory ADV-1 · 3 affected · detector: ci-evidence/i)).toBeInTheDocument();
+    // The failed-verification finding (the run's own status + criteria count).
+    expect(screen.getByText(/Verification failed for wi-failx/i)).toBeInTheDocument();
+    expect(screen.getByText(/failed 2 acceptance criteria/i)).toBeInTheDocument();
+    // Severity badges are the authorities' own values.
+    expect(screen.getAllByText('Critical', { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getByText('Failed', { exact: true })).toBeInTheDocument();
+    // No all-clear alongside real findings.
+    expect(screen.queryByTestId('health-incomplete')).not.toBeInTheDocument();
+    expect(screen.queryByText(/No health findings/i)).not.toBeInTheDocument();
+  });
+
+  // ADVERSARIAL #6: maintenance findings remain distinguishable from actual
+  // COMPLETED Work Items — completed maintenance work is done work, never an
+  // open finding (the authority's own completed flag).
+  it('maintenance work: COMPLETED maintenance work is never an open finding — open and completed are visibly distinct', async () => {
+    walkSucceeds();
+    vi.mocked(maintenance.getHealth).mockResolvedValueOnce(
+      healthWithSignals(
+        maintenanceSignalFixture('wi-open', 'high'),
+        maintenanceSignalFixture('wi-done', 'critical', true),
+      ),
+    );
+    renderWorkbench('health');
+    // The OPEN signal is the finding.
+    expect(await screen.findByText('Maintenance: Maintenance wi-open')).toBeInTheDocument();
+    expect(screen.queryByText('Maintenance: Maintenance wi-done')).not.toBeInTheDocument();
+    // The completed section carries the completed record with its own badge.
+    expect(screen.getByText(/Completed maintenance work \(1\) — done, not open/i)).toBeInTheDocument();
+    expect(screen.getAllByText('Completed').length).toBeGreaterThan(0);
+    // What-next lists the OPEN work item as the governed path — not the
+    // completed one.
+    expect(screen.getByText(/The maintenance authority's Work Item — the governed path/i)).toBeInTheDocument();
+  });
+
+  it('maintenance work: genuine empty (no signals) renders "No maintenance signals" — never a fabricated finding', async () => {
+    walkSucceeds();
+    renderWorkbench('health');
+    expect(await screen.findByText('No maintenance signals')).toBeInTheDocument();
+    expect(screen.queryByTestId('maintenance-unavailable')).not.toBeInTheDocument();
+  });
+
+  // The what-next card follows the same read-state discipline.
+  it('what-next: no open maintenance work + no findings → "Nothing to act on" (the lightweight state)', async () => {
+    walkSucceeds();
+    renderWorkbench('health');
+    expect(await screen.findByText(/Nothing to act on — no open maintenance work and no health findings/i)).toBeInTheDocument();
+  });
+
+  it('what-next: a FAILED maintenance read → "Next maintenance step unavailable" — never a false "nothing to act on"', async () => {
+    walkSucceeds();
+    vi.mocked(maintenance.getHealth).mockRejectedValueOnce(new Error('Not found'));
+    renderWorkbench('health');
+    expect(await screen.findByTestId('maintenance-next-unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Next maintenance step unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing to act on/i)).not.toBeInTheDocument();
+  });
+
+  // ADVERSARIAL #7: the authoritative Work Item state comes from the backend —
+  // the health view only renders the authority's own completed flag (when the
+  // authority says completed, the finding is gone even if the record remains).
+  it('health findings: a maintenance signal whose Work Item the authority marks completed produces NO finding (the authority decides, not the view)', async () => {
+    walkSucceeds();
+    vi.mocked(maintenance.getHealth).mockResolvedValueOnce(
+      healthWithSignals(maintenanceSignalFixture('wi-finished', 'critical', true)),
+    );
+    renderWorkbench('health');
+    expect(await screen.findByText(/No health findings — the authorities report nothing unhealthy/i)).toBeInTheDocument();
+    // …and the completed record is still visible as completed WORK.
+    expect(screen.getByText(/Completed maintenance work \(1\) — done, not open/i)).toBeInTheDocument();
   });
 });

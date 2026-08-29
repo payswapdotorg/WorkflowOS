@@ -1000,7 +1000,7 @@
     {
       "id": "WORK-048",
       "title": "Developer Workbench",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-040",
         "WORK-041",
@@ -1009,7 +1009,7 @@
       ],
       "branch": "feat/work-048-developer-workbench",
       "pr": 76,
-      "head": "d1fa4b9",
+      "head": "8ac4d54",
       "workOrder": "spec/work-orders/WORK-048.md",
       "origin": "architect",
       "surfaces": {
@@ -1042,12 +1042,16 @@
       ],
       "assuranceProfile": "HIGH_ASSURANCE",
       "runtimeImpactBinding": "high",
-      "note": "activated after the WORK-047 merge (e2b665c): the Developer Workbench — the primary human-facing engineering workspace as a CONSUMER of backend authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-048.md). Thin read-model composition ONLY: the workbench never owns workflow/authorization/execution/verification/review state; the new HTTP surface is READ-ONLY project-scoped (project.read + server-side project resolution); module changes are read-only listForProject additions on the OWNING services/repositories (work-items, agents, reviews, verification, github); the frontend renders authoritative data with WORK-044/WORK-047 recommendations visibly distinct from decisions. No migration (the last stays 0057)."
+      "note": "Merged by the architect as 5c48257c81ba8f4125dbae9465be8d3936067645 (PR #76, squash-merged at branch head 8ac4d54 on 2026-08-29T10:23:03Z; the merge tree is IDENTICAL to the approved review-remediated head). The post-merge finalization (§34.8/ADR-0007) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, the active handoff removed (merged work is not resumable), and the work-order document status updated. branch/pr/head kept as the historical record of how it merged. The architect's review found the workbench architecture sound (the five GET-only read-model endpoints, the requireProjectAuthorization ordering, the project-scoped queries, the safe execution projection, the recommendation-as-recommendation semantics all accepted) and merged it after ONE review correction (failed authority reads were degraded into empty state by loadAll()'s .catch(() => null)/.catch(() => []) pattern — remediated at d1fa4b9 with the read-state model (loading/success/error, success([]) structurally distinct from error), the per-surface error renderings, and 25 discriminating frontend regressions; the backend read model was unchanged).",
+      "mergedAs": {
+        "pr": 76,
+        "mergeCommit": "5c48257c81ba8f4125dbae9465be8d3936067645"
+      }
     },
     {
       "id": "WORK-049",
       "title": "Project Health and Maintenance UX",
-      "status": "blocked",
+      "status": "in_flight",
       "dependencies": [
         "WORK-041",
         "WORK-048"
@@ -1059,19 +1063,26 @@
         ],
         "appLayer": [],
         "migrations": [],
-        "specDocs": [],
-        "sharedIntegrationSurfaces": []
+        "specDocs": [
+          "spec/work-orders/WORK-049.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/tests/architecture/static-architecture.test.ts"
+        ]
       },
       "surfaceFlags": [
         "moduleInternals"
       ],
       "assuranceProfile": "STANDARD",
-      "note": "blocked pending WORK-048"
+      "note": "activated after the WORK-048 merge (5c48257): the Project Health and Maintenance UX — the Workbench extended to surface maintenance and health information as a CONSUMER of existing backend authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-049.md). FRONTEND-ONLY read-model composition: the health derivation is a pure presentation function over the AUTHORITATIVE facts the Workbench already loads (the maintenance authority's signals with their own severity/category/evidence, the verification authority's failed runs, the dependency authority's unsatisfied dependencies, the runtime authority's provider status, the execution records, the deployments). NO second maintenance engine, NO second health authority, NO frontend policy/prioritization engine, NO second Work Item store, NO workflow state machine in the frontend; maintenance findings remain visibly SIGNALS/RECOMMENDATIONS unless an authoritative Work Item exists (open maintenance work vs completed work always distinguishable). Lightweight for normal projects (a compact all-healthy state; no critical-system governance forced onto every project). Read-only (ZERO mutation calls); no migration (the last stays 0057).",
+      "branch": "feat/work-049-project-health-maintenance-ux",
+      "workOrder": "spec/work-orders/WORK-049.md",
+      "runtimeImpactBinding": "medium"
     },
     {
       "id": "WORK-050",
       "title": "Unified Execution UX",
-      "status": "blocked",
+      "status": "pending",
       "dependencies": [
         "WORK-042",
         "WORK-043",
@@ -1092,7 +1103,7 @@
         "multiModule"
       ],
       "assuranceProfile": "STANDARD",
-      "note": "blocked pending WORK-048"
+      "note": "dependency-eligible (all dependencies complete after the WORK-048 merge 5c48257); awaiting architect authorization via Work Order"
     },
     {
       "id": "WORK-051",
@@ -1359,16 +1370,18 @@
     "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
     "activeHandoffs": [
       {
-        "workOrderId": "WORK-048",
-        "lastVerifiedState": "REVIEW CORRECTION DELIVERED on branch feat/work-048-developer-workbench (off main@e2b665c): the PR #76 REQUEST CHANGES verdict ordered ONE narrow frontend correction — failed authority reads were being degraded into empty state (loadAll()'s .catch(() => null)/.catch(() => []) turned an execution/changes/verification/reviews/deployments failure into 'No …' and a failed getNextWorkItem() into 'No eligible next work item') — remediated at d1fa4b9 WITHOUT redesigning the Workbench: the read-state model (frontend/src/lib/read-state.ts) gives every authoritative surface loading / success(data) / error with success([]) structurally distinct from error; loadAll() settles every read through settleRead() and the swallowing pattern is structurally gone; every surface renders loading → LoadingState, genuine-empty → the 'No …' EmptyState, error → an explicit '… unavailable — <authority> could not be reached (<reason>)' ErrorState; a failed getNextWorkItem() renders 'Next work item unavailable' (never a false 'none eligible'); the attention derivation withholds the all-clear when a contributing read failed; maintenance distinguishes error from the legitimate 'No architecture version' absence. Discriminating regressions: WorkbenchPage.test.tsx 2 → 27 tests proving BOTH branches per surface (API [] → 'No executions'; API throws → 'Executions unavailable' — and likewise for changes/verification/reviews/deployments/activity/graph/runtime/maintenance/planner/project/next-work-item/attention). Static architecture 761 → 764 (no .catch degradation; the three-state read model; the discriminating titles pinned). Browser E2E strengthened: the UNWIRED runtime authority's failures now provably render as 'Deployments unavailable'/'Runtime status unavailable' errors and tenant-isolation 403s as 'Executions unavailable'/'Next work item unavailable' — never the fabricated empty texts. VERIFIED: frontend 67/67 + typecheck 0 + lint 0 errors; backend typecheck 0 / lint 0 errors; static 764/764; browser e2e work-048 5/5 + work-027/032 green; FULL real-PG 18 sweep 111 files 2443/2443 (2440 + the 3 new static invariants); pglite sweep 2399 passed / 0 failed / 44 real-PG-only skipped; the work order carries the review remediation record. The five GET-only endpoints, the requireProjectAuthorization ordering, the project-scoped queries, the safe execution projection, and the recommendation-as-recommendation semantics are UNCHANGED (accepted by the review).",
+        "workOrderId": "WORK-049",
+        "lastVerifiedState": "STARTED on branch feat/work-049-project-health-maintenance-ux (off main@5c48257 — the merged WORK-048, whose post-merge finalization is carried by this same change per §34.8/ADR-0007): the derived work order spec/work-orders/WORK-049.md + the governed activation. Scope established from the repository (not prior reports): the Workbench already loads every health-relevant authority (maintenance health with the authority's own severity/category/advisory evidence, verification runs, the work graph with unsatisfied dependencies, runtime provider status, executions, deployments) — WORK-049 is a frontend-only read-model extension: a pure fact-based health derivation helper (frontend/src/lib/health.ts) + the Workbench Health tab (findings with what/why/severity/evidence, open maintenance work vs completed maintenance work, the all-healthy lightweight state, per-surface read-state rendering).",
         "nextSteps": [
-          "awaiting the architect's re-review of PR #76 (the review correction is pushed at d1fa4b9; the backend read model and all accepted surfaces are unchanged)",
-          "if further changes requested: remediate on the same branch (feat/work-048-developer-workbench)",
-          "if approved: the architect merges; post-merge finalization per §34.8/ADR-0007 (complete + mergedAs {pr, mergeCommit} + head = the squashed branch head + handoff removal + governance:status truthful)"
+          "implement the pure health derivation helper (facts in → findings out; deterministic; no policy engine)",
+          "implement the Workbench Health tab (findings / maintenance work / what-next; read-states everywhere)",
+          "adversarial regressions: tenant isolation, failed-vs-empty health reads, no fabricated signals, stale UI, recommendations cannot mutate, findings vs completed work",
+          "static architecture pins: no new frontend authority, pure derivation, read-only, no second stores",
+          "full verification: typecheck, lint, frontend tests, static suite, real-PG sweep, browser E2E; open the PR"
         ],
         "blockers": [],
-        "recordedAt": "2026-08-29T07:29:00Z",
-        "recordedBy": "the WORK-048 implementation agent (review correction round)"
+        "recordedAt": "2026-08-29T11:30:00Z",
+        "recordedBy": "the WORK-049 implementation agent"
       }
     ]
   },

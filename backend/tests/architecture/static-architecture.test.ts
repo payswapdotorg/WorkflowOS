@@ -17994,3 +17994,179 @@ describe('WORK-048 invariants — Developer Workbench (consumer, never authority
     expect(tests).toMatch(/the work graph: a FAILED read renders the explicit unavailable error — never "No work items"/);
   });
 });
+
+// ===========================================================================
+// WORK-049 — Project Health and Maintenance UX (a consumer of existing
+// authorities, never an authority itself). The Workbench's Health tab is a
+// read-model presentation over the SAME authoritative responses the page
+// already loads; the derivation is the PURE helper in
+// frontend/src/lib/health.ts (facts in → findings out; severity is ALWAYS
+// the authority's own value, never computed). No second maintenance engine,
+// no second health authority, no frontend policy/prioritization engine, no
+// second Work Item store, no workflow state machine — and ZERO mutations
+// (health recommendations cannot mutate state).
+// ===========================================================================
+describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, never authority)', () => {
+  const FRONTEND_SRC = join(BACKEND_ROOT, '..', 'frontend', 'src');
+  const HEALTH_PAGE = join(FRONTEND_SRC, 'pages', 'WorkbenchPage.tsx');
+  const HEALTH_LIB = join(FRONTEND_SRC, 'lib', 'health.ts');
+  const HEALTH_LIB_TESTS = join(FRONTEND_SRC, 'lib', 'health.test.ts');
+  const HEALTH_PAGE_TESTS = join(FRONTEND_SRC, 'pages', 'WorkbenchPage.test.tsx');
+  const WORK_ORDER = join(BACKEND_ROOT, '..', 'spec', 'work-orders', 'WORK-049.md');
+  const HEALTH_FILES = [HEALTH_PAGE, HEALTH_LIB];
+
+  // --- (a) NO new frontend authority (the work order's non-negotiable rule) --
+
+  it('ADVERSARIAL #8 (structural): the health helper is a PURE presentation function — no fetch, no state, no persistence, no evaluation engine', () => {
+    const src = readFileSync(HEALTH_LIB, 'utf8');
+    // No I/O of any kind: the helper only shapes authoritative facts (the
+    // work-graph.ts precedent — lookup Maps for display grouping are fine;
+    // engines, fetches, and persistence are not).
+    for (const forbidden of [
+      /apiGet\s*\(/,
+      /apiPost\s*\(/,
+      /apiPatch\s*\(/,
+      /apiDelete\s*\(/,
+      /\bfetch\s*\(/,
+      /localStorage/,
+      /sessionStorage/,
+      /useState|useEffect|useMemo|useRef/,
+      /new\s+Request\b/,
+    ]) {
+      expect(src, `lib/health.ts must be pure presentation (forbidden: ${forbidden})`).not.toMatch(forbidden);
+    }
+    // It derives from the AUTHORITATIVE types (the api client's own records).
+    expect(src).toMatch(/from '@\/api\/client'/);
+  });
+
+  it('ADVERSARIAL #8 (structural): NO second maintenance/health/debt/policy/prioritization authority, NO second Work Item store, NO workflow state machine in the health frontend', () => {
+    for (const file of HEALTH_FILES) {
+      const src = readFileSync(file, 'utf8');
+      const codeOnly = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not define a health engine`).not.toMatch(
+        /\bMaintenanceEngine\b|\bHealthEngine\b|\bHealthPolicy\b|\bPolicyEngine\b|\bPrioritizationEngine\b|\bTechnicalDebtStore\b/,
+      );
+      // No persisted second Work Item store, no workflow transition authority.
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not persist a second Work Item store`).not.toMatch(
+        /localStorage\.setItem|localStorage\.getItem|sessionStorage\.setItem/,
+      );
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not define workflow transitions`).not.toMatch(
+        /\bLEGAL_TRANSITIONS\b|\blegalTransitions\b|\btransitionMap\b|toState\s*:/,
+      );
+      // No direct database/provider access (the frontend never touches them).
+      expect(codeOnly, `${relative(BACKEND_ROOT, file)} must not touch the database or providers`).not.toMatch(
+        /DatabaseClient|api\.github\.com|\bpg\b|pglite/i,
+      );
+    }
+  });
+
+  // --- (b) ADVERSARIAL #5 (structural): health recommendations cannot mutate --
+
+  it('ADVERSARIAL #5 (structural): the health view performs ZERO mutation calls (read-only by construction)', () => {
+    for (const file of HEALTH_FILES) {
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${relative(BACKEND_ROOT, file)} must not call API mutations`).not.toMatch(
+        /apiPost\s*\(|apiPatch\s*\(|apiDelete\s*\(|\.transition\(|\.converge\(|\.beginVerification\(|\.requestMerge\(|\.evaluate\(|\.detectAndEvaluate\(|\.scan\(/,
+      );
+    }
+    // The maintenance scan/evaluate triggers are NOT surfaced from the health
+    // view: the page's maintenance namespace usage is the read-only getHealth.
+    const page = readFileSync(HEALTH_PAGE, 'utf8');
+    expect(page).toMatch(/maintenance\.getHealth\(/);
+    expect(page).not.toMatch(/maintenance\.(evaluate|scan)/);
+  });
+
+  // --- (c) severity is the AUTHORITY's own value, never computed -------------
+
+  it("the health derivation never computes a severity the authority did not state (the authority's own values, verbatim)", () => {
+    const src = readFileSync(HEALTH_LIB, 'utf8');
+    // Severity values are read from the authority's records (maintenance
+    // severity / run status / deployment status / provider status) — the only
+    // "ordering" is the DISPLAY order over the authority's own values.
+    expect(src).toMatch(/severity:\s*m\.severity/);
+    expect(src).toMatch(/severity:\s*run\.status/);
+    expect(src).toMatch(/severity:\s*e\.status/);
+    expect(src).toMatch(/severity:\s*d\.status/);
+    // No synthesized severity scale anywhere.
+    expect(src).not.toMatch(/score\s*[+*]|weight\s*[+*]|normalize\(|computeSeverity|deriveSeverity/);
+  });
+
+  // --- (d) findings vs completed work (adversarial #6/#7) ---------------------
+
+  it("ADVERSARIAL #6 (structural): completed maintenance work is never an open finding — the split is the authority's own completed flag", () => {
+    const src = readFileSync(HEALTH_LIB, 'utf8');
+    // The split keys on the authority's own completed flag.
+    expect(src).toMatch(/s\.completed\s*\?\s*completed\s*:\s*open/);
+    // Findings derive from OPEN signals only (splitMaintenanceWork().open).
+    expect(src).toMatch(/splitMaintenanceWork\(maintenanceHealth\.signals\)/);
+    // The page renders the completed section VISIBLY distinct from findings.
+    const page = readFileSync(HEALTH_PAGE, 'utf8');
+    expect(page).toMatch(/Completed maintenance work/);
+    expect(page).toMatch(/done, not open/);
+  });
+
+  // --- (e) the adversarial regression coverage is pinned by title -------------
+
+  it('the WORK-049 adversarial coverage is pinned by title in the frontend suites (the work order\'s required matrix)', () => {
+    const pageTests = readFileSync(HEALTH_PAGE_TESTS, 'utf8');
+    // #1/#3 tenant isolation + no fabrication (the 403 topology).
+    expect(pageTests).toMatch(/EVERY read rejected \(the tenant-isolation 403 topology\) → errors only, never "No health findings"/);
+    // #2 failed health reads distinct from genuine empty health.
+    expect(pageTests).toMatch(/a FAILED contributing read → "Health assessment incomplete" — never a false all-clear/);
+    expect(pageTests).toMatch(/all reads successful \+ quiet → "No health findings" \(provable, lightweight\)/);
+    // #5 recommendations cannot mutate + #6/#7 findings vs completed work.
+    expect(pageTests).toMatch(/COMPLETED maintenance work is never an open finding — open and completed are visibly distinct/);
+    expect(pageTests).toMatch(/a maintenance signal whose Work Item the authority marks completed produces NO finding \(the authority decides, not the view\)/);
+    // The what-next read-state discrimination.
+    expect(pageTests).toMatch(/a FAILED maintenance read → "Next maintenance step unavailable" — never a false "nothing to act on"/);
+    // The pure-helper suite: determinism, no fabrication, refresh consistency.
+    const libTests = readFileSync(HEALTH_LIB_TESTS, 'utf8');
+    expect(libTests).toMatch(/DETERMINISM: the SAME facts always produce the SAME findings in the SAME order/);
+    expect(libTests).toMatch(/MISSING SIGNALS ARE NOT FABRICATED/);
+    expect(libTests).toMatch(/REFRESH CONSISTENCY: fresh authoritative facts produce the fresh health view — never a cached verdict/);
+    expect(libTests).toMatch(/FINDINGS vs COMPLETED WORK/);
+  });
+
+  // --- (f) the work order exists with the non-negotiable rules ----------------
+
+  it('the WORK-049 work order exists with the non-negotiable consumer rules and the adversarial matrix', () => {
+    const order = readFileSync(WORK_ORDER, 'utf8');
+    expect(order).toMatch(/The frontend MUST NOT become a health authority/);
+    expect(order).toMatch(/a second maintenance engine/);
+    expect(order).toMatch(/Maintenance findings are signals\/recommendations unless an authoritative Work\nItem exists/);
+    expect(order).toMatch(/Failed health reads\s+are\s+ERRORS, never "no findings"/);
+    expect(order).toMatch(/Keep the UX lightweight for normal projects/);
+    expect(order).toMatch(/The health view makes emerging maintenance legible/);
+    expect(order).toMatch(/No new authority is introduced/);
+    expect(order).toMatch(/Tenant isolation \(a user cannot read another project's health state\)/);
+  });
+
+  // --- (g) no new backend surface rode along ----------------------------------
+
+  it('WORK-049 adds NO backend route (the api routes directory is unchanged by the health UX — frontend-only scope)', () => {
+    const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    // The exact route set as WORK-048 left it: 32 route files, no additions.
+    // (health.route.ts is WORK-001/023's PLATFORM liveness/readiness probe —
+    // it predates WORK-049 and is NOT a project-health read model.)
+    const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
+    expect(routeFiles).toEqual([
+      'agent-intelligence.route.ts', 'agent-policy.route.ts', 'agent-roles.route.ts', 'agent.route.ts',
+      'architect.route.ts', 'architecture.route.ts', 'audit.route.ts', 'benchmark.route.ts',
+      'companion.route.ts', 'delegation.route.ts', 'development-planner.route.ts',
+      'execution-policy.route.ts', 'execution-routing.route.ts', 'execution.route.ts',
+      'github-provisioning.route.ts', 'github-webhook.route.ts', 'health.route.ts',
+      'jobs.route.ts', 'llm.route.ts', 'maintenance.route.ts', 'notification.route.ts',
+      'onboarding.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
+      'requirements.route.ts', 'review.route.ts', 'runtime.route.ts', 'specifications.route.ts',
+      'verification.route.ts', 'work-items.route.ts', 'workbench.route.ts', 'workflow.route.ts',
+    ]);
+    // The maintenance read model remains WORK-041's (unchanged by WORK-049):
+    // GET-only health/signals reads, project.read, server-side scoping.
+    const maintenanceCode = readFileSync(join(routesDir, 'maintenance.route.ts'), 'utf8');
+    expect(maintenanceCode).toMatch(/app\.get\('\/projects\/:projectId\/maintenance\/health'/);
+    expect(maintenanceCode).toMatch(/app\.get\('\/projects\/:projectId\/maintenance\/signals'/);
+    // The workbench route is STILL GET-only (WORK-049 changed nothing there).
+    const routeCode = readFileSync(join(routesDir, 'workbench.route.ts'), 'utf8');
+    expect(routeCode).not.toMatch(/app\.(post|put|patch|delete)\(/);
+  });
+});

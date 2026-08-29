@@ -1,9 +1,6 @@
 # WORK-048 — Developer Workbench
 
-Status: IN FLIGHT — on branch `feat/work-048-developer-workbench` (off main@e2b665c —
-the merged WORK-047, whose post-merge finalization §34.8/ADR-0007 is carried by this
-same change). Derived from the architect's authorization; this document is the
-governing work order.
+Status: COMPLETE — merged by the architect as `5c48257c81ba8f4125dbae9465be8d3936067645` (PR #76, squash-merged at branch head `8ac4d54` on 2026-08-29T10:23:03Z; the merge tree is identical to the approved review-remediated head). The post-merge finalization (§34.8/ADR-0007) — complete + `mergedAs {pr: 76, mergeCommit: 5c48257c…}` + handoff removed — is recorded in the canonical state and was carried by the WORK-049 activation change.
 Architecture: frozen v1.0 authority model (the workbench is a CONSUMER, never an authority)
 Dependencies: WORK-040 (continuous development planner), WORK-041 (maintenance and
 project health engine), WORK-042 (cross-mode execution handoff), WORK-044 (adaptive

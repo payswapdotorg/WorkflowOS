@@ -24,6 +24,17 @@
  * getNextWorkItem() renders "Next work item unavailable", never "No eligible
  * next work item". success([]) (the authority genuinely answered "none") and
  * error (the authority could not be reached) are always distinguishable.
+ *
+ * HEALTH TAB (WORK-049 — the Project Health & Maintenance UX): the Health
+ * tab is a read-model presentation over the SAME authoritative responses
+ * this page already loads (the maintenance authority's signals, the
+ * verification runs, the work graph, the executions, the runtime status,
+ * the deployments). The derivation is the PURE helper in lib/health.ts
+ * (facts in → findings out; severity is ALWAYS the authority's own value,
+ * never computed); a failed contributing read withholds the all-healthy
+ * conclusion ("Health assessment incomplete — …"); open maintenance
+ * findings and COMPLETED maintenance work are always distinguishable; the
+ * tab performs ZERO mutations (health recommendations cannot mutate state).
  */
 import * as React from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
@@ -35,6 +46,7 @@ import {
   CircleCheckBig,
   Cpu,
   GitPullRequest,
+  HeartPulse,
   Layers,
   ListChecks,
   Rocket,
@@ -72,6 +84,7 @@ import { StatusBadge } from '@/components/domain/status-badge';
 import { AuditEventItem } from '@/components/domain/audit-event-item';
 import { WorkGraphBoard } from '@/components/workbench/work-graph-board';
 import { countByState, deriveAttention } from '@/lib/work-graph';
+import { deriveHealthFindings, splitMaintenanceWork } from '@/lib/health';
 import { formatRelative, shortId, titleCase } from '@/lib/format';
 import { readLoading, settleRead, type ReadState } from '@/lib/read-state';
 import { Badge } from '@/components/ui/badge';
@@ -88,7 +101,7 @@ const TABS = [
   { value: 'verification', label: 'Verification', icon: ShieldCheck },
   { value: 'reviews', label: 'Reviews', icon: Users },
   { value: 'deployments', label: 'Deployments', icon: Rocket },
-  { value: 'maintenance', label: 'Maintenance', icon: Stethoscope },
+  { value: 'health', label: 'Health', icon: HeartPulse },
   { value: 'activity', label: 'Activity', icon: ActivityIcon },
 ] as const;
 
@@ -340,6 +353,50 @@ export default function WorkbenchPage() {
   ];
   const attentionFailed = attentionSurfaces.filter((s) => s.failed).map((s) => s.name);
   const attentionPending = attentionSurfaces.some((s) => s.pending);
+
+  // --- WORK-049: the Project Health view ---------------------------------
+  //
+  // The health findings are derived ONLY from reads that SUCCEEDED (a
+  // failed read contributes NOTHING — its findings are simply unknown, and
+  // the all-healthy conclusion is withheld below). The SAME facts always
+  // produce the SAME findings (the pure helper); fresh responses re-derive
+  // the view on every refresh (stale UI can never override server truth).
+  const healthFindings = React.useMemo(
+    () =>
+      deriveHealthFindings({
+        graph,
+        executions: executionsRead.status === 'success' ? executionsRead.data : [],
+        verificationRuns: verificationRead.status === 'success' ? verificationRead.data : [],
+        maintenanceHealth: maintenanceRead.status === 'success' ? maintenanceRead.data : null,
+        runtimeStatus: runtimeRead.status === 'success' ? runtimeRead.data : null,
+        deployments: deploymentsRead.status === 'success' ? deploymentsRead.data : [],
+      }),
+    [graph, executionsRead, verificationRead, maintenanceRead, runtimeRead, deploymentsRead],
+  );
+  // A failed contributing read makes the all-healthy conclusion UNPROVABLE —
+  // the health assessment reports the gap instead ("I don't know" must not
+  // become "nothing is unhealthy").
+  const healthSurfaces: Array<{ name: string; failed: boolean; pending: boolean }> = [
+    { name: 'work graph', failed: graphRead.status === 'error', pending: graphRead.status === 'loading' },
+    { name: 'executions', failed: executionsRead.status === 'error', pending: executionsRead.status === 'loading' },
+    { name: 'verification', failed: verificationRead.status === 'error', pending: verificationRead.status === 'loading' },
+    { name: 'deployments', failed: deploymentsRead.status === 'error', pending: deploymentsRead.status === 'loading' },
+    { name: 'runtime', failed: runtimeRead.status === 'error', pending: runtimeRead.status === 'loading' },
+    { name: 'maintenance', failed: maintenanceRead.status === 'error', pending: maintenanceRead.status === 'loading' },
+  ];
+  const healthFailed = healthSurfaces.filter((s) => s.failed).map((s) => s.name);
+  const healthPending = healthSurfaces.some((s) => s.pending);
+
+  // The maintenance authority's own signals, split into OPEN work (the
+  // findings' work items — the governed next steps) and COMPLETED work
+  // (done work, visibly never an open finding).
+  const maintenanceWork = React.useMemo(
+    () =>
+      maintenanceRead.status === 'success' && maintenanceRead.data
+        ? splitMaintenanceWork(maintenanceRead.data.signals)
+        : null,
+    [maintenanceRead],
+  );
 
   const stateCounts = React.useMemo(
     () => (graph ? countByState(graph.nodes) : []),
@@ -871,74 +928,203 @@ export default function WorkbenchPage() {
           )}
         </TabsContent>
 
-        {/* --- Maintenance --------------------------------------------------------- */}
-        <TabsContent value="maintenance" className="flex flex-col gap-4">
-          {maintenanceRead.status === 'error' ? (
-            <ErrorState
-              data-testid="maintenance-unavailable"
-              message={maintenanceRead.message}
-              onRetry={loadAll}
-            />
-          ) : maintenanceRead.status === 'loading' ? (
-            <LoadingState label="Loading maintenance health…" />
-          ) : maintenanceRead.data === null ? (
-            <EmptyState
-              icon={Stethoscope}
-              title="No architecture version"
-              description="This project has no architecture version to inspect yet — the maintenance authority is version-scoped (no data is invented)."
-            />
-          ) : maintenanceRead.data.totalSignals === 0 ? (
-            <EmptyState
-              icon={Stethoscope}
-              title="No maintenance signals"
-              description="The maintenance authority reports no emerging maintenance for this architecture version."
-            />
-          ) : (
-            <>
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">Maintenance health</CardTitle>
-                  <CardDescription>
-                    {maintenanceRead.data.totalSignals} signal
-                    {maintenanceRead.data.totalSignals === 1 ? '' : 's'} (the maintenance authority's
-                    assessment of this architecture version).
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="flex flex-wrap gap-2">
-                  {Object.entries(maintenanceRead.data.bySeverity).map(([sev, count]) => (
-                    <Badge key={sev} variant={sev === 'critical' || sev === 'high' ? 'destructive' : 'secondary'}>
-                      {titleCase(sev)}: {count}
-                    </Badge>
-                  ))}
-                  {Object.entries(maintenanceRead.data.byCategory).map(([cat, count]) => (
-                    <Badge key={cat} variant="secondary">
-                      {titleCase(cat)}: {count}
-                    </Badge>
-                  ))}
-                </CardContent>
-              </Card>
-              {maintenanceRead.data.signals.map((s) => (
+        {/* --- Health (WORK-049: the Project Health & Maintenance UX) ------------ */}
+        <TabsContent value="health" className="flex flex-col gap-4">
+          {/* What is unhealthy? Why? How severe? What evidence supports it? */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <HeartPulse className="h-4 w-4" />
+                Health findings
+              </CardTitle>
+              <CardDescription>
+                Derived from the authoritative maintenance signals, verification
+                runs, work graph, executions, and runtime status. Severity is
+                the authority's own value; every finding links to its evidence.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
+              {healthFindings.map((f, idx) => (
                 <RowCard
-                  key={s.workItemId}
-                  to={`/work-items/${s.workItemId}`}
-                  title={`${s.workItemHumanId} — ${s.title}`}
+                  key={`${f.kind}-${idx}`}
+                  to={f.href}
+                  title={f.what}
                   meta={
                     <span>
-                      {titleCase(s.planner.maintenance?.category ?? 'unknown')}
-                      {s.planner.maintenance?.severity ? ` · ${s.planner.maintenance.severity}` : ''}
-                      {s.planner.maintenance?.advisoryId ? ` · ${s.planner.maintenance.advisoryId}` : ''}
-                      {` · ${s.planner.whyNow}`}
+                      {f.why} · Evidence: {f.evidence}
                     </span>
                   }
                   badge={
-                    <StatusBadge
-                      value={s.planner.maintenance?.severity ?? null}
-                    />
+                    <span className="flex items-center gap-1.5">
+                      <Badge variant="secondary">{titleCase(f.kind)}</Badge>
+                      {f.severity ? <StatusBadge value={f.severity} /> : null}
+                    </span>
                   }
                 />
               ))}
-            </>
-          )}
+              {healthFailed.length > 0 ? (
+                // A failed contributing read makes the all-healthy conclusion
+                // UNPROVABLE — the gap is reported, never papered over.
+                <div className="text-sm text-destructive" data-testid="health-incomplete">
+                  Health assessment incomplete — the following authority reads
+                  failed and could not be assessed: {healthFailed.join(', ')}.
+                </div>
+              ) : healthPending ? (
+                <LoadingState label="Loading health findings…" />
+              ) : healthFindings.length === 0 ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CircleCheckBig className="h-4 w-4 text-success" />
+                  No health findings — the authorities report nothing unhealthy.
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          {/* What maintenance work exists? (open findings vs COMPLETED work —
+              always distinguishable; the authority's own records) */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Stethoscope className="h-4 w-4" />
+                Maintenance work
+              </CardTitle>
+              <CardDescription>
+                The maintenance authority's own signals for this architecture
+                version — each is an authoritative Work Item.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
+              {maintenanceRead.status === 'error' ? (
+                <UnavailableLine testid="maintenance-unavailable">
+                  {maintenanceRead.message}
+                </UnavailableLine>
+              ) : maintenanceRead.status === 'loading' ? (
+                <LoadingState label="Loading maintenance work…" />
+              ) : maintenanceRead.data === null ? (
+                <EmptyState
+                  icon={Stethoscope}
+                  title="No architecture version"
+                  description="This project has no architecture version to inspect yet — the maintenance authority is version-scoped (no data is invented)."
+                />
+              ) : !maintenanceWork || (maintenanceWork.open.length === 0 && maintenanceWork.completed.length === 0) ? (
+                <EmptyState
+                  icon={Stethoscope}
+                  title="No maintenance signals"
+                  description="The maintenance authority reports no emerging maintenance for this architecture version."
+                />
+              ) : (
+                <>
+                  {maintenanceWork.open.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      {maintenanceWork.open.map((m) => (
+                        <RowCard
+                          key={m.workItemId}
+                          to={m.href}
+                          title={`${m.workItemHumanId} — ${m.title}`}
+                          meta={
+                            <span>
+                              {titleCase(m.category ?? 'unknown')}
+                              {m.severity ? ` · ${m.severity}` : ''}
+                              {m.advisoryId ? ` · ${m.advisoryId}` : ''}
+                              {m.affectedCount !== null ? ` · ${m.affectedCount} affected` : ''}
+                              {` · ${m.whyNow}`}
+                            </span>
+                          }
+                          badge={<StatusBadge value={m.severity} />}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {maintenanceWork.completed.length > 0 && (
+                    // COMPLETED maintenance work: done work, visibly distinct
+                    // from open findings — never presented as an open problem.
+                    <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-muted/30 p-3">
+                      <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                        <CircleCheckBig className="h-3.5 w-3.5 text-success" />
+                        Completed maintenance work ({maintenanceWork.completed.length}) — done, not open
+                      </div>
+                      <div className="flex max-h-48 flex-col gap-1.5 overflow-y-auto">
+                        {maintenanceWork.completed.map((m) => (
+                          <RowCard
+                            key={m.workItemId}
+                            to={m.href}
+                            title={
+                              <span className="text-muted-foreground">
+                                {m.workItemHumanId} — {m.title}
+                              </span>
+                            }
+                            meta={
+                              <span>
+                                {titleCase(m.category ?? 'unknown')}
+                                {m.severity ? ` · was ${m.severity}` : ''}
+                              </span>
+                            }
+                            badge={<Badge variant="success">Completed</Badge>}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* What should happen next? (the governed path — the authoritative
+              Work Items; the health view never invents an action) */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ArrowRight className="h-4 w-4" />
+                What should happen next
+              </CardTitle>
+              <CardDescription>
+                The maintenance authority's open Work Items are the governed
+                next steps — the health view recommends nothing beyond them
+                (recommendations never become decisions here).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
+              {maintenanceRead.status === 'error' ? (
+                <UnavailableLine testid="maintenance-next-unavailable">
+                  Next maintenance step unavailable — the maintenance authority
+                  could not be reached (the reason is on the maintenance work
+                  card above).
+                </UnavailableLine>
+              ) : maintenanceRead.status === 'loading' ? (
+                <LoadingState label="Loading next maintenance steps…" />
+              ) : maintenanceRead.data === null ? (
+                <div className="text-sm text-muted-foreground">
+                  No architecture version to plan maintenance against yet.
+                </div>
+              ) : maintenanceWork && maintenanceWork.open.length > 0 ? (
+                maintenanceWork.open.slice(0, 5).map((m) => (
+                  <RowCard
+                    key={m.workItemId}
+                    to={m.href}
+                    title={`${m.workItemHumanId} — ${m.title}`}
+                    meta="The maintenance authority's Work Item — the governed path (act on it through the workflow)."
+                    badge={
+                      <span className="flex items-center gap-1.5">
+                        <Badge variant="secondary">Maintenance</Badge>
+                        {m.severity ? <StatusBadge value={m.severity} /> : null}
+                      </span>
+                    }
+                  />
+                ))
+              ) : healthFindings.length > 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  No open maintenance work — follow the evidence links on the
+                  findings above (each links to its authoritative record).
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CircleCheckBig className="h-4 w-4 text-success" />
+                  Nothing to act on — no open maintenance work and no health findings.
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* --- Activity --------------------------------------------------------- */}
