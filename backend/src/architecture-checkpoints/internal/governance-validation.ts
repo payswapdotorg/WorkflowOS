@@ -446,6 +446,22 @@ export function selectAssuranceProfile(
  */
 export type GovernanceFileReader = (repoRelativePath: string) => Promise<string | null>;
 
+/**
+ * Lists a repository-relative directory for work-order identity-surface
+ * validation (returns the entry names; `[]` when the directory does not
+ * exist). May THROW on a read failure — callers fail closed on a throw,
+ * exactly like {@link GovernanceFileReader}.
+ */
+export type GovernanceDirLister = (repoRelativePath: string) => Promise<readonly string[]>;
+
+/**
+ * The ONE authoritative directory for Work Order identity artifacts
+ * (code-pinned): `spec/work-orders/` holds exactly the canonical
+ * `WORK-NNN.md` files (plus `TEMPLATE.md`). Retired/superseded identity
+ * material lives in `spec/archive/` under distinct identities — NEVER here.
+ */
+export const AUTHORITATIVE_WORK_ORDER_DIR = 'spec/work-orders';
+
 export interface GovernanceValidationResult {
   ok: boolean;
   violations: string[];
@@ -486,6 +502,7 @@ export async function validateGovernanceState(
   model: GovernanceModel,
   program: ProgramState,
   readFile: GovernanceFileReader,
+  listDir?: GovernanceDirLister,
 ): Promise<GovernanceValidationResult> {
   const violations: string[] = [];
 
@@ -1017,6 +1034,67 @@ export async function validateGovernanceState(
     for (const w of orders) {
       for (const adr of w.coordination?.adrs ?? []) {
         if (!files.has(adr)) violations.push(`workOrders[${w.id}].coordination.adrs: "${adr}" is not in the decisions index — coordination rationale must be durably recoverable`);
+      }
+    }
+  }
+
+  // --- (11) the work-order identity surface (the 2026-08-29 resolution) -----
+  //
+  // Exactly ONE canonical artifact per WORK-NNN identity (the architect's
+  // PR #74 REQUEST CHANGES verdict: duplicate Work Order identifiers are
+  // duplicate authorities — the DUPLICATE-AUTHORITY contract area). The
+  // authoritative directory holds ONLY canonical `WORK-NNN.md` files (+
+  // TEMPLATE.md); a variant filename claiming a WORK identity, a duplicated
+  // identity, or a program record referencing a non-canonical identity
+  // artifact is a REJECTING violation. Retired material belongs in
+  // `spec/archive/` under a distinct identity and is never authoritative.
+  // Runs whenever the caller can list the repository (the control-plane
+  // loader and the revision-bound governance-manifest detector both can);
+  // a listing FAILURE propagates so callers fail closed (inconclusive,
+  // never a vacuous pass).
+  if (listDir) {
+    const entries = await listDir(AUTHORITATIVE_WORK_ORDER_DIR);
+    const seenIdentities = new Map<string, string>(); // WORK-NNN -> filename
+    for (const name of entries) {
+      if (name === 'TEMPLATE.md') continue;
+      const canonical = /^WORK-(\d{3})\.md$/.exec(name);
+      if (canonical) {
+        const id = `WORK-${canonical[1]}`;
+        const prior = seenIdentities.get(id);
+        if (prior) {
+          violations.push(
+            `work-order identity surface: DUPLICATE Work Order identity "${id}" — "${prior}" and "${name}" both claim it ` +
+              `(exactly one canonical artifact per identity; duplicate identifiers are duplicate authorities — the 2026-08-29 identity resolution)`,
+          );
+        } else {
+          seenIdentities.set(id, name);
+        }
+        continue;
+      }
+      if (/WORK-\d{3}/.test(name)) {
+        violations.push(
+          `work-order identity surface: "${name}" claims a WORK identity but is not the canonical "WORK-NNN.md" artifact — ` +
+            `variant identity artifacts are rejected from ${AUTHORITATIVE_WORK_ORDER_DIR} ` +
+            '(retired material belongs in spec/archive/ under a DISTINCT identity; the 2026-08-29 identity resolution)',
+        );
+      } else {
+        violations.push(
+          `work-order identity surface: "${name}" is not a canonical "WORK-NNN.md" artifact — ` +
+            `only WORK-NNN.md and TEMPLATE.md belong in ${AUTHORITATIVE_WORK_ORDER_DIR} (the authoritative identity surface is closed)`,
+        );
+      }
+    }
+    // A program record must reference its OWN canonical artifact — never a
+    // variant identity file (e.g. an em-dash upload-wave file).
+    for (const w of orders) {
+      const spec = w.workOrder;
+      if (!spec) continue;
+      const base = spec.split('/').pop() ?? spec;
+      if (/WORK-\d{3}/.test(base) && !/^WORK-\d{3}\.md$/.test(base)) {
+        violations.push(
+          `workOrders[${w.id}].workOrder: references the non-canonical identity artifact "${spec}" — ` +
+            `a work order record must reference ${AUTHORITATIVE_WORK_ORDER_DIR}/${w.id}.md (a variant identity artifact is never authoritative)`,
+        );
       }
     }
   }

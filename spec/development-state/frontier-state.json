@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "kind": "derived-frontier-state",
+  "sourceOfTruth": [
+    "spec/development-state/program-state.json",
+    "spec/dependency-graph.md",
+    "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73)"
+  ],
+  "computedAt": "2026-08-29 (identity resolution: the upload-wave collision recorded on 2026-08-29 is RESOLVED — see resolvedConflicts)",
+  "currentMain": "8f27cc755a2ffbb27de79c9b1a6e884a222b296b",
+  "currentLiveImplementation": null,
+  "liveImplementationNote": "Nothing is in flight: every recorded work order is complete (WORK-050 merged as 8f27cc7 by PR #78 and finalized by this package's reconciliation commit; 52/52 complete, merged finalized 7/7). The only open implementation PRs are this architecture package itself (#74) and the stale pre-wave test branch #50.",
+  "activeRule": "A derived frontier must never authorize work whose authoritative Work Order dependencies are incomplete. If live PR state and repository state disagree, halt authorization and require architect reconciliation.",
+  "knownConflicts": [
+    "Open PR #50 (test(WORK-043), base a1b88a9b) predates the WORK-046..050 wave and is stale relative to current main."
+  ],
+  "plannedNext": [
+    "WORK-053"
+  ],
+  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete). The identity collision that previously halted authorization is RESOLVED (resolvedConflicts); WORK-053 remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet').",
+  "plannedFuture": [
+    "WORK-054",
+    "WORK-055",
+    "WORK-056",
+    "WORK-057",
+    "WORK-058",
+    "WORK-059",
+    "WORK-060",
+    "WORK-061"
+  ],
+  "resolvedConflicts": [
+    {
+      "conflict": "WORK IDENTITY COLLISION — the architect-issued GitHub issues #65..#73 (2026-08-28T17:34Z) defined WORK-053..061 as the v1.1 evolution roadmap, while the architect's direct-to-main upload wave (2026-08-28T18:24..18:40Z, commits 7db2ad3..0541d13) re-used WORK-053..059 for a different roadmap under a '2.0' version label (ARCHITECTURE_LOCK.md 'Version: 2.0, Status: FROZEN', DAG.yaml architecture_version 2.0).",
+      "resolvedAt": "2026-08-29",
+      "resolution": "The architect's PR #74 review verdict (REQUEST CHANGES) chose the architect-issued GitHub issue track (ACR-001, WORK-053..061, v1.1) as the ONE canonical track. The upload-wave artifacts are retired under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (explicitly non-authoritative; machine-readable record index.json); the '2.0 FROZEN' documents were removed from their governing-looking live locations and corrected in their archival banners. Every WORK-NNN identifier now has exactly one canonical meaning: spec/work-orders/WORK-NNN.md + dependency-state.json futureGeneration.",
+      "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"
+    },
+    {
+      "conflict": "Internal disagreement inside the upload wave: DAG.yaml vs its own uploaded work-order files on WORK-054/WORK-055 status and dependencies; CURRENT_STATE.md said 'Active: WORK-052' although WORK-052 had completed at 16:34Z that day.",
+      "resolvedAt": "2026-08-29",
+      "resolution": "Historical note only: the disagreeing artifacts are retired to spec/archive/upload-wave-2026-08-28/ and no longer make any live claim. The canonical dependency mapping is dependency-state.json futureGeneration (the issue track).",
+      "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"
+    }
+  ]
+}

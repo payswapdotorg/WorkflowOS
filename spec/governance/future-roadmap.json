@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "governingArchitectureCandidate": "v1.1",
+  "status": "proposed",
+  "sequence": [
+    "WORK-053",
+    "WORK-054",
+    "WORK-055",
+    "WORK-056",
+    "WORK-057",
+    "WORK-058",
+    "WORK-059",
+    "WORK-060",
+    "WORK-061"
+  ],
+  "parallelWaves": [
+    {
+      "wave": 1,
+      "items": [
+        "WORK-053"
+      ]
+    },
+    {
+      "wave": 2,
+      "items": [
+        "WORK-054"
+      ]
+    },
+    {
+      "wave": 3,
+      "items": [
+        "WORK-055",
+        "WORK-056"
+      ]
+    },
+    {
+      "wave": 4,
+      "items": [
+        "WORK-057",
+        "WORK-058"
+      ]
+    },
+    {
+      "wave": 5,
+      "items": [
+        "WORK-059",
+        "WORK-060"
+      ]
+    },
+    {
+      "wave": 6,
+      "items": [
+        "WORK-061"
+      ]
+    }
+  ],
+  "rule": "Parallel waves are planning hints only; actual execution eligibility is derived from authoritative Work Order status, dependencies, protected-surface coordination, and current main revision. No Work Order starts without the architect's authorization (activation is recorded in program-state.json). WORK-053 is dependency-eligible and remains PLANNED — the architect's 2026-08-29 verdict says 'Do not activate WORK-053 yet'.",
+  "retiredUploadWave": {
+    "note": "The architect's direct-to-main upload wave (2026-08-28T18:24..18:40Z) declared a parallel 'v2.0' roadmap that re-used the WORK-053..059 identifiers with different scopes. By the architect's 2026-08-29 PR #74 review verdict, the architect-issued GitHub issue track (this sequence) is the ONE canonical track; the upload-wave artifacts are RETIRED under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (explicitly non-authoritative historical material; machine-readable retirement record: spec/archive/upload-wave-2026-08-28/index.json).",
+    "retiredIdentities": [
+      "UW-053",
+      "UW-054",
+      "UW-055",
+      "UW-056",
+      "UW-057",
+      "UW-058",
+      "UW-059"
+    ],
+    "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"
+  }
+}

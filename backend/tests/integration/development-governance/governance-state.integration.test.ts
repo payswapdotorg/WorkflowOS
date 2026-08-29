@@ -66,8 +66,8 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(51); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc)
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-050']);
+    expect(complete.length).toBeGreaterThanOrEqual(52); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7)
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -88,27 +88,23 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w048?.mergedAs).toEqual({ pr: 76, mergeCommit: '5c48257c81ba8f4125dbae9465be8d3936067645' });
     const w049 = complete.find((w) => w.id === 'WORK-049');
     expect(w049?.mergedAs).toEqual({ pr: 77, mergeCommit: '07ac9cc68b088c91c17a61cf2b3943d784a2aeb5' });
+    const w050 = complete.find((w) => w.id === 'WORK-050');
+    expect(w050?.mergedAs).toEqual({ pr: 78, mergeCommit: '8f27cc755a2ffbb27de79c9b1a6e884a222b296b' });
     for (const w of inFlight) {
       expect(w.mergedAs, `${w.id} (in_flight) must NOT carry merge evidence`).toBeUndefined();
     }
 
     // Q4 — what can safely run in parallel? (frontier + conflicts)
     const frontier = fresh.getFrontier();
-    expect(frontier.inFlight.length).toBe(1);
-    // WORK-050 is the in-flight item (activated after the WORK-049 merge —
-    // its dependencies 042/043/048 are all complete). Nothing remains
-    // pending: every other work order is complete — the dependency frontier
-    // is empty and nothing is blocked.
+    // WORK-050 is MERGED (8f27cc7) and finalized: NOTHING is in flight, and
+    // nothing remains pending — every recorded work order is complete. The
+    // dependency frontier is empty and nothing is blocked.
+    expect(frontier.inFlight).toEqual([]);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
-    // WORK-050 is the only in-flight item: no other in-flight item shares its
-    // declared surfaces (there are none).
-    const w050f = frontier.inFlight.find((w) => w.id === 'WORK-050');
-    expect(w050f?.conflicts).toEqual([]);
     // The frontier's item-level coordination flag is TRUTHFUL (PR #62 round 1,
-    // BLOCKER 2): WORK-050 has all conflicts mutually coordinated (vacuously:
-    // none) and no incomplete deps — the flag is TRUE because the FACTS are
-    // true (the false case is proven by mutation in the parallel suite).
+    // BLOCKER 2): with no in-flight items the flag discipline holds vacuously
+    // (the false case is proven by mutation in the parallel suite).
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
       expect(item.conflicts.every((c) => c.coordinated), `${item.id}: every conflict mutually coordinated`).toBe(true);
@@ -130,19 +126,17 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(governing.decisions.map((d) => d.id)).toContain('ADR-0007');
     expect(governing.decisions.filter((d) => d.kind === 'adr').length).toBeGreaterThanOrEqual(7);
 
-    // Q7 — how do I resume interrupted implementation? (WORK-050 — the only
-    // in-flight item — has a handoff; WORK-046, WORK-047, WORK-048, WORK-049,
-    // and WORK-052 are MERGED: their handoffs were removed by the post-merge
-    // finalization, and merged work is NOT resumable.)
-    const resumption = fresh.resumeImplementation('WORK-050');
-    expect(resumption.branch).toBe('feat/work-050-unified-execution-ux');
-    expect(resumption.handoff.lastVerifiedState.length).toBeGreaterThan(0);
-    expect(resumption.handoff.nextSteps.length).toBeGreaterThan(0);
+    // Q7 — how do I resume interrupted implementation? (NOTHING is in flight:
+    // WORK-046..WORK-050 and WORK-052 are all MERGED — their handoffs were
+    // removed by the post-merge finalization, and merged work is NOT
+    // resumable. The positive resumption path is covered by the fixture-based
+    // tests below; the real state pins the merged-not-resumable rule.)
     expect(() => fresh.resumeImplementation('WORK-052')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-047')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-046')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-048')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-049')).toThrow(NoResumableStateError);
+    expect(() => fresh.resumeImplementation('WORK-050')).toThrow(NoResumableStateError);
   });
 
   it('W052-AC01 — the governance:status CLI entry answers from the repository alone (the script exists and constructs the service)', async () => {
@@ -214,8 +208,10 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
 
   it('W052-AC02 — DISCRIMINATION: a completion without merge evidence is REJECTED', async () => {
     const violations = await inspectMutated(undefined, (p) => {
+      // WORK-050 is complete WITH evidence (8f27cc7) — strip the evidence
+      // while keeping the complete claim: the lie must be rejected.
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
-      w050.status = 'complete';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
     });
     expect(violations.some((v) => v.includes('REQUIRES merge evidence'))).toBe(true);
   });
@@ -247,8 +243,12 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
 
   it('W052-AC02 — DISCRIMINATION: an assurance profile inconsistent with the deterministic selection is REJECTED', async () => {
     const violations = await inspectMutated(undefined, (p) => {
-      // WORK-050 (the in-flight item) declares its surfaces; lie about the profile.
+      // Reconstruct WORK-050 (merged as 8f27cc7) as a STARTED item — the
+      // deterministic-selection invariant guards started work — and lie
+      // about the profile against its declared surfaces.
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
       w050.assuranceProfile = 'LIGHT';
     });
     expect(violations.some((v) => v.includes('does not match the DETERMINISTIC selection'))).toBe(true);
@@ -257,10 +257,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
   // --- PR #62 round-1 discriminations (the architect's three blockers) ----------
 
   it('W052-AC02 — DISCRIMINATION (PR #62 round 1, BLOCKER 1): ONE-SIDED coordination is REJECTED', async () => {
-    // Reconstruct an in-flight pair over the REAL records: WORK-050 (the
-    // in-flight item) declares coordination with WORK-049, and WORK-049 is
-    // reconstructed as in-flight with its merge evidence removed (that lie
-    // would be rejected separately) and WITHOUT a reciprocal coordination
+    // Reconstruct an in-flight pair over the REAL records: WORK-050 (merged
+    // as 8f27cc7 — reconstructed as in-flight with its merge evidence
+    // removed; that lie would be rejected separately) declares coordination
+    // with WORK-049, and WORK-049 is likewise reconstructed as in-flight
+    // with its merge evidence removed and WITHOUT a reciprocal coordination
     // record — the reference from WORK-050 is one-sided.
     const violations = await inspectMutated(undefined, (p) => {
       const w049 = p.workOrders.find((w) => w.id === 'WORK-049')!;
@@ -268,6 +269,8 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       delete (w049 as { mergedAs?: unknown }).mergedAs;
       delete (w049 as { coordination?: unknown }).coordination;
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
       w050.coordination = { with: ['WORK-049'], reason: 'reconstructed one-sided fixture', adrs: [] };
     });
     expect(
@@ -280,11 +283,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     const violations = await inspectMutated(undefined, (p) => {
       const w049 = p.workOrders.find((w) => w.id === 'WORK-049')!;
       // Reconstruct WORK-049 as an INCOMPLETE dependency (in-flight, merge
-      // evidence removed) that WORK-050 starts over, while WORK-050
-      // coordinates only with the merged WORK-048.
+      // evidence removed) that WORK-050 (reconstructed in-flight likewise)
+      // starts over, while WORK-050 coordinates only with the merged
+      // WORK-048.
       w049.status = 'in_flight';
       delete (w049 as { mergedAs?: unknown }).mergedAs;
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
       w050.dependencies = [...w050.dependencies, 'WORK-049'];
       w050.coordination = { with: ['WORK-048'], reason: 'covers WORK-048 but not the incomplete WORK-049', adrs: [] };
     });
@@ -294,11 +300,13 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
   it('W052-AC02 — DISCRIMINATION (PR #62 round 1, BLOCKER 1): coordination referencing an UNSTARTED work order is REJECTED', async () => {
     const violations = await inspectMutated(undefined, (p) => {
       // Reconstruct WORK-049 as pending (unstarted) and reference it from the
-      // in-flight WORK-050's coordination record.
+      // reconstructed in-flight WORK-050's coordination record.
       const w049 = p.workOrders.find((w) => w.id === 'WORK-049')!;
       w049.status = 'pending';
       delete (w049 as { mergedAs?: unknown }).mergedAs;
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
       w050.coordination = { with: ['WORK-049'], reason: 'references the pending WORK-049', adrs: [] };
     });
     expect(violations.some((v) => v.includes('is pending — coordination references started (in_flight) or merged (complete) work orders only'))).toBe(true);
@@ -306,7 +314,10 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
 
   it('W052-AC02 — DISCRIMINATION (PR #62 round 1, BLOCKER 3): an in_flight work order carrying MERGE EVIDENCE is REJECTED (merged-but-in-flight is a lie about the merge)', async () => {
     const violations = await inspectMutated(undefined, (p) => {
+      // WORK-050 is MERGED (8f27cc7) — reconstruct it as in-flight while
+      // keeping (fake) merge evidence: the lie must be rejected.
       const w050 = p.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
       w050.mergedAs = { pr: 78, mergeCommit: 'deadbeef' };
     });
     expect(violations.some((v) => v.includes('MUST NOT carry merge evidence'))).toBe(true);
@@ -380,13 +391,16 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w052.status).toBe('complete');
     expect((w052.checkpointOutcomes ?? []).length).toBe(11);
     expect(w052.mergedAs).toEqual({ pr: 62, mergeCommit: '47615c236ec0e194e112efd3d2ef0f432c4bf210' });
-    // Outcomes WITHOUT a merge never complete work: an in-flight item may
-    // carry implementer claims and stays in_flight (a synthetic copy — the
-    // live program has no such record; the discriminations enforce the rule).
+    // Outcomes WITHOUT a merge never complete work: a started item may
+    // carry implementer claims and stays in_flight (a synthetic copy —
+    // WORK-050 is RECONSTRUCTED as started because the live record is
+    // complete-and-merged; the discriminations enforce the rule).
     const dir = mkdtempSync(join(tmpdir(), 'wfos-gov-claims-only-'));
     try {
       const program: ProgramState = structuredClone(realProgram);
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
+      w050.status = 'in_flight';
+      delete (w050 as { mergedAs?: unknown }).mergedAs;
       w050.checkpointOutcomes = [
         { contractId: 'AUTH-PRESERVATION', status: 'evidenced', proofClasses: ['static'], evidenceRef: 'claim', at: '2026-08-29T04:40:00Z' },
       ];

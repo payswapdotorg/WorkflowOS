@@ -81,6 +81,7 @@ export {
   CLASSIFICATION_ORDER,
   selectAssuranceProfile,
   validateGovernanceState,
+  AUTHORITATIVE_WORK_ORDER_DIR,
 } from './internal/governance-validation.js';
 export type {
   AssuranceProfile,
@@ -108,5 +109,6 @@ export type {
   DecisionRecord,
   ProgramState,
   GovernanceFileReader,
+  GovernanceDirLister,
   GovernanceValidationResult,
 } from './internal/governance-validation.js';

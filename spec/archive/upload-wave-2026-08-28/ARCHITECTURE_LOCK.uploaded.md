@@ -1,3 +1,22 @@
+> **RETIRED UPLOAD-WAVE DOCUMENT — NON-AUTHORITATIVE HISTORICAL MATERIAL.**
+>
+> Originally uploaded as `spec/governance/ARCHITECTURE_LOCK.md`, direct-pushed to main on 2026-08-28
+> (commit 3a66034). Its header claims “Version: 2.0, Status: FROZEN”.
+>
+> **That claim was never established through the Architecture Change Request mechanism.** No ACR has
+> been approved for any architecture version change. The governing architecture remains **v1.0
+> (frozen)** per `spec/development-state/program-state.json`; v1.1 exists only as a PROPOSED
+> evolution package (PR #74, ACR-001, `spec/architecture/v1.1/`).
+>
+> Retired and moved to the archive by the architect's 2026-08-29 PR #74 review verdict so that no
+> document in a governing-looking location (`spec/governance/`) asserts a competing version authority.
+
+> Nothing in this file governs. It is preserved as historical material only.
+> See `spec/archive/upload-wave-2026-08-28/index.json` and
+> `spec/architecture/v1.1/reconciliation-record.md` §8.
+
+---
+
 # WorkflowOS Architecture Lock
 
 Version:

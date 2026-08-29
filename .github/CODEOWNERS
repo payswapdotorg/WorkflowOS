@@ -1,0 +1,8 @@
+# Architecture and governance are architect-owned surfaces.
+/spec/architecture* @pectoraux
+/spec/architecture/ @pectoraux
+/spec/architecture-change-requests/ @pectoraux
+/spec/governance/ @pectoraux
+/spec/development-state/governance-model.json @pectoraux
+/spec/development-state/program-state.json @pectoraux
+/docs/adr/ @pectoraux

@@ -1682,7 +1682,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // boot sweep enqueues + reconciles). This is the exact "crash between
     // reserve and the post-mutation enqueue" window the architect prescribed
     // the boot sweep for.
-    it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', { timeout: 40_000 }, async () => {
+    it('R1-#2a. reserve → crash (before mutate) → WorkerHost boot sweep + relay reconciles → converges (exactly-one handoff; obligation discharges)', { timeout: 70_000 }, async () => {
       const { executionId, recordId } = await createNativeRecord('failed');
       // Build a service whose transitionMode crashes the FIRST time (the
       // reserve persists the handoff log row + the obligation before the
@@ -1746,10 +1746,18 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         // pending obligations + enqueues relay jobs). The WorkerHost's poll
         // loop drains the job; wait for the reconcile to converge (record.mode
         // === external + the obligation discharges).
+        //
+        // Deadline 45s (de-flaked 2026-08-29, the 50da09e precedent): the 20s
+        // default lacked headroom on the 2-core GitHub CI runner under
+        // full-suite load — the same convergence chain exceeded it on three
+        // consecutive CI attempts on PR #74 (R1-#2b) while seven consecutive
+        // local runs on the same commit converge in ~1.4s. The vitest timeout
+        // is 70s to keep deadline + setup/teardown headroom.
         await relay.enqueuePendingRelayJobs();
         await waitFor(
           () => executionRecordRepo.findByExecutionId(executionId),
           (r) => r?.mode === 'external' && r.status === 'handoff_ready' && r.packageValue != null,
+          45_000,
         );
 
         // The handoff converged (the relay reconciled: re-mutate + re-dispatch).
@@ -1760,7 +1768,17 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         expect(after!.packageValue).not.toBeNull();
         // Exactly ONE handoff log row (no duplicate).
         expect(await countHandoffsForExecution(executionId)).toBe(1);
-        // The obligation DISCHARGED (the reconcile confirmed completion).
+        // The obligation DISCHARGED (the reconcile confirmed completion). The
+        // discharge is a LATER step of the relay job than the record mutation —
+        // the record-level waitFor above can observe the converged record
+        // BEFORE the discharge lands (proven on PR #74 CI attempt 2,
+        // 2026-08-29: discharged=0 immediately after record convergence), so
+        // the discharge gets its OWN waitFor (the established pattern).
+        await waitFor(
+          () => countDischargedObligations(executionId),
+          (c) => c === 1,
+          45_000,
+        );
         expect(await countDischargedObligations(executionId)).toBe(1);
         expect(await countPendingObligations(executionId)).toBe(0);
       } finally {
@@ -1771,7 +1789,7 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
     // R1-#2b: crash window #2 (mutate → process dies before dispatch). The
     // boot sweep + the relay re-dispatch; exactly-one AgentRun (the
     // agentRunRepository.findByExecutionId guard + the UNIQUE fence).
-    it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', { timeout: 40_000 }, async () => {
+    it('R1-#2b. mutate → crash (before dispatch) → WorkerHost boot sweep + relay re-dispatches native → converges (exactly-one AgentRun; obligation discharges)', { timeout: 70_000 }, async () => {
       const { executionId, recordId } = await createExternalRecord('handoff_ready');
       const queue = new InMemoryQueue();
       // A service wired with the queue (PR #46 round 3: the post-mutation relay
@@ -1851,10 +1869,22 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         // ALL pending obligations). The WorkerHost's poll loop drains them;
         // wait for the reconcile to converge (record.status === completed +
         // the obligation discharges).
+        //
+        // Deadline 45s (de-flaked 2026-08-29, the 50da09e precedent): the 20s
+        // default was exceeded by this exact convergence on THREE consecutive
+        // GitHub CI attempts on PR #74 (2026-08-29 18:17/18:23/18:30 — the
+        // 'running' vs 'completed' assertion failure is the file-local waitFor
+        // returning its last value at the deadline) and previously on
+        // PR #77/PR #78 attempt 1, while seven consecutive local runs on the
+        // same commit converge in ~1.4s. Zero coupling with the PR's diff
+        // (this suite imports nothing from architecture-checkpoints or
+        // development-governance). The vitest timeout is 70s for deadline +
+        // setup/teardown headroom.
         await relay.enqueuePendingRelayJobs();
         await waitFor(
           () => executionRecordRepo.findByExecutionId(executionId),
           (r) => r?.status === 'completed' && r.agentRunId != null,
+          45_000,
         );
 
         // The handoff converged (the relay re-dispatched native).
@@ -1870,7 +1900,15 @@ describe('WORK-042 — Cross-Mode Execution Handoff', () => {
         expect(Number(runsRes.rows[0]?.c ?? 0)).toBe(1);
         // Exactly ONE handoff log row.
         expect(await countHandoffsForExecution(executionId)).toBe(1);
-        // The obligation DISCHARGED.
+        // The obligation DISCHARGED — with its OWN waitFor (the discharge is
+        // a later relay-job step than the record completion; the same
+        // record-vs-discharge gap was proven on PR #74 CI attempt 2 by
+        // R1-#2a).
+        await waitFor(
+          () => countDischargedObligations(executionId),
+          (c) => c === 1,
+          45_000,
+        );
         expect(await countDischargedObligations(executionId)).toBe(1);
       } finally {
         await worker.stop();

@@ -137,6 +137,12 @@ export class GovernanceManifestDetector implements ArchitectureAssertionDetector
         model as GovernanceModel,
         program as ProgramState,
         async (path) => snapshot.readFile(path),
+        // The work-order identity surface is validated AT THE SAME REVISION:
+        // duplicate WORK-NNN identity claims at the bound revision are a
+        // 'fail' (duplicate identifiers are duplicate authorities — the
+        // 2026-08-29 identity resolution); a listing failure propagates to
+        // the catch below (inconclusive, fail closed).
+        async (path) => (await snapshot.listDir(path)).map((e) => e.name),
       );
     } catch (err) {
       return {

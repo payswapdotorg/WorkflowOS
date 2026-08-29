@@ -1,0 +1,54 @@
+name: Architecture Change Request
+description: Propose an evolution that cannot safely fit within the frozen governing ArchitectureVersion.
+title: "ACR-___ — "
+labels: [architecture]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Architecture changes are append-only and require `/architecture` authority approval. Do not rewrite frozen architecture in place.
+  - type: input
+    id: current-version
+    attributes:
+      label: Current ArchitectureVersion
+      placeholder: v1.0
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and evidence
+      description: State the concrete system evidence or requirement that makes evolution necessary.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed evolution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered and rejected
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Preserved invariants and authority impact
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration and rollback strategy
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Required proof
+      description: State static, dynamic, discrimination, fitness and operational evidence required.
+    validations:
+      required: true

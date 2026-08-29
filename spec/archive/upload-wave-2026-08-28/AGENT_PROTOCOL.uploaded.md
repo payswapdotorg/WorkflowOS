@@ -1,3 +1,18 @@
+> **RETIRED UPLOAD-WAVE DOCUMENT — NON-AUTHORITATIVE HISTORICAL MATERIAL.**
+>
+> Originally uploaded as `spec/governance/AGENT_PROTOCOL.md`, direct-pushed to main on 2026-08-28
+> (commit 6db6f60).
+>
+> The actual worker protocol is `spec/governance/worker-protocol.json` (the machine-readable,
+> stateless worker contract of the v1.1 package); this document is an earlier prose draft of the
+> same ideas, never established through the ACR mechanism.
+
+> Nothing in this file governs. It is preserved as historical material only.
+> See `spec/archive/upload-wave-2026-08-28/index.json` and
+> `spec/architecture/v1.1/reconciliation-record.md` §8.
+
+---
+
 # Implementation Agent Protocol
 
 ## Role

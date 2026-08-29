@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "kind": "derived-dependency-state",
+  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73)",
+  "computedAt": "2026-08-29 (identity resolution: the upload-wave collision recorded on 2026-08-29 is RESOLVED — see resolvedConflicts)",
+  "rules": {
+    "eligible": "all declared dependencies are complete",
+    "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
+    "blocked": "one or more dependencies are not complete",
+    "staleState": "dependency graph and program state disagree; fail closed and require architect reconciliation"
+  },
+  "currentGeneration": {
+    "completedWorkOrders": 52,
+    "inFlight": [],
+    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2). The WORK-050 post-merge finalization (§34.8/ADR-0007) is carried by this package."
+  },
+  "futureGeneration": {
+    "WORK-053": [
+      "WORK-046",
+      "WORK-051",
+      "WORK-052"
+    ],
+    "WORK-054": [
+      "WORK-039",
+      "WORK-053"
+    ],
+    "WORK-055": [
+      "WORK-053",
+      "WORK-054"
+    ],
+    "WORK-056": [
+      "WORK-039",
+      "WORK-041",
+      "WORK-054"
+    ],
+    "WORK-057": [
+      "WORK-053",
+      "WORK-054",
+      "WORK-046",
+      "WORK-047"
+    ],
+    "WORK-058": [
+      "WORK-053",
+      "WORK-055",
+      "WORK-046",
+      "WORK-051",
+      "WORK-052"
+    ],
+    "WORK-059": [
+      "WORK-055",
+      "WORK-056",
+      "WORK-058",
+      "WORK-019"
+    ],
+    "WORK-060": [
+      "WORK-055",
+      "WORK-056",
+      "WORK-058",
+      "WORK-059",
+      "WORK-005"
+    ],
+    "WORK-061": [
+      "WORK-057",
+      "WORK-058",
+      "WORK-059",
+      "WORK-060",
+      "WORK-047",
+      "WORK-050"
+    ]
+  },
+  "futureGenerationEligibility": {
+    "WORK-053": "eligible — WORK-046, WORK-051, WORK-052 all complete (the identity collision is RESOLVED; WORK-053 remains planned and NOT activated — the architect's authorization is required, and the 2026-08-29 verdict says 'Do not activate WORK-053 yet')",
+    "WORK-054": "blocked — WORK-053 not started (WORK-039 complete)",
+    "WORK-055": "blocked — WORK-053, WORK-054 not started",
+    "WORK-056": "blocked — WORK-054 not started (WORK-039, WORK-041 complete)",
+    "WORK-057": "blocked — WORK-053, WORK-054 not started (WORK-046, WORK-047 complete)",
+    "WORK-058": "blocked — WORK-053, WORK-055 not started (WORK-046, WORK-051, WORK-052 complete)",
+    "WORK-059": "blocked — WORK-055, WORK-056, WORK-058 not started (WORK-019 complete)",
+    "WORK-060": "blocked — WORK-055, WORK-056, WORK-058, WORK-059 not started (WORK-005 complete)",
+    "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060 not started (WORK-047, WORK-050 complete)"
+  },
+  "knownConflicts": [],
+  "resolvedConflicts": [
+    {
+      "conflict": "The architect's uploaded work-order files (originally spec/work-orders/WORK-053 — Architecture Checkpoint Framework.md .. WORK-059 — WorkflowOS Self-Hosting Lifecycle.md) declared a DIFFERENT dependency set for the re-used identifiers WORK-053..059 (053←[052], 054←[053], 055←[052], 056←[053,055], 057←[053,055], 058←[056,057], 059←[058]) than the futureGeneration above (which follows the architect-issued issues #65..#73 and spec/architecture/v1.1/dependency-graph.md).",
+      "resolvedAt": "2026-08-29",
+      "resolution": "The architect's PR #74 review verdict chose the issue track as canonical. The uploaded files are retired under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (non-authoritative; the retired dependency claims are preserved there as history). futureGeneration above is the ONE canonical dependency mapping for WORK-053..061.",
+      "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"
+    },
+    {
+      "conflict": "DAG.yaml (architecture_version 2.0) disagreed with its own uploaded work-order files on WORK-054 and WORK-055 (status and dependencies).",
+      "resolvedAt": "2026-08-29",
+      "resolution": "Historical note only: DAG.yaml is retired to spec/archive/upload-wave-2026-08-28/DAG.uploaded.yaml and makes no live claim. The canonical dependency mapping is this file's futureGeneration.",
+      "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"
+    }
+  ]
+}

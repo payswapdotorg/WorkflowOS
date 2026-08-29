@@ -13,6 +13,9 @@ constrain the work, and how to resume interrupted implementation.
 |---|---|---|
 | `governance-model.json` | The governance MODEL: the Engineering Control Loop, assurance profiles + deterministic selection rules + requirement matrix, the governed checkpoint contracts (architecture fitness functions), the self-hosting boundary, the authority map. | Architect only — through a Work Order (GitHub Issue → `spec/work-orders/`) + PR review. Schema evolution is versioned; never edited in place silently. |
 | `program-state.json` | The PROGRAM STATE: the governing architecture version record, one record per Work Order (status, dependencies, declared change surfaces, branch/PR bindings, merge evidence, handoff/resumption records, checkpoint outcomes), and the decisions index. | Implementers per the parallel protocol (one branch per Work Item; updated as work progresses); the architect merges. Statuses are evidence-backed (`complete` requires merge evidence). |
+| `dependency-state.json` | Derived dependency eligibility and conflict state. It can be regenerated from authoritative Work Order/program state and the canonical dependency graph. | Derived by governance tooling; never an independent authority. |
+| `frontier-state.json` | Derived current implementation frontier and live PR/base reconciliation. | Derived by governance tooling; stale/conflicting state fails closed. |
+| `checkpoint-state.json` | Derived checkpoint requirement/result summary. Actual verification evidence remains owned by `/verification`. | Derived by governance tooling and checkpoint orchestration. |
 
 **Who may write what:** the governance model changes only through architect-issued Work
 Orders; the program state is maintained by the implementing agent of each Work Order
@@ -20,6 +23,17 @@ within its declared surfaces and becomes canonical when the architect merges the
 Nothing in this directory is a runtime tenant artifact: PostgreSQL (via the existing
 modules) remains the authority for tenant project state; the runtime `/architecture`
 module remains the per-project ADR/authority; this directory is the self-hosting plane.
+
+## v1.1 evolution artifacts
+
+The next architecture generation is proposed, not silently activated:
+
+- `spec/architecture/v1.1/` — additive architecture and lock package, including the [reconciliation record](../architecture/v1.1/reconciliation-record.md) (2026-08-29 pass 1: the verified repository truth and the corrected derived state; pass 2: the architect verdict resolving the upload-wave identity collision — §8; and the GitHub enforcement gaps).
+- `spec/architecture-change-requests/ACR-001-v1-1-adaptive-engineering-control-system.md` — durable architecture evolution proposal.
+- `spec/governance/` — persistent architect, worker, assurance and checkpoint contracts.
+- `spec/governance/future-roadmap.json` — planned v1.1 Work Order sequence and parallelization hints.
+
+An ACR is required before a new ArchitectureVersion becomes governing.
 
 ## Consumption
 
@@ -61,6 +75,8 @@ module remains the per-project ADR/authority; this directory is the self-hosting
    removal, and the data-only constraint; the enforcement references the
    merged-finalization invariant; the constraints add no authority, no workflow
    state, no automation — §34.8, ADR-0007).
+10. v1.1 derived artifacts cannot supersede v1.0 authorities and cannot activate v1.1
+    without an approved Architecture Change Request.
 
 A repository whose development state violates any invariant is NOT a valid governed
 state: the control plane refuses to serve it, and the `governance-manifest` checkpoint

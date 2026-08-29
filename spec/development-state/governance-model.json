@@ -495,6 +495,11 @@
           "class": "discrimination",
           "file": "backend/tests/integration/architecture-governance/checkpoint-service.integration.test.ts",
           "marker": "PROOF 7a — an inconclusive BLOCKING assertion (unknown detector kind) fails closed"
+        },
+        {
+          "class": "discrimination",
+          "file": "backend/tests/integration/development-governance/work-order-identity.integration.test.ts",
+          "marker": "IDENTITY-01 — duplicate Work Order identifiers cannot coexist as authoritative artifacts"
         }
       ]
     },

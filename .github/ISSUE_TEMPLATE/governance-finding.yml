@@ -1,0 +1,39 @@
+name: Governance Finding
+description: Record an architectural or governance defect found during implementation/review.
+title: "Governance Finding — "
+labels: [architecture, work-order]
+body:
+  - type: input
+    id: work-order
+    attributes:
+      label: Work Order
+      placeholder: WORK-046
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Exact implementation revision
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Finding
+      description: State the concrete violated invariant and actual code/evidence location.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Discrimination or reproduction
+      description: Give the smallest deterministic way to demonstrate the violation.
+    validations:
+      required: true
+  - type: textarea
+    id: disposition
+    attributes:
+      label: Required disposition
+      description: REQUEST CHANGES, REJECT, or ARCHITECTURE CHANGE REQUEST.
+    validations:
+      required: true

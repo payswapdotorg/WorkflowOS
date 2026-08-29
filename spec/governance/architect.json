@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "authority": "architecture-governance",
+  "principal": "@pectoraux",
+  "decisionRights": [
+    "approve-architecture-change",
+    "approve-work-order",
+    "approve-checkpoint-verdict",
+    "approve-merge",
+    "reject-implementation",
+    "authorize-remediation"
+  ],
+  "nonDelegable": [
+    "change-governing-architecture",
+    "weaken-frozen-invariant",
+    "bypass-verification",
+    "bypass-review",
+    "bypass-merge-gate"
+  ],
+  "implementationAgents": [
+    "z-ai",
+    "other-provider-neutral-execution-workers"
+  ],
+  "rule": "Implementation agents may propose changes and evidence but cannot exercise architectural or merge authority."
+}

@@ -1,0 +1,47 @@
+# RETIRED UPLOAD-WAVE DOCUMENT — NON-AUTHORITATIVE HISTORICAL MATERIAL.
+#
+# Originally uploaded as `spec/work-orders/DAG.yaml`, direct-pushed to main on 2026-08-28
+# (commit f388386). It declares `architecture_version: "2.0"` — a version label never
+# established through the ACR mechanism (the governing architecture remains v1.0) — and it
+# re-uses the WORK-053..059 identifiers for the retired upload-wave roadmap (now UW-053..UW-059).
+# It also disagrees with its own uploaded work-order files on WORK-054/WORK-055 status and
+# dependencies (recorded in spec/architecture/v1.1/reconciliation-record.md §3).
+# The canonical machine-readable dependency mapping is
+# `spec/development-state/dependency-state.json` (futureGeneration) — never this file.
+# Nothing in this file governs. See `spec/archive/upload-wave-2026-08-28/index.json` and
+# `spec/architecture/v1.1/reconciliation-record.md` §8.
+#
+# --- original content below (verbatim historical record) ---
+#
+architecture_version: "2.0"
+
+work_items:
+
+  WORK-052:
+    status: completed
+    enables:
+      - WORK-053
+      - WORK-054
+
+
+  WORK-053:
+    status: ready
+    depends_on:
+      - WORK-052
+    parallel_group:
+      governance
+
+
+  WORK-054:
+    status: ready
+    depends_on:
+      - WORK-052
+    parallel_group:
+      governance
+
+
+  WORK-055:
+    status: blocked
+    depends_on:
+      - WORK-053
+      - WORK-054

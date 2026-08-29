@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "checkpointClasses": {
+    "readiness": "before implementation: validate dependencies, scope, architecture version, authority preservation and assurance profile",
+    "work_order": "before execution: validate Work Order completeness, proof contract, migration reservation, tenant/security impact and allowed surfaces",
+    "pr_conformance": "at PR: evaluate exact implementation revision against architecture assertions, transformations and forbidden shortcuts",
+    "verification_entry": "before terminal verification/release: require applicable evidence and exact revision identity",
+    "fitness": "for material changes or scheduled evaluation: assess declared quality attributes against measured baselines/thresholds",
+    "release": "for applicable high-risk changes: require release strategy, operational evidence and rollback/post-release validation"
+  },
+  "commonRules": [
+    "revision-bound where implementation content is evaluated",
+    "unknown detector/checkpoint semantics are inconclusive",
+    "inconclusive blocking assertions fail closed",
+    "tenant mismatch is rejected before content access",
+    "evidence is persisted through /verification",
+    "checkpoint orchestration does not mutate workflow state directly"
+  ],
+  "proofClasses": ["static", "dynamic", "discrimination", "transformation-completeness", "quality-attribute"],
+  "authority": "/architecture + /workflows + /verification + /reviews + /github as applicable"
+}

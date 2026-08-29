@@ -1,0 +1,157 @@
+name: Architecture Governance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  governance-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate machine-readable governance artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          files = [
+              Path('spec/development-state/governance-model.json'),
+              Path('spec/development-state/program-state.json'),
+              Path('spec/development-state/dependency-state.json'),
+              Path('spec/development-state/frontier-state.json'),
+              Path('spec/development-state/checkpoint-state.json'),
+              Path('spec/governance/architect.json'),
+              Path('spec/governance/worker-protocol.json'),
+              Path('spec/governance/assurance-profiles.json'),
+              Path('spec/governance/checkpoint-contract.json'),
+              Path('spec/governance/future-roadmap.json'),
+              Path('spec/architecture/v1.1/artifact-taxonomy.json'),
+          ]
+          for path in files:
+              json.loads(path.read_text())
+          required = [Path(f'spec/work-orders/WORK-{n:03d}.md') for n in range(53, 62)]
+          missing = [str(p) for p in required if not p.exists()]
+          if missing:
+              raise SystemExit('Missing planned Work Orders: ' + ', '.join(missing))
+          print('Governance artifacts: valid')
+          PY
+
+      - name: Validate architecture evolution boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Positive invariant assertions (the v1.0/v1.1 boundary):
+          grep -q 'v1.0 is immutable historical architecture' spec/architecture/v1.1/architecture-lock.md
+          grep -q 'ACR approval is required before v1.1 becomes governing' spec/architecture/v1.1/architecture-lock.md
+          grep -q 'ACR-001' spec/architecture-change-requests/ACR-001-v1-1-adaptive-engineering-control-system.md
+          # The machine-readable roadmap must agree with the machine-readable
+          # dependency state, and v1.1 must remain proposed until ACR approval.
+          python - <<'PY'
+          import json
+          roadmap = json.load(open('spec/governance/future-roadmap.json'))
+          dep = json.load(open('spec/development-state/dependency-state.json'))
+          seq = set(roadmap['sequence'])
+          gen = set(dep['futureGeneration'])
+          assert seq == gen, (
+              'future-roadmap sequence and dependency-state futureGeneration disagree: '
+              + str(sorted(seq ^ gen))
+          )
+          for wave in roadmap['parallelWaves']:
+              for item in wave['items']:
+                  assert item in seq, f'parallel wave item {item} is not in the sequence'
+          assert roadmap['status'] == 'proposed', 'v1.1 must remain proposed until ACR approval'
+          print('Evolution boundary checks: valid')
+          PY
+
+      - name: Validate persistent authority boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          architect=json.load(open('spec/governance/architect.json'))
+          worker=json.load(open('spec/governance/worker-protocol.json'))
+          required = {'workOrder','architectureVersion','dependencies','allowedSurfaces','forbiddenSurfaces','assuranceProfile','checkpointContract','requiredProofs'}
+          assert required.issubset(set(worker['requiredContext']))
+          assert 'merge-own-pr' in worker['workerMayNot']
+          assert 'change-governing-architecture-without-acr' in worker['workerMayNot']
+          assert worker['mergeAuthority'] == 'architect'
+          assert 'approve-architecture-change' in architect['decisionRights']
+          assert 'approve-merge' in architect['decisionRights']
+          print('Persistent authority boundaries: valid')
+          PY
+
+      - name: Validate Work Order identity uniqueness (the 2026-08-29 identity resolution)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, re
+          from pathlib import Path
+
+          # The authoritative identity surface: spec/work-orders/ holds ONLY
+          # canonical WORK-NNN.md files (+ TEMPLATE.md). Duplicate Work Order
+          # identifiers are duplicate authorities — they cannot coexist as
+          # authoritative artifacts (the architect's 2026-08-29 PR #74 verdict).
+          wo_dir = Path('spec/work-orders')
+          entries = sorted(p.name for p in wo_dir.iterdir())
+          seen = {}
+          for name in entries:
+              if name == 'TEMPLATE.md':
+                  continue
+              m = re.fullmatch(r'WORK-(\d{3})\.md', name)
+              if m:
+                  wid = 'WORK-' + m.group(1)
+                  assert wid not in seen, 'duplicate Work Order identity ' + wid + ': ' + seen[wid] + ' and ' + name
+                  seen[wid] = name
+              elif re.search(r'WORK-\d{3}', name):
+                  raise SystemExit(
+                      name + ' claims a WORK identity but is not a canonical WORK-NNN.md artifact — '
+                      'variant identity artifacts are rejected from spec/work-orders '
+                      '(retired material belongs in spec/archive/ under a distinct identity)')
+              else:
+                  raise SystemExit(
+                      name + ' is not a canonical WORK-NNN.md artifact — only WORK-NNN.md and '
+                      'TEMPLATE.md belong in spec/work-orders')
+
+          # The machine-readable retirement record must be consistent with the
+          # archived files it maps (exactly one canonical mapping per ID).
+          idx = json.load(open('spec/archive/upload-wave-2026-08-28/index.json'))
+          assert idx['status'] == 'non-authoritative'
+          for m in idx['identityMapping']:
+              archived = Path(m['archivedFile'])
+              assert archived.exists(), 'index.json references missing archived file ' + str(archived)
+              text = archived.read_text(encoding='utf-8')
+              assert text.startswith('> **RETIRED UPLOAD-WAVE PROPOSAL'), str(archived) + ' lacks its retirement banner'
+              assert ('# ' + m['retiredIdentity'] + ' ') in text, str(archived) + ' does not carry its retired identity ' + m['retiredIdentity']
+              assert m['retiredIdentity'].startswith('UW-'), m['retiredIdentity']
+              assert m['originalClaimedId'] in m['canonicalMeaningOfOriginalId'], m['originalClaimedId']
+          for c in idx['governanceDocumentCorrections']:
+              archived = Path(c['archivedFile'])
+              assert archived.exists(), 'index.json references missing archived file ' + str(archived)
+              # No retired document may remain in a live governing-looking location.
+              assert not Path(c['originalPath']).exists(), c['originalPath'] + ' still exists in a live location'
+
+          # program-state must reference only canonical identity artifacts.
+          program = json.load(open('spec/development-state/program-state.json'))
+          for w in program['workOrders']:
+              ref = w.get('workOrder')
+              if ref and re.search(r'WORK-\d{3}', ref):
+                  base = ref.rsplit('/', 1)[-1]
+                  assert re.fullmatch(r'WORK-\d{3}\.md', base), w['id'] + ' references non-canonical artifact ' + ref
+
+          print('Work Order identity surface: valid (' + str(len(seen)) + ' canonical identities, '
+                + str(len(idx['identityMapping'])) + ' retired upload-wave identities archived)')
+          PY

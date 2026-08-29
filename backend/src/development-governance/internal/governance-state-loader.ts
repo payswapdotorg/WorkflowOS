@@ -8,7 +8,7 @@
  * never served ({@link GovernanceStateValidationError}).
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { validateGovernanceState } from '../../architecture-checkpoints/index.js';
@@ -55,14 +55,7 @@ export class FileSystemGovernanceStateLoader {
   /** Loads + validates the artifacts; throws GovernanceStateValidationError on any violation. */
   async load(): Promise<LoadedGovernanceState> {
     const { model, program } = await this.readArtifacts();
-    const validation = await validateGovernanceState(model, program, async (path) => {
-      try {
-        return await readFile(join(this.repoRoot, path), 'utf8');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw err;
-      }
-    });
+    const validation = await validateGovernanceState(model, program, this.readFile(), this.listDir());
     if (!validation.ok) {
       throw new GovernanceStateValidationError(validation.violations);
     }
@@ -72,15 +65,37 @@ export class FileSystemGovernanceStateLoader {
   /** Loads + validates WITHOUT throwing on validation failure (discrimination tests inspect violations). */
   async inspect(): Promise<LoadedGovernanceState> {
     const { model, program } = await this.readArtifacts();
-    const validation = await validateGovernanceState(model, program, async (path) => {
+    const validation = await validateGovernanceState(model, program, this.readFile(), this.listDir());
+    return { model, program, validation, repoRoot: this.repoRoot };
+  }
+
+  /** The repository-bound file reader (ENOENT → null; other failures propagate). */
+  private readFile() {
+    return async (path: string): Promise<string | null> => {
       try {
         return await readFile(join(this.repoRoot, path), 'utf8');
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw err;
       }
-    });
-    return { model, program, validation, repoRoot: this.repoRoot };
+    };
+  }
+
+  /**
+   * The repository-bound directory lister for the work-order identity
+   * surface (the 2026-08-29 identity resolution): entry names, `[]` when the
+   * directory does not exist (ungoverned repositories); failures propagate
+   * (fail closed).
+   */
+  private listDir() {
+    return async (path: string): Promise<readonly string[]> => {
+      try {
+        return await readdir(join(this.repoRoot, path));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw err;
+      }
+    };
   }
 
   private async readArtifacts(): Promise<{ model: GovernanceModel; program: ProgramState }> {

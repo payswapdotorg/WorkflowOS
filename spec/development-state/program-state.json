@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-29T15:01:10Z",
+  "asOf": "2026-08-29T17:20:00Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1088,7 +1088,7 @@
     {
       "id": "WORK-050",
       "title": "Unified Execution UX",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-042",
         "WORK-043",
@@ -1120,10 +1120,16 @@
         "moduleInternals"
       ],
       "assuranceProfile": "HIGH_ASSURANCE",
-      "note": "activated after the WORK-049 merge (07ac9cc): the Unified Execution UX — the Work Item's unified execution section, a CONSUMER of existing authorities (the work order derives from the architect's authorization: spec/work-orders/WORK-050.md). The developer experiences native/API and external execution as ONE coherent capability from the Work Item perspective: current state, provider/model/mode, agent role, why-this-route, constraints, the WORK-044 routing + WORK-047 intelligence recommendations (ALWAYS advisory — never a decision), what was ACTUALLY selected (the execution record's own values), the WORK-042 handoff state, the verification state, and the next action. Read-only frontend composition (HIGH_ASSURANCE: the two new public GET endpoints are public contracts; static + dynamic + discrimination proofs) (a pure facts→view derivation helper + the unified section with per-surface read-states); the ONLY backend surface is TWO new read-only GET endpoints exposing otherwise-unreachable authoritative facts (the cross-mode-handoff record read + the delegation-plan list); every mutation stays behind the EXISTING execution boundary; NO new engine/store/state machine of any kind; no migration (the last stays 0057).",
+      "note": "Merged by the architect as 8f27cc755a2ffbb27de79c9b1a6e884a222b296b (PR #78, squash-merged at branch head 6c9031c on 2026-08-29T16:57:01Z; the merge tree is IDENTICAL to the approved head). The post-merge finalization (§34.8/ADR-0007, carried by the v1.1 architecture-package reconciliation PR #74 — the next unit of work on main) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, the active handoff removed (merged work is not resumable), and the work-order document status updated; branch/pr/head kept as the historical record. The architect's review accepted the unified execution architecture (the pure facts→view derivation with actuallySelected coming ONLY from the execution record, the structurally distinct advisory routing+intelligence surfaces, the per-surface read-states with explicit error testids, the two GET-only public endpoints, the zero-mutation read-only composition, and the no-second-authority static invariants) and merged it unchanged. The PR's backend CI passed on its head (9/9 checks green at merge time).",
       "branch": "feat/work-050-unified-execution-ux",
       "workOrder": "spec/work-orders/WORK-050.md",
-      "runtimeImpactBinding": "high"
+      "runtimeImpactBinding": "high",
+      "pr": 78,
+      "head": "6c9031c",
+      "mergedAs": {
+        "pr": 78,
+        "mergeCommit": "8f27cc755a2ffbb27de79c9b1a6e884a222b296b"
+      }
     },
     {
       "id": "WORK-051",
@@ -1388,19 +1394,7 @@
   ],
   "resumption": {
     "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
-    "activeHandoffs": [
-      {
-        "workOrderId": "WORK-050",
-        "lastVerifiedState": "IMPLEMENTED on branch feat/work-050-unified-execution-ux: the two read-only backend GETs (the cross-mode-handoff record read on the execution routes + the delegation-plans list on the delegation routes — both GET-only, project.read, server-side scoped) + the work-item GET's server-resolved projectId (the project-scoped advisory reads become addressable) + the pure execution-view derivation helper (frontend/src/lib/execution-view.ts — actuallySelected comes ONLY from the execution record; the routing/intelligence advisories stay structurally distinct) + the Workbench's WorkItemPage unified execution section (current state / actually-selected vs advisory routing+intelligence / constraints / handoff / delegated units / verification / next action — per-surface read-states with explicit per-surface error testids) + the regressions (16 lib tests + 19 page tests + 14 API integration tests + 9 static invariants + 4 browser E2E tests) + the CI workflow.",
-        "nextSteps": [
-          "run the FULL verification stack (both typechecks/lints, the entire frontend suite, the static suite, the development-governance suite, the FULL real-PG sweep, the browser E2E set)",
-          "open the PR with the exact SHAs and the evidence (do NOT merge; the architect is the sole merge authority)"
-        ],
-        "blockers": [],
-        "recordedAt": "2026-08-29T15:01:10Z",
-        "recordedBy": "main-implementation-agent"
-      }
-    ]
+    "activeHandoffs": []
   },
   "decisions": [
     {

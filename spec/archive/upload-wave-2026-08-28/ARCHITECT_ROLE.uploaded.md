@@ -1,3 +1,19 @@
+> **RETIRED UPLOAD-WAVE DOCUMENT — NON-AUTHORITATIVE HISTORICAL MATERIAL.**
+>
+> Originally uploaded as `spec/governance/ARCHITECT_ROLE.md`, direct-pushed to main on 2026-08-28
+> (commits ad4ea7f/09d91a9).
+>
+> The architect's actual decision rights and authority chain are defined by the governing
+> development-state (`spec/development-state/governance-model.json`, `program-state.json`) and the
+> v1.1 governance artifacts (`spec/governance/architect.json`); this document duplicated that
+> authority in prose without the ACR mechanism.
+
+> Nothing in this file governs. It is preserved as historical material only.
+> See `spec/archive/upload-wave-2026-08-28/index.json` and
+> `spec/architecture/v1.1/reconciliation-record.md` §8.
+
+---
+
 # WorkflowOS Architect Role
 
 ## Mission

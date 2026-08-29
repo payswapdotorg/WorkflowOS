@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "LIGHT": {
+      "intent": "small low-risk changes",
+      "requiredProofs": ["static"],
+      "requiredCheckpoints": ["pr_conformance"]
+    },
+    "STANDARD": {
+      "intent": "normal feature and bounded multi-module changes",
+      "requiredProofs": ["static", "dynamic"],
+      "requiredCheckpoints": ["work_order", "pr_conformance"]
+    },
+    "HIGH_ASSURANCE": {
+      "intent": "public-contract, concurrency, external-side-effect, or otherwise high-risk changes",
+      "requiredProofs": ["static", "dynamic", "discrimination"],
+      "requiredCheckpoints": ["readiness", "work_order", "pr_conformance", "verification_entry"]
+    },
+    "CRITICAL": {
+      "intent": "authority, security/tenant, schema, mission-critical, or materially irreversible changes",
+      "requiredProofs": ["static", "dynamic", "discrimination"],
+      "requiredCheckpoints": ["readiness", "work_order", "pr_conformance", "verification_entry", "architect_review"]
+    }
+  },
+  "selection": "deterministic first-match over declared risk/surface flags; unknown classification fails closed to HIGH_ASSURANCE",
+  "invariant": "assurance may add evidence requirements but never relaxes frozen architecture or security semantics"
+}

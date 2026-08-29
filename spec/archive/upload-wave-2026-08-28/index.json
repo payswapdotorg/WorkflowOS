@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "kind": "retired-identity-record",
+  "status": "non-authoritative",
+  "uploadedAt": "2026-08-28T18:24..18:40Z",
+  "uploadedVia": "direct push to main (commits 7db2ad3, ad4ea7f, 09d91a9, 3a66034, 6db6f60, f388386, 881ab0a, 044be40, 0541d13)",
+  "retiredAt": "2026-08-29",
+  "retiredBy": "the architect's PR #74 review verdict (REQUEST CHANGES, 2026-08-29): preserve the architect-issued GitHub issue track (ACR-001, WORK-053..061, v1.1) as the one canonical track; retire/rename the upload-wave artifacts so the WORK identifiers are no longer duplicated",
+  "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented",
+  "canonicalAuthorities": {
+    "governingArchitecture": "v1.0 (frozen) — spec/development-state/program-state.json",
+    "proposedEvolution": "v1.1 (proposed, ACR-001 pending) — spec/architecture/v1.1/",
+    "workOrderIdentity": "spec/work-orders/WORK-NNN.md (the architect-issued files, GitHub issues #64..#73) + spec/development-state/dependency-state.json futureGeneration",
+    "rule": "Every WORK-NNN identifier has exactly one canonical meaning. This archive records retired, superseded identity claims as history only; no artifact under this directory governs anything."
+  },
+  "identityMapping": [
+    {
+      "originalClaimedId": "WORK-053",
+      "retiredIdentity": "UW-053",
+      "uploadedTitle": "Architecture Checkpoint Framework",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-053-architecture-checkpoint-framework.md",
+      "canonicalMeaningOfOriginalId": "Architecture v1.1 Foundation and Control Loop (issue #65, spec/work-orders/WORK-053.md)"
+    },
+    {
+      "originalClaimedId": "WORK-054",
+      "retiredIdentity": "UW-054",
+      "uploadedTitle": "Adaptive Assurance Profiles",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-054-adaptive-assurance-profiles.md",
+      "canonicalMeaningOfOriginalId": "System Model and Provenance Graph (issue #66, spec/work-orders/WORK-054.md)"
+    },
+    {
+      "originalClaimedId": "WORK-055",
+      "retiredIdentity": "UW-055",
+      "uploadedTitle": "Evidence and Proof Registry",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-055-evidence-and-proof-registry.md",
+      "canonicalMeaningOfOriginalId": "Quality Attributes and Architecture Fitness (issue #67, spec/work-orders/WORK-055.md)"
+    },
+    {
+      "originalClaimedId": "WORK-056",
+      "retiredIdentity": "UW-056",
+      "uploadedTitle": "Change Program - Change Set Model",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-056-change-program-change-set-model.md",
+      "canonicalMeaningOfOriginalId": "Engineering Signals and Feedback Intake (issue #68, spec/work-orders/WORK-056.md)"
+    },
+    {
+      "originalClaimedId": "WORK-057",
+      "retiredIdentity": "UW-057",
+      "uploadedTitle": "Architecture Fitness Engine",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-057-architecture-fitness-engine.md",
+      "canonicalMeaningOfOriginalId": "Change Programs and Change Sets (issue #69, spec/work-orders/WORK-057.md)"
+    },
+    {
+      "originalClaimedId": "WORK-058",
+      "retiredIdentity": "UW-058",
+      "uploadedTitle": "Continuous Maintenance Intelligence",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-058-continuous-maintenance-intelligence.md",
+      "canonicalMeaningOfOriginalId": "Adaptive Assurance Engine (issue #70, spec/work-orders/WORK-058.md)"
+    },
+    {
+      "originalClaimedId": "WORK-059",
+      "retiredIdentity": "UW-059",
+      "uploadedTitle": "WorkflowOS Self-Hosting Lifecycle",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/UW-059-workflowos-self-hosting-lifecycle.md",
+      "canonicalMeaningOfOriginalId": "Operational and Release Governance (issue #71, spec/work-orders/WORK-059.md)"
+    }
+  ],
+  "governanceDocumentCorrections": [
+    {
+      "originalPath": "spec/governance/ARCHITECTURE_LOCK.md",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/ARCHITECTURE_LOCK.uploaded.md",
+      "misleadingClaim": "Version: 2.0, Status: FROZEN",
+      "correction": "No ACR was ever approved for a version change. The governing architecture is v1.0 (frozen) per spec/development-state/program-state.json; v1.1 exists only as a proposed evolution package (ACR-001 pending)."
+    },
+    {
+      "originalPath": "spec/work-orders/DAG.yaml",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/DAG.uploaded.yaml",
+      "misleadingClaim": "architecture_version: \"2.0\" and a WORK-053..059 roadmap that contradicts the architect-issued issues and its own uploaded files",
+      "correction": "The canonical machine-readable dependency mapping is spec/development-state/dependency-state.json (futureGeneration); the canonical sequence is spec/governance/future-roadmap.json."
+    },
+    {
+      "originalPath": "spec/implementation/CURRENT_STATE.md",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/CURRENT_STATE.uploaded.md",
+      "misleadingClaim": "Architecture: v2.0; Active: WORK-052",
+      "correction": "Stale at upload time (WORK-052 had completed at 16:34Z that day) and the v2.0 label was never established. The implementation state is derived from spec/development-state/program-state.json."
+    },
+    {
+      "originalPath": "spec/governance/ARCHITECT_ROLE.md",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/ARCHITECT_ROLE.uploaded.md",
+      "misleadingClaim": "a second prose definition of the architect's authority",
+      "correction": "The architect's decision rights are defined by spec/development-state/governance-model.json and spec/governance/architect.json (proposed v1.1)."
+    },
+    {
+      "originalPath": "spec/governance/AGENT_PROTOCOL.md",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/AGENT_PROTOCOL.uploaded.md",
+      "misleadingClaim": "a second definition of the worker protocol",
+      "correction": "The worker protocol is spec/governance/worker-protocol.json (proposed v1.1); this is an earlier prose draft, never established through the ACR mechanism."
+    },
+    {
+      "originalPath": "spec/governance/NEW_ARCHITECT_START.md",
+      "archivedFile": "spec/archive/upload-wave-2026-08-28/NEW_ARCHITECT_START.uploaded.md",
+      "misleadingClaim": "startup pointers that direct a fresh architect to the retired upload-wave documents",
+      "correction": "A fresh architect reconstructs the program from spec/development-state/program-state.json (bun run governance:status in backend/), the frozen v1.0 architecture, and the v1.1 proposal."
+    }
+  ]
+}

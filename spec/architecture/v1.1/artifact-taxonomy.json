@@ -1,0 +1,36 @@
+{
+  "version": "1.1",
+  "classes": {
+    "normative": [
+      "ArchitectureVersion",
+      "architecture-lock",
+      "ADR",
+      "ArchitectureChangeRequest"
+    ],
+    "authoritative": [
+      "/architecture",
+      "/work-items",
+      "/workflows",
+      "/verification",
+      "/reviews",
+      "/github"
+    ],
+    "derived": [
+      "SystemModel",
+      "EngineeringSignal",
+      "frontier-state",
+      "dependency-state",
+      "architecture-fitness-observation",
+      "checkpoint-summary"
+    ],
+    "evidence": [
+      "verification evidence",
+      "review findings",
+      "repository observations",
+      "CI observations",
+      "runtime observations",
+      "user-feedback observations"
+    ]
+  },
+  "rule": "A new artifact must be classified before creation. Derived artifacts cannot become authoritative by convention or caller choice. Evidence cannot directly mutate normative or authoritative state."
+}

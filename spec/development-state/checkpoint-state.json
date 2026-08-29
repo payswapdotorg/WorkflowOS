@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "derived-checkpoint-state",
+  "sourceOfTruth": ["spec/governance/checkpoint-contract.json", "spec/development-state/program-state.json", "spec/development-state/governance-model.json"],
+  "computedAt": "2026-08-28",
+  "requiredByProfile": {
+    "LIGHT": ["pr_conformance"],
+    "STANDARD": ["work_order", "pr_conformance"],
+    "HIGH_ASSURANCE": ["readiness", "work_order", "pr_conformance", "verification_entry"],
+    "CRITICAL": ["readiness", "work_order", "pr_conformance", "verification_entry", "architect_review"]
+  },
+  "resultRule": "Checkpoint state is descriptive/derived. Verification evidence remains owned by /verification and architectural decisions remain owned by /architecture. Missing evidence cannot be interpreted as success."
+}

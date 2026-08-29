@@ -1,9 +1,10 @@
 # WORK-050 — Unified Execution UX
 
-Status: IN FLIGHT — on branch `feat/work-050-unified-execution-ux` (off
-main@07ac9cc — the merged WORK-049, whose post-merge finalization §34.8/ADR-0007
-is carried by this same change). Derived from the architect's authorization;
-this document is the governing work order.
+Status: COMPLETE — merged by the architect as `8f27cc7` (PR #78, squash-merged
+at branch head `6c9031c` on 2026-08-29T16:57:01Z; the merge tree is identical
+to the approved head). The post-merge finalization §34.8/ADR-0007 is carried by
+the v1.1 architecture-package reconciliation (PR #74). Derived from the
+architect's authorization; this document is the governing work order.
 Architecture: frozen v1.0 authority model (the execution UX is a CONSUMER of
 existing authorities, never an authority itself)
 Dependencies: WORK-042 (cross-mode execution handoff), WORK-043 (execution
