@@ -317,6 +317,16 @@ import type {
   DelegationCoordinator,
   DelegationPlanService,
 } from './delegation/index.js';
+// WORK-047: the application-layer agent-intelligence domain (advisory/ranking
+// only — consumes the WORK-044 routing result + the WORK-045 role catalog +
+// read-only historical evidence from the EXISTING stores via their public
+// barrels; §33.9). The terminal slice of the forward dependency chain:
+// routing → roles → delegation → INTELLIGENCE (advisory; never authority).
+import {
+  DefaultAgentIntelligenceService,
+  PgAgentIntelligenceRepository,
+} from './agent-intelligence/index.js';
+import type { AgentIntelligenceService } from './agent-intelligence/index.js';
 import type { AgentRoleCatalogService } from './agent-roles/index.js';
 import { DefaultExecutionPromptBuilder } from './modules/work-items/internal/execution-prompt-builder.js';
 import { DefaultExecutionTaskService } from './modules/work-items/internal/execution-task-service.js';
@@ -486,6 +496,12 @@ export interface AppDeps {
    *  coordination only; every execution goes through the EXISTING
    *  ExecutionService). */
   delegationCoordinator?: DelegationCoordinator;
+  /** WORK-047: the agent-intelligence service (advisory/ranking only — the
+   *  re-ranking of the routing result's eligible set with the observed
+   *  execution-history signal + the deterministic delegation decomposition
+   *  recommendation; stateless, read-only, deterministic). Present when the
+   *  router + role catalog + database are configured. */
+  agentIntelligenceService?: AgentIntelligenceService;
   /** WORK-027: one-time, short-lived handoff token boundary for external packages. */
   executionHandoffService?: ExecutionHandoffService;
   /** WORK-027 (PR #30 fix #2): scoped event-ingestion callback token boundary. */
@@ -748,6 +764,8 @@ export async function buildApp(
   // WORK-046: the delegation coordination services (application layer).
   let delegationPlanService: DelegationPlanService | undefined;
   let delegationCoordinator: DelegationCoordinator | undefined;
+  // WORK-047: the agent-intelligence service (application layer — advisory).
+  let agentIntelligenceService: AgentIntelligenceService | undefined;
   let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
   // WORK-032 start-delivery durability: the generic OutboxRelay for the
   // benchmark start-delivery outbox. Injected into the WorkerHost below —
@@ -1752,6 +1770,20 @@ export async function buildApp(
       },
       logger,
     });
+    // WORK-047: the agent-intelligence layer — composed AFTER the router
+    // (the pipeline order is structural: hard eligibility → routing →
+    // INTELLIGENCE; the service consumes the router's already-eligible
+    // ranked set and NEVER reaches around it to the policy service). The
+    // evidence repository is READ-ONLY aggregation over the EXISTING stores
+    // (wfos_executions + the W046-AC10 delegation ledger — no second
+    // historical-data store); the role catalog is the WORK-045 authority.
+    // Advisory only: stateless, deterministic, no mutation, no scheduler.
+    agentIntelligenceService = new DefaultAgentIntelligenceService({
+      router: executionRouterService,
+      roleCatalog: agentRoleCatalogService,
+      repository: new PgAgentIntelligenceRepository({ db: database }),
+      logger,
+    });
     // WORK-043 (final admission): NOW the policy service exists — construct
     // the concrete admission boundary + bind it into the executionService's
     // delegating port (see the agents block above for the forward
@@ -2070,6 +2102,10 @@ export async function buildApp(
       // execution-policy service is configured). Advisory only — the
       // selection layer over the WORK-043 eligibility verdicts.
       executionRouterService,
+      // WORK-047: the agent-intelligence service (present when the router +
+      // role catalog + database are configured). Advisory/ranking only —
+      // the terminal §33.9 slice over the routing authority.
+      agentIntelligenceService,
       // WORK-045: the agent-role catalog service (always present — the
       // provider-independent role contracts; advisory configuration only).
       agentRoleCatalogService,

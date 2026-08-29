@@ -69,6 +69,52 @@ describe('WORK-052 — the post-merge finalization audit binds canonical state t
     expect(evidence.byWorkOrder.has('WORK-051')).toBe(false);
   });
 
+  it('DISCRIMINATION (the PR #75 review — evidence classification): a post-merge FINALIZATION/state-only commit beginning with WORK-NNN is NOT merge evidence — the 1ccc45f conflation can never recur', () => {
+    // The real-world defect: the WORK-052 post-merge finalization commit
+    // 1ccc45f ("WORK-052 post-merge corrective finalization — … (#63)", the
+    // squash of PR #63 — a STATE-ONLY change reconciling the canonical state
+    // after the merge) was classified as a SECOND merge-evidence commit for
+    // WORK-052 by the loose `^WORK-NNN\b` subject matcher. Merge evidence is
+    // the architect's ACTUAL merge (47615c2), never the finalization that
+    // reconciles state after it: the very commit that established the
+    // finalization protocol was being misclassified as merge evidence for
+    // its own work order — a provenance/audit-model defect, not a stale
+    // expected-value pin.
+    const FINALIZATION_SHA = '1ccc45ff926331c0b4bd161a11bb28a7182c6146';
+    const MERGE_SHA = '47615c236ec0e194e112efd3d2ef0f432c4bf210';
+    const finalizationSubject =
+      'WORK-052 post-merge corrective finalization — the canonical state reconciled with the 47615c2 merge, ' +
+      'the post-merge finalization protocol (§34.8/ADR-0007), the detector corrected to ADR-0006 (#63)';
+    const evidence = collectMergeEvidenceFromLines([
+      `${FINALIZATION_SHA} ${finalizationSubject}`,
+      `${MERGE_SHA} WORK-052: Development Governance & Self-Hosting Control Plane`,
+      // Generic state-only shapes — any subject naming the work order as a
+      // topic WITHOUT the colon convention — are equally not evidence.
+      `${SHA_A} WORK-052 post-merge finalization — state-only reconciliation`,
+      `${SHA_B} WORK-046 post-merge corrective finalization — canonical state only`,
+      `${SHA_A} WORK-052 finalization`,
+    ]);
+    // The architect's ACTUAL merge is evidence; the finalization commit is
+    // NOT — exact equality, so no extra candidate can hide in the list.
+    expect(evidence.byWorkOrder.get('WORK-052')).toEqual([MERGE_SHA]);
+    expect(evidence.byWorkOrder.get('WORK-052')).not.toContain(FINALIZATION_SHA);
+    expect(evidence.byWorkOrder.has('WORK-046')).toBe(false);
+    // AUDIT-LEVEL proof: a history containing ONLY the finalization commit
+    // does NOT bind the work order as merged — under the loose matcher this
+    // exact history would have bound WORK-052 ([1ccc45f]) and reported a
+    // FALSE "mergedAs.mergeCommit does not match the actual merge evidence"
+    // gap against the truthful 47615c2 record. A state-only reconciliation
+    // is not a completion event and can never satisfy (or violate) the
+    // merged-finalization invariant.
+    const finalizationOnly = collectMergeEvidenceFromLines([
+      `${FINALIZATION_SHA} ${finalizationSubject}`,
+    ]);
+    const audit = auditMergedFinalization(realProgram, finalizationOnly);
+    expect(audit.mergedWorkOrderIds).not.toContain('WORK-052');
+    expect(audit.mergedWorkOrderIds).toEqual([]);
+    expect(audit.gaps).toEqual([]);
+  });
+
   it('the POSITIVE arm: a finalized work order (complete + mergedAs matching the actual merge evidence, full or short form) audits clean', () => {
     const program = structuredClone(realProgram);
     const evidence = evidenceWith([[62, ['47615c236ec0e194e112efd3d2ef0f432c4bf210']]]);
@@ -168,7 +214,11 @@ describe('WORK-052 — the post-merge finalization audit binds canonical state t
     expect(audit.gaps).toEqual([]);
   });
 
-  it('a second architect merge of the same work order (e.g. a corrective finalization squash) audits clean when mergedAs matches ANY actual merge commit', () => {
+  it('a work order the architect ACTUALLY merged more than once (e.g. an implementation merge followed by a corrective re-merge under the SAME convention) audits clean when mergedAs matches ANY actual merge commit', () => {
+    // Multiple evidence entries are legitimate only for multiple ACTUAL
+    // architect merges — a post-merge finalization/state-only squash is NOT
+    // among them (see the PR #75 review discrimination above: it never
+    // enters the evidence at all).
     const evidence = evidenceWith([], [['WORK-052', ['47615c236ec0e194e112efd3d2ef0f432c4bf210', SHA_B]]]);
     // mergedAs records the IMPLEMENTATION merge (the completion event).
     const audit = auditMergedFinalization(realProgram, evidence);
@@ -195,7 +245,13 @@ describe('WORK-052 — the post-merge finalization audit binds canonical state t
 
   it('the REAL repository audits clean — the drift the post-merge review found is closed (WORK-052: merged 47615c2, finalized complete with the full provenance identity)', () => {
     const evidence = collectMergeEvidenceFromRepository(REPO_ROOT);
-    // The real history binds WORK-052 through the WORK-NNN squash convention.
+    // The real history binds WORK-052 through the WORK-NNN colon convention —
+    // EXACTLY the architect's actual merge. The WORK-052 post-merge
+    // finalization commit 1ccc45f (also in the real first-parent history,
+    // subject "WORK-052 post-merge corrective finalization — …") is NOT
+    // evidence: the exact-equality assertion is the discriminating proof
+    // that the conflation is gone on the REAL repository (no expected-SHA
+    // re-pinning — the matcher now classifies the truth this always asserted).
     expect(evidence.byWorkOrder.get('WORK-052')).toEqual(['47615c236ec0e194e112efd3d2ef0f432c4bf210']);
     // …and WORK-051 through the classic merge shape (its declared pr 52) —
     // BOTH shapes audit clean with their full mergedAs identities.

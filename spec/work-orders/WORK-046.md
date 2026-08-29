@@ -1,6 +1,6 @@
 # WORK-046 — Multi-Agent Delegation
 
-Status: IMPLEMENTED — reconciled onto current main@0541d13 (PR #60: integration merge retaining the round-1 remediation verbatim); awaiting architect re-review
+Status: COMPLETE — merged by the architect as `1f2bef93598433c65b874e58701bdec198289404` (PR #60, squash-merged at branch head `c2ebf1b` on 2026-08-29T01:47:09Z; the merge tree is identical to the approved head). Post-merge finalization recorded per §34.8/ADR-0007.
 Architecture: frozen v1.0 authority model + forward multi-agent intelligence direction (§33.9)
 Dependencies: WORK-034, WORK-036, WORK-044, WORK-045
 

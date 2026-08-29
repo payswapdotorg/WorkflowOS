@@ -169,22 +169,33 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     expect(pair.sharedSurfaces.length).toBeGreaterThan(0);
   });
 
-  it('W052-AC03 — the real program state: the WORK-046/WORK-052 shared-surface conflict is reported and MUTUALLY coordinated (PR #62 round 1)', () => {
+  it('W052-AC03 — the real program state: the historical WORK-046/WORK-052 shared-surface coordination is DURABLE HISTORY (both merged — no active conflict; the pairwise view still reports the shared surface + the mutual coordination)', () => {
+    // WORK-046 merged as 1f2bef9 and WORK-052 as 47615c2: both are complete,
+    // so the frontier reports NO active in-flight conflict. The coordination
+    // records on both records are durable history (the conflict happened and
+    // was mutually coordinated), and the pairwise view still reports the
+    // shared surface with coordinated: true.
     const report = realService.evaluateParallelEligibility(['WORK-046', 'WORK-052']);
-    // The two in-flight items share the static-architecture suite — the
-    // conflict is REPORTED (never a silent pass) and MUTUALLY coordinated.
     const pair = report.pairwise[0]!;
-    expect(pair.parallelSafe).toBe(false);
+    expect(pair.parallelSafe).toBe(false); // the shared static-architecture suite is still a FACT
     expect(pair.sharedSurfaces.some((s) => s.value.includes('static-architecture.test.ts'))).toBe(true);
-    expect(pair.coordinated, 'the coordination is declared on BOTH records').toBe(true);
-    // WORK-052's dependency on WORK-051 is SATISFIED since the f2c996c merge.
+    expect(pair.coordinated, 'the coordination is declared on BOTH records (durable history)').toBe(true);
+    // Both merged items have ALL dependencies satisfied (complete).
+    const a046 = report.assessments.find((a) => a.workOrderId === 'WORK-046')!;
     const a052 = report.assessments.find((a) => a.workOrderId === 'WORK-052')!;
+    expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
-    expect(a052.unsatisfiedDependencies).toEqual([]);
-    // The conflict facts are still REPORTED even when coordinated.
-    expect(a052.conflictsWith.length).toBeGreaterThan(0);
-    expect(a052.conflictsWith[0]!.workOrderId).toBe('WORK-046');
-    expect(a052.conflictsWith[0]!.coordinated).toBe(true);
+    // Evaluating the merged pair as candidates surfaces only the LIVE
+    // in-flight item (WORK-047, sharing the static-architecture suite) as an
+    // informational conflict partner — never each other (both complete; the
+    // in-flight-only conflict scan excludes them). The frontier is the
+    // authoritative live view: WORK-047 is the only in-flight item and has
+    // ZERO active conflicts.
+    expect(a046.conflictsWith.every((c) => c.workOrderId === 'WORK-047')).toBe(true);
+    expect(a052.conflictsWith.every((c) => c.workOrderId === 'WORK-047')).toBe(true);
+    const frontier = realService.getFrontier();
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-047']);
+    expect(frontier.inFlight[0]!.conflicts).toEqual([]);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -411,14 +422,16 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: WORK-048 is the dependency-eligible item; 047/049/050 are blocked', () => {
+  it('W052-AC03 — the REAL frontier: WORK-048 is the dependency-eligible item; WORK-047 is in flight; 049/050 are blocked on WORK-048', () => {
     const frontier = realService.getFrontier();
     expect(frontier.dependencyEligible.map((w) => w.id)).toEqual(['WORK-048']);
+    // WORK-047 was activated after the WORK-046 merge (all dependencies
+    // complete) — it is the in-flight item, not a blocked one.
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-047']);
+    expect(frontier.inFlight[0]!.branch).toBe('feat/work-047-agent-intelligence');
     const blockedIds = frontier.blocked.map((w) => w.id);
-    expect(blockedIds).toContain('WORK-047');
     expect(blockedIds).toContain('WORK-049');
     expect(blockedIds).toContain('WORK-050');
-    expect(frontier.blocked.find((w) => w.id === 'WORK-047')!.blockedBy).toEqual(['WORK-046']);
     expect(frontier.blocked.find((w) => w.id === 'WORK-049')!.blockedBy).toEqual(['WORK-048']);
     expect(frontier.blocked.find((w) => w.id === 'WORK-050')!.blockedBy).toEqual(['WORK-048']);
   });

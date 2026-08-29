@@ -390,6 +390,31 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-047: Agent Intelligence routes — the READ-ONLY advisory surface
+      // (the execution recommendation + the delegation decomposition
+      // recommendation; project.read — the recommendation computes but
+      // mutates NOTHING; the caller dispatches through the existing
+      // authority, which carries its own authorization). The intelligence
+      // layer consumes the WORK-044 routing result and NEVER bypasses hard
+      // constraints; the decomposition is data the caller submits through
+      // the EXISTING WORK-046 delegation boundary.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.workItemRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.agentIntelligenceService
+        ? {
+            agentIntelligence: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              workItemRepository: app.deps.workItemRepository,
+              architectureRepository: app.deps.architectureRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              agentIntelligenceService: app.deps.agentIntelligenceService,
+            },
+          }
+        : {}),
       // WORK-037: Agent Policy & Permissions routes. Backend-authorized
       // (project.read / project.admin). The engine never imports the
       // authorization service — only this route layer calls

@@ -26,6 +26,10 @@ import { executionPolicyRoutes, type ExecutionPolicyRouteDeps } from './routes/e
 import { executionRoutingRoutes, type ExecutionRoutingRouteDeps } from './routes/execution-routing.route.js';
 import { agentRolesRoutes, type AgentRolesRouteDeps } from './routes/agent-roles.route.js';
 import { delegationRoutes, type DelegationRouteDeps } from './routes/delegation.route.js';
+import {
+  agentIntelligenceRoutes,
+  type AgentIntelligenceRouteDeps,
+} from './routes/agent-intelligence.route.js';
 import { agentPolicyRoutes, type AgentPolicyRouteDeps } from './routes/agent-policy.route.js';
 import { onboardingRoutes, type OnboardingRouteDeps } from './routes/onboarding.route.js';
 import {
@@ -114,6 +118,12 @@ export interface ServerDeps extends JobsRouteDeps {
    *  surface (create/get/drive/retry/interrupt; backend-authorized; every
    *  delegated execution goes through the EXISTING execution boundary). */
   delegation?: DelegationRouteDeps;
+  /** WORK-047: Agent Intelligence routes — the READ-ONLY advisory surface
+   *  (the execution recommendation + the delegation decomposition
+   *  recommendation; backend-authorized project.read; advisory/ranking
+   *  only — hard constraints always dominate; the decomposition is data
+   *  submitted through the EXISTING WORK-046 boundary). */
+  agentIntelligence?: AgentIntelligenceRouteDeps;
   /** WORK-037: Agent Policy & Permissions routes. Backend-authorized. */
   agentPolicy?: AgentPolicyRouteDeps;
   /** WORK-038: Existing Project Onboarding routes (connect + analyze a
@@ -243,6 +253,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.delegation) {
     await delegationRoutes(app, deps.delegation);
+  }
+  if (deps.auth && deps.agentIntelligence) {
+    await agentIntelligenceRoutes(app, deps.agentIntelligence);
   }
   if (deps.auth && deps.agentPolicy) {
     await agentPolicyRoutes(app, deps.agentPolicy);

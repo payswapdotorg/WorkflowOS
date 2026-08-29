@@ -899,7 +899,7 @@
     {
       "id": "WORK-046",
       "title": "Multi-Agent Delegation (coordination, not authority)",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-045",
         "WORK-035",
@@ -907,7 +907,11 @@
       ],
       "branch": "feat/work-046-multi-agent-delegation",
       "pr": 60,
-      "head": "8433f24",
+      "head": "c2ebf1b",
+      "mergedAs": {
+        "pr": 60,
+        "mergeCommit": "1f2bef93598433c65b874e58701bdec198289404"
+      },
       "issue": 60,
       "workOrder": "spec/work-orders/WORK-046.md",
       "origin": "architect",
@@ -947,34 +951,47 @@
         "reason": "shares the static-architecture suite and composition-root surfaces with the (now merged) WORK-051 — coordinated by reserved migration numbering (0052-0056 WORK-051, 0057 WORK-046); ALSO shares the static-architecture suite with the in-flight WORK-052 (both append describe blocks to the same file) — merge order is serialized by the architect: whichever PR merges second rebases its describe-block additions",
         "adrs": []
       },
-      "note": "round-3 correction complete: the architect's round-3 review of PR #60 (CHANGES REQUIRED on head 20e72f6) found the attempt-generation race in PgDelegationRepository.recordAttemptOutcome — the attempt outcome row was fenced by attemptId but the unit-state mutation was fenced only by unit_id + status IN('dispatched','failed','unresolved'), so a LATE attempt-1 result arriving after a retry allocated attempt 2 could flip the unit (and through it the plan-completion check) while attempt 2 was still executing. Fixed by the ATTEMPT-GENERATION FENCE (commit 8433f24): the unit UPDATE now additionally requires the recorded attempt to BE the unit's current attempt (a.attempt_no = u.attempt_count — the allocation invariant), making a result for a superseded attempt structurally incapable of changing the unit's current state; no schema change (the fence lives in the durable operation itself). The required two-actor PostgreSQL regression (delegation-attempt-generation-race.integration.test.ts, two independent connections, the stale recorder's unit UPDATE genuinely BLOCKED on the retry's row lock with a contention probe) covers all three architect-required directions — stale SUCCESS and stale FAILURE both leave the unit dispatched on attempt 2; attempt 2 resolving takes the unit's outcome and may complete the plan — with the discrimination proven (all three tests FAIL on the unfenced repository). Static invariant (k) added (735 -> 736) pinning the fence + the regression. Everything else from the prior rounds stands: the round-1 remediation (0e15abf + 75ca9b6) retained verbatim, the merge-based integration onto main@0541d13 (a52b2e4), the ARCH-SELF-006 pin advance (20e72f6), and the resolved migration reservation (0052-0056 WORK-051, 0057 WORK-046). Full re-verification on real PostgreSQL 18 recorded in the PR #60 round-3 report; awaiting the architect's re-review of the resulting head."
+      "note": "Merged by the architect as 1f2bef93598433c65b874e58701bdec198289404 (PR #60, squash-merged at branch head c2ebf1b on 2026-08-29T01:47:09Z; the merge tree is IDENTICAL to the approved head). The post-merge finalization (§34.8/ADR-0007) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, the active handoff removed (merged work is not resumable), and the work-order document status updated. branch/pr/head kept as the historical record of how it merged; the coordination record is durable history (the WORK-051/WORK-052 shared-surface coordination happened; both partners are merged). The architect's approval review (2026-08-28T20:39:23Z) confirmed: the round-3 attempt-generation-race defect corrected by the ATTEMPT-GENERATION FENCE (a.attempt_no = u.attempt_count in recordAttemptOutcome), the two-connection PostgreSQL regression proves stale attempt-1 success/failure cannot overwrite attempt-2 state and attempt-2 terminal resolution can complete/recover the plan, the discrimination proof accepted, the round-1 interruption race guard intact, the reconciliation/migration-head correction acceptable — 'WORK-046 satisfies the v1.0 acceptance contract.'"
     },
     {
       "id": "WORK-047",
       "title": "Agent Intelligence",
-      "status": "blocked",
+      "status": "in_flight",
       "dependencies": [
         "WORK-032",
         "WORK-044",
         "WORK-046"
       ],
+      "branch": "feat/work-047-agent-intelligence",
+      "pr": 75,
+      "head": "1b5a6ac",
+      "workOrder": "spec/work-orders/WORK-047.md",
       "origin": "architect",
       "surfaces": {
         "modules": [
-          "repository-intelligence",
           "execution-routing"
         ],
-        "appLayer": [],
+        "appLayer": [
+          "agent-intelligence"
+        ],
         "migrations": [],
-        "specDocs": [],
-        "sharedIntegrationSurfaces": []
+        "specDocs": [
+          "spec/work-orders/WORK-047.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/src/api/index.ts",
+          "backend/src/api/server.ts",
+          "backend/tests/architecture/static-architecture.test.ts"
+        ]
       },
       "surfaceFlags": [
         "publicContracts",
         "moduleInternals"
       ],
       "assuranceProfile": "HIGH_ASSURANCE",
-      "note": "blocked pending WORK-046 completion; explicitly out of WORK-052 scope (Issue #61)"
+      "runtimeImpactBinding": "high",
+      "note": "activated after the WORK-046 merge (1f2bef9): the advisory/ranking intelligence layer over the EXISTING authorities (§33.9) — consumes the WORK-044 routing result's already-eligible ranked set, the WORK-045 role catalog, and read-only historical evidence from the EXISTING stores (wfos_executions terminal outcomes + the W046-AC10 delegation structured state + the benchmark evidence carried through the consumed recommendation); NO migration, NO new tables (the last migration stays 0057); STATELESS and DETERMINISTIC with full provenance. The work order was ABSENT and is derived per the architect's authorization from §33.9 + the dependency graph + the W045-AC14/W046-AC10 forward-compatibility contracts (spec/work-orders/WORK-047.md). Surfaces declared truthfully at activation: the slice adds the agent-intelligence application layer and consumes the execution-routing public contract; repository-intelligence (in the original reservation) is NOT touched by this implementation. Adversarial coverage: hard constraints always dominate intelligence (policy/capability/routing exclusions of the historically best candidate, the ineligible-candidate seam), fail-closed semantics, tenant isolation, determinism, provenance, no-mutation, no-second-authority."
     },
     {
       "id": "WORK-048",
@@ -1318,16 +1335,16 @@
     "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
     "activeHandoffs": [
       {
-        "workOrderId": "WORK-046",
-        "lastVerifiedState": "Round-3 correction complete on branch feat/work-046-multi-agent-delegation (PR #60, head 8433f24): the attempt-generation race found by the architect's round-3 review is closed — recordAttemptOutcome's unit-state mutation is now ATTEMPT-FENCED (a.attempt_no = u.attempt_count), so a stale attempt-1 result (SUCCESS or FAILURE) arriving after a retry allocated attempt 2 leaves the unit dispatched on attempt 2, and only the current attempt's outcome can change the unit or complete the plan; the two-actor real-PostgreSQL regression (two independent connections, contention-proven blocked interleaving) covers all three required directions and FAILS on the unfenced repository (discrimination proven); static invariant (k) pins the fence (736/736). Full re-verification: typecheck 0; lint 0 errors; delegation real-PG 15/15; governance suites 90/91 (the 1 = the documented pre-existing merged-finalization pin failure, WORK-052 scope); full real-PG sweep 2356 passed / 1 failed (the same pre-existing); pglite 2312/44-skipped/1-failed (same); governance:status exit 0.",
+        "workOrderId": "WORK-047",
+        "lastVerifiedState": "IMPLEMENTED on branch feat/work-047-agent-intelligence (off main@1f2bef9 — the merged WORK-046): the derived work order spec/work-orders/WORK-047.md + the advisory/ranking intelligence layer at src/agent-intelligence/ (recommendExecution: the re-ranking of the WORK-044 router's already-eligible set with the observed execution-history signal from wfos_executions — composite 0.6 routing + 0.4 history, neutral prior, §14 sufficiency, the fail-closed ineligible-candidate seam, total-order tie-breaks, ordered fallbacks; recommendDelegation: the deterministic task-profile-driven decomposition over the WORK-045 catalog with assignments from the ranking and the W046-AC10 role history annotating never dropping; full provenance: reasons + evidence windows + constraintsApplied with the §22 decisionId + rejectedAlternatives with the authority's reasons). READ-ONLY (SELECT-only evidence over EXISTING stores; no migration — the last stays 0057); stateless; deterministic. The same change carries the WORK-046 post-merge finalization (complete + mergedAs {pr: 60, mergeCommit: 1f2bef9…} + handoff removed per §34.8/ADR-0007). PR #75 ARCHITECT REVIEW (REQUEST CHANGES — one narrow governance correction, remediated on the same branch): the merged-finalization audit's architect-merge evidence matcher (ARCHITECT_MERGE_SUBJECT_RE) accepted ANY subject beginning with WORK-NNN, so the WORK-052 post-merge finalization commit 1ccc45f ('WORK-052 post-merge corrective finalization — …') was misclassified as merge evidence for its own work order — a provenance/audit-model defect (NOT a stale expected-value pin, as the delivery report had characterized it; that characterization is withdrawn). Corrected: the matcher now recognizes the SPECIFIC colon-separated architect-merge convention ('WORK-NNN: title' — exactly what governance-model.json postMergeFinalization.enforcement and ADR-0007 record; both legitimate shapes preserved: classic 'Merge pull request #N from …' + the colon convention); a discriminating regression added proving finalization/state-only WORK-NNN subjects never enter the evidence (the real 1ccc45f subject + generic shapes + the audit-level no-binding proof); the check NOT weakened (the matcher strictly narrows accepted evidence) and NO expected-SHA re-pinning (the REAL-repository audit's exact-equality assertion was already the truth; the matcher now classifies it). Verified after the correction: typecheck 0; lint 0 errors; static 747/747; agent-intelligence 46/46 on real PG 18 + pglite; merged-finalization 11/11; development-governance 52/52; architecture-governance 40/40; FULL real-PG 18 sweep 110 files — 2415 passed / 0 failed; pglite sweep 2371 passed / 44 skipped / 0 failed; governance:status exit 0 (48 complete, WORK-047 in flight, merged finalized 3/3, frontier WORK-048).",
         "nextSteps": [
-          "architect re-reviews PR #60 on the round-3 head (8433f24 — the attempt-generation fence + the two-actor regression)",
-          "if changes requested: remediate on the same branch",
-          "if approved: architect merges PR #60; record mergedAs and set status complete (post-merge finalization per §34.8/ADR-0007); WORK-047 becomes eligible once complete"
+          "architect re-reviews PR #75 after the merge-evidence matcher correction (the intelligence layer is unchanged; the correction is governance-scope only)",
+          "if further changes requested: remediate on the same branch (feat/work-047-agent-intelligence)",
+          "if approved: architect merges the PR; record mergedAs and set status complete (post-merge finalization per §34.8/ADR-0007); WORK-048 remains the frontier item awaiting its own architect authorization"
         ],
         "blockers": [],
-        "recordedAt": "2026-08-28T20:30:00Z",
-        "recordedBy": "z.ai implementation agent (WORK-046)"
+        "recordedAt": "2026-08-29T02:45:00Z",
+        "recordedBy": "z.ai implementation agent (WORK-047)"
       }
     ]
   },

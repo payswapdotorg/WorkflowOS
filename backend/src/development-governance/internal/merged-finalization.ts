@@ -28,6 +28,17 @@
  *   - `WORK-NNN: …` — the architect's direct/squash merge convention (bound
  *     by work-order id; PR #62 merged this way as `47615c2`).
  *
+ * The second shape is the SPECIFIC colon-separated convention
+ * (`WORK-NNN: title`, exactly as recorded in `governance-model.json`
+ * postMergeFinalization.enforcement and ADR-0007) — NOT every subject that
+ * begins with a work-order id. A post-merge FINALIZATION/state-only commit
+ * names the work order as a TOPIC (`WORK-052 post-merge corrective
+ * finalization — …`, the `1ccc45f` squash of PR #63) and is NOT merge
+ * evidence: conflating it with the architectural merge it finalizes would
+ * misclassify the very commit that established the finalization protocol as
+ * merge evidence for its own work order (the PR #75 review — a
+ * provenance/audit-model defect, not a stale test pin).
+ *
  * PURE over its inputs; the only I/O is
  * {@link MergeEvidenceUnavailableError} fail-closed evidence collection from
  * repository-resident git history — never an external service.
@@ -41,7 +52,12 @@ import type { ProgramState } from '../../architecture-checkpoints/index.js';
 export interface MergeEvidence {
   /** PR number → the full merge-commit SHAs that merged it (classic merge commits). */
   readonly byPr: ReadonlyMap<number, readonly string[]>;
-  /** Work order id → the full commit SHAs whose subject names it (the architect-merge subject convention). */
+  /**
+   * Work order id → the full commit SHAs whose subject follows the
+   * `WORK-NNN: title` architect-merge convention. A state-only commit that
+   * merely BEGINS with the id (e.g. a post-merge finalization) is NOT
+   * evidence and never appears here.
+   */
   readonly byWorkOrder: ReadonlyMap<string, readonly string[]>;
 }
 
@@ -66,14 +82,25 @@ export class MergeEvidenceUnavailableError extends Error {
 
 const SHA_SUBJECT_LINE_RE = /^([0-9a-f]{40}) (.*)$/;
 const MERGE_PULL_REQUEST_RE = /^Merge pull request #(\d+) from /;
-const ARCHITECT_MERGE_SUBJECT_RE = /^(WORK-\d{3})\b/;
+/**
+ * The architect-merge subject convention: `WORK-NNN: title` — the
+ * colon-separated id-then-title shape (both actual architect squash merges
+ * follow it: `WORK-046: Multi-Agent Delegation`, `WORK-052: Development
+ * Governance & Self-Hosting Control Plane`). Subjects that merely BEGIN with
+ * the id (no colon) name the work order as a topic — e.g. the `1ccc45f`
+ * post-merge finalization — and are NOT merge evidence.
+ */
+const ARCHITECT_MERGE_SUBJECT_RE = /^(WORK-\d{3}): /;
 
 /**
  * Parse `<sha> <subject>` log lines (the first-parent history of main) into
  * merge evidence. Both merge shapes are recognized; a work order or PR may
- * legitimately appear more than once (e.g. an implementation merge followed
- * by a corrective finalization squash) — the audit matches ANY actual merge
- * commit.
+ * legitimately appear more than once when the architect ACTUALLY merged it
+ * more than once (e.g. an implementation merge followed by a corrective
+ * re-merge under the same convention) — the audit matches ANY actual merge
+ * commit. A post-merge finalization/state-only commit is NOT a merge: its
+ * subject names the work order as a topic without the colon convention, so
+ * it is never collected as evidence (the PR #75 review).
  */
 export function collectMergeEvidenceFromLines(lines: readonly string[]): MergeEvidence {
   const byPr = new Map<number, string[]>();

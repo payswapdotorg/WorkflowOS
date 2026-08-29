@@ -16959,7 +16959,14 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     const auditModule = readFileSync(join(DG_INTERNAL, 'merged-finalization.ts'), 'utf8');
     expect(auditModule).toMatch(/auditMergedFinalization/);
     expect(auditModule).toMatch(/Merge pull request #/);
-    expect(auditModule).toMatch(/\^\(WORK-\\d\{3\}\)\\b/);
+    // The PR #75 review: the architect-merge evidence matcher recognizes the
+    // SPECIFIC colon-separated convention (`WORK-NNN: title` — exactly what
+    // governance-model.json postMergeFinalization.enforcement and ADR-0007
+    // record), NOT every subject that begins with a work-order id — the
+    // WORK-052 post-merge finalization commit 1ccc45f ("WORK-052 post-merge
+    // corrective finalization — …", a state-only squash) is never merge
+    // evidence for its own work order.
+    expect(auditModule).toMatch(/\^\(WORK-\\d\{3\}\): /);
     // The PR #63 round-2 review: the ENTIRE mergedAs identity is validated —
     // the PR number against the authoritative PR identity (the declared pr),
     // not merely stored.
@@ -17077,6 +17084,14 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(finalization).toMatch(/DISCRIMINATION \(the PR #63 round-2 review — fail closed\): a WORK-NNN-merged work order that declares NO pr cannot anchor its mergedAs\.pr provenance claim/);
     expect(finalization).toMatch(/an in-flight work order with NO merge evidence is NOT a gap/);
     expect(finalization).toMatch(/the REAL repository audits clean/);
+    // The PR #75 review — the evidence-classification correction: the
+    // discriminating regression is a mandated marker (a finalization/
+    // state-only commit beginning with WORK-NNN is NOT merge evidence), and
+    // the multi-evidence premise is limited to ACTUAL architect merges.
+    expect(finalization).toMatch(
+      /DISCRIMINATION \(the PR #75 review — evidence classification\): a post-merge FINALIZATION\/state-only commit beginning with WORK-NNN is NOT merge evidence/,
+    );
+    expect(finalization).toMatch(/a work order the architect ACTUALLY merged more than once/);
     const detectorTests = readFileSync(DG_DETECTOR_TESTS, 'utf8');
     expect(detectorTests).toMatch(/WORK-052 — the governance-manifest detector \(self-hosting boundary at the checkpoint substrate\)/);
     expect(detectorTests).toMatch(/W052-AC09 — a valid governance manifest at the bound revision PASSES with durable \/verification evidence/);
@@ -17399,5 +17414,297 @@ describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not auth
     // The interruption race guard regression stays pinned (round-1).
     expect(readFileSync(join(DELEGATION_TESTS_DIR, 'delegation-interruption-race.integration.test.ts'), 'utf8'))
       .toMatch(/rejects a stale dispatch after interruption/);
+  });
+});
+
+// ===========================================================================
+// WORK-047 — Agent Intelligence (advisory/ranking only — §33.9)
+// ===========================================================================
+// The intelligence domain lives at src/agent-intelligence/ (application-layer
+// ORCHESTRATOR outside src/modules/, mirroring the §34 benchmark /
+// execution-policy / execution-routing / agent-roles / delegation pattern —
+// NOT the 18th frozen module). The terminal slice of the forward dependency
+// chain: WORK-044 (routing) → WORK-045 Agent Roles → WORK-046 Delegation
+// → WORK-047 Agent Intelligence.
+describe('WORK-047 invariants — Agent Intelligence (advisory/ranking only, never authority)', () => {
+  const AI_DIR = join(BACKEND_ROOT, 'src', 'agent-intelligence');
+  const AI_INTERNAL = join(AI_DIR, 'internal');
+  const AI_TYPES = join(AI_DIR, 'types.ts');
+  const AI_BARREL = join(AI_DIR, 'index.ts');
+  const AI_SERVICE = join(AI_INTERNAL, 'agent-intelligence.service.ts');
+  const AI_RANKING = join(AI_INTERNAL, 'intelligence-ranking.ts');
+  const AI_REPO = join(AI_INTERNAL, 'pg-agent-intelligence-repository.ts');
+  const AI_DECOMP = join(AI_INTERNAL, 'decomposition.ts');
+  const AI_ROUTE = join(BACKEND_ROOT, 'src', 'api', 'routes', 'agent-intelligence.route.ts');
+  const AI_TESTS = join(BACKEND_ROOT, 'tests', 'integration', 'agent-intelligence', 'agent-intelligence.integration.test.ts');
+  const AI_UNIT_TESTS = join(BACKEND_ROOT, 'tests', 'integration', 'agent-intelligence', 'agent-intelligence-ranking.unit.test.ts');
+  const AI_API_TESTS = join(BACKEND_ROOT, 'tests', 'integration', 'agent-intelligence', 'agent-intelligence.api.integration.test.ts');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const WORK_ORDER = join(BACKEND_ROOT, '..', 'spec', 'work-orders', 'WORK-047.md');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readIntelligenceFiles(): { path: string; code: string; raw: string }[] {
+    const out: { path: string; code: string; raw: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir).sort()) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const raw = readFileSync(full, 'utf8');
+          out.push({ path: full, code: stripCodeComments(raw), raw });
+        }
+      }
+    };
+    walk(AI_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module -------------------------
+
+  it('the agent-intelligence domain exists at src/agent-intelligence/ and is NOT a frozen module (the set stays 17)', () => {
+    expect(existsSync(AI_DIR), 'src/agent-intelligence/ must exist').toBe(true);
+    expect(existsSync(AI_BARREL), 'src/agent-intelligence/index.ts must exist').toBe(true);
+    expect(existsSync(AI_TYPES), 'src/agent-intelligence/types.ts must exist').toBe(true);
+    expect(existsSync(AI_INTERNAL), 'src/agent-intelligence/internal/ must exist').toBe(true);
+    expect(existsSync(AI_SERVICE), 'the intelligence service must exist').toBe(true);
+    expect(existsSync(AI_RANKING), 'the pure ranking module must exist').toBe(true);
+    expect(existsSync(AI_REPO), 'the read-only evidence repository must exist').toBe(true);
+    expect(existsSync(AI_DECOMP), 'the decomposition rules module must exist').toBe(true);
+    expect(existsSync(join(MODULES_DIR, 'agent-intelligence'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'agent-intelligence must not be a frozen module').not.toContain('/agent-intelligence');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) THE PIPELINE ORDER — the routing authority is consumed, never bypassed
+
+  it('the service consumes the WORK-044 router (recommendExecution) and NEVER the policy service directly — the pipeline order is structural', () => {
+    const serviceCode = stripCodeComments(readFileSync(AI_SERVICE, 'utf8'));
+    // THE CONSUMED AUTHORITY: the router's recommendation.
+    expect(serviceCode).toMatch(/this\.deps\.router\.recommendExecution\(/);
+    // NO policy-service dependency: the intelligence layer never reaches
+    // around the router to evaluate or recommend on its own.
+    expect(serviceCode).not.toMatch(/ExecutionPolicyService/);
+    expect(serviceCode).not.toMatch(/executionPolicyService/);
+    // NO benchmark/eligibility machinery of its own.
+    for (const f of readIntelligenceFiles()) {
+      expect(f.code, `${f.path}: no eligibility engine`).not.toMatch(
+        /ExecutionEligibilityService|DefaultExecutionEligibilityService/,
+      );
+      expect(f.code, `${f.path}: no recommendation engine of the policy layer`).not.toMatch(
+        /DefaultExecutionRecommendationService/,
+      );
+      expect(f.code, `${f.path}: no benchmark orchestrator`).not.toMatch(/BenchmarkService|BenchmarkTrialOrchestrator/);
+    }
+  });
+
+  // --- (c) the fail-closed eligibility seam (hard constraints always dominate) --
+
+  it('the ranking seam REJECTS ineligible candidates with a typed error — intelligence cannot bypass hard constraints (W047-AC02)', () => {
+    const rankingCode = stripCodeComments(readFileSync(AI_RANKING, 'utf8'));
+    expect(rankingCode).toMatch(/assertEligibleAtSeam/);
+    expect(rankingCode).toMatch(/agent-intelligence-ineligible-candidate/);
+    // The seam runs for EVERY ranked row inside rankWithIntelligence.
+    expect(rankingCode).toMatch(/assertEligibleAtSeam\(\{ eligibility: candidate\.eligibility, identity: candidate\.identity \}\)/);
+    // The exclusion picture carries the AUTHORITY's verdicts verbatim (never
+    // invented exclusion reasons).
+    expect(rankingCode).toMatch(/buildRejectedAlternatives/);
+    // The regression proves it by title (defense in depth).
+    const tests = readFileSync(AI_TESTS, 'utf8');
+    expect(tests).toMatch(/ADVERSARIAL #10: an ineligible candidate at the ranking seam/);
+    expect(tests).toMatch(/ADVERSARIAL #7: POLICY excludes the historically best candidate/);
+    expect(tests).toMatch(/ADVERSARIAL #8: CAPABILITY excludes the historically best candidate/);
+    expect(tests).toMatch(/ADVERSARIAL #9: the ROUTING-CARRIED exclusion/);
+  });
+
+  // --- (d) NO second authority of any kind (the forbidden-duplication matrix) --
+
+  it('NO forbidden duplication: no workflow/verification/review authority, no role authoring, no llm, no scheduler, no provider SDK, no credentials', () => {
+    for (const f of readIntelligenceFiles()) {
+      // No workflow authority (vocabulary, engine, or table SQL).
+      expect(f.code, `${f.path}: no workflow engine`).not.toMatch(/implements\s+WorkflowEngine|WorkflowOrchestrator/);
+      expect(f.code, `${f.path}: no workflow table SQL`).not.toMatch(/wfos_workflow_executions|wfos_workflow_transitions/);
+      // No verification/review authority.
+      expect(f.code, `${f.path}: no verification authority`).not.toMatch(/@modules\/verification|VerificationService/);
+      expect(f.code, `${f.path}: no review authority`).not.toMatch(/@modules\/reviews|ReviewService/);
+      // No role AUTHORING (consume the catalog; never define roles).
+      expect(f.code, `${f.path}: no role definitions`).not.toMatch(/AGENT_ROLE_CATALOG\s*=|AgentRoleDefinition|displayName:\s*'/);
+      expect(f.code, `${f.path}: no AgentRoleId redeclaration`).not.toMatch(/export type AgentRoleId/);
+      // No LLM (the intelligence is deterministic aggregation, not generation).
+      expect(f.code, `${f.path}: no llm`).not.toMatch(/@modules\/llm/);
+      // NO SCHEDULER (every recommendation is an explicit call).
+      expect(f.code, `${f.path}: no scheduler`).not.toMatch(/setInterval|setTimeout|cron\(|WorkerHost|Queue\(/);
+      // No provider SDK / gateway / adapter / registry.
+      expect(f.code, `${f.path}: no AgentGateway`).not.toMatch(/AgentGateway/);
+      expect(f.code, `${f.path}: no provider implementation`).not.toMatch(/implements\s+ExecutionProvider|NativeExecutionProvider|ExternalExecutionProvider/);
+      expect(f.code, `${f.path}: no provider registry`).not.toMatch(/AgentProviderRegistry/);
+      expect(f.code, `${f.path}: no agent adapter`).not.toMatch(/AgentProviderAdapter/);
+      // No credential/env access.
+      expect(f.code, `${f.path}: no env access`).not.toMatch(/process\.env/);
+      expect(f.code, `${f.path}: no secret store`).not.toMatch(/SecretStore|getSecret/);
+      // Barrel-only frozen-module imports (no internal/ paths).
+      expect(f.code, `${f.path}: no module internal imports`).not.toMatch(/@modules\/[a-z-]+\/internal\//);
+      // No delegation-plan creation/driving (the decomposition is DATA).
+      expect(f.code, `${f.path}: no delegation coordinator`).not.toMatch(/DelegationCoordinator|drivePlan\(/);
+      expect(f.code, `${f.path}: no delegation plan creation`).not.toMatch(/DelegationPlanService|createPlan\(/);
+      expect(f.code, `${f.path}: no execution submit`).not.toMatch(/ExecutionService|\.submit\(/);
+    }
+  });
+
+  // --- (e) READ-ONLY evidence over EXISTING stores (no second historical store) -
+
+  it('the evidence repository is SELECT-ONLY aggregation over the EXISTING stores — no second historical-data store, no migration', () => {
+    const repoRaw = readFileSync(AI_REPO, 'utf8');
+    const repoCode = stripCodeComments(repoRaw);
+    // SELECT-only: no data mutation anywhere in the domain.
+    for (const f of readIntelligenceFiles()) {
+      expect(f.code, `${f.path}: no INSERT`).not.toMatch(/\bINSERT\s+INTO\b/);
+      expect(f.code, `${f.path}: no UPDATE`).not.toMatch(/\bUPDATE\b/);
+      expect(f.code, `${f.path}: no DELETE`).not.toMatch(/\bDELETE\s+FROM\b/);
+      expect(f.code, `${f.path}: no DDL`).not.toMatch(/\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b/);
+    }
+    // The two evidence queries: wfos_executions (project_id-scoped) + the
+    // delegation ledger (scoped through the AUTHORITATIVE work-item →
+    // architecture → project chain).
+    expect(repoCode).toMatch(/FROM wfos_executions/);
+    expect(repoCode).toMatch(/WHERE project_id = \$1/);
+    expect(repoCode).toMatch(/FROM wfos_delegation_attempts/);
+    expect(repoCode).toMatch(/JOIN wfos_delegation_plans p ON p\.id = u\.plan_id/);
+    expect(repoCode).toMatch(/WHERE ar\.project_id = \$1/);
+    // NO new tables: the domain declares NO migration of its own — the last
+    // migration remains the WORK-046 delegation coordination ledger 0057.
+    const migrations = readdirSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations'))
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    expect(migrations[migrations.length - 1]).toMatch(/^0057_/);
+    expect(migrations.some((m) => m.startsWith('0058'))).toBe(false);
+  });
+
+  // --- (f) DETERMINISM — the documented constants + the total-order tie-break --
+
+  it('the scoring constants and the deterministic tie-break chain are pinned (W047-AC04)', () => {
+    const rankingCode = stripCodeComments(readFileSync(AI_RANKING, 'utf8'));
+    expect(rankingCode).toMatch(/export const ROUTING_WEIGHT = 0\.6;/);
+    expect(rankingCode).toMatch(/export const HISTORY_WEIGHT = 0\.4;/);
+    expect(rankingCode).toMatch(/export const NEUTRAL_PRIOR = 0\.5;/);
+    expect(rankingCode).toMatch(/export const INSUFFICIENT_SAMPLE = 3;/);
+    // The composite formula.
+    expect(rankingCode).toMatch(/ROUTING_WEIGHT \* components\.routing\.value \+ HISTORY_WEIGHT \* components\.historicalSuccess\.value/);
+    // The tie-break chain: score desc → routing desc → lexicographic.
+    expect(rankingCode).toMatch(/b\.score - a\.score/);
+    expect(rankingCode).toMatch(/b\.components\.routing\.value - a\.components\.routing\.value/);
+    expect(rankingCode).toMatch(/identityLexicographicKey/);
+    // The regressions by title.
+    const tests = readFileSync(AI_TESTS, 'utf8');
+    expect(tests).toMatch(/ADVERSARIAL #13: deterministic ordering under equal evidence/);
+    expect(tests).toMatch(/ADVERSARIAL #14: repeated recommendation for identical inputs/);
+  });
+
+  // --- (g) the provenance contract (the four questions) -------------------------
+
+  it('the provenance contract answers the four questions structurally (W047-AC06)', () => {
+    const typesCode = stripCodeComments(readFileSync(AI_TYPES, 'utf8'));
+    // Why (headline + reasons), which evidence (contributions + windows),
+    // which constraints (decisionId + satisfied), which alternatives rejected.
+    expect(typesCode).toMatch(/readonly headline: string;/);
+    expect(typesCode).toMatch(/readonly reasons: readonly IntelligenceReason\[\];/);
+    expect(typesCode).toMatch(/readonly contributingEvidence: readonly EvidenceContribution\[\];/);
+    expect(typesCode).toMatch(/readonly firstObservedAt: Date;/);
+    expect(typesCode).toMatch(/readonly lastObservedAt: Date;/);
+    expect(typesCode).toMatch(/readonly decisionId: string;/);
+    expect(typesCode).toMatch(/readonly satisfiedConstraints: readonly string\[\];/);
+    expect(typesCode).toMatch(/readonly rejectedAlternatives: readonly IntelligenceRejectedAlternative\[\];/);
+    // The integration regression asserts the full provenance by title.
+    const tests = readFileSync(AI_TESTS, 'utf8');
+    expect(tests).toMatch(/W047-AC06: the provenance answers the four questions/);
+  });
+
+  // --- (h) the decomposition is DATA (never executed) + evidence annotates ------
+
+  it('the decomposition is DATA (the WORK-046 request vocabulary) — never created, driven, or executed here; role history annotates, never drops (W047-AC09/AC10)', () => {
+    const decompCode = stripCodeComments(readFileSync(AI_DECOMP, 'utf8'));
+    // The deterministic rule table over the closed catalog roles.
+    expect(decompCode).toMatch(/export const DECOMPOSITION_RULES: readonly DecompositionRule\[\]/);
+    // The fail-closed unknown-role seam.
+    expect(decompCode).toMatch(/agent-intelligence-unknown-role/);
+    // The submission path is DOCUMENTED on the result, not executed.
+    const typesCode = stripCodeComments(readFileSync(AI_TYPES, 'utf8'));
+    expect(typesCode).toMatch(/readonly submissionPath: string;/);
+    // The regressions by title.
+    const tests = readFileSync(AI_TESTS, 'utf8');
+    expect(tests).toMatch(/W047-AC09: the decomposition is DATA/);
+    expect(tests).toMatch(/W047-AC10: historical role evidence ANNOTATES the decomposition and NEVER drops/);
+    expect(tests).toMatch(/ADVERSARIAL #6: unknown role at the decomposition seam/);
+  });
+
+  // --- (i) the composition root + the HTTP surface mirror the existing patterns -
+
+  it('the composition root wires intelligence AFTER the router (the pipeline order); the route authorizes project.read + resolves the project server-side', () => {
+    const appCode = stripCodeComments(readFileSync(APP_TS, 'utf8'));
+    expect(appCode).toMatch(/new DefaultAgentIntelligenceService\(/);
+    expect(appCode).toMatch(/new PgAgentIntelligenceRepository\(/);
+    // Composed AFTER the router exists (the dependency direction).
+    const routerIdx = appCode.indexOf('executionRouterService = new AdaptiveExecutionRouter(');
+    const aiIdx = appCode.indexOf('new DefaultAgentIntelligenceService(');
+    expect(routerIdx).toBeGreaterThan(-1);
+    expect(aiIdx).toBeGreaterThan(routerIdx);
+
+    const routeCode = stripCodeComments(readFileSync(AI_ROUTE, 'utf8'));
+    expect(routeCode).toMatch(/requireProjectAuthorization/);
+    expect(routeCode).toMatch(/permission: 'project\.read'/);
+    expect(routeCode).toMatch(/work-item-not-in-project/);
+    expect(routeCode).toMatch(/resolveProjectForWorkItem/);
+    // The benchmark-mode override is VALIDATED (the WORK-043 contract).
+    expect(routeCode).toMatch(/invalid-benchmark-mode/);
+    // READ-ONLY: the route exposes GET endpoints only.
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/work-items\/:workItemId\/agent-intelligence\/execution'/);
+    expect(routeCode).toMatch(/app\.get\('\/projects\/:projectId\/work-items\/:workItemId\/agent-intelligence\/delegation'/);
+    expect(routeCode).not.toMatch(/app\.(post|put|patch|delete)\(/);
+    // NO routing/eligibility semantics of its own.
+    expect(routeCode).not.toMatch(/AdaptiveExecutionRouter|ExecutionPolicyService/);
+  });
+
+  // --- (j) the remaining adversarial matrix titles + the fail-closed semantics ---
+
+  it('the remaining adversarial coverage is pinned by title in the integration suite (the work order\'s required matrix)', () => {
+    const tests = readFileSync(AI_TESTS, 'utf8');
+    expect(tests).toMatch(/ADVERSARIAL #1: no eligible candidates → fail closed/);
+    expect(tests).toMatch(/ADVERSARIAL #2: historical evidence unavailable/);
+    expect(tests).toMatch(/ADVERSARIAL #3: stale historical evidence/);
+    expect(tests).toMatch(/ADVERSARIAL #4: conflicting evidence/);
+    expect(tests).toMatch(/ADVERSARIAL #5: a new provider\/model absent from historical data/);
+    expect(tests).toMatch(/ADVERSARIAL #11 \+ #12: tenant isolation/);
+    expect(tests).toMatch(/ADVERSARIAL #15: no mutation of authoritative workflow\/execution\/delegation state/);
+    expect(tests).toMatch(/ADVERSARIAL #16 \(behavioral\): the routing authority is CONSUMED/);
+    // The unit + API suites exist with their own contracts.
+    expect(existsSync(AI_UNIT_TESTS)).toBe(true);
+    expect(existsSync(AI_API_TESTS)).toBe(true);
+    const api = readFileSync(AI_API_TESTS, 'utf8');
+    expect(api).toMatch(/work-item-not-in-project/);
+    expect(api).toMatch(/invalid-benchmark-mode/);
+  });
+
+  // --- (k) the work order exists with the authority ordering + the matrix --------
+
+  it('the WORK-047 work order exists with the non-negotiable authority ordering, the provenance questions, and the required adversarial matrix', () => {
+    const order = readFileSync(WORK_ORDER, 'utf8');
+    expect(order).toMatch(/hard eligibility \/ constraints/);
+    expect(order).toMatch(/routing \/ execution policy/);
+    expect(order).toMatch(/historical intelligence/);
+    expect(order).toMatch(/Intelligence recommends\.\s+Authoritative subsystems decide\./);
+    // The four provenance questions, verbatim.
+    expect(order).toMatch(/Why was this role\/provider\/model\/mode recommended\?/);
+    expect(order).toMatch(/Which historical evidence contributed\?/);
+    expect(order).toMatch(/What constraints were already applied\?/);
+    expect(order).toMatch(/What alternatives were rejected\?/);
+    // The downstream decomposition path (data, not execution).
+    expect(order).toMatch(/Work Item[\s\S]*WORK-047 recommendation[\s\S]*WORK-046 delegation[\s\S]*existing execution authority/);
+    // The forbidden duplications.
+    expect(order).toMatch(/Do not introduce/);
+    expect(order).toMatch(/a second eligibility evaluator/);
+    expect(order).toMatch(/a second routing engine/);
+    expect(order).toMatch(/a second role catalog/);
   });
 });
