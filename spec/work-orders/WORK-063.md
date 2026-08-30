@@ -1,13 +1,27 @@
 # WORK-063 — Identity and Access Layer (Human Login and Scoped Machine Identity)
 
-Status: planned.
+Status: COMPLETE — merged by the architect as
+`8dac9c47f7397e22765478520ac71659d37e1783` (PR #81, squash-merged at branch head
+`f86d1f2` on 2026-08-30T12:25:02Z; the merge tree is IDENTICAL to the approved
+rebased head — verified with an empty `git diff f86d1f2..8dac9c4`, both trees
+`76f366c`). The post-merge finalization §34.8/ADR-0007 is recorded in the
+canonical state (`status complete` + `mergedAs {pr: 81, mergeCommit:
+8dac9c47…}` + no active handoff — merged work is not resumable). The merged
+delivery is SPEC-ONLY: the identity-and-access architecture decision, this
+Work Order, and the dependency-model correction — the runtime implementation
+(authentication code, provider adapters, service accounts, session lifecycle,
+the Workbench migration off the demo key, and the required proofs below on
+real PostgreSQL) is future implementation work under the architect's separate
+authorization and is NOT part of this completion. The merged-finalization
+audit binds WORK-063 ↔ PR #81 ↔ merge commit `8dac9c4` on the real
+first-parent history (the `Governance: WORK-NNN — … (#PR)` governance-decision
+merge convention — the third evidence shape the audit recognizes).
 
 Issued by: the 2026-08-30 identity-and-access architecture decision (the
 second governance correction of 2026-08-30, after WORK-062). This Work Order
-establishes the production Identity & Access model — it does NOT implement
-runtime code. Activation requires the architect's authorization and is
-recorded in `spec/development-state/program-state.json` (this change records
-none).
+establishes the production Identity & Access model — the merged change does
+NOT implement runtime code. The completion record is in
+`spec/development-state/program-state.json`.
 
 Dependencies: WORK-002 (Identity, organizations, permissions, tenant
 isolation — the frozen foundation this layer extends), WORK-048 (Developer
@@ -361,3 +375,52 @@ STOP and raise an Architecture Change Request if implementation requires:
 - PR contains only WORK-063 scope; independent Architect Review approves;
   the implementation PR is merged; WORK-063 is marked VERIFIED before
   WORK-061 becomes eligible on it.
+
+  (The obligations above are the Definition of Done of the FUTURE RUNTIME
+  IMPLEMENTATION of this Work Order — the proof contract the architect will
+  hold that implementation to. The merged PR #81 delivery — the architecture
+  decision, this Work Order, and the dependency-model correction — is complete
+  as the governance decision it was issued as; the runtime implementation
+  remains future work under the architect's separate authorization.)
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-30)
+
+The architect merged PR #81 as `8dac9c47f7397e22765478520ac71659d37e1783`
+(squash merge; single parent `45cb20f` — the PR #84 ACR-002 package merge;
+merged 2026-08-30T12:25:02Z). The merged tree is IDENTICAL to the approved
+rebased head `f86d1f2` (`git diff f86d1f2 8dac9c4` is empty; both trees are
+`76f366c`). The finalization — a data-only change on branch
+`governance/WORK-063-post-merge-finalization` — records in the canonical
+state: `status = complete`, `mergedAs = {pr: 81, mergeCommit:
+8dac9c47f7397e22765478520ac71659d37e1783}`, the implementation head
+recorded as `f86d1f2`, no active handoff (none was ever recorded — WORK-063
+was never activated; `resumption.activeHandoffs` was empty before and after;
+merged work is not resumable), and this work-order document's status updated
+truthfully with this evidence APPENDED (history preserved, not rewritten).
+
+The delivery merged by PR #81 is SPEC-ONLY: `spec/work-orders/WORK-063.md`
+(this Work Order), the WORK-061 dependency-model correction, and the
+canonical dependency/frontier/roadmap state. NO runtime implementation rode
+the merge — no authentication code, no OAuth/OIDC or email provider adapters,
+no service accounts, no session lifecycle, no Workbench login changes, and no
+removal of the demo key from the runtime; the required proofs above remain
+the obligations of the future runtime implementation (architect-gated).
+Dogfooding has NOT started.
+
+The merged-finalization audit binds WORK-063 ↔ PR #81 ↔ merge commit
+`8dac9c4` on the real first-parent history: the merge subject follows the
+`Governance: WORK-NNN — … (#PR)` governance-decision squash convention — a
+third merge-evidence shape the audit's evidence collector did not previously
+recognize (the actual defect the finalization's §4 audit pass exposed and
+fixed narrowly, preserving the `WORK-NNN:` colon convention and every
+existing discrimination: the post-merge finalization commits —
+`chore(governance): …` and topic-naming subjects — are structurally excluded
+and can never be mistaken for the architect's merge). The audit validates the
+full provenance identity: `mergedAs.pr` must equal the declared PR (81) and
+`mergedAs.mergeCommit` must match the ACTUAL merge evidence. The dependency
+frontier was recomputed: WORK-063 is complete (54/54 recorded work orders,
+nothing in flight), WORK-061's WORK-063 dependency edge is SATISFIED
+(WORK-061 remains blocked on WORK-057/058/059/060, the WORK-053..056
+foundation chain), and WORK-064 is now DEPENDENCY-ELIGIBLE (WORK-048,
+WORK-050, and WORK-063 all complete) — NOT activated, NOT started; the
+architect's authorization is required.

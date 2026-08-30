@@ -256,12 +256,18 @@ Orders, create branches, create PRs, read execution state; CANNOT modify
 architecture, approve their own PR, alter verification evidence, or change
 tenant). API keys REMAIN available for automation — the layer is never an
 "OAuth-only" replacement. It adds NO second workflow/business authority, NO
-client-side authorization, and NO new tenant-isolation model. See
-`spec/work-orders/WORK-063.md` (issued by the 2026-08-30
-identity-and-access architecture decision; planned, not activated).
+client-side authorization, and NO new tenant-isolation model. WORK-063 is
+COMPLETE — merged by the architect as `8dac9c4` via PR #81 on 2026-08-30
+(spec-only: the architecture decision, the Work Order, and the
+dependency-model correction; NO runtime implementation rode the merge) and
+finalized per §34.8/ADR-0007 — see `spec/work-orders/WORK-063.md` and the
+program state. The runtime identity layer the Work Order specifies remains
+UNIMPLEMENTED (architect-gated future work).
 WORK-061 depends on WORK-063: the customer-facing self-hosting experience
 begins with a human signing in and ends with an authorized agent running
-governed work — neither is possible on a shared demo key.
+governed work — neither is possible on a shared demo key. That dependency
+edge is now SATISFIED (WORK-061 remains blocked on WORK-057/058/059/060,
+the WORK-053..056 foundation chain).
 
 ### Development governance and self-hosting
 
@@ -297,10 +303,10 @@ and CONSUME (but do not duplicate) the ACR-001 capabilities when those
 Work Orders land.
 
 ```text
-WORK-063 (Identity & Access — planned, NOT activated; spec/work-orders/WORK-063.md)
+WORK-063 (Identity & Access — COMPLETE: merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007; spec/work-orders/WORK-063.md)
     │
     ↓
-WORK-064 (Continuous Product Validation — the domain/model authority)
+WORK-064 (Continuous Product Validation — the domain/model authority; dependency-eligible, NOT activated)
     │
     ↓
 WORK-065 (Synthetic Browser Validation Agent — the execution mechanism)
@@ -323,7 +329,7 @@ WORK-068 (Feedback → Governed Work Items — through the EXISTING /work-items 
 
 Exact edges:
 
-- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (planned — carried into main by PR #81; NOT activated, NOT implemented)
+- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007; the runtime identity layer remains future architect-gated work) → WORK-064 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-065 ← WORK-064
 - WORK-066 ← WORK-064, WORK-065, (soft: WORK-058)
 - WORK-067 ← WORK-064, WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056)

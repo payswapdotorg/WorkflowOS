@@ -115,9 +115,9 @@ Activation is the architect's non-delegable decision (recorded in
 `program-state.json`). The dependency graph is:
 
 ```text
-WORK-063 (Identity & Access — PR #81, open)
+WORK-063 (Identity & Access — complete: merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007)
     ↓
-WORK-064 (Continuous Product Validation)
+WORK-064 (Continuous Product Validation — dependency-eligible, NOT activated)
     ↓
 WORK-065 (Synthetic Browser Validation Agent)
     ↓

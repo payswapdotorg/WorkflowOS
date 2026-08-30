@@ -189,8 +189,8 @@ Read `spec/development-state/frontier-state.json` → `plannedNext` and
 As of this writing (the 2026-08-30 governance state + the v1.1 continuous
 product validation roadmap):
 
-- 53 Work Orders are `complete` (WORK-001..045, WORK-046..052, and
-  WORK-062) — all with merge evidence.
+- 54 Work Orders are `complete` (WORK-001..045, WORK-046..052, WORK-062,
+  and WORK-063) — all with merge evidence.
 - WORK-062 (Durable Multi-Agent Orchestration Substrate) is `complete`
   (activated 2026-08-30; merged by the architect as `f0855d2` via PR #82
   on 2026-08-30, squash-merged at the approved review-remediated head
@@ -198,16 +198,29 @@ product validation roadmap):
   finalization merged as `46e7858` via PR #83; the canonical state records
   `status: complete` with the full `mergedAs` provenance identity:
   pr 82, mergeCommit f0855d2955dcf2d3edea683e497902ad30778fc8).
+- WORK-063 (Identity and Access Layer) is `complete` (merged by the
+  architect as `8dac9c47f7397e22765478520ac71659d37e1783` via PR #81 on
+  2026-08-30, squash-merged at branch head `f86d1f2` — the tree is
+  identical to the approved rebased head; finalized complete per
+  §34.8/ADR-0007; the canonical state records `status: complete` with the
+  full `mergedAs` provenance identity: pr 81, mergeCommit
+  8dac9c47f7397e22765478520ac71659d37e1783). The merged delivery is
+  SPEC-ONLY — the identity-and-access architecture decision, the Work
+  Order, and the dependency-model correction; NO runtime implementation
+  rode the merge, and the runtime identity layer remains UNIMPLEMENTED
+  (architect-gated future work).
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
-- WORK-063 (Identity and Access Layer) is `planned` (in PR #81, open,
-  NOT merged into main — main does not yet carry WORK-063).
 - WORK-064..070 are `planned` (spec files only; NOT in program-state;
   new in this package).
 
-The frontier's `plannedNext` is WORK-053 (dependency-eligible on
-WORK-046+WORK-051+WORK-052, all complete; remains PLANNED — the
-architect's 2026-08-29 verdict says "Do not activate WORK-053 yet",
-additionally gated on the v1.1/ACR-001 disposition).
+The frontier's `plannedNext` holds TWO dependency-eligible heads, one per
+track: WORK-053 (ACR-001; dependency-eligible on WORK-046+WORK-051+WORK-052,
+all complete; remains PLANNED — the architect's 2026-08-29 verdict says
+"Do not activate WORK-053 yet", additionally gated on the v1.1/ACR-001
+disposition) and WORK-064 (ACR-002; dependency-eligible on
+WORK-048+WORK-050+WORK-063, all complete; remains PLANNED, NOT activated,
+NOT started — the architect's authorization is required). Dogfooding has
+NOT started.
 
 ## 8. How to review implementation agents
 

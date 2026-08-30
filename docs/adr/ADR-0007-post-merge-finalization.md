@@ -98,3 +98,33 @@ data-only.
   corrective finalization squash) audit clean when `mergedAs` matches ANY
   actual merge commit; `mergedAs` records the completion event (the
   implementation merge).
+
+## Amendment — the third merge-evidence shape (2026-08-30, the WORK-063 finalization)
+
+The architect merged PR #81 as `8dac9c47f7397e22765478520ac71659d37e1783`
+(subject "Governance: WORK-063 — Identity and Access Layer (the
+identity-and-access architecture decision) (#81)") — a THIRD merge-evidence
+shape this repository's architect actually uses: the governance-decision
+squash-merge convention `Governance: WORK-NNN — title (#PR)` (previously seen
+at `9aadd50`, the PR #80 governance correction that issued WORK-062). The
+evidence collector recognized only the classic `Merge pull request #N from …`
+and `WORK-NNN: …` colon conventions, so the actual WORK-063 architect merge
+was invisible to the audit — the exact fail-open blindness this protocol
+exists to prevent (a merged-but-unfinalized work order would not open the red
+window when the merge subject uses an unrecognized shape).
+
+The WORK-063 post-merge finalization fixes this narrowly
+(`backend/src/development-governance/internal/merged-finalization.ts`): the
+evidence collector recognizes the governance-decision convention — the
+work-order id in TITLE-HEAD position after the fixed `Governance: ` prefix,
+separated by an em-dash — binding by work-order id, with the declared `pr`
+remaining the PR identity exactly as for the colon convention. Every existing
+discrimination is preserved and now regression-pinned: a post-merge
+FINALIZATION commit (the `chore(governance): the WORK-NNN post-merge
+finalization — … (#PR)` shape of `46e7858`/PR #83, and every topic-naming
+subject such as `1ccc45f`/PR #63) is structurally excluded — it can never be
+mistaken for the architect's merge. Recognizing `9aadd50` alongside
+`f0855d2` as WORK-062 evidence is consistent with the multi-merge rule above:
+both are actual architect merges of WORK-062 identity content, and
+`mergedAs` records the completion event `f0855d2`, which the audit matches
+against ANY actual merge commit.

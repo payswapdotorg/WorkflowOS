@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T11:05:00Z",
+  "asOf": "2026-08-30T12:45:00Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1436,6 +1436,48 @@
       "mergedAs": {
         "pr": 82,
         "mergeCommit": "f0855d2955dcf2d3edea683e497902ad30778fc8"
+      }
+    },
+    {
+      "id": "WORK-063",
+      "title": "Identity and Access Layer (Human Login and Scoped Machine Identity)",
+      "status": "complete",
+      "dependencies": [
+        "WORK-002",
+        "WORK-048"
+      ],
+      "branch": "governance/WORK-063-identity-access-layer",
+      "pr": 81,
+      "workOrder": "spec/work-orders/WORK-063.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-063.md",
+          "spec/work-orders/WORK-061.md",
+          "spec/dependency-graph.md",
+          "spec/architecture/v1.1/dependency-graph.md",
+          "spec/architecture/v1.1/work-items.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "spec/development-state/program-state.json",
+          "spec/development-state/dependency-state.json",
+          "spec/development-state/frontier-state.json",
+          "spec/governance/future-roadmap.json"
+        ]
+      },
+      "surfaceFlags": [
+        "documentation"
+      ],
+      "assuranceProfile": "LIGHT",
+      "runtimeImpactBinding": "low",
+      "note": "Merged by the architect as 8dac9c47f7397e22765478520ac71659d37e1783 (PR #81, squash-merged at branch head f86d1f2 on 2026-08-30T12:25:02Z; the merge tree is IDENTICAL to the approved rebased head — verified with an empty git diff f86d1f2..8dac9c4, both trees 76f366c). The post-merge finalization (§34.8/ADR-0007, carried by the governance/WORK-063-post-merge-finalization change) records the completion: status complete with mergedAs carrying the ACTUAL merge commit — the governance-decision squash subject “Governance: WORK-063 — Identity and Access Layer (…) (#81)”, the third merge-evidence shape the merged-finalization audit recognizes (the narrow detector correction carried by this finalization; the audit binds WORK-063 ↔ PR #81 ↔ 8dac9c4 and validates the full provenance identity) — no active handoff (none was ever recorded: WORK-063 was never activated and merged as a spec-only governance decision; resumption.activeHandoffs stays empty; merged work is not resumable), and the work-order document status updated with the finalization evidence APPENDED (history preserved, not rewritten); branch/pr/head kept as the historical record of how it merged. The delivery is SPEC-ONLY: the identity-and-access architecture decision — the Work Order (spec/work-orders/WORK-063.md), the WORK-061 dependency-model correction, and the canonical dependency/frontier/roadmap state — with NO runtime implementation (no authentication code, no OAuth/OIDC or email provider adapters, no service accounts, no session lifecycle, no Workbench login changes, no demo-key removal from the runtime; the Work Order's required proofs remain the obligations of the future runtime implementation, which requires the architect's separate authorization and is NOT part of this completion). The decision itself: human principals (Google/GitHub/email login) and machine principals (scoped service accounts with capability-scoped API credentials) are BOTH first-class and permanently distinct — an agent never impersonates a human; authentication is separated from authorization; the existing server-side chain (user → organization membership → role/permission → project access) stays the ONE authorization path with tenant isolation unchanged and unweakened (AUTHZ-AC-02); API keys remain first-class for automation; the Workbench demo-key bootstrap is retired BY THE MODEL (the runtime migration is future implementation work); no second workflow/business authority; no client-side authorization; no credential store outside the SecretStore discipline; PostgreSQL stays authoritative for identity state. WORK-061's WORK-063 dependency edge is SATISFIED (it remains blocked on WORK-057/058/059/060, the WORK-053..056 foundation chain). WORK-064 (Continuous Product Validation) is now DEPENDENCY-ELIGIBLE (WORK-048, WORK-050, and WORK-063 all complete) and remains NOT activated and NOT started — the architect's authorization is required. Dogfooding has NOT started.",
+      "head": "f86d1f2",
+      "mergedAs": {
+        "pr": 81,
+        "mergeCommit": "8dac9c47f7397e22765478520ac71659d37e1783"
       }
     }
   ],

@@ -26,18 +26,25 @@
  *   - `Merge pull request #N from …` — the classic merge commit (bound by PR
  *     number);
  *   - `WORK-NNN: …` — the architect's direct/squash merge convention (bound
- *     by work-order id; PR #62 merged this way as `47615c2`).
+ *     by work-order id; PR #62 merged this way as `47615c2`);
+ *   - `Governance: WORK-NNN — … (#PR)` — the architect's governance-decision
+ *     squash-merge convention (bound by work-order id; PR #81 merged this
+ *     way as `8dac9c4` for WORK-063, and PR #80 as `9aadd50` for the
+ *     WORK-062 governance correction).
  *
- * The second shape is the SPECIFIC colon-separated convention
- * (`WORK-NNN: title`, exactly as recorded in `governance-model.json`
+ * The second and third shapes are the SPECIFIC conventions — the work-order
+ * id in TITLE-HEAD position, separated from the title by `: ` or ` — `
+ * respectively (exactly as recorded in `governance-model.json`
  * postMergeFinalization.enforcement and ADR-0007) — NOT every subject that
- * begins with a work-order id. A post-merge FINALIZATION/state-only commit
- * names the work order as a TOPIC (`WORK-052 post-merge corrective
- * finalization — …`, the `1ccc45f` squash of PR #63) and is NOT merge
- * evidence: conflating it with the architectural merge it finalizes would
- * misclassify the very commit that established the finalization protocol as
- * merge evidence for its own work order (the PR #75 review — a
- * provenance/audit-model defect, not a stale test pin).
+ * begins with (or merely contains) a work-order id. A post-merge
+ * FINALIZATION/state-only commit names the work order as a TOPIC
+ * (`WORK-052 post-merge corrective finalization — …`, the `1ccc45f` squash
+ * of PR #63; `chore(governance): the WORK-062 post-merge finalization — …`,
+ * the `46e7858` squash of PR #83) and is NOT merge evidence: conflating it
+ * with the architectural merge it finalizes would misclassify the very
+ * commit that established the finalization protocol as merge evidence for
+ * its own work order (the PR #75 review — a provenance/audit-model defect,
+ * not a stale test pin).
  *
  * PURE over its inputs; the only I/O is
  * {@link MergeEvidenceUnavailableError} fail-closed evidence collection from
@@ -53,9 +60,10 @@ export interface MergeEvidence {
   /** PR number → the full merge-commit SHAs that merged it (classic merge commits). */
   readonly byPr: ReadonlyMap<number, readonly string[]>;
   /**
-   * Work order id → the full commit SHAs whose subject follows the
-   * `WORK-NNN: title` architect-merge convention. A state-only commit that
-   * merely BEGINS with the id (e.g. a post-merge finalization) is NOT
+   * Work order id → the full commit SHAs whose subject follows a recognized
+   * architect-merge convention (`WORK-NNN: title` or
+   * `Governance: WORK-NNN — title (#PR)`). A state-only commit that names
+   * the work order as a TOPIC (e.g. a post-merge finalization) is NOT
    * evidence and never appears here.
    */
   readonly byWorkOrder: ReadonlyMap<string, readonly string[]>;
@@ -91,16 +99,37 @@ const MERGE_PULL_REQUEST_RE = /^Merge pull request #(\d+) from /;
  * post-merge finalization — and are NOT merge evidence.
  */
 const ARCHITECT_MERGE_SUBJECT_RE = /^(WORK-\d{3}): /;
+/**
+ * The architect's governance-decision squash-merge convention:
+ * `Governance: WORK-NNN — title (#PR)` — the work-order id in TITLE-HEAD
+ * position after the fixed `Governance: ` prefix, separated from the title
+ * by an em-dash (both actual instances: `8dac9c4` "Governance: WORK-063 —
+ * Identity and Access Layer (…) (#81)", the WORK-063 completion merge, and
+ * `9aadd50` "Governance: WORK-062 — Durable Multi-Agent Orchestration
+ * Substrate (…) (#80)", the governance correction that issued WORK-062).
+ * Post-merge finalization/state-only subjects are structurally EXCLUDED: the
+ * `46e7858` finalization carries the `chore(governance): ` prefix (not
+ * `Governance: `) and names the work order as a topic after an article
+ * ("chore(governance): the WORK-062 post-merge finalization …"), so neither
+ * the prefix nor the title-head position can match. The declared `pr`
+ * remains the PR identity for this shape exactly as for the colon
+ * convention (ADR-0007): the subject binds the commit to the work order
+ * while the trailing `(#PR)` stamp is GitHub's squash-merge provenance
+ * marker on the PR title.
+ */
+const GOVERNANCE_MERGE_SUBJECT_RE = /^Governance: (WORK-\d{3}) — /;
 
 /**
  * Parse `<sha> <subject>` log lines (the first-parent history of main) into
- * merge evidence. Both merge shapes are recognized; a work order or PR may
+ * merge evidence. All three merge shapes are recognized; a work order may
  * legitimately appear more than once when the architect ACTUALLY merged it
- * more than once (e.g. an implementation merge followed by a corrective
- * re-merge under the same convention) — the audit matches ANY actual merge
- * commit. A post-merge finalization/state-only commit is NOT a merge: its
- * subject names the work order as a topic without the colon convention, so
- * it is never collected as evidence (the PR #75 review).
+ * more than once (e.g. the WORK-062 governance correction `9aadd50` followed
+ * by the implementation merge `f0855d2`, both under recognized conventions) —
+ * the audit matches ANY actual merge commit. A post-merge
+ * finalization/state-only commit is NOT a merge: its subject names the work
+ * order as a topic (after a `chore(governance): ` prefix, after an article,
+ * or without the title-head separation), so it never enters the evidence
+ * (the PR #75 review).
  */
 export function collectMergeEvidenceFromLines(lines: readonly string[]): MergeEvidence {
   const byPr = new Map<number, string[]>();
@@ -118,7 +147,7 @@ export function collectMergeEvidenceFromLines(lines: readonly string[]): MergeEv
       list.push(sha);
       byPr.set(Number(pr[1]), list);
     }
-    const workOrder = ARCHITECT_MERGE_SUBJECT_RE.exec(subject);
+    const workOrder = ARCHITECT_MERGE_SUBJECT_RE.exec(subject) ?? GOVERNANCE_MERGE_SUBJECT_RE.exec(subject);
     if (workOrder) {
       const list = byWorkOrder.get(workOrder[1]!) ?? [];
       list.push(sha);

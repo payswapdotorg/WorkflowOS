@@ -12,11 +12,12 @@ requires the architect's authorization and is recorded in
 Dependencies: WORK-048 (Developer Workbench — the user-facing surface whose
 journeys are validated), WORK-050 (Unified Execution UX — the unified
 execution surface whose journeys are validated), and WORK-063 (Identity and
-Access Layer — proposed in PR #81, NOT yet merged into main at the time of
-issuance; the validation journey model needs authentication to model
-sign-up/sign-in/password-reset journeys honestly). Where a journey does not
-require authentication (e.g. public read paths), the WORK-063 dependency is
-not exercised, but the model must still account for it.
+Access Layer — proposed in PR #81 at issuance and now COMPLETE: merged as
+`8dac9c4` on 2026-08-30, spec-only, finalized §34.8/ADR-0007; the validation
+journey model needs authentication to model sign-up/sign-in/password-reset
+journeys honestly). Where a journey does not require authentication (e.g.
+public read paths), the WORK-063 dependency is not exercised, but the model
+must still account for it.
 
 Downstream: WORK-065 (Synthetic Browser Validation Agent) executes
 ValidationJourneys under this Work Order's authority; WORK-066 (Validation
@@ -123,8 +124,10 @@ Layer) is the dependency that makes this honest: synthetic identities are
 scoped service accounts with capability-scoped credentials, never a single
 shared bootstrap key.
 
-Until WORK-063 is implemented and merged, journeys that require
-authentication must either:
+Until the runtime identity layer that WORK-063 specifies is implemented
+(the Work Order is merged and complete as the architecture decision; the
+runtime implementation remains future architect-gated work), journeys that
+require authentication must either:
 
 - declare FORBIDDEN for the authenticated steps (and exercise only the
   pre-authentication surface); or
@@ -336,7 +339,7 @@ parallelConflicts:
       them. Concurrent Work Orders that AUTHOR them (none planned) would
       conflict.
   - dependencies:
-      - WORK-063   # proposed in PR #81 (open); blocks activation until merged
+      - WORK-063   # complete — merged as 8dac9c4 via PR #81 (spec-only), finalized §34.8/ADR-0007
       - WORK-048   # complete
       - WORK-050   # complete
     reason: the dependency surface itself; WORK-063 is the load-bearing
@@ -350,8 +353,12 @@ protectedSurfaces:
 ```
 
 An Architect LLM may mechanically determine the state of WORK-064 as:
-`READY` when WORK-048, WORK-050, and WORK-063 are complete; `BLOCKED` while
-WORK-063 is in PR #81 (open) or unimplemented; `PARALLEL-SAFE` with
+`READY` when WORK-048, WORK-050, and WORK-063 are complete (ALL THREE are
+complete as of 2026-08-30 — WORK-063 merged as `8dac9c4` via PR #81,
+spec-only, and finalized §34.8/ADR-0007 — so WORK-064 is
+DEPENDENCY-ELIGIBLE; activation remains the architect's authorization, and
+WORK-064 is NOT activated and NOT started); `BLOCKED` while any declared
+dependency is incomplete; `PARALLEL-SAFE` with
 WORK-053..061 (independent v1.1 evolution track — different surfaces);
 `CONFLICTING` with any future Work Order that authors a second verification,
 identity, or execution authority.
