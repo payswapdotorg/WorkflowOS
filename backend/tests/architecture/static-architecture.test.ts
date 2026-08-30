@@ -16985,6 +16985,13 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     // not merely stored.
     expect(auditModule).toMatch(/authoritative PR identity/);
     expect(auditModule).toMatch(/w\.mergedAs\.pr !== w\.pr/);
+    // The WORK-064 finalization — the fourth merge-evidence shape: the
+    // conventional-commit scope convention (type(work-NNN): … (#PR), the
+    // actual shape of the PR #86 / c351451 architect merge) is code-pinned
+    // with its structural exclusions (the scope must be EXACTLY the
+    // work-order id; the title must not name the same work order as a
+    // topic).
+    expect(auditModule).toMatch(/CONVENTIONAL_SCOPE_MERGE_SUBJECT_RE/);
     const service = readFileSync(DG_SERVICE, 'utf8');
     expect(service).toMatch(/verifyPostMergeFinalization/);
     const cli = readFileSync(DG_CLI, 'utf8');
@@ -17090,12 +17097,19 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     // The merged-finalization audit suite (§34.8; ADR-0007).
     const finalization = readFileSync(DG_FINALIZATION_TESTS, 'utf8');
     expect(finalization).toMatch(/WORK-052 — the post-merge finalization audit binds canonical state to git merge history/);
-    expect(finalization).toMatch(/ALL THREE merge shapes \(the classic merge commit, the WORK-NNN architect-merge subject convention, AND the Governance: WORK-NNN — governance-decision squash convention\)/);
+    expect(finalization).toMatch(/ALL FOUR merge shapes \(the classic merge commit, the WORK-NNN architect-merge subject convention, the Governance: WORK-NNN — governance-decision squash convention, AND the type\(work-NNN\): conventional-commit scope convention\)/);
     // The WORK-063 finalization — the third merge-evidence shape: the
     // governance-decision squash convention (Governance: WORK-NNN — … (#PR),
     // the actual shape of the PR #81 / 8dac9c4 architect merge) is a mandated
     // marker, with its own finalization discrimination regression-pinned.
     expect(finalization).toMatch(/DISCRIMINATION \(the WORK-063 finalization — the governance-decision shape\): a post-merge FINALIZATION\/state-only commit is NOT governance merge evidence/);
+    // The WORK-064 finalization — the fourth merge-evidence shape: the
+    // conventional-commit scope squash convention (type(work-NNN): … (#PR),
+    // the actual shape of the PR #86 / c351451 architect merge) is a mandated
+    // marker, with its own finalization discrimination regression-pinned
+    // (the scope-exactly-an-id + no-topic-mention exclusions; the real-history
+    // WORK-064 binding).
+    expect(finalization).toMatch(/DISCRIMINATION \(the WORK-064 finalization — the conventional-commit scope shape\): a post-merge FINALIZATION\/state-only commit is NOT scope-convention merge evidence/);
     expect(finalization).toMatch(/DISCRIMINATION \(post-merge correction, BLOCKER 1\): a MERGED work order still in_flight is a GAP/);
     expect(finalization).toMatch(/DISCRIMINATION \(post-merge correction, BLOCKER 1\): a complete work order whose mergedAs does NOT match the actual merge evidence is a GAP/);
     expect(finalization).toMatch(/DISCRIMINATION \(the PR #63 round-2 review — the provenance identity\): a FALSE mergedAs\.pr/);

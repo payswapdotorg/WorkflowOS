@@ -15,7 +15,7 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-060 | Continuous Architecture Evolution and ACR Feedback Loop | WORK-055, WORK-056, WORK-058, WORK-059, WORK-005 |
 | WORK-062 | Durable Multi-Agent Orchestration Substrate — durable execution underneath WORK-046 delegation | WORK-046 |
 | WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062, WORK-063 |
-| WORK-064 | Continuous Product Validation — the ValidationJourney/EffectPolicy domain model | WORK-048, WORK-050, WORK-063 (complete — dependency-eligible, NOT activated) |
+| WORK-064 | Continuous Product Validation — the ValidationJourney/EffectPolicy domain model | WORK-048, WORK-050, WORK-063 (all complete — WORK-064 COMPLETE: merged `c351451` via PR #86, finalized §34.8/ADR-0007) |
 | WORK-065 | Synthetic Browser Validation Agent — the execution mechanism for ValidationJourneys | WORK-064 |
 | WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065, (soft: WORK-058) |
 | WORK-067 | Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood | WORK-064, WORK-015, WORK-040, WORK-041, (soft: WORK-056) |
@@ -77,10 +77,15 @@ All items remain architect-governed and require a Work Order file, declared surf
 > consumes WORK-055's model and WORK-060's loop. Soft dependencies are marked "(soft: …)";
 > the Work Order can be implemented with a simpler initial surface and upgraded to the full
 > soft dependency when it lands. WORK-064's dependency on WORK-063 references the WORK-063
-> Work Order carried into main by PR #81 — now COMPLETE (merged as `8dac9c4`, spec-only,
-> finalized §34.8/ADR-0007 on 2026-08-30): WORK-064 is DEPENDENCY-ELIGIBLE (WORK-048,
-> WORK-050, and WORK-063 all complete) and remains NOT activated, NOT started (recorded
-> honestly in `dependency-state.json` → `futureGenerationEligibility`). All seven Work
-> Orders are PLANNED and NOT activated. Each carries parallel-execution metadata
+> Work Order carried into main by PR #81 — COMPLETE (merged as `8dac9c4`, spec-only,
+> finalized §34.8/ADR-0007 on 2026-08-30) — and WORK-064 itself is now COMPLETE too:
+> ACTIVATED by the architect on 2026-08-30, implemented on branch
+> `feat/work-064-continuous-validation` (PR #86), merged as `c351451` (squash-merged at the
+> approved head `524c3f4` — the tree is identical) and finalized §34.8/ADR-0007 on
+> 2026-08-30 — the domain/model authority is on main at `backend/src/continuous-validation/`.
+> WORK-065 and WORK-067 are now DEPENDENCY-ELIGIBLE (both depend only on WORK-064;
+> parallel-eligible — different protected surfaces) and remain NOT activated, NOT started
+> (recorded honestly in `dependency-state.json` → `futureGenerationEligibility`). The six
+> remaining Work Orders (WORK-065..070) are PLANNED and NOT activated. Each carries parallel-execution metadata
 > (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
 > [`parallel-execution-metadata.md`](parallel-execution-metadata.md).

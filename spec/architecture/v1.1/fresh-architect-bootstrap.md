@@ -104,7 +104,7 @@ validation sub-evolution) approval by the architecture authority.
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
   state. `workOrders[]` records the activated Work Orders (complete,
-  in_flight). PLANNED Work Orders (WORK-053..061, WORK-064..070) are
+  in_flight). PLANNED Work Orders (WORK-053..061, WORK-065..070) are
   spec files only — they are NOT in `program-state.json` until the
   architect activates them.
 - `spec/development-state/dependency-state.json` — the canonical
@@ -209,18 +209,29 @@ product validation roadmap):
   Order, and the dependency-model correction; NO runtime implementation
   rode the merge, and the runtime identity layer remains UNIMPLEMENTED
   (architect-gated future work).
+- WORK-064 (Continuous Product Validation — the domain/model authority) is
+  `complete` (ACTIVATED by the architect on 2026-08-30 after the approved
+  implementation plan merged as `4018f42`; implemented on branch
+  `feat/work-064-continuous-validation`, PR #86; merged by the architect as
+  `c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b` on 2026-08-30, squash-merged at
+  the approved head `524c3f4` — the tree is identical; finalized complete
+  per §34.8/ADR-0007; the canonical state records `status: complete` with
+  the full `mergedAs` provenance identity: pr 86, mergeCommit
+  c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b; the domain/model authority is on
+  main at `backend/src/continuous-validation/`).
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
-- WORK-064..070 are `planned` (spec files only; NOT in program-state;
+- WORK-065..070 are `planned` (spec files only; NOT in program-state;
   new in this package).
 
 The frontier's `plannedNext` holds TWO dependency-eligible heads, one per
 track: WORK-053 (ACR-001; dependency-eligible on WORK-046+WORK-051+WORK-052,
 all complete; remains PLANNED — the architect's 2026-08-29 verdict says
 "Do not activate WORK-053 yet", additionally gated on the v1.1/ACR-001
-disposition) and WORK-064 (ACR-002; dependency-eligible on
-WORK-048+WORK-050+WORK-063, all complete; remains PLANNED, NOT activated,
-NOT started — the architect's authorization is required). Dogfooding has
-NOT started.
+disposition) and WORK-065 (ACR-002; dependency-eligible now that its only
+dependency WORK-064 is complete; remains PLANNED, NOT activated,
+NOT started — the architect's authorization is required; WORK-067 is
+equally eligible — different protected surfaces — and equally NOT
+activated). Dogfooding has NOT started.
 
 ## 8. How to review implementation agents
 
@@ -345,8 +356,13 @@ dogfood run begins only after:
 
 1. WORK-063 (Identity and Access Layer) is implemented and merged (the
    normal authentication path is functional; the demo key is retired
-   from the customer login path);
-2. WORK-064 (Continuous Product Validation) is implemented and merged;
+   from the customer login path) — the Work Order is COMPLETE as the
+   architecture decision (merged as `8dac9c4`, spec-only), but this gate
+   additionally requires the RUNTIME identity layer, which remains
+   UNIMPLEMENTED architect-gated future work;
+2. WORK-064 (Continuous Product Validation) is implemented and merged —
+   SATISFIED: COMPLETE (merged as `c351451` via PR #86 and finalized
+   §34.8/ADR-0007 on 2026-08-30; the domain/model authority is on main);
 3. WORK-065 (Synthetic Browser Validation Agent) is implemented and
    merged;
 4. the existing v1.0 authorities are operational.

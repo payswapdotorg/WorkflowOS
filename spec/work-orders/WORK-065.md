@@ -12,7 +12,7 @@ the architect's authorization and is recorded in
 Dependencies: WORK-064 (Continuous Product Validation — the authority this
 agent executes underneath). The browser agent is the EXECUTION MECHANISM
 for ValidationJourneys; WORK-064 is the AUTHORITY that defines them and the
-EffectPolicy that binds them.
+EffectPolicy that binds them. That dependency edge is now SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). WORK-065 is now DEPENDENCY-ELIGIBLE and remains NOT activated, NOT started — the architect's authorization is required.
 
 Downstream: WORK-066 (Validation Scheduling & Change Triggers) decides
 when this agent runs; WORK-067 (Engineering Signal & Regression Correlation)

@@ -128,3 +128,36 @@ mistaken for the architect's merge. Recognizing `9aadd50` alongside
 both are actual architect merges of WORK-062 identity content, and
 `mergedAs` records the completion event `f0855d2`, which the audit matches
 against ANY actual merge commit.
+
+## Amendment — the fourth merge-evidence shape (2026-08-30, the WORK-064 finalization)
+
+The architect merged PR #86 as `c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b`
+(subject "feat(work-064): the Continuous Product Validation domain (the
+domain/model authority) (#86)") — a FOURTH merge-evidence shape this
+repository's architect actually uses: the conventional-commit squash-merge
+convention `type(work-NNN): title (#PR)`, the work-order id in the SCOPE
+position (GitHub derives the lowercase form from the branch name; the binding
+id is canonicalized to `WORK-NNN`). The evidence collector recognized only
+the three prior conventions, so the actual WORK-064 architect merge was
+invisible to the audit — the same fail-open blindness the third-shape
+amendment above describes (a merged-but-unfinalized work order would not
+open the red window when the merge subject uses an unrecognized shape).
+
+The WORK-064 post-merge finalization fixes this narrowly
+(`backend/src/development-governance/internal/merged-finalization.ts`): the
+evidence collector recognizes the conventional-commit scope convention with
+two structural exclusions that keep state-only subjects out — the scope must
+be EXACTLY the work-order id (`fix(WORK-052 round 1): …` is a parenthesized
+branch-commit prefix, not a scope), and the title must NOT name the same work
+order as a topic in any letter case (the architect's merge carries the id
+exactly ONCE, in the binding position, and names the DOMAIN in the title —
+so a hypothetical `chore(work-064): the WORK-064 post-merge finalization — …`
+misshape is excluded exactly like the actual `chore(governance): …`
+finalization convention, whose scope is the word `governance`, never a
+work-order id). The declared `pr` remains the PR identity for this shape
+exactly as for the other conventions. Every existing discrimination is
+preserved and regression-pinned, and the red-window proof now includes the
+fourth shape: an in-flight WORK-064 record against the real evidence (the
+merge `c351451` bound by the scope convention) is DETECTED, while the
+finalized truth (complete + `mergedAs {pr: 86, mergeCommit: c351451…}`)
+audits clean.

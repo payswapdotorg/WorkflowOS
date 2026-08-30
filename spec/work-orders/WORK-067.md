@@ -9,7 +9,7 @@ code. Activation requires the architect's authorization and is recorded in
 `spec/development-state/program-state.json` (this change records none).
 
 Dependencies: WORK-064 (Continuous Product Validation — the primary
-validation-originated signal source). Existing authorities consumed:
+validation-originated signal source That dependency edge is now SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). WORK-067 is now DEPENDENCY-ELIGIBLE (WORK-015/WORK-040/WORK-041 already complete; WORK-056 soft) and remains NOT activated, NOT started — the architect's authorization is required. Existing authorities consumed:
 `/verification` (WORK-015 — complete; the existing verification authority
 whose evidence this Work Order correlates), the continuous planning authority
 (WORK-040 — complete), the maintenance authority (WORK-041 — complete). Soft

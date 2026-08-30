@@ -193,7 +193,9 @@ The first official dogfood run is gated on:
    normal authentication path is functional; the demo key is retired
    from the customer login path);
 2. WORK-064 (Continuous Product Validation) is implemented and merged
-   (the ValidationJourney/EffectPolicy model is in force);
+   (the ValidationJourney/EffectPolicy model is in force) — SATISFIED:
+   COMPLETE (merged as `c351451` via PR #86 and finalized §34.8/ADR-0007
+   on 2026-08-30; the domain/model authority is on main);
 3. WORK-065 (Synthetic Browser Validation Agent) is implemented and
    merged (the execution mechanism exists);
 4. the existing v1.0 authorities are operational (the dogfood run

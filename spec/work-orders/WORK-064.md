@@ -1,10 +1,12 @@
 # WORK-064 — Continuous Product Validation
 
-Status: in flight (activated 2026-08-30 by the architect — the implementation
-instruction after the approved implementation plan merged to main as
-`4018f42`; the activation is recorded in
-`spec/development-state/program-state.json`, branch
-`feat/work-064-continuous-validation`, implementation PR #86). The implementation delivers the
+Status: COMPLETE — merged by the architect as
+`c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b` via PR #86 on 2026-08-30
+(squash-merged at the approved head `524c3f4`; the merge tree is IDENTICAL
+— both trees `b496c00a`) and finalized per §34.8/ADR-0007 (see the
+post-merge finalization record appended below; the activation,
+implementation, and review-correction history below is preserved, not
+rewritten). The implementation delivered the
 domain/model authority at `backend/src/continuous-validation/` (the
 application-layer pattern, NOT an 18th frozen module): the closed
 vocabularies (EffectPolicy × ValidationMode × ValidationTrigger × typed
@@ -483,3 +485,44 @@ STOP and raise an Architecture Change Request if implementation requires:
 - Typecheck and lint clean; the full repository regression suite clean.
 - PR contains only WORK-064 scope; independent Architect Review approves;
   WORK-064 is marked VERIFIED before WORK-065/066/067 become eligible on it.
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-30)
+
+The architect merged PR #86 as `c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b`
+(squash merge; single parent `4018f42` — the approved WORK-064
+implementation plan; merged 2026-08-30T17:39:59Z). The merged tree is
+IDENTICAL to the approved head `524c3f4` (`git diff 524c3f4 c351451` is
+empty; both trees are `b496c00a`) — the head that carries the two PR #86
+review corrections (canonical expectation integrity + success-criteria
+semantics) and the re-review correction (derived match integrity), each with
+its discriminating regressions and the 11/11 green CI. The finalization — a
+data-only change on branch `governance/WORK-064-post-merge-finalization` —
+records in the canonical state: `status = complete`, `mergedAs = {pr: 86,
+mergeCommit: c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b}`, the implementation
+head recorded as `524c3f4`, no active handoff (none was ever recorded —
+`resumption.activeHandoffs` was empty before and after; merged work is not
+resumable), and this work-order document's status updated truthfully with
+this evidence APPENDED (history preserved, not rewritten).
+
+The merged-finalization audit binds WORK-064 ↔ PR #86 ↔ merge commit
+`c351451` on the real first-parent history: the merge subject follows the
+`type(work-NNN): … (#PR)` conventional-commit scope squash convention — a
+FOURTH merge-evidence shape the audit's evidence collector did not previously
+recognize (the same fail-open blindness the WORK-063 finalization's
+third-shape amendment describes; fixed narrowly by this finalization with
+two structural exclusions — the scope must be EXACTLY the work-order id, and
+the title must not name the same work order as a topic — preserving every
+existing discrimination: the post-merge finalization commits —
+`chore(governance): …` and topic-naming subjects — remain structurally
+excluded and can never be mistaken for the architect's merge). The audit
+validates the full provenance identity: `mergedAs.pr` must equal the
+declared PR (86) and `mergedAs.mergeCommit` must match the ACTUAL merge
+evidence. The dependency frontier was recomputed: WORK-064 is complete
+(55/55 recorded work orders, nothing in flight, merged finalized 10/10), and
+WORK-065 and WORK-067 are now DEPENDENCY-ELIGIBLE (both depend only on
+WORK-064; parallel-eligible, different protected surfaces) — both remain
+PLANNED, NOT activated, NOT started; the architect's authorization is
+required. WORK-066 remains blocked on WORK-065; WORK-069 remains blocked on
+WORK-066; WORK-061 remains blocked on WORK-057/058/059/060. The runtime
+identity layer specified by WORK-063 remains UNIMPLEMENTED
+(architect-gated future work); dogfooding has NOT started.

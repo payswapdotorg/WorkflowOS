@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
-  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002)",
-  "computedAt": "2026-08-30 (WORK-064 ACTIVATED by the architect — the implementation instruction after the approved implementation plan merged as 4018f42; it left the futureGeneration and is IN FLIGHT on branch feat/work-064-continuous-validation, recorded in program-state.json. WORK-053 remains the dependency-eligible PLANNED head of the v1.1 track. The remaining futureGeneration is unchanged.)",
+  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002, of which WORK-064 was ACTIVATED 2026-08-30 and is MERGED COMPLETE as c351451 via PR #86 (finalized §34.8/ADR-0007 on 2026-08-30))",
+  "computedAt": "2026-08-30 (the WORK-064 post-merge finalization §34.8/ADR-0007: WORK-064 (Continuous Product Validation — the domain/model authority) merged by the architect as c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b via PR #86 (squash-merged at the approved head 524c3f4; the merge tree is IDENTICAL) and finalized complete — 55/55 recorded work orders complete, nothing in flight. WORK-065 and WORK-067 are now DEPENDENCY-ELIGIBLE (both depend only on WORK-064) and remain NOT activated, NOT started. Prior record: WORK-064 ACTIVATED by the architect after the approved implementation plan merged as 4018f42; it left the futureGeneration and was IN FLIGHT on branch feat/work-064-continuous-validation until the merge.)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -10,11 +10,9 @@
     "staleState": "dependency graph and program state disagree; fail closed and require architect reconciliation"
   },
   "currentGeneration": {
-    "completedWorkOrders": 54,
-    "inFlight": [
-      "WORK-064"
-    ],
-    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 via PR #82, finalized §34.8/ADR-0007), and WORK-063 (8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) — 54/54 complete. IN FLIGHT: WORK-064 (Continuous Product Validation — activated 2026-08-30 by the architect's implementation instruction after the plan merged as 4018f42; branch feat/work-064-continuous-validation; the domain/model authority at src/continuous-validation/)."
+    "completedWorkOrders": 55,
+    "inFlight": [],
+    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 via PR #82, finalized §34.8/ADR-0007), WORK-063 (8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007), and WORK-064 (c351451 via PR #86 — the continuous product validation domain/model authority at backend/src/continuous-validation/, finalized §34.8/ADR-0007) — 55/55 complete, nothing in flight."
   },
   "futureGeneration": {
     "WORK-053": [
@@ -110,11 +108,11 @@
     "WORK-059": "blocked — WORK-055, WORK-056, WORK-058 not started (WORK-019 complete)",
     "WORK-060": "blocked — WORK-055, WORK-056, WORK-058, WORK-059 not started (WORK-005 complete)",
     "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060 not started (WORK-047, WORK-050, WORK-062, and WORK-063 all COMPLETE — the WORK-062 edge was satisfied by the f0855d2 merge via PR #82 and the WORK-063 edge by the 8dac9c4 merge via PR #81, both finalized §34.8/ADR-0007 on 2026-08-30; the remaining gate is the WORK-053..056 foundation chain, which the architect has not activated)",
-    "WORK-065": "blocked — WORK-064 not started",
-    "WORK-066": "blocked — WORK-064, WORK-065 not started (soft: WORK-058 not started — the scheduler can ship with a simpler fixed-mapping assurance model and delegate to WORK-058 when it lands)",
-    "WORK-067": "blocked — WORK-064 not started (WORK-015, WORK-040, WORK-041 complete; soft: WORK-056 not started — WORK-067 operates on raw observations directly with the same provenance discipline until WORK-056 lands)",
+    "WORK-065": "eligible — WORK-064 complete (merged c351451 via PR #86, finalized §34.8/ADR-0007; the domain/model authority the browser agent executes underneath is on main) — NOT activated, NOT started: the architect's authorization is required",
+    "WORK-066": "blocked — WORK-065 not started (WORK-064 complete; soft: WORK-058 not started — the scheduler can ship with a simpler fixed-mapping assurance model and delegate to WORK-058 when it lands)",
+    "WORK-067": "eligible — WORK-064 complete (merged c351451 via PR #86, finalized §34.8/ADR-0007); WORK-015, WORK-040, WORK-041 complete (soft: WORK-056 not started — WORK-067 operates on raw observations directly with the same provenance discipline until WORK-056 lands) — NOT activated, NOT started: the architect's authorization is required",
     "WORK-068": "blocked — WORK-067 not started",
-    "WORK-069": "blocked — WORK-064, WORK-066 not started (WORK-019, WORK-026, WORK-020 complete; soft: WORK-059 not started — WORK-069 operates directly on the existing v1.0 release/runtime authorities until WORK-059 lands)",
+    "WORK-069": "blocked — WORK-066 not started (WORK-064, WORK-019, WORK-026, WORK-020 complete; soft: WORK-059 not started — WORK-069 operates directly on the existing v1.0 release/runtime authorities until WORK-059 lands)",
     "WORK-070": "blocked — WORK-067, WORK-069 not started (WORK-051 complete; soft: WORK-055, WORK-060 not started — WORK-070 performs continuous evaluation directly against the existing architecture assertions until WORK-055/060 land)"
   },
   "futureGenerationSoftDependencies": {

@@ -117,7 +117,7 @@ Activation is the architect's non-delegable decision (recorded in
 ```text
 WORK-063 (Identity & Access — complete: merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007)
     ↓
-WORK-064 (Continuous Product Validation — dependency-eligible, NOT activated)
+WORK-064 (Continuous Product Validation — COMPLETE: merged as c351451 via PR #86, finalized §34.8/ADR-0007)
     ↓
 WORK-065 (Synthetic Browser Validation Agent)
     ↓
@@ -170,7 +170,12 @@ Unmerged v1.1 Work Items can be abandoned without altering v1.0
 authoritative state. A future v1.1-derived artifact may be removed only
 through its owning authority; historical v1.0 records remain intact.
 The seven new Work Orders (WORK-064..070) are spec files only until
-activated; abandoning them is a `git revert` of this package.
+activated; abandoning them is a `git revert` of this package. (WORK-064
+has since been activated and is COMPLETE — merged as `c351451` via PR #86
+and finalized §34.8/ADR-0007 on 2026-08-30; abandoning its MERGED delivery
+would be a governed revert of the merge, not of this package alone. The six
+remaining Work Orders WORK-065..070 are still spec files only, NOT
+activated.)
 
 ## Approval rule
 

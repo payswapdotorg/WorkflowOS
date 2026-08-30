@@ -34,7 +34,7 @@ WORK-046 + WORK-051 + WORK-052
 WORK-063 (Identity & Access — COMPLETE: merged 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007)
     │
     ↓
-WORK-064 (Continuous Product Validation — dependency-eligible, NOT activated)
+WORK-064 (Continuous Product Validation — COMPLETE: merged c351451 via PR #86, finalized §34.8/ADR-0007)
     │
     ↓
 WORK-065 (Synthetic Browser Validation Agent)
@@ -69,12 +69,12 @@ Exact edges:
 
 v1.1 continuous product validation sub-evolution (ACR-002) edges:
 
-- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-064 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-065 ← WORK-064
-- WORK-066 ← WORK-064, WORK-065, WORK-058 (soft — adaptive assurance engine, planned)
-- WORK-067 ← WORK-064, WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned)
+- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 — the approved head 524c3f4, tree identical — and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
+- WORK-065 ← WORK-064 (complete) → WORK-065 is DEPENDENCY-ELIGIBLE and NOT activated
+- WORK-066 ← WORK-064 (complete), WORK-065, WORK-058 (soft — adaptive assurance engine, planned)
+- WORK-067 ← WORK-064 (complete), WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned) → WORK-067 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-068 ← WORK-067
-- WORK-069 ← WORK-064, WORK-066, WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned)
+- WORK-069 ← WORK-064 (complete), WORK-066, WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned)
 - WORK-070 ← WORK-067, WORK-069, WORK-051 (complete — architecture checkpoint framework), WORK-055 (soft — quality-attribute model, planned), WORK-060 (soft — ACR feedback loop, planned)
 
 WORK-062 (Durable Multi-Agent Orchestration Substrate) was added by the
@@ -138,16 +138,22 @@ authenticated journeys AND for WORK-061's customer-facing self-hosting (see
 the main track above). WORK-063 was carried into main by PR #81 (the
 2026-08-30 identity-and-access architecture decision, reconciled onto this
 mainline) and is COMPLETE — merged as `8dac9c4` (spec-only) and finalized
-per §34.8/ADR-0007. WORK-064's dependency on WORK-063 is thereby SATISFIED:
-WORK-064 is DEPENDENCY-ELIGIBLE (WORK-048, WORK-050, and WORK-063 all
-complete) and remains NOT activated — the architect's authorization is
-required. (The runtime identity layer that the authenticated journeys will
-eventually exercise remains UNIMPLEMENTED future work; journeys requiring
-authentication stay governed by the Work Order's PRE_MERGE/FORBIDDEN rules
-until that implementation lands under its own authorization.)
+per §34.8/ADR-0007. WORK-064's dependency on WORK-063 was thereby SATISFIED,
+and WORK-064 is itself now COMPLETE: ACTIVATED by the architect on 2026-08-30
+(after the approved implementation plan merged as `4018f42`), implemented on
+branch `feat/work-064-continuous-validation` (PR #86), merged as `c351451`
+(squash-merged at the approved head `524c3f4` — the tree is identical) and
+finalized per §34.8/ADR-0007 on 2026-08-30. (The runtime identity layer that
+the authenticated journeys will eventually exercise remains UNIMPLEMENTED
+future work; journeys requiring authentication stay governed by the Work
+Order's PRE_MERGE/FORBIDDEN rules until that implementation lands under its
+own authorization.)
 
-WORK-064..070 are PLANNED and NOT activated. The architect's authorization
-is required to activate any of them (recorded in `program-state.json`).
+WORK-065..070 are PLANNED and NOT activated. WORK-065 and WORK-067 are now
+DEPENDENCY-ELIGIBLE (both depend only on the complete WORK-064;
+parallel-eligible — different protected surfaces). The architect's
+authorization is required to activate any of them (recorded in
+`program-state.json`).
 Each carries parallel-execution metadata
 (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
 `parallel-execution-metadata.md` and each Work Order's `Parallel-execution
@@ -170,8 +176,10 @@ Parallelization is permitted only where dependencies are complete and protected-
 > They do NOT collide with WORK-053..061 (the ACR-001 track) — different
 > identifiers, different scopes, different protected surfaces. The dependency
 > edge WORK-064 ← WORK-063 references the WORK-063 Work Order carried into
-> main by PR #81 — now COMPLETE (merged as `8dac9c4`, spec-only, finalized
-> §34.8/ADR-0007 on 2026-08-30): WORK-064 is DEPENDENCY-ELIGIBLE (all three
-> declared dependencies complete) and remains NOT activated, NOT started
-> (the eligibility is recorded honestly in
-> `dependency-state.json` → `futureGenerationEligibility`).
+> main by PR #81 — COMPLETE (merged as `8dac9c4`, spec-only, finalized
+> §34.8/ADR-0007 on 2026-08-30) — and WORK-064 itself is now COMPLETE too:
+> ACTIVATED 2026-08-30, merged as `c351451` via PR #86 (the approved head
+> `524c3f4`, tree identical) and finalized §34.8/ADR-0007 on 2026-08-30.
+> WORK-065 and WORK-067 are DEPENDENCY-ELIGIBLE (both depend only on WORK-064)
+> and remain NOT activated, NOT started (the eligibility is recorded honestly
+> in `dependency-state.json` → `futureGenerationEligibility`).

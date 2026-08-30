@@ -10,7 +10,7 @@ requires the architect's authorization and is recorded in
 
 Dependencies: WORK-064 (Continuous Product Validation — the journey/EffectPolicy
 authority the scheduler admits), WORK-065 (Synthetic Browser Validation Agent —
-the execution mechanism the scheduler drives). Soft dependency: WORK-058
+the execution mechanism the scheduler drives; WORK-064 is COMPLETE — merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007, so the WORK-064 dependency edge is SATISFIED — WORK-066 remains blocked on WORK-065). Soft dependency: WORK-058
 (Adaptive Assurance Engine — planned; "adaptive assurance architecture as
 appropriate" per the issuing brief). The scheduler can be implemented
 initially with a simpler assurance-aware model and upgraded to full adaptive
