@@ -66,11 +66,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(53); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2)
-    // WORK-062 (the durable orchestration substrate underneath WORK-046
-    // delegation) was MERGED by the architect as f0855d2 (PR #82, 2026-08-30)
-    // and finalized per §34.8/ADR-0007 — NOTHING is in flight.
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    expect(complete.length).toBeGreaterThanOrEqual(53); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only)
+    // WORK-064 (Continuous Product Validation — the domain/model authority)
+    // was ACTIVATED by the architect on 2026-08-30 (the implementation
+    // instruction after the plan merged as 4018f42) and is IN FLIGHT on
+    // branch feat/work-064-continuous-validation; its dependencies
+    // (WORK-048/WORK-050/WORK-063) are all complete (no coordination
+    // required).
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-064']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -101,19 +104,23 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
 
     // Q4 — what can safely run in parallel? (frontier + conflicts)
     const frontier = fresh.getFrontier();
-    // WORK-062 was merged as f0855d2 (PR #82) and finalized complete
-    // (§34.8/ADR-0007, 2026-08-30): every recorded work order is complete,
-    // NOTHING is in flight, and the frontier is empty (WORK-053..061 are
-    // future-generation items not yet recorded in program-state).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    // WORK-064 (Continuous Product Validation) was ACTIVATED 2026-08-30 and
+    // is the ONLY in-flight item (branch feat/work-064-continuous-validation;
+    // dependencies WORK-048/WORK-050/WORK-063 all complete). WORK-053..061 and
+    // WORK-065..070 are future-generation items not yet recorded in
+    // program-state.
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-064']);
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
     }
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag is TRUTHFUL (PR #62 round 1,
-    // BLOCKER 2): with no in-flight items the flag discipline holds vacuously
-    // (the false case is proven by mutation in the parallel suite).
+    // BLOCKER 2): WORK-064's only live conflict partners would be other
+    // IN-FLIGHT items — there are none (its shared static-architecture suite
+    // surface partners WORK-046/WORK-052 are complete durable history), so
+    // the flag discipline holds (the false case is proven by mutation in the
+    // parallel suite).
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
       expect(item.conflicts.every((c) => c.coordinated), `${item.id}: every conflict mutually coordinated`).toBe(true);
@@ -424,16 +431,35 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       w062.checkpointOutcomes = [
         { contractId: 'AUTH-PRESERVATION', status: 'evidenced', proofClasses: ['static'], evidenceRef: 'claim', at: '2026-08-30T09:00:00Z' },
       ];
+      // The REAL WORK-064 entry (in flight, all dependencies complete) is
+      // also present in the cloned program. The fixture reconstructs
+      // WORK-050 (a WORK-064 dependency) as started — under the ADR-0003
+      // coordination contract a start over an incomplete dependency REQUIRES
+      // a mutual coordination record, so the fixture carries one (the
+      // protocol's own answer; the coordination is fixture bookkeeping, not
+      // a claim about the live state, where WORK-050 is complete).
+      const w064 = program.workOrders.find((w) => w.id === 'WORK-064')!;
+      w064.coordination = {
+        with: ['WORK-050'],
+        reason: 'fixture: WORK-050 reconstructed as started for the claims-only discrimination',
+        adrs: [],
+      };
+      w050.coordination = {
+        with: ['WORK-064'],
+        reason: 'fixture: mutual coordination for the WORK-064 start over the reconstructed WORK-050',
+        adrs: [],
+      };
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'governance-model.json'), JSON.stringify(realModel, null, 2));
       writeFileSync(join(dir, 'program-state.json'), JSON.stringify(program, null, 2));
       const loaded = await new FileSystemGovernanceStateLoader({ repoRoot: REPO_ROOT, governanceDir: dir }).load();
       const claimsOnly = DefaultDevelopmentGovernanceService.fromLoadedState(loaded.model, loaded.program);
       const stillInFlight = claimsOnly.listWorkOrders({ status: 'in_flight' }).map((w) => w.id);
-      // WORK-050 and WORK-062 both stay in_flight (outcomes never complete
-      // work) — reconstructed started items because both live records are
-      // complete-and-merged.
-      expect(stillInFlight).toEqual(['WORK-050', 'WORK-062']);
+      // WORK-050, WORK-062, and the cloned WORK-064 all stay in_flight
+      // (outcomes never complete work) — WORK-050 and WORK-062 are
+      // reconstructed started items (both live records are
+      // complete-and-merged); WORK-064 is the REAL in-flight item.
+      expect(stillInFlight.sort()).toEqual(['WORK-050', 'WORK-062', 'WORK-064']);
       expect(claimsOnly.getWorkOrder('WORK-050').mergedAs).toBeUndefined();
       expect(claimsOnly.getWorkOrder('WORK-062').mergedAs).toBeUndefined();
     } finally {

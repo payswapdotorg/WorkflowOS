@@ -12,7 +12,6 @@
     "WORK-059",
     "WORK-060",
     "WORK-061",
-    "WORK-064",
     "WORK-065",
     "WORK-066",
     "WORK-067",
@@ -62,9 +61,7 @@
     },
     {
       "wave": 7,
-      "items": [
-        "WORK-064"
-      ]
+      "items": []
     },
     {
       "wave": 8,

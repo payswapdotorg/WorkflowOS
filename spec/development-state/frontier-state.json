@@ -6,19 +6,18 @@
     "spec/dependency-graph.md",
     "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision, plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002)"
   ],
-  "computedAt": "2026-08-30 (the WORK-063 post-merge finalization §34.8/ADR-0007: WORK-063 (Identity and Access Layer) merged by the architect as 8dac9c47f7397e22765478520ac71659d37e1783 via PR #81 (squash-merged at branch head f86d1f2; the merge tree is IDENTICAL to the approved rebased head) and finalized complete — 54/54 recorded work orders complete, nothing in flight. The delivery is SPEC-ONLY (the architecture decision + the Work Order + the dependency-model correction; the runtime identity layer remains UNIMPLEMENTED, architect-gated future work). WORK-064 is now DEPENDENCY-ELIGIBLE (WORK-048, WORK-050, WORK-063 all complete) and remains NOT activated, NOT started. WORK-061's WORK-063 dependency edge is SATISFIED (WORK-061 remains blocked on WORK-057/058/059/060). Prior records: the v1.1/ACR-002 package (WORK-064..070, proposed) merged as 45cb20f via PR #84; WORK-062 merged as f0855d2 via PR #82 and finalized (PR #83, merged as 46e7858); WORK-063 was carried into main by PR #81 rebased onto the post-#84 mainline)",
-  "currentMain": "8dac9c47f7397e22765478520ac71659d37e1783",
-  "currentLiveImplementation": null,
-  "liveImplementationNote": "Nothing is in flight: every recorded work order is complete — WORK-062 (the durable orchestration substrate) merged as f0855d2 via PR #82 and finalized by the §34.8/ADR-0007 post-merge finalization (PR #83, merged as 46e7858); the v1.1 continuous-product-validation package (ACR-002) merged as 45cb20f via PR #84; and WORK-063 (Identity and Access Layer — the identity-and-access architecture decision, spec-only) merged as 8dac9c4 via PR #81 and finalized complete by the §34.8/ADR-0007 post-merge finalization (54/54 complete, merged finalized 9/9). Dogfooding has NOT started. The open PRs are: the WORK-063 post-merge finalization PR (this change), and the stale pre-wave test branch #50.",
+  "computedAt": "2026-08-30 (WORK-064 ACTIVATED by the architect and now IN FLIGHT — it left plannedNext/plannedFuture; the frontier tracks the in-flight implementation through program-state.json. Main carries the WORK-063 finalization (00a3745 via PR #85) and the approved WORK-064 implementation plan (4018f42).)",
+  "currentMain": "4018f42278be1748fc73d767518fadbab1a5cfa8",
+  "currentLiveImplementation": "WORK-064 (Continuous Product Validation — the domain/model authority) on branch feat/work-064-continuous-validation",
+  "liveImplementationNote": "WORK-064 is IN FLIGHT (activated 2026-08-30 by the architect's implementation instruction after the approved implementation plan merged as 4018f42): the continuous product validation domain at src/continuous-validation/ — closed vocabularies, fail-closed effect-policy admission, synthetic test-identity binding over the existing /auth authority, provenance-preserving typed outcomes, evidence mapping into the EXISTING /verification authority, the in-memory run repository (NO migration authorized), and the domain service composed in buildApp. WORK-065..070 are NOT activated and NOT implemented.",
   "activeRule": "A derived frontier must never authorize work whose authoritative Work Order dependencies are incomplete. If live PR state and repository state disagree, halt authorization and require architect reconciliation.",
   "knownConflicts": [
     "Open PR #50 (test(WORK-043), base a1b88a9b) predates the WORK-046..050 wave and is stale relative to current main."
   ],
   "plannedNext": [
-    "WORK-053",
-    "WORK-064"
+    "WORK-053"
   ],
-  "plannedNextNote": "Two dependency-eligible heads, one per track, both PLANNED and NOT activated. WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the head of the ACR-001 track (deps WORK-046+WORK-051+WORK-052, all complete); it remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet'). WORK-064 (Continuous Product Validation) is the head of the ACR-002 track: its dependencies WORK-048, WORK-050, and WORK-063 are ALL complete (WORK-063 — the identity-and-access architecture decision — merged as 8dac9c4 via PR #81 and finalized complete §34.8/ADR-0007 on 2026-08-30), making WORK-064 dependency-eligible; it remains PLANNED, NOT activated, NOT started — the architect's authorization is required. WORK-062 was activated 2026-08-30, merged as f0855d2 via PR #82, and finalized complete (PR #83 merged as 46e7858); its completion satisfies WORK-061's WORK-062 edge. WORK-063's completion satisfies WORK-061's WORK-063 edge — WORK-061 stays blocked on WORK-057/058/059/060 (the WORK-053..056 foundation chain). The runtime identity layer specified by WORK-063 remains UNIMPLEMENTED (architect-gated future work); dogfooding has NOT started.",
+  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete) and remains PLANNED and NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict). WORK-064 was dependency-eligible (WORK-048+WORK-050+WORK-063 all complete) and was ACTIVATED 2026-08-30 — it is IN FLIGHT (branch feat/work-064-continuous-validation, recorded in program-state.json), no longer merely planned.",
   "plannedFuture": [
     "WORK-054",
     "WORK-055",
@@ -28,7 +27,6 @@
     "WORK-059",
     "WORK-060",
     "WORK-061",
-    "WORK-064",
     "WORK-065",
     "WORK-066",
     "WORK-067",

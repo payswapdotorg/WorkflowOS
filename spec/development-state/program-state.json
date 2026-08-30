@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T12:45:00Z",
+  "asOf": "2026-08-30T15:15:00Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1479,6 +1479,43 @@
         "pr": 81,
         "mergeCommit": "8dac9c47f7397e22765478520ac71659d37e1783"
       }
+    },
+    {
+      "id": "WORK-064",
+      "title": "Continuous Product Validation (the domain/model authority for synthetic product validation)",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-048",
+        "WORK-050",
+        "WORK-063"
+      ],
+      "branch": "feat/work-064-continuous-validation",
+      "pr": 86,
+      "workOrder": "spec/work-orders/WORK-064.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [
+          "continuous-validation"
+        ],
+        "migrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-064.md",
+          "docs/superpowers/notes/2026-08-30-work-064-repository-mapping.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/vitest.config.ts"
+        ]
+      },
+      "surfaceFlags": [
+        "authorityBoundary",
+        "publicContracts"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "note": "Activated by the architect (2026-08-30, the implementation instruction after the approved implementation plan merged as 4018f42 on main). Implementation: the continuous product validation DOMAIN/MODEL authority at src/continuous-validation/ (the application-layer pattern — NOT an 18th frozen module): the closed vocabularies (EffectPolicy/ValidationMode/ValidationTrigger/typed outcomes), fail-closed Environment × EffectPolicy admission (FORBIDDEN never admits in production; PRE_MERGE only behind the architect-approved safe mechanism), TestIdentity binding as an ADAPTER over the existing /auth AuthenticatedPrincipal (machine-credential providers only — the closed 'apikey' set today; human principals rejected; no issuance path), ValidationRun admission composing identity+environment+policy+mode/trigger constraints (POST_RELEASE requires an explicit releaseRef — no release authority exists yet; CONTINUOUS requires explicit configuration — no autonomous scheduling), typed observations/outcomes with the full run→journey→step→environment provenance chain (missing observation = explicit validation_failure, never healthy — mutation-killing discriminations pinned), evidence mapping into the EXISTING /verification authority through its public attachEvidence boundary (claim authority, server-side classification — NO parallel evidence store), the ValidationRunRepository PORT with the documented IN-MEMORY adapter (NO schema migration authorized by WORK-064 — durable validation state is an explicit future ACR-gated decision; migrations stay at 58), and the DefaultContinuousValidationService composed in buildApp + exposed on AppDeps for FUTURE consumers (WORK-065 browser agent, WORK-066 scheduler — NOT implemented here). Verification on the implementation branch: WORK-064 suite 119/119; static architecture 804/804 (13 WORK-064 boundary invariants: no second identity/verification/workflow/execution authority, no browser/scheduler/signal/release runtime, no secrets, provenance chain pinned); development-governance 66/66; architecture-governance 40/40; checkpoint-gates 19/19; backend typecheck 0 / lint 0 errors (2 pre-existing warnings, untouched); frontend typecheck 0 / lint 0 errors (1 pre-existing warning); FULL backend regression 2617 passed / 44 skipped / 0 failed; governance:status exit 0. Architectural rulings (documented in the repository mapping note): (1) journey declaration lives in types.ts (the plan's internal/journey.ts is redundant — no duplicate journey authority created); (2) NO release authority exists in the repository — POST_RELEASE admission requires an explicit caller-supplied releaseRef recorded for the future authority (fail-closed when absent); (3) NO durable persistence without an ACR — the in-memory adapter is the documented repository boundary. PR #86 review correction (the architect's audit, 2026-08-30 — two domain-correctness fixes in finalization, nothing else changed): (1) canonical expectation integrity — finalizeValidationRun resolves each result's expectation against the CANONICAL journey declaration and verifies deep structural equality (id/stepId/kind/description/matcher); a result retaining the id but altering the matcher and claiming matched:true is a typed FINALIZE_EXPECTATION_CANONICAL_MISMATCH rejection (health can never be derived from an executor-supplied expectation variant); (2) success-criteria semantics — health is determined by SuccessCriterion.requiresObservationIds (the declared set), not the raw expectation count: an observational expectation not required by any criterion no longer fails the run (its captured actual stays provenance-preserved; a failing run still records EVERY unmet expectation); an unmet required observation fails the run exactly as before; the finalize boundary rejects hand-crafted journeys with empty or unknown-referencing criteria (health is never vacuous). Discriminating regressions added (7 fail on the pre-correction implementation — proven both ways); the full WORK-064/governance/static/regression verification re-run on the correction head. PR #86 re-review correction (the architect's REQUEST CHANGES on the corrected head 71f9e18, 2026-08-30 — one remaining integrity gap in the same finalization boundary, nothing else changed): (3) derived match integrity — the finalizer no longer determines success from the caller-supplied result.matched: it derives the match itself with the authoritative deterministic evaluator (evaluateObservation over the canonical journey expectation and the recorded actual observation), the success-criteria evaluation reads the DERIVED value, and a supplied matched that contradicts the derivation is a typed FINALIZE_MATCH_ASSERTION_MISMATCH rejection (expected = canonical + actual = incorrect + matched:true can no longer fabricate health; actual = correct + matched:false can no longer fabricate failure; honest executors unaffected — every legitimate result constructor already derives matched through evaluateObservation). Discriminating regressions added (§8, the four required directions + two supporting: 4 of 6 FAIL on pre-correction 71f9e18 — proven both ways); the full WORK-064/governance/static/regression verification re-run on the correction head (WORK-064 suite 135/135; static architecture 804/804; governance suites 125/125; full backend regression 2633 passed / 0 failed)."
     }
   ],
   "resumption": {

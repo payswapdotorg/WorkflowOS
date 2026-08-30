@@ -326,6 +326,21 @@ import type {
 // the delegation coordinator's existing protocol via the executor port).
 import { DefaultOrchestrationSubstrate } from './orchestration/index.js';
 import type { OrchestrationSubstrate } from './orchestration/index.js';
+// WORK-064: the continuous product validation domain service — the
+// domain/model authority for synthetic product validation (journeys, runs,
+// synthetic test identities, environments, effect policies, expected
+// observations, typed outcomes). It CONSUMES the existing /verification
+// authority for evidence (never a parallel evidence store) and binds
+// already-authenticated /auth principals (never a second identity
+// authority). NO migration is authorized by WORK-064: the run repository
+// stays at the in-memory adapter (durable validation state is an explicit
+// future ACR-gated decision). Exposed for FUTURE consumers (WORK-065
+// browser agent, WORK-066 scheduler — NOT implemented in this Work Order).
+import {
+  DefaultContinuousValidationService,
+  InMemoryValidationRunRepository,
+} from './continuous-validation/index.js';
+import type { ContinuousValidationService } from './continuous-validation/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -456,6 +471,10 @@ export interface AppDeps {
   planApplier?: import('@modules/llm/index.js').ArchitectPlanApplier;
   /** WORK-015: verification service. Present when DB configured. */
   verificationService?: VerificationService;
+  /** WORK-064: the continuous product validation domain service (admission,
+   *  finalization, evidence mapping into /verification). Present when DB
+   *  configured. Future consumers: WORK-065 browser agent, WORK-066 scheduler. */
+  continuousValidationService?: ContinuousValidationService;
   /** WORK-016: review service. Present when DB configured. */
   reviewService?: ReviewService;
   /** WORK-015: CI evidence ingestion service. Present when DB configured. */
@@ -755,6 +774,8 @@ export async function buildApp(
   let architectSessionRepository: import('@modules/llm/index.js').ArchitectSessionRepository | undefined;
   let planApplier: import('@modules/llm/index.js').ArchitectPlanApplier | undefined;
   let verificationService: VerificationService | undefined;
+  // WORK-064: the continuous product validation domain service.
+  let continuousValidationService: ContinuousValidationService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
   let webhookProcessingService: WebhookProcessingService | undefined;
@@ -1004,6 +1025,14 @@ export async function buildApp(
     );
     // WORK-016: review service.
     reviewService = new DefaultReviewService(database, workItemRepository, logger);
+    // WORK-064: the continuous product validation domain service — composed
+    // from its ports with the EXISTING /verification authority (evidence
+    // mapping through its public boundary) and the documented in-memory run
+    // repository (NO migration authorized; durable state is a future ACR).
+    continuousValidationService = new DefaultContinuousValidationService({
+      runRepository: new InMemoryValidationRunRepository(),
+      verificationService: verificationService!,
+    });
     // WORK-008/009: webhook event repository + processing service.
     const pgWebhookEventRepo = new PgWebhookEventRepository(database);
     webhookEventRepository = pgWebhookEventRepo;
@@ -2059,6 +2088,7 @@ export async function buildApp(
       architectSessionRepository,
       planApplier,
       verificationService,
+      continuousValidationService,
       reviewService,
       ciEvidenceIngestionService,
       webhookProcessingService,

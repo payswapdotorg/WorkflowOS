@@ -45,6 +45,9 @@ export default defineConfig({
       'tests/integration/**/*.test.ts',
       'tests/integration/**/*.test.tsx',
       'tests/architecture/**/*.test.ts',
+      // WORK-064: the continuous-validation domain suite (pure domain +
+      // composition tests — no database required).
+      'tests/continuous-validation/**/*.test.ts',
     ],
     testTimeout: 15000,
     hookTimeout: 15000,

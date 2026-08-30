@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
   "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002)",
-  "computedAt": "2026-08-30 (the WORK-063 post-merge finalization §34.8/ADR-0007: WORK-063 (Identity and Access Layer) is COMPLETE — merged by the architect as 8dac9c47f7397e22765478520ac71659d37e1783 via PR #81 (squash-merged at branch head f86d1f2; the merge tree is IDENTICAL to the approved rebased head) and finalized complete; it left the futureGeneration and is tracked in program-state.json workOrders with the full mergedAs provenance identity. The delivery is SPEC-ONLY (the architecture decision + Work Order + dependency-model correction; no runtime implementation). WORK-064 is now dependency-eligible (WORK-048, WORK-050, WORK-063 all complete) and remains NOT activated and NOT started. WORK-061's WORK-063 dependency edge is SATISFIED. 54/54 recorded work orders complete, nothing in flight. Prior records: the v1.1/ACR-002 package (WORK-064..070) merged as 45cb20f via PR #84; WORK-062 COMPLETE — merged by the architect as f0855d2 via PR #82, finalized §34.8/ADR-0007 (PR #83, merged as 46e7858); WORK-063 was carried into main by PR #81 rebased onto the post-#84 mainline, preserving the canonical WORK-062-complete / WORK-064..070 state. The 2026-08-29 identity-resolution remains recorded in resolvedConflicts)",
+  "computedAt": "2026-08-30 (WORK-064 ACTIVATED by the architect — the implementation instruction after the approved implementation plan merged as 4018f42; it left the futureGeneration and is IN FLIGHT on branch feat/work-064-continuous-validation, recorded in program-state.json. WORK-053 remains the dependency-eligible PLANNED head of the v1.1 track. The remaining futureGeneration is unchanged.)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -11,8 +11,10 @@
   },
   "currentGeneration": {
     "completedWorkOrders": 54,
-    "inFlight": [],
-    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 — merged by the architect via PR #82 and finalized per §34.8/ADR-0007 on 2026-08-30), and WORK-063 (8dac9c4 — the identity-and-access architecture decision, merged by the architect via PR #81 and finalized per §34.8/ADR-0007 on 2026-08-30; spec-only: no runtime implementation rode the merge). The WORK-050, WORK-062, and WORK-063 post-merge finalizations are all carried in the canonical state. Nothing is in flight; the future generation (WORK-053..061 plus WORK-064..070) remains architect-gated."
+    "inFlight": [
+      "WORK-064"
+    ],
+    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 via PR #82, finalized §34.8/ADR-0007), and WORK-063 (8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) — 54/54 complete. IN FLIGHT: WORK-064 (Continuous Product Validation — activated 2026-08-30 by the architect's implementation instruction after the plan merged as 4018f42; branch feat/work-064-continuous-validation; the domain/model authority at src/continuous-validation/)."
   },
   "futureGeneration": {
     "WORK-053": [
@@ -69,11 +71,6 @@
       "WORK-062",
       "WORK-063"
     ],
-    "WORK-064": [
-      "WORK-048",
-      "WORK-050",
-      "WORK-063"
-    ],
     "WORK-065": [
       "WORK-064"
     ],
@@ -113,7 +110,6 @@
     "WORK-059": "blocked — WORK-055, WORK-056, WORK-058 not started (WORK-019 complete)",
     "WORK-060": "blocked — WORK-055, WORK-056, WORK-058, WORK-059 not started (WORK-005 complete)",
     "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060 not started (WORK-047, WORK-050, WORK-062, and WORK-063 all COMPLETE — the WORK-062 edge was satisfied by the f0855d2 merge via PR #82 and the WORK-063 edge by the 8dac9c4 merge via PR #81, both finalized §34.8/ADR-0007 on 2026-08-30; the remaining gate is the WORK-053..056 foundation chain, which the architect has not activated)",
-    "WORK-064": "eligible — WORK-048, WORK-050, and WORK-063 are ALL complete (WORK-063, the identity-and-access architecture decision, merged as 8dac9c4 via PR #81 and finalized §34.8/ADR-0007 on 2026-08-30). Dependency-eligible does NOT mean activated: WORK-064 remains PLANNED, NOT activated, NOT started — the architect's authorization is required, and until it is granted no implementation work may begin. (See spec/work-orders/WORK-064.md for the full Work Order; see spec/architecture/v1.1/dependency-graph.md for the design-time graph. The runtime identity layer that WORK-063's Work Order specifies remains UNIMPLEMENTED — its future implementation is a separate architect-gated authorization; the dependency edge is satisfied by the completed Work Order as the canonical state records it.)",
     "WORK-065": "blocked — WORK-064 not started",
     "WORK-066": "blocked — WORK-064, WORK-065 not started (soft: WORK-058 not started — the scheduler can ship with a simpler fixed-mapping assurance model and delegate to WORK-058 when it lands)",
     "WORK-067": "blocked — WORK-064 not started (WORK-015, WORK-040, WORK-041 complete; soft: WORK-056 not started — WORK-067 operates on raw observations directly with the same provenance discipline until WORK-056 lands)",
@@ -151,16 +147,6 @@
   },
   "futureGenerationParallelMetadata": {
     "note": "Parallel-execution metadata for the future Work Orders. Each entry summarizes the parallelEligibility, parallelConflicts, and protectedSurfaces declared in the Work Order spec file. See spec/architecture/v1.1/parallel-execution-metadata.md for the full model and each Work Order's 'Parallel-execution metadata' section for the verbatim declaration.",
-    "WORK-064": {
-      "parallelEligibility": "conditional",
-      "protectedSurfaces": [
-        "spec/architecture/v1.1/validation-model.md",
-        "spec/architecture/v1.1/continuous-validation-lifecycle.md",
-        "spec/architecture/v1.1/evidence-provenance-model.md",
-        "spec/architecture/v1.1/dogfooding-model.md",
-        "spec/work-orders/WORK-064.md"
-      ]
-    },
     "WORK-065": {
       "parallelEligibility": "conditional",
       "protectedSurfaces": [

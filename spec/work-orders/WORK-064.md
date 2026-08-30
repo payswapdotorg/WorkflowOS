@@ -1,13 +1,106 @@
 # WORK-064 — Continuous Product Validation
 
-Status: planned.
+Status: in flight (activated 2026-08-30 by the architect — the implementation
+instruction after the approved implementation plan merged to main as
+`4018f42`; the activation is recorded in
+`spec/development-state/program-state.json`, branch
+`feat/work-064-continuous-validation`, implementation PR #86). The implementation delivers the
+domain/model authority at `backend/src/continuous-validation/` (the
+application-layer pattern, NOT an 18th frozen module): the closed
+vocabularies (EffectPolicy × ValidationMode × ValidationTrigger × typed
+outcomes), fail-closed Environment × EffectPolicy admission (FORBIDDEN never
+admits in production; PRE_MERGE only behind the architect-approved safe
+mechanism), TestIdentity binding as an ADAPTER over the existing `/auth`
+`AuthenticatedPrincipal` (machine-credential providers only — the closed
+`apikey` set today, extended by WORK-063's future runtime; human principals
+rejected; NO issuance path), ValidationRun admission composing
+identity + environment + policy + mode/trigger constraints (POST_RELEASE
+requires an explicit caller-supplied releaseRef — no release authority
+exists in the repository yet; CONTINUOUS requires explicit configuration —
+no autonomous scheduling), typed observations/outcomes with the full
+run → journey → step → environment provenance chain (a missing
+CRITERION-REQUIRED observation is an EXPLICIT validation_failure, never
+healthy — mutation-killing discriminations pinned), evidence mapping into the EXISTING `/verification`
+authority through its public `attachEvidence` boundary (claim authority,
+server-side classification — NO parallel evidence store), the
+ValidationRunRepository PORT with the documented IN-MEMORY adapter (NO
+schema migration is authorized — durable validation state is an explicit
+future ACR-gated decision; migrations stay at 58), and the
+DefaultContinuousValidationService composed in `buildApp` + exposed on
+AppDeps for FUTURE consumers (WORK-065 browser agent, WORK-066 scheduler —
+NOT implemented here). Verification on the branch: WORK-064 suite 119/119;
+static architecture 804/804 (13 WORK-064 boundary invariants);
+development-governance 66/66; architecture-governance 40/40; full backend
+regression 2617 passed / 0 failed; typecheck/lint clean (backend + frontend).
+Architectural rulings documented in
+`docs/superpowers/notes/2026-08-30-work-064-repository-mapping.md`.
+
+PR #86 review correction (2026-08-30, the architect's audit — two
+domain-correctness fixes in finalization, NOTHING else changed: no new
+authority, no migration, no WORK-065+ scope):
+
+1. **Canonical expectation integrity** — `finalizeValidationRun` now
+   resolves each result's expectation against the CANONICAL journey
+   declaration and verifies deep structural equality
+   (id/stepId/kind/description/matcher). A result retaining the id but
+   altering the matcher and claiming `matched: true` is a typed
+   `FINALIZE_EXPECTATION_CANONICAL_MISMATCH` rejection: health can never be
+   derived from an executor-supplied expectation variant. A structurally
+   equal clone is accepted (the contract is canonical SHAPE, not object
+   identity).
+2. **Success-criteria semantics** — health is determined by
+   `SuccessCriterion.requiresObservationIds` (the declared set that
+   determines health), NOT the raw expectation count: an observational
+   expectation not required by any criterion no longer fails the run (its
+   captured actual stays provenance-preserved in the run's observations;
+   when a run DOES fail, every unmet expectation — required AND
+   observational — is still recorded with full provenance); an unmet
+   required observation fails the run exactly as before. The finalize
+   boundary additionally rejects hand-crafted journeys with empty or
+   unknown-referencing criteria (defense in depth — health is never
+   vacuous).
+
+Discriminating regressions added in
+`backend/tests/continuous-validation/outcome-provenance.test.ts` (§6+§7:
+seven of them FAIL on the pre-correction implementation — the
+pre-correction pin asserting the wrong every-expectation semantics was
+inverted); the full WORK-064/governance/static/regression verification was
+re-run on the correction head.
+
+PR #86 re-review correction (2026-08-30, the architect's REQUEST CHANGES on
+the corrected implementation — ONE remaining integrity gap in the same
+finalization boundary, NOTHING else changed: no new authority, no
+migration, no WORK-065+ scope):
+
+3. **Derived match integrity** — after corrections 1–2, the finalizer
+   verified the canonical expectation but still determined success from
+   the caller-supplied `result.matched`. The finalizer now derives the
+   match itself — `evaluateObservation(canonicalExpected, actual)`, the
+   authoritative deterministic evaluator — and the success-criteria
+   evaluation reads the DERIVED value, never the assertion. The supplied
+   `result.matched` is treated as an ASSERTED value that must equal the
+   derived value and otherwise is rejected (typed
+   `FINALIZE_MATCH_ASSERTION_MISMATCH`): an executor submitting
+   `expected = canonical, actual = incorrect, matched: true` can no longer
+   fabricate a healthy result (and `actual = correct, matched: false` can
+   no longer fabricate a failure). Honest executors are unaffected — every
+   legitimate result constructor already derives `matched` through
+   `evaluateObservation`.
+
+Discriminating regressions added in
+`backend/tests/continuous-validation/outcome-provenance.test.ts` (§8, the
+four required directions + two supporting: 4 of the 6 FAIL on the
+pre-correction head `71f9e18` — proven both ways); the full
+WORK-064/governance/static/regression verification was re-run on the
+correction head (WORK-064 suite 135/135; static architecture 804/804;
+governance suites 125/125; full backend regression 2633 passed / 0 failed).
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap — the closed-loop software engineering control system
 extension to v1.1). This Work Order establishes the continuous product
-validation domain model — it does NOT implement runtime code. Activation
-requires the architect's authorization and is recorded in
-`spec/development-state/program-state.json` (this change records none).
+validation domain model. Activation requires the architect's authorization
+and is recorded in `spec/development-state/program-state.json` (the
+activation was recorded 2026-08-30 — see the status header above).
 
 Dependencies: WORK-048 (Developer Workbench — the user-facing surface whose
 journeys are validated), WORK-050 (Unified Execution UX — the unified
