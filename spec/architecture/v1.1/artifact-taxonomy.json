@@ -21,7 +21,12 @@
       "frontier-state",
       "dependency-state",
       "architecture-fitness-observation",
-      "checkpoint-summary"
+      "checkpoint-summary",
+      "ValidationJourney",
+      "ValidationRun",
+      "ValidationObservation",
+      "EngineeringSignalCorrelation",
+      "ArchitectureRiskRecommendation"
     ],
     "evidence": [
       "verification evidence",
@@ -29,8 +34,21 @@
       "repository observations",
       "CI observations",
       "runtime observations",
-      "user-feedback observations"
+      "user-feedback observations",
+      "validation observations (mapped into verification evidence — provenance preserved)"
     ]
   },
-  "rule": "A new artifact must be classified before creation. Derived artifacts cannot become authoritative by convention or caller choice. Evidence cannot directly mutate normative or authoritative state."
+  "rule": "A new artifact must be classified before creation. Derived artifacts cannot become authoritative by convention or caller choice. Evidence cannot directly mutate normative or authoritative state.",
+  "v1_1_continuous_product_validation_sub_evolution": {
+    "acr": "ACR-002 (proposed)",
+    "new_derived_artifacts": [
+      "ValidationJourney (design-time authority: WORK-064)",
+      "ValidationRun (the outcome of one synthetic execution; provenance-bound to /verification)",
+      "ValidationObservation (a single raw observation; provenance-bound to /verification)",
+      "EngineeringSignalCorrelation (the correlation/regression-detection layer: WORK-067)",
+      "ArchitectureRiskRecommendation (the closed-loop synthesis output: WORK-070, feeds the /architecture ACR authority)"
+    ],
+    "invariant": "Validation evidence maps INTO the EXISTING /verification evidence authority as a derived artifact (provenance preserved). No parallel evidence store. No customer-product validation failure may be silently discarded, converted into a false healthy state, or directly converted into an ungoverned code change.",
+    "activation": "These artifacts become governing only when ACR-001 + ACR-002 are approved by the architect and the corresponding Work Orders (WORK-064..070) are implemented and merged. Until then, they are design-time proposed state in spec/architecture/v1.1/."
+  }
 }

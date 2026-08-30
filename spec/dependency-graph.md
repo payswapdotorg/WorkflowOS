@@ -244,3 +244,85 @@ WORK-051 and WORK-052 share surfaces with the in-flight WORK-046 (the static
 architecture suite and composition root); migration numbering is reserved per work
 order (0052–0056 WORK-051, 0057 WORK-046) so all merge orders stay clean. WORK-052
 introduces no new migration.
+
+### Continuous product validation sub-evolution (v1.1, ACR-002 — proposed)
+
+The 2026-08-30 research-driven v1.1 evolution adds a continuous product
+validation sub-evolution that closes the engineering control loop with an
+explicit `VALIDATE` stage. Seven new Work Orders carry the sub-evolution;
+they are SEPARATE from the WORK-053..061 track (which implements ACR-001)
+and CONSUME (but do not duplicate) the ACR-001 capabilities when those
+Work Orders land.
+
+```text
+WORK-063 (Identity & Access — PR #81, open; NOT yet in main)
+    │
+    ↓
+WORK-064 (Continuous Product Validation — the domain/model authority)
+    │
+    ↓
+WORK-065 (Synthetic Browser Validation Agent — the execution mechanism)
+    │
+    ↓
+WORK-066 (Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS)
+    │                                  ← soft: WORK-058 (Adaptive Assurance Engine)
+    ↓
+WORK-067 (Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood)
+    │                                  ← soft: WORK-056 (Engineering Signals Intake)
+    ↓
+WORK-068 (Feedback → Governed Work Items — through the EXISTING /work-items authority)
+    │
+    ├────────────→ WORK-069 (Progressive Release & Runtime Validation — canary, continue/halt/recover)
+    │                                      ← soft: WORK-059 (Operational/Release Governance)
+    │                      │
+    └──────────────────────┴──→ WORK-070 (Continuous Architecture Fitness → ACR through /architecture)
+                                      ← soft: WORK-055 (Quality Attributes) + WORK-060 (ACR Feedback Loop)
+```
+
+Exact edges:
+
+- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (proposed in PR #81, open)
+- WORK-065 ← WORK-064
+- WORK-066 ← WORK-064, WORK-065, (soft: WORK-058)
+- WORK-067 ← WORK-064, WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056)
+- WORK-068 ← WORK-067
+- WORK-069 ← WORK-064, WORK-066, WORK-019 (complete), WORK-026 (complete), WORK-020 (complete), (soft: WORK-059)
+- WORK-070 ← WORK-067, WORK-069, WORK-051 (complete), (soft: WORK-055, WORK-060)
+
+The `VALIDATE` stage (between RELEASE and OBSERVE in the v1.1 control loop)
+is the deliberate act of exercising meaningful user workflows against a real
+deployment (preview or production, under a declared EffectPolicy) to confirm
+the released system works for the customer. The frozen v1.0 control loop
+(10 stages, no `VALIDATE`) remains governing until ACR-001 + ACR-002 are
+approved; the v1.1 control loop (11 stages, with `VALIDATE`) is PROPOSED in
+`spec/architecture/v1.1/control-system-evolution.md`.
+
+The browser agent (WORK-065) is an EXECUTION MECHANISM, not an authority:
+it cannot relax a FORBIDDEN EffectPolicy, cannot mutate code, cannot merge
+PRs, cannot approve reviews, cannot transition workflow state. The
+ValidationJourney/EffectPolicy domain model is owned by WORK-064 (the
+authority); the browser agent executes underneath it.
+
+Production synthetic validation must never perform uncontrolled destructive
+side effects. Dangerous functionality requires a sandbox, a synthetic
+identity, a test tenant, a test payment instrument, controlled external
+integrations, or another explicitly approved safe mechanism.
+
+No customer-product validation failure may be silently discarded, converted
+into a false healthy state, or directly converted into an ungoverned code
+change. The canonical flow: validation failure → evidence (provenance
+preserved) → Engineering Signal (WORK-067) → governed assessment → Work
+Item (WORK-068, through the EXISTING `/work-items` authority).
+
+All seven Work Orders are PLANNED and NOT activated. Each carries
+parallel-execution metadata (`parallelEligibility`, `parallelConflicts`,
+`protectedSurfaces`) — see `spec/architecture/v1.1/parallel-execution-metadata.md`
+and each Work Order's `Parallel-execution metadata` section. An Architect
+LLM may mechanically determine READY/BLOCKED/PARALLEL-SAFE/CONFLICTING for
+each.
+
+The Fresh-Architect Bootstrap artifact
+(`spec/architecture/v1.1/fresh-architect-bootstrap.md`) is the durable
+record that the repository — not the previous conversation — is
+authoritative. A new Architect LLM that reads the repository has the same
+authority as the original architect.

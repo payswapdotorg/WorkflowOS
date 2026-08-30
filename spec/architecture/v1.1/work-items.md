@@ -14,6 +14,13 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-060 | Continuous Architecture Evolution and ACR Feedback Loop | WORK-055, WORK-056, WORK-058, WORK-059, WORK-005 |
 | WORK-062 | Durable Multi-Agent Orchestration Substrate — durable execution underneath WORK-046 delegation | WORK-046 |
 | WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062 |
+| WORK-064 | Continuous Product Validation — the ValidationJourney/EffectPolicy domain model | WORK-048, WORK-050, WORK-063 (PR #81, open) |
+| WORK-065 | Synthetic Browser Validation Agent — the execution mechanism for ValidationJourneys | WORK-064 |
+| WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065, (soft: WORK-058) |
+| WORK-067 | Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood | WORK-064, WORK-015, WORK-040, WORK-041, (soft: WORK-056) |
+| WORK-068 | Feedback → Governed Work Items — convert signals through the EXISTING /work-items authority | WORK-067 |
+| WORK-069 | Progressive Release & Runtime Validation — canary/partial rollout with governed continue/halt/recover | WORK-064, WORK-066, WORK-019, WORK-026, WORK-020, (soft: WORK-059) |
+| WORK-070 | Continuous Architecture Fitness — closed-loop synthesis → architecture risk → ACR | WORK-067, WORK-069, WORK-051, (soft: WORK-055, WORK-060) |
 
 All items remain architect-governed and require a Work Order file, declared surfaces, deterministic assurance, checkpoint requirements, proof contract, and architect-controlled merge.
 
@@ -35,7 +42,23 @@ All items remain architect-governed and require a Work Order file, declared surf
 > architect on 2026-08-30 and is COMPLETE — merged by the architect as `f0855d2` via
 > PR #82 on 2026-08-30 (squash-merged at the approved review-remediated head `1caa259`;
 > the merge tree is identical to the approved head) and finalized complete per
-> §34.8/ADR-0007 (program-state.json records status complete with the full `mergedAs`
-> provenance identity: pr 82, mergeCommit f0855d2955dcf2d3edea683e497902ad30778fc8).
-> WORK-061's WORK-062 dependency edge is thereby satisfied; WORK-061 remains blocked
-> on WORK-057/058/059/060 (the WORK-053..056 foundation chain).
+> §34.8/ADR-0007 (PR #83, merged as `46e7858`; program-state.json records status
+> complete with the full `mergedAs` provenance identity: pr 82, mergeCommit
+> f0855d2955dcf2d3edea683e497902ad30778fc8). WORK-061's WORK-062 dependency edge is
+> thereby satisfied; WORK-061 remains blocked on WORK-057/058/059/060 (the WORK-053..056
+> foundation chain).
+>
+> **WORK-064..070 note (2026-08-30 continuous product validation sub-evolution, ACR-002):**
+> these seven Work Orders are NEW in the 2026-08-30 research-driven v1.1 evolution. They
+> are SEPARATE from the WORK-053..061 track (which implements ACR-001). They CONSUME (but do
+> not duplicate) the ACR-001 capabilities when those Work Orders land: WORK-067 consumes
+> WORK-056's signal taxonomy; WORK-069 consumes WORK-059's release framework; WORK-070
+> consumes WORK-055's model and WORK-060's loop. Soft dependencies are marked "(soft: …)";
+> the Work Order can be implemented with a simpler initial surface and upgraded to the full
+> soft dependency when it lands. WORK-064's dependency on WORK-063 references a Work Order
+> that is itself PROPOSED in PR #81 (open, not yet merged into main); until PR #81 merges
+> AND WORK-063 is implemented, WORK-064 is BLOCKED on WORK-063 (recorded honestly in
+> `dependency-state.json` → `futureGenerationEligibility`). All seven Work Orders are
+> PLANNED and NOT activated. Each carries parallel-execution metadata
+> (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
+> [`parallel-execution-metadata.md`](parallel-execution-metadata.md).

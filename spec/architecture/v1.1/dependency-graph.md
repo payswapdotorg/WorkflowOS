@@ -25,6 +25,32 @@ WORK-046 + WORK-051 + WORK-052
        WORK-062  ←── WORK-046 (complete — the delegation authority; merged f0855d2)
            ↓
        WORK-061
+
+# ── v1.1 continuous product validation sub-evolution (ACR-002) ──
+#    (NEW in the 2026-08-30 continuous-product-validation roadmap;
+#     SEPARATE from the WORK-053..061 track; CONSUMES, does not
+#     duplicate, the ACR-001 capabilities when they land.)
+
+WORK-063 (Identity & Access — PR #81, open)
+    │
+    ↓
+WORK-064 (Continuous Product Validation)
+    │
+    ↓
+WORK-065 (Synthetic Browser Validation Agent)
+    │
+    ↓
+WORK-066 (Validation Scheduling & Change Triggers)  ← soft: WORK-058
+    │
+    ↓
+WORK-067 (Engineering Signal & Regression Correlation)  ← soft: WORK-056
+    │
+    ↓
+WORK-068 (Feedback → Governed Work Items)
+    │
+    ├────────────→ WORK-069 (Progressive Release & Runtime Validation)  ← soft: WORK-059
+    │                      │
+    └──────────────────────┴──→ WORK-070 (Continuous Architecture Fitness)  ← soft: WORK-055, WORK-060
 ```
 
 Exact edges:
@@ -39,6 +65,16 @@ Exact edges:
 - WORK-060 ← WORK-055, WORK-056, WORK-058, WORK-059, WORK-005
 - WORK-062 ← WORK-046
 - WORK-061 ← WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062
+
+v1.1 continuous product validation sub-evolution (ACR-002) edges:
+
+- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (proposed in PR #81, open — NOT yet in main)
+- WORK-065 ← WORK-064
+- WORK-066 ← WORK-064, WORK-065, WORK-058 (soft — adaptive assurance engine, planned)
+- WORK-067 ← WORK-064, WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned)
+- WORK-068 ← WORK-067
+- WORK-069 ← WORK-064, WORK-066, WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned)
+- WORK-070 ← WORK-067, WORK-069, WORK-051 (complete — architecture checkpoint framework), WORK-055 (soft — quality-attribute model, planned), WORK-060 (soft — ACR feedback loop, planned)
 
 WORK-062 (Durable Multi-Agent Orchestration Substrate) was added by the
 2026-08-30 governance correction — the execution-substrate architecture
@@ -57,6 +93,39 @@ the approved head) and finalized complete per §34.8/ADR-0007 (see
 dependency edge is satisfied; WORK-061 remains blocked on
 WORK-057/058/059/060.
 
+WORK-064..070 (the continuous product validation sub-evolution, ACR-002) are
+NEW Work Orders issued by the 2026-08-30 research-driven v1.1 evolution. They
+are SEPARATE from the WORK-053..061 track (which implements ACR-001). They
+CONSUME (but do not duplicate) the ACR-001 capabilities when those Work
+Orders land:
+
+- WORK-067 (Engineering Signal & Regression Correlation) is the
+  CORRELATION/REGRESSION-DETECTION LAYER that CONSUMES WORK-056's signal
+  taxonomy when WORK-056 lands; until then, it operates on raw observations
+  directly with the same provenance discipline.
+- WORK-069 (Progressive Release & Runtime Validation) is the CLOSED-LOOP
+  RUNTIME VALIDATION LAYER that CONSUMES WORK-059's release governance
+  framework when WORK-059 lands; until then, it operates directly on the
+  existing v1.0 release/runtime authorities.
+- WORK-070 (Continuous Architecture Fitness) is the CLOSED-LOOP SYNTHESIS
+  of WORK-055 (the model) + WORK-060 (the loop) + WORK-067 (signals) +
+  WORK-069 (release/runtime evidence). It does not replace any of them.
+
+WORK-063 (Identity and Access Layer) is the proposed identity layer for
+WORK-064's authenticated journeys. PR #81 (open, NOT merged into main at
+the time of this package's authoring) carries WORK-063. WORK-064's
+dependency on WORK-063 means WORK-064 is BLOCKED until PR #81 merges AND
+WORK-063 is implemented. The honest state: WORK-063 is "proposed in
+PR #81 (open); not yet in main". See `spec/work-orders/WORK-063.md` (in
+the PR #81 branch) for the Work Order.
+
+WORK-064..070 are PLANNED and NOT activated. The architect's authorization
+is required to activate any of them (recorded in `program-state.json`).
+Each carries parallel-execution metadata
+(`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
+`parallel-execution-metadata.md` and each Work Order's `Parallel-execution
+metadata` section.
+
 Parallelization is permitted only where dependencies are complete and protected-surface coordination permits it. The graph is not itself an authorization token; derived frontier state must reconcile it with live program state and GitHub merge evidence.
 
 > **Reconciliation note (2026-08-29, updated by pass 2):** the architect's direct-to-main upload wave
@@ -68,3 +137,12 @@ Parallelization is permitted only where dependencies are complete and protected-
 > (`spec/archive/upload-wave-2026-08-28/`), and `spec/development-state/dependency-state.json`
 > `futureGeneration` is the one canonical dependency mapping — see
 > [`reconciliation-record.md`](reconciliation-record.md) §8.
+
+> **Continuous product validation sub-evolution note (2026-08-30):** WORK-064..070
+> are NEW Work Orders issued by the 2026-08-30 research-driven v1.1 evolution.
+> They do NOT collide with WORK-053..061 (the ACR-001 track) — different
+> identifiers, different scopes, different protected surfaces. The dependency
+> edge WORK-064 ← WORK-063 references a Work Order that is itself PROPOSED in
+> PR #81 (open, not yet merged into main); until PR #81 merges, WORK-064 is
+> BLOCKED on WORK-063 (and the eligibility is recorded honestly in
+> `dependency-state.json` → `futureGenerationEligibility`).

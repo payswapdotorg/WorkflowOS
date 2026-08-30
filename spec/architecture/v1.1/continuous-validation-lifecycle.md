@@ -1,0 +1,164 @@
+# WorkflowOS v1.1 — Continuous Validation Lifecycle (Operating Modes)
+
+Status: proposed. This document persists the three validation operating
+modes (PRE_MERGE, POST_RELEASE, CONTINUOUS) and their EffectPolicy /
+assurance-level bindings. It is the design-time authority for the
+validation lifecycle; the runtime scheduling engine (when authorized)
+lives in the backend under WORK-066.
+
+## 1. The three operating modes
+
+### PRE_MERGE
+
+Environment: preview / isolated environment (a preview deployment of the
+PR's branch, an isolated test tenant, a sandbox).
+
+Purpose: catch integration regressions before merge.
+
+EffectPolicy: may permit READ_ONLY, SAFE_MUTATION, ISOLATED_MUTATION.
+FORBIDDEN actions are rejected unless an explicitly approved safe
+mechanism exists.
+
+Assurance: bound to the change's assurance profile (LIGHT → READ_ONLY
+smoke; STANDARD → READ_ONLY + SAFE_MUTATION; HIGH_ASSURANCE → +
+ISOLATED_MUTATION + integration journeys; CRITICAL → + the full journey
+suite + architect-review record).
+
+Triggers: PR, deployment (to preview), architecture change (ACR-gated
+preview), security finding (immediate preview), major dependency change
+(the dependency's preview).
+
+### POST_RELEASE
+
+Environment: the real production deployment, immediately after a
+release.
+
+Purpose: confirm the new release works in the real deployment.
+
+EffectPolicy: READ_ONLY and SAFE_MUTATION only. ISOLATED_MUTATION
+requires an isolated test tenant in production (rare; only for
+CRITICAL changes with an approved sandbox). FORBIDDEN actions are
+rejected.
+
+Assurance: bound to the release's assurance profile. CRITICAL releases
+are canary-bound (WORK-069 progressive release): the POST_RELEASE
+validation runs against the canary before full rollout.
+
+Triggers: release.
+
+### CONTINUOUS
+
+Environment: the real production deployment.
+
+Purpose: detect regressions after deployment.
+
+EffectPolicy: READ_ONLY and SAFE_MUTATION only (CRITICAL journeys may
+include SAFE_MUTATION in production with an approved test tenant).
+FORBIDDEN actions are rejected.
+
+Assurance: bound to the journey's declared assurance level. The
+CONTINUOUS mode runs the full journey suite on a schedule (for
+CRITICAL-class journeys) or on event triggers (runtime anomaly,
+security signal, user-feedback spike).
+
+Triggers: scheduled interval, runtime signal, security signal, user
+feedback.
+
+## 2. The EffectPolicy binding per mode and profile
+
+| Mode | LIGHT | STANDARD | HIGH_ASSURANCE | CRITICAL |
+|---|---|---|---|---|
+| PRE_MERGE | READ_ONLY | READ_ONLY, SAFE_MUTATION | READ_ONLY, SAFE_MUTATION, ISOLATED_MUTATION | READ_ONLY, SAFE_MUTATION, ISOLATED_MUTATION |
+| POST_RELEASE | (none) | READ_ONLY | READ_ONLY | READ_ONLY, SAFE_MUTATION |
+| CONTINUOUS | (none) | READ_ONLY | READ_ONLY | READ_ONLY, SAFE_MUTATION |
+
+FORBIDDEN is FORBIDDEN in every mode and every profile. Production
+destructive operations are never admitted without an explicitly
+approved safe mechanism.
+
+## 3. The trigger → mode binding
+
+| Trigger | Mode | Profile |
+|---|---|---|
+| PR | PRE_MERGE | bound to the PR's assurance profile |
+| deployment (to preview) | PRE_MERGE | bound to the deployment's assurance profile |
+| release | POST_RELEASE | bound to the release's assurance profile |
+| scheduled interval | CONTINUOUS | bound to the journey's declared level |
+| runtime signal | CONTINUOUS | bound to the signal's severity |
+| architecture change (ACR) | PRE_MERGE | bound to the ACR's assurance profile |
+| security finding | PRE_MERGE + POST_RELEASE | bound to the finding's severity |
+| major dependency change | PRE_MERGE + POST_RELEASE | bound to the dependency's assurance profile |
+
+The scheduler (WORK-066) consumes triggers from the existing authorities
+(`/github`, runtime/audit, `/architecture`, the existing security signal
+intake). It does not invent its own triggers.
+
+## 4. The scheduling rules
+
+- A run is admitted only when its declared EffectPolicy is one the
+  target Environment is authorized to accept.
+- A run is admitted only when its declared TestIdentity is valid for the
+  target Environment (a synthetic identity in production; a test-tenant
+  identity in an isolated sandbox for ISOLATED_MUTATION).
+- A run is admitted only when its declared assurance level is met by
+  the run's evidence (static + dynamic + discrimination proofs as
+  required).
+- A CONTINUOUS run is admitted only by explicit configuration (no
+  autonomous unsupervised scheduling).
+- A POST_RELEASE run is admitted only after the release is recorded by
+  the existing release authority (no premature POST_RELEASE against an
+  unreleased change).
+
+## 5. The failure semantics per mode
+
+A validation failure in any mode produces:
+
+- evidence (provenance preserved — the run, journey, step, environment,
+  observation);
+- an Engineering Signal (WORK-067 — correlated, deduplicated, regression-
+  likelihood-assessed);
+- a governed Work Item proposal (WORK-068 — through the existing
+  `/work-items` authority).
+
+The mode affects the failure's severity and the response:
+
+- a PRE_MERGE failure blocks the merge (the change is not ready);
+- a POST_RELEASE failure triggers the progressive-release continue/halt/
+  recover decision (WORK-069);
+- a CONTINUOUS failure triggers the runtime-observation → signal → Work
+  Item flow (the system has regressed since the release).
+
+A failure is NEVER silently discarded, NEVER converted into a false
+healthy state, and NEVER directly converted into an ungoverned code
+change (the WORK-064 invariant, carried forward).
+
+## 6. The runtime scheduling engine (NOT implemented in this task)
+
+The runtime scheduling engine that admits runs based on triggers and
+binds EffectPolicies per assurance level will be implemented under
+WORK-066 (Validation Scheduling & Change Triggers) when it is activated.
+Until then:
+
+- the v1.0 frozen authorities govern (no validation runs are admitted);
+- the v1.1 operating modes in this document are design-time proposed
+  state;
+- no runtime code implements the modes.
+
+This task does NOT implement the scheduling engine. It persists the
+model.
+
+## 7. The relationship to WORK-069 (Progressive Release & Runtime Validation)
+
+WORK-069 (Progressive Release & Runtime Validation — planned) is the
+v1.1 evolution Work Order that binds POST_RELEASE validation to
+progressive rollout (canary / partial rollout → synthetic validation →
+runtime observation → continue / halt / recover). WORK-066 (this
+document's owning Work Order) decides WHEN validation runs; WORK-069
+decides how the POST_RELEASE validation is bound to the release
+decision. They are separate Work Orders because they own separate
+concerns (scheduling vs. release binding).
+
+When WORK-069 lands, the POST_RELEASE mode is extended with the
+canary-bound continue/halt/recover loop. Until then, POST_RELEASE is
+defined in this document as the immediate-post-release validation
+without the progressive-rollout binding.
