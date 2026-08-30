@@ -78,15 +78,19 @@ products.
 ## 4. The dogfood execution policy (operational)
 
 The first official dogfood run begins only after the normal
-authentication path is functional (WORK-063, Identity and Access Layer —
-proposed in PR #81). The demo API key is NOT the permanent customer
+authentication path is functional (WORK-074, Identity & Access Runtime
+Activation — the runtime implementation of WORK-063's spec; WORK-063
+itself is the SPEC-ONLY architecture decision merged as `8dac9c4` via
+PR #81 — see §8 and §8.1 for the gate and the spec/runtime separation).
+The demo API key is NOT the permanent customer
 login mechanism and must not be encoded into the ValidationJourney
 contract as if it were.
 
 The dogfood run exercises:
 
 ```text
-authentication (WORK-063 — human login + scoped machine identity)
+authentication (WORK-074 — the runtime implementation of WORK-063's spec;
+                human login + scoped machine identity; the demo key is retired)
 organization (existing v1.0 authority)
 project (existing v1.0 authority)
 GitHub connection (existing v1.0 authority)
@@ -187,25 +191,80 @@ The dogfood run is the canonical acceptance journey.
 
 ## 8. The first dogfood run (operational policy)
 
+> **2026-08-30 update (the customer dogfooding experiment's governed
+> follow-up):** the dogfooding experiment was ATTEMPTED on 2026-08-30 and
+> STOPPED at onboarding. The empirical findings are persisted in
+> `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`.
+> The gate below is updated to distinguish WORK-063 (the SPEC, already merged
+> complete) from WORK-074 (the RUNTIME ACTIVATION — the "WORK-063-RUNTIME" of
+> the experiment's design; the runtime implementation of WORK-063's spec), and
+> to add WORK-071 (the local development runtime substrate). The repository no
+> longer implies that merely merging WORK-063's architecture specification
+> means real authentication exists.
+
 The first official dogfood run is gated on:
 
-1. WORK-063 (Identity and Access Layer) is implemented and merged (the
-   normal authentication path is functional; the demo key is retired
-   from the customer login path);
-2. WORK-064 (Continuous Product Validation) is implemented and merged
+1. **WORK-074 (Identity & Access Runtime Activation — the runtime
+   implementation of WORK-063's spec) is complete and merged** (the normal
+   authentication path is functional: Google/GitHub/email login, server-side
+   sessions, scoped machine identity; the demo key is retired from the customer
+   login path). WORK-063 (the SPEC) is already merged complete as
+   `8dac9c4` via PR #81 (spec-only, finalized §34.8/ADR-0007) — but the spec
+   merge is NOT the runtime. The gate references the RUNTIME Work Order
+   (WORK-074), not the spec (WORK-063), because the runtime identity layer
+   remains UNIMPLEMENTED until WORK-074 lands. The dogfooding experiment
+   confirmed this empirically (finding F-1: the LoginPage exposes ONLY an
+   API-key input; there is NO Google/GitHub/email login surface).
+2. **WORK-071 (Local Development Runtime Substrate) is complete, OR an
+   equivalent supported runtime environment is available** (a real customer —
+   and the dogfooding experiment — can run the application locally against real
+   authorities without requiring an externally hosted PostgreSQL). The
+   dogfooding experiment confirmed the gap empirically (finding F-2: the
+   composition root leaves `database` undefined when `DATABASE_URL` is absent;
+   there is no local fallback; a PGlite `DatabaseClient` adapter already exists
+   but the production composition does not wire it for a dev path).
+3. WORK-064 (Continuous Product Validation) is implemented and merged
    (the ValidationJourney/EffectPolicy model is in force) — SATISFIED:
    COMPLETE (merged as `c351451` via PR #86 and finalized §34.8/ADR-0007
-   on 2026-08-30; the domain/model authority is on main);
-3. WORK-065 (Synthetic Browser Validation Agent) is implemented and
-   merged (the execution mechanism exists);
-4. the existing v1.0 authorities are operational (the dogfood run
+   on 2026-08-30; the domain/model authority is on main; this item governs
+   the browser-validation portion of the dogfood run);
+4. WORK-065 (Synthetic Browser Validation Agent) is implemented and
+   merged (the execution mechanism exists) — for the browser-validation
+   portion;
+5. the existing v1.0 authorities are operational (the dogfood run
    exercises the real authorities, not mocks).
 
 Until these are in place, the dogfood run is staged: the customer
 journeys that do not require authentication (public read paths) can run
-in PRE_MERGE; the authenticated journeys are FORBIDDEN until WORK-063
-lands.
+in PRE_MERGE; the authenticated journeys are FORBIDDEN until WORK-074
+lands (the runtime identity layer specified by WORK-063 is UNIMPLEMENTED
+without it).
 
 The repository records that this is the canonical acceptance journey
 for WorkflowOS-as-a-product. A fresh Architect LLM resuming the program
-must treat the dogfood run as the integration acceptance gate.
+must treat the dogfood run as the integration acceptance gate, and must
+NOT confuse WORK-063's merged spec with the runtime identity layer
+(WORK-074) the gate actually requires.
+
+### 8.1 The dogfooding gate is the spec/runtime separation (the invariant)
+
+The gate's authentication precondition (item 1) references WORK-074, NOT
+WORK-063. This is the load-bearing distinction: WORK-063 is the architecture
+decision (the identity model — merged complete as the spec); WORK-074 is the
+runtime implementation (the authentication code, the provider adapters, the
+session lifecycle, the service-account issuance, the Workbench migration off
+the demo key). A release of WorkflowOS is NOT honestly complete because
+WORK-063's spec merged; it is honestly complete only when WORK-074's runtime
+is implemented, proven, and merged — AND WORK-071's local-runtime path (or an
+equivalent supported runtime) lets the dogfood run actually exercise the
+application locally.
+
+The dogfooding experiment's governed follow-up Work Orders (WORK-071,
+WORK-072, WORK-073, WORK-074) are PLANNED, NOT activated, NOT started — the
+architect's authorization is required. WORK-072 (Authentication State
+Synchronization) and WORK-073 (Create Project Organization Selection) are
+independent frontend product-defect fixes (findings F-3 and F-4) that may be
+done in parallel with the dogfooding-gate enablers; they do NOT gate the
+dogfood run, but they remove P2 UX defects a real customer would encounter.
+See `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`
+for the full experiment record and the finding→Work-Order mapping.

@@ -183,3 +183,168 @@ Parallelization is permitted only where dependencies are complete and protected-
 > WORK-065 and WORK-067 are DEPENDENCY-ELIGIBLE (both depend only on WORK-064)
 > and remain NOT activated, NOT started (the eligibility is recorded honestly
 > in `dependency-state.json` → `futureGenerationEligibility`).
+
+# ── v1.1 customer dogfooding follow-up (2026-08-30) ──
+#    (NEW in the 2026-08-30 dogfooding experiment's governed follow-up;
+#     SEPARATE from the WORK-053..061 (ACR-001) and WORK-064..070 (ACR-002)
+#     tracks; the dogfooding-gate enablers UNBLOCK the next dogfood run when
+#     complete. See spec/architecture/v1.1/dogfooding-evidence/2026-08-30-
+#     onboarding-attempt.md.)
+
+```text
+WORK-063 (Identity & Access — COMPLETE: merged 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007)
+    │
+    ↓
+WORK-074 (Identity & Access Runtime Activation — the "WORK-063-RUNTIME" of
+          the dogfooding experiment's design; the runtime implementation of
+          WORK-063's spec; PLANNED, NOT activated, NOT started)
+    │
+    └── enables ──→ authenticated dogfooding (the dogfooding gate's
+                    authentication precondition; the repo no longer implies
+                    that merely merging WORK-063's architecture specification
+                    means real authentication exists)
+
+WORK-003 (complete) + WORK-023 (complete)
+    │
+    ↓
+WORK-071 (Local Development Runtime Substrate — a dev-only PGlite-backed
+          path so WorkflowOS can be exercised without externally hosted
+          PostgreSQL; PLANNED, NOT activated, NOT started)
+    │
+    └── enables ──→ local dogfooding (the dogfooding gate's local-runtime
+                    precondition; parallel-safe with WORK-074 — different
+                    protected surfaces: the platform/runtime substrate vs
+                    the identity/auth runtime)
+
+# the dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8):
+#   WORK-074 complete AND WORK-071 complete (or equivalent supported runtime)
+#   → the canonical first full dogfooding journey may begin.
+
+WORK-072 (Authentication State Synchronization — a frontend product-defect
+          fix; no hard deps; the defect exists in the current frontend and the
+          fix is frontend-only and provider-independent; PLANNED, NOT
+          activated, NOT started)
+    │
+    └── CONFLICTING with WORK-074 on the shared LoginPage/useAuth/App.tsx
+        surface (coordinate, or sequence WORK-072 after WORK-074)
+
+WORK-073 (Create Project Organization Selection — a frontend product-defect
+          fix; no hard deps; uses the existing organizations/projects
+          authorities; PLANNED, NOT activated, NOT started)
+    │
+    └── PARALLEL-SAFE with WORK-071, WORK-074, and WORK-072 (different
+        protected surfaces: the ProjectListPage CreateProjectForm vs the
+        platform/runtime substrate, the auth/login surface, and the
+        LoginPage/useAuth/App surface — the explicit example of safe
+        parallelism)
+
+# Safe parallelism (the dogfooding follow-up):
+#   - WORK-071 || WORK-074 (wave 12): the two dogfooding-gate enablers;
+#     different protected surfaces (platform/runtime substrate vs identity/
+#     auth runtime).
+#   - WORK-072 || WORK-073 (wave 13): the two frontend product-defect fixes;
+#     different protected surfaces (LoginPage/useAuth/App vs ProjectListPage).
+#   - WORK-072 CONFLICTS with WORK-074 (shared LoginPage/useAuth/App.tsx
+#     surface) — wave 13 follows wave 12 to the conflict, or the two
+#     coordinate if concurrent.
+#   - WORK-073 is parallel-safe with everything (independent frontend surface).
+```
+
+Exact edges (the dogfooding follow-up):
+
+- WORK-074 ← WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-074 is DEPENDENCY-ELIGIBLE and NOT activated
+- WORK-071 ← WORK-003 (complete), WORK-023 (complete) → WORK-071 is DEPENDENCY-ELIGIBLE and NOT activated
+- WORK-072 ← (no hard dependencies) → WORK-072 is DEPENDENCY-ELIGIBLE and NOT activated
+- WORK-073 ← (no hard dependencies) → WORK-073 is DEPENDENCY-ELIGIBLE and NOT activated
+
+WORK-074 (Identity & Access Runtime Activation) is the RUNTIME IMPLEMENTATION
+of WORK-063's spec. The repository's identity model confirmed that spec/runtime
+separation is required (WORK-063.md: "the runtime implementation remains future
+work under the architect's separate authorization"). The dogfooding experiment's
+design referred to this Work Order by the logical label "WORK-063-RUNTIME"; the
+canonical numeric identity is WORK-074 per the repository's identity-surface
+invariant (the 2026-08-29 architect verdict, enforced in
+`backend/src/architecture-checkpoints/internal/governance-validation.ts`:
+authoritative Work Order identities match `^WORK-\d{3}$` and live as
+`spec/work-orders/WORK-NNN.md`). The numeric ID was chosen (rather than reusing
+the `WORK-063-RUNTIME` string as a filename) precisely because the repo's
+identity surface is closed to strict `WORK-NNN` identities, and this Work Order
+does NOT rewrite that invariant. The dogfooding evidence artifact
+(`spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`,
+finding F-1) records the empirical confirmation: the LoginPage exposes ONLY an
+API-key input; there is NO Google/GitHub/email login surface; the runtime
+identity layer is UNIMPLEMENTED. WORK-074 implements it. The dogfooding gate
+(`spec/architecture/v1.1/dogfooding-model.md` §8) now requires WORK-074
+complete AND WORK-071 complete (or an equivalent supported runtime environment)
+— the repository no longer implies that merely merging WORK-063's architecture
+specification means real authentication exists.
+
+WORK-071 (Local Development Runtime Substrate) is the dev-only runtime path.
+The dogfooding evidence artifact (finding F-2) records the empirical
+confirmation: the composition root (`backend/src/app.ts` `buildApp`) leaves
+`database` `undefined` when `DATABASE_URL` is absent — unlike the queue
+(InMemoryQueue fallback) and object store (InMemoryObjectStore fallback), the
+database has NO local fallback; without a database, the Infrastructure
+container is never built and the application cannot serve its authoritative
+surfaces. A PGlite `DatabaseClient` adapter ALREADY EXISTS
+(`backend/src/platform/postgres/pglite-database-client.ts` — real PostgreSQL
+compiled to WASM, satisfying DATA-AC-03) and is used by the test suite, but the
+production composition does NOT wire it for a dev path. WORK-071 provides the
+dev path. The likely direction is a dev-only PGlite-backed runtime path, but
+the implementer must NOT assume PGlite is automatically the correct
+architecture — the Work Order requires inspecting the existing runtime
+abstractions first and justifying the choice (including the Redis/queue/
+objectStore substitutes for the full Infrastructure container). The production
+PostgreSQL path remains authoritative (DATA-AC-03).
+
+WORK-072 (Authentication State Synchronization) is the frontend product-defect
+fix. The dogfooding evidence artifact (finding F-3, independently verified
+against the code) records the defect: the LoginPage calls `useAuth().setApiKey`
+and navigates, but the App-level auth state does not synchronously observe the
+update (App.tsx:26 and LoginPage.tsx:9 each instantiate `useAuth()` separately
+— separate `useState`; App's `hasApiKey` is never updated by LoginPage's
+`setHasApiKey`), requiring a reload before protected routes become visible.
+The fix establishes a single canonical auth-state source (an auth-context
+provider or an observable auth client) observed synchronously by the App shell
+and all consumers — provider-independent (it carries forward to the real
+OAuth/email path WORK-074 will provide). WORK-072 CONFLICTS with WORK-074 on
+the shared LoginPage/useAuth/App.tsx surface.
+
+WORK-073 (Create Project Organization Selection) is the frontend product-defect
+fix. The dogfooding evidence artifact (finding F-4, independently verified
+against the code) records the defect: the CreateProjectForm tells the user to
+"Enter an org ID manually" when no organizations are loaded but exposes NO
+org-ID input (ProjectListPage.tsx:153-167); the `organizations.listForUser()`
+failure is silently swallowed (`.catch(() => {})` at line 127) into a
+fabricated empty state — the very class of provenance defect F-5 records as
+correctly avoided elsewhere. The fix exposes the valid organization
+selection/input path using the EXISTING organizations authority, produces
+explicit errors when the authority is unavailable (no fabricated empty state),
+and preserves tenant isolation (the frontend never invents organization
+membership).
+
+WORK-071, WORK-072, WORK-073, WORK-074 are PLANNED and NOT activated. The
+architect's authorization is required to activate any of them (recorded in
+`program-state.json`). Each carries parallel-execution metadata
+(`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
+`parallel-execution-metadata.md` and each Work Order's `Parallel-execution
+metadata` section. The dogfooding gate (the canonical first full dogfooding
+journey) requires WORK-074 complete AND WORK-071 complete (or an equivalent
+supported runtime environment); WORK-072 and WORK-073 are independent
+product-defect fixes that may be done in parallel with the dogfooding-gate
+enablers (subject to the WORK-072↔WORK-074 conflict).
+
+> **Customer dogfooding follow-up note (2026-08-30):** WORK-071, WORK-072,
+> WORK-073, WORK-074 are NEW Work Orders issued by the 2026-08-30 customer
+> dogfooding experiment's governed follow-up. They do NOT collide with
+> WORK-053..061 (ACR-001) or WORK-064..070 (ACR-002) — different identifiers,
+> different scopes, different protected surfaces. The dogfooding evidence
+> artifact (`spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-
+> attempt.md`) records the experiment that produced them (the 2026-08-30
+> onboarding attempt that STOPPED at onboarding). The dogfooding gate
+> (`spec/architecture/v1.1/dogfooding-model.md` §8) is updated to require
+> WORK-074 complete AND WORK-071 complete (or equivalent supported runtime) —
+> the repository no longer implies that merely merging WORK-063's architecture
+> specification means real authentication exists. All four are PLANNED, NOT
+> activated, NOT started (the eligibility is recorded honestly in
+> `dependency-state.json` → `futureGenerationEligibility`).

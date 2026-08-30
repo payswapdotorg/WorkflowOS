@@ -80,6 +80,14 @@ validation sub-evolution) approval by the architecture authority.
   `spec/governance/assurance-profiles.json`).
 - `spec/architecture/v1.1/dogfooding-model.md` — the dogfooding/self-
   hosting model (the canonical customer-product and self-hosting flows).
+- `spec/architecture/v1.1/dogfooding-evidence/` — the durable dogfooding
+  EVIDENCE artifacts (runtime/user-feedback/validation observations; mapped
+  into the existing governance evidence taxonomy — see `artifact-taxonomy.json`).
+  The first artifact, `2026-08-30-onboarding-attempt.md`, records the
+  2026-08-30 customer dogfooding experiment that was ATTEMPTED and STOPPED at
+  onboarding (the runtime does not yet provide the required production
+  authentication or a local runtime database path). It is EVIDENCE, not
+  normative or authoritative; it does not directly mutate state.
 - `spec/architecture/v1.1/continuous-validation-lifecycle.md` — the
   three operating modes (PRE_MERGE, POST_RELEASE, CONTINUOUS) and their
   EffectPolicy/assurance bindings.
@@ -104,9 +112,9 @@ validation sub-evolution) approval by the architecture authority.
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
   state. `workOrders[]` records the activated Work Orders (complete,
-  in_flight). PLANNED Work Orders (WORK-053..061, WORK-065..070) are
-  spec files only — they are NOT in `program-state.json` until the
-  architect activates them.
+  in_flight). PLANNED Work Orders (WORK-053..061, WORK-065..070,
+  WORK-071..074) are spec files only — they are NOT in `program-state.json`
+  until the architect activates them.
 - `spec/development-state/dependency-state.json` — the canonical
   dependency mapping. `futureGeneration` maps each planned Work Order
   to its dependencies; `futureGenerationEligibility` records the
@@ -189,8 +197,8 @@ Read `spec/development-state/frontier-state.json` → `plannedNext` and
 As of this writing (the 2026-08-30 governance state + the v1.1 continuous
 product validation roadmap):
 
-- 54 Work Orders are `complete` (WORK-001..045, WORK-046..052, WORK-062,
-  and WORK-063) — all with merge evidence.
+- 55 Work Orders are `complete` (WORK-001..045, WORK-046..052, WORK-062,
+  WORK-063, and WORK-064) — all with merge evidence.
 - WORK-062 (Durable Multi-Agent Orchestration Substrate) is `complete`
   (activated 2026-08-30; merged by the architect as `f0855d2` via PR #82
   on 2026-08-30, squash-merged at the approved review-remediated head
@@ -222,16 +230,41 @@ product validation roadmap):
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
 - WORK-065..070 are `planned` (spec files only; NOT in program-state;
   new in this package).
+- WORK-071, WORK-072, WORK-073, WORK-074 are `planned` (spec files only;
+  NOT in program-state; new in the 2026-08-30 customer dogfooding
+  experiment's governed follow-up — see
+  `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`).
+  WORK-074 (Identity & Access Runtime Activation — the "WORK-063-RUNTIME" of
+  the experiment's design) is the runtime implementation of WORK-063's spec;
+  WORK-071 is the local development runtime substrate; WORK-072 and
+  WORK-073 are frontend product-defect fixes. The dogfooding gate (§12)
+  requires WORK-074 complete AND WORK-071 complete (or equivalent supported
+  runtime).
 
-The frontier's `plannedNext` holds TWO dependency-eligible heads, one per
-track: WORK-053 (ACR-001; dependency-eligible on WORK-046+WORK-051+WORK-052,
-all complete; remains PLANNED — the architect's 2026-08-29 verdict says
-"Do not activate WORK-053 yet", additionally gated on the v1.1/ACR-001
-disposition) and WORK-065 (ACR-002; dependency-eligible now that its only
-dependency WORK-064 is complete; remains PLANNED, NOT activated,
-NOT started — the architect's authorization is required; WORK-067 is
-equally eligible — different protected surfaces — and equally NOT
-activated). Dogfooding has NOT started.
+The frontier's `plannedNext` holds FOUR dependency-eligible heads across
+three tracks, all PLANNED and NOT activated: WORK-053 (ACR-001;
+dependency-eligible on WORK-046+WORK-051+WORK-052, all complete; remains
+PLANNED — the architect's 2026-08-29 verdict says "Do not activate WORK-053
+yet", additionally gated on the v1.1/ACR-001 disposition) and WORK-065
+(ACR-002; dependency-eligible now that its only dependency WORK-064 is
+complete; remains PLANNED, NOT activated, NOT started — the architect's
+authorization is required; WORK-067 is equally eligible — different protected
+surfaces — and equally NOT activated), PLUS the two dogfooding-gate enablers
+issued by the 2026-08-30 customer dogfooding experiment's governed follow-up:
+WORK-071 (Local Development Runtime Substrate; deps WORK-003+WORK-023, both
+complete) and WORK-074 (Identity & Access Runtime Activation — the
+"WORK-063-RUNTIME" of the dogfooding experiment's design; deps WORK-063
+complete). WORK-072 (Authentication State Synchronization; no hard deps) and
+WORK-073 (Create Project Organization Selection; no hard deps) are the two
+frontend product-defect fixes (also PLANNED). All four are
+dependency-eligible and remain PLANNED, NOT activated, NOT started — the
+architect's authorization is required. Dogfooding was ATTEMPTED on 2026-08-30
+and STOPPED at onboarding
+(see `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`);
+the dogfooding gate (§12 below) now requires WORK-074 complete AND WORK-071
+complete (or equivalent supported runtime) — the repository no longer implies
+that merely merging WORK-063's architecture specification means real
+authentication exists.
 
 ## 8. How to review implementation agents
 
@@ -351,25 +384,53 @@ state wins. The canonical state is:
 
 ## 12. How to initiate customer-product dogfooding
 
-Read `spec/architecture/v1.1/dogfooding-model.md`. The first official
-dogfood run begins only after:
+Read `spec/architecture/v1.1/dogfooding-model.md` (especially §8, updated by
+the 2026-08-30 customer dogfooding experiment's governed follow-up). The
+first official dogfood run begins only after:
 
-1. WORK-063 (Identity and Access Layer) is implemented and merged (the
-   normal authentication path is functional; the demo key is retired
-   from the customer login path) — the Work Order is COMPLETE as the
-   architecture decision (merged as `8dac9c4`, spec-only), but this gate
-   additionally requires the RUNTIME identity layer, which remains
-   UNIMPLEMENTED architect-gated future work;
-2. WORK-064 (Continuous Product Validation) is implemented and merged —
+1. **WORK-074 (Identity & Access Runtime Activation — the runtime
+   implementation of WORK-063's spec) is complete and merged** (the normal
+   authentication path is functional; the demo key is retired from the
+   customer login path). WORK-063 (the SPEC) is already merged complete as
+   `8dac9c4` via PR #81 (spec-only, finalized §34.8/ADR-0007) — but the spec
+   merge is NOT the runtime. The gate references WORK-074 (the runtime), NOT
+   WORK-063 (the spec), because the runtime identity layer remains
+   UNIMPLEMENTED until WORK-074 lands. The 2026-08-30 dogfooding experiment
+   confirmed this empirically (finding F-1: the LoginPage exposes ONLY an
+   API-key input; there is NO Google/GitHub/email login surface).
+2. **WORK-071 (Local Development Runtime Substrate) is complete, OR an
+   equivalent supported runtime environment is available** (the application
+   can be exercised locally against real authorities without an externally
+   hosted PostgreSQL). The experiment confirmed the gap empirically (finding
+   F-2: the composition root leaves `database` undefined when `DATABASE_URL`
+   is absent; no local fallback exists; a PGlite adapter already exists but
+   is not wired for a dev path).
+3. WORK-064 (Continuous Product Validation) is implemented and merged —
    SATISFIED: COMPLETE (merged as `c351451` via PR #86 and finalized
    §34.8/ADR-0007 on 2026-08-30; the domain/model authority is on main);
-3. WORK-065 (Synthetic Browser Validation Agent) is implemented and
+4. WORK-065 (Synthetic Browser Validation Agent) is implemented and
    merged;
-4. the existing v1.0 authorities are operational.
+5. the existing v1.0 authorities are operational.
 
 Until these are in place, the dogfood run is staged: the customer
 journeys that do not require authentication can run in PRE_MERGE; the
-authenticated journeys are FORBIDDEN until WORK-063 lands.
+authenticated journeys are FORBIDDEN until WORK-074 lands.
+
+**The dogfooding experiment was ATTEMPTED on 2026-08-30 and STOPPED at
+onboarding** (the runtime does not yet provide the required production
+authentication or a local runtime database path). The empirical findings are
+persisted in
+`spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`:
+seven findings (F-1 no production authentication runtime → WORK-074; F-2 no
+local development runtime database path → WORK-071; F-3 LoginPage auth-state
+synchronization defect → WORK-072; F-4 Create Project organization-selection
+defect → WORK-073; F-5 POSITIVE — authority read failure → explicit error →
+no fabricated empty state, no Work Item; F-6 GitHub/Vercel/LLM configuration
+not exercisable — blocked-by-prerequisite; F-7 target product could not be
+fully built/deployed — blocked-by-prerequisite consequence). A fresh Architect
+LLM must NOT confuse WORK-063's merged spec with the runtime identity layer
+(WORK-074) the gate actually requires, and must NOT imply the dogfooding gate
+is satisfied merely because WORK-063's architecture specification merged.
 
 The dogfood run exercises the canonical acceptance journey:
 authentication, organization, project, GitHub connection, Vercel
@@ -407,6 +468,41 @@ No browser agent may directly modify code because it found a failure.
 The invariant: no customer-product validation failure may be silently
 discarded, converted into a false healthy state, or directly converted
 into an ungoverned code change.
+
+### 13.1 The dogfooding experiment already produced findings → governed Work Orders
+
+The 2026-08-30 customer dogfooding experiment (see
+`spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`)
+produced empirical findings that became governed Work Orders — through the
+EXISTING authority, NOT through the not-yet-implemented WORK-067/068 signal
+pipeline. The flow that actually operated:
+
+```text
+dogfooding evidence (the evidence artifact — provenance preserved)
+    ↓
+governed classification (each finding classified: PRODUCT BUG /
+    ARCHITECTURE/GOVERNANCE / POSITIVE / BLOCKED-BY-PREREQUISITE;
+    severity P0–P3)
+    ↓
+governed Work Order (through the EXISTING architect-issued Work Order
+    authority: spec/work-orders/WORK-NNN.md — the same authority the
+    WORK-067/068 pipeline will eventually feed)
+    ↓
+the existing governance lifecycle (planned → architect-activated →
+    implemented → verified → reviewed → merged)
+```
+
+The product-defect findings (F-3 → WORK-072, F-4 → WORK-073) and the
+runtime-enabler findings (F-1 → WORK-074, F-2 → WORK-071) are governed Work
+Orders, PLANNED, NOT activated. The positive finding (F-5) recorded NO Work
+Item (the Workbench provenance correction is working). The
+blocked-by-prerequisite findings (F-6, F-7) recorded NO Work Order (they are
+unblocked indirectly by the dogfooding gate). This is the invariant operating
+in practice: no finding was silently discarded, converted into a false healthy
+state, or directly converted into an ungoverned code change. When WORK-067/068
+land, the same flow will be automated (the signal pipeline + the feedback
+converter), but the authority is the same: the EXISTING /work-items authority
+governs the change; the architect governs the review.
 
 ## 14. How to resume after losing all conversation context
 

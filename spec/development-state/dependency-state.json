@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
-  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002, of which WORK-064 was ACTIVATED 2026-08-30 and is MERGED COMPLETE as c351451 via PR #86 (finalized §34.8/ADR-0007 on 2026-08-30))",
-  "computedAt": "2026-08-30 (the WORK-064 post-merge finalization §34.8/ADR-0007: WORK-064 (Continuous Product Validation — the domain/model authority) merged by the architect as c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b via PR #86 (squash-merged at the approved head 524c3f4; the merge tree is IDENTICAL) and finalized complete — 55/55 recorded work orders complete, nothing in flight. WORK-065 and WORK-067 are now DEPENDENCY-ELIGIBLE (both depend only on WORK-064) and remain NOT activated, NOT started. Prior record: WORK-064 ACTIVATED by the architect after the approved implementation plan merged as 4018f42; it left the futureGeneration and was IN FLIGHT on branch feat/work-064-continuous-validation until the merge.)",
+  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002, of which WORK-064 was ACTIVATED 2026-08-30 and is MERGED COMPLETE as c351451 via PR #86 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-074 + WORK-071 + WORK-072 + WORK-073 issued by the 2026-08-30 customer dogfooding experiment's governed follow-up — see spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md)",
+  "computedAt": "2026-08-30 (the customer dogfooding experiment's governed follow-up, reconciled by the PR #87 rebase onto the post-WORK-064-finalization mainline f9ba02f — WORK-064 (Continuous Product Validation — the domain/model authority) merged as c351451 via PR #86 and finalized §34.8/ADR-0007 via PR #95; 55/55 recorded work orders complete, nothing in flight. The 2026-08-30 onboarding-attempt dogfooding experiment was ATTEMPTED and STOPPED at onboarding — see spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md. The experiment produced seven findings (F-1 no production authentication runtime → WORK-074; F-2 no local development runtime database path → WORK-071; F-3 LoginPage auth-state synchronization defect → WORK-072; F-4 Create Project organization-selection defect → WORK-073; F-5 POSITIVE — authority read failure → explicit error → no fabricated empty state, no Work Item; F-6 GitHub/Vercel/LLM configuration not exercisable — blocked-by-prerequisite, no Work Order; F-7 target product could not be fully built/deployed — blocked-by-prerequisite consequence, no Work Order). Four new governed Work Orders (WORK-074, WORK-071, WORK-072, WORK-073) are issued by this change and are PLANNED, NOT activated, NOT started — the architect's authorization is required. The dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8) is updated to require WORK-074 complete AND WORK-071 complete (or equivalent supported runtime) — the repository no longer implies that merely merging WORK-063's architecture specification means real authentication exists. All four new Work Orders are dependency-eligible (WORK-074 ← WORK-063 complete; WORK-071 ← WORK-003 + WORK-023 complete; WORK-072 ← no hard deps; WORK-073 ← no hard deps). WORK-074 and WORK-071 are the dogfooding-gate enablers and are PARALLEL-SAFE with each other (different protected surfaces: the identity/auth runtime vs the platform/runtime substrate). WORK-072 and WORK-073 are PARALLEL-SAFE with each other (different frontend surfaces: LoginPage/useAuth/App vs ProjectListPage). WORK-072 is CONFLICTING with WORK-074 on the shared LoginPage/useAuth/App.tsx surface — coordinate or sequence. Prior records: WORK-064 (Continuous Product Validation) is COMPLETE — merged as c351451 via PR #86, finalized §34.8/ADR-0007 (PR #95, merged as f9ba02f); WORK-063 (Identity and Access Layer) is COMPLETE — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007 (PR #85, merged as 00a3745); the v1.1/ACR-002 package (WORK-064..070) merged as 45cb20f via PR #84; WORK-062 COMPLETE — merged as f0855d2 via PR #82, finalized (PR #83, merged as 46e7858); the 2026-08-29 identity-resolution remains recorded in resolvedConflicts)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -96,6 +96,15 @@
       "WORK-067",
       "WORK-069",
       "WORK-051"
+    ],
+    "WORK-071": [
+      "WORK-003",
+      "WORK-023"
+    ],
+    "WORK-072": [],
+    "WORK-073": [],
+    "WORK-074": [
+      "WORK-063"
     ]
   },
   "futureGenerationEligibility": {
@@ -113,7 +122,11 @@
     "WORK-067": "eligible — WORK-064 complete (merged c351451 via PR #86, finalized §34.8/ADR-0007); WORK-015, WORK-040, WORK-041 complete (soft: WORK-056 not started — WORK-067 operates on raw observations directly with the same provenance discipline until WORK-056 lands) — NOT activated, NOT started: the architect's authorization is required",
     "WORK-068": "blocked — WORK-067 not started",
     "WORK-069": "blocked — WORK-066 not started (WORK-064, WORK-019, WORK-026, WORK-020 complete; soft: WORK-059 not started — WORK-069 operates directly on the existing v1.0 release/runtime authorities until WORK-059 lands)",
-    "WORK-070": "blocked — WORK-067, WORK-069 not started (WORK-051 complete; soft: WORK-055, WORK-060 not started — WORK-070 performs continuous evaluation directly against the existing architecture assertions until WORK-055/060 land)"
+    "WORK-070": "blocked — WORK-067, WORK-069 not started (WORK-051 complete; soft: WORK-055, WORK-060 not started — WORK-070 performs continuous evaluation directly against the existing architecture assertions until WORK-055/060 land)",
+    "WORK-071": "eligible — WORK-003 and WORK-023 are BOTH complete (the frozen persistence boundary and the deployable-runtime composition root). WORK-071 is the local-development runtime substrate (a dev-only PGlite-backed path so WorkflowOS can be exercised without externally hosted PostgreSQL). Dependency-eligible does NOT mean activated: WORK-071 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-071.md. The dogfooding evidence artifact finding F-2 records that buildApp leaves `database` undefined without DATABASE_URL — no local fallback; this Work Order provides it. PARALLEL-SAFE with WORK-074: different protected surfaces — the platform/runtime substrate vs the identity/auth runtime.)",
+    "WORK-072": "eligible — no hard dependencies (the defect exists in the current frontend code and the fix is frontend-only and provider-independent). WORK-072 fixes the auth-state synchronization defect (LoginPage updates local state; App-level auth state not synchronously observing; requires reload). Dependency-eligible does NOT mean activated: WORK-072 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-072.md. The dogfooding evidence artifact finding F-3 records the defect, independently verified against the code. PARALLEL-SAFE with WORK-071 and WORK-073; CONFLICTING with WORK-074 on the shared LoginPage/useAuth/App.tsx surface — coordinate or sequence.)",
+    "WORK-073": "eligible — no hard dependencies (the defect exists in the current frontend code; the fix uses the existing organizations.listForUser() and projects.create() authorities, both complete). WORK-073 fixes the Create Project organization-selection defect (the UI tells the user to enter an org ID manually but exposes no org-ID input; the org-authority failure is silently swallowed into a fabricated empty state). Dependency-eligible does NOT mean activated: WORK-073 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-073.md. The dogfooding evidence artifact finding F-4 records the defect, independently verified against the code. PARALLEL-SAFE with WORK-071, WORK-074, and WORK-072 — different protected surfaces; the explicit example of safe parallelism.)",
+    "WORK-074": "eligible — WORK-063 is COMPLETE (merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007 on 2026-08-30). WORK-074 is the RUNTIME ACTIVATION of the identity-and-access spec WORK-063 already merged (referred to in the dogfooding experiment's design as 'WORK-063-RUNTIME' — the logical alias; the canonical numeric identity is WORK-074 per the repo's identity-surface invariant); it is dependency-eligible immediately (the spec it implements is complete). Dependency-eligible does NOT mean activated: WORK-074 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-074.md. The dogfooding evidence artifact spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md finding F-1 records that the runtime identity layer is UNIMPLEMENTED; this Work Order implements it. The dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8) now requires this Work Order complete AND WORK-071 complete.)"
   },
   "futureGenerationSoftDependencies": {
     "note": "Soft dependencies are NOT in the futureGeneration dependency lists above (those lists are the hard dependencies the validation engine checks). Soft dependencies are Work Orders that the new Work Orders CONSUME (but do not require) when they land. The soft dependency is recorded here so an Architect LLM can see the full relationship.",
@@ -185,6 +198,54 @@
       "protectedSurfaces": [
         "spec/architecture/v1.1/control-system-evolution.md",
         "spec/work-orders/WORK-070.md"
+      ]
+    },
+    "WORK-071": {
+      "parallelEligibility": "conditional",
+      "protectedSurfaces": [
+        "backend/src/app.ts",
+        "backend/src/config.ts",
+        "backend/src/platform/postgres/database-factory.ts",
+        "backend/src/platform/postgres/pglite-database-client.ts",
+        "backend/src/platform/persistence/infrastructure.ts",
+        "backend/src/platform/redis/",
+        "backend/src/platform/index.ts",
+        "spec/work-orders/WORK-071.md",
+        "spec/architecture/v1.1/dogfooding-model.md",
+        "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
+      ]
+    },
+    "WORK-072": {
+      "parallelEligibility": "conditional",
+      "protectedSurfaces": [
+        "frontend/src/hooks/useAuth.ts",
+        "frontend/src/App.tsx",
+        "frontend/src/pages/LoginPage.tsx",
+        "frontend/src/main.tsx",
+        "spec/work-orders/WORK-072.md",
+        "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
+      ]
+    },
+    "WORK-073": {
+      "parallelEligibility": "conditional",
+      "protectedSurfaces": [
+        "frontend/src/pages/ProjectListPage.tsx",
+        "spec/work-orders/WORK-073.md",
+        "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
+      ]
+    },
+    "WORK-074": {
+      "parallelEligibility": "conditional",
+      "protectedSurfaces": [
+        "backend/src/modules/auth/",
+        "backend/src/modules/users/",
+        "backend/src/modules/organizations/",
+        "frontend/src/pages/LoginPage.tsx",
+        "frontend/src/hooks/useAuth.ts",
+        "frontend/src/App.tsx",
+        "spec/work-orders/WORK-074.md",
+        "spec/architecture/v1.1/dogfooding-model.md",
+        "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
       ]
     }
   },

@@ -22,6 +22,10 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-068 | Feedback → Governed Work Items — convert signals through the EXISTING /work-items authority | WORK-067 |
 | WORK-069 | Progressive Release & Runtime Validation — canary/partial rollout with governed continue/halt/recover | WORK-064, WORK-066, WORK-019, WORK-026, WORK-020, (soft: WORK-059) |
 | WORK-070 | Continuous Architecture Fitness — closed-loop synthesis → architecture risk → ACR | WORK-067, WORK-069, WORK-051, (soft: WORK-055, WORK-060) |
+| WORK-071 | Local Development Runtime Substrate — a supported dev-only runtime path so WorkflowOS runs against real authorities without requiring an externally hosted PostgreSQL (no production semantics altered) | WORK-003, WORK-023 (complete — dependency-eligible, NOT activated) |
+| WORK-072 | Authentication State Synchronization — fix the frontend auth-state ownership defect (LoginPage changes auth state locally while the App-level state is not synchronously observing → reload required before protected routes become visible) | none (hard) — frontend-only; CONFLICTS with WORK-074 on the shared LoginPage/useAuth/App.tsx surface |
+| WORK-073 | Create Project Organization Selection — fix the Create Project UI to expose the valid organization selection/input path through the EXISTING organizations authority (no fabricated empty state) | none (hard) — frontend-only (ProjectListPage `CreateProjectForm`); uses the existing WORK-002/WORK-004 authorities |
+| WORK-074 | Identity & Access Runtime Activation — the RUNTIME IMPLEMENTATION of WORK-063's spec-only identity-and-access architecture decision (the logical alias "WORK-063-RUNTIME" of the dogfooding experiment's design resolves to this canonical numeric identity) | WORK-063 (complete, spec-only, merged `8dac9c4` via PR #81 — this Work Order implements what that spec specifies) |
 
 All items remain architect-governed and require a Work Order file, declared surfaces, deterministic assurance, checkpoint requirements, proof contract, and architect-controlled merge.
 
@@ -89,3 +93,35 @@ All items remain architect-governed and require a Work Order file, declared surf
 > remaining Work Orders (WORK-065..070) are PLANNED and NOT activated. Each carries parallel-execution metadata
 > (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
 > [`parallel-execution-metadata.md`](parallel-execution-metadata.md).
+>
+> **WORK-071..074 note (2026-08-30 customer dogfooding experiment's governed follow-up,
+> recomputed by the PR #87 reconciliation):** these four Work Orders are NEW in the
+> 2026-08-30 dogfooding-governed follow-up. The experiment was ATTEMPTED and STOPPED at
+> onboarding (the runtime does not yet provide the required production authentication or
+> a local runtime database path) — see
+> [`dogfooding-evidence/2026-08-30-onboarding-attempt.md`](dogfooding-evidence/2026-08-30-onboarding-attempt.md).
+> They are issued PLANNED, NOT activated, NOT started, and remain OUTSIDE
+> `program-state.json` → `workOrders[]` until the architect activates them (recorded
+> in `dependency-state.json` → `futureGeneration` and `future-roadmap.json` → `sequence`).
+> WORK-071 is the local-development runtime substrate (finding F-2); WORK-072 fixes the
+> frontend auth-state synchronization defect (finding F-3); WORK-073 fixes the Create
+> Project organization-selection / provenance defect (finding F-4); WORK-074 is the
+> RUNTIME ACTIVATION of WORK-063's spec-only identity-and-access architecture decision
+> (finding F-1; the logical alias "WORK-063-RUNTIME" of the experiment's design resolves
+> to the canonical numeric identity WORK-074 per the repo's identity-surface invariant).
+> WORK-074 is NOT a re-decision of WORK-063's architecture — WORK-063 remains the
+> architecture authority (merged as `8dac9c4`, spec-only, finalized §34.8/ADR-0007);
+> WORK-074 implements what that spec specifies. WORK-071 and WORK-074 are the
+> dogfooding-gate enablers ([`dogfooding-model.md`](dogfooding-model.md) §8, updated in
+> this change) and are PARALLEL-SAFE with each other (different protected surfaces: the
+> platform/runtime substrate vs the identity/auth runtime). WORK-072 and WORK-073 are
+> PARALLEL-SAFE with each other (different frontend surfaces). WORK-072 CONFLICTS with
+> WORK-074 on the shared LoginPage/useAuth/App.tsx surface — coordinate or sequence.
+> F-5 (authority read failure → explicit error → no fabricated empty state) is a POSITIVE
+> finding and carries NO Work Item. F-6 (GitHub/Vercel/LLM configuration not exercisable)
+> and F-7 (target product could not be fully built/deployed) are blocked-by-prerequisite
+> findings and carry NO Work Item. The current program (55/55 recorded work orders
+> complete, nothing in flight — WORK-064 among them, merged as `c351451` via
+> PR #86 and finalized §34.8/ADR-0007 via PR #95 on the mainline this PR #87
+> reconciliation targets) does NOT claim any of WORK-071..074 is activated or in
+> flight. NO runtime implementation rides this change (governance/persistence only).

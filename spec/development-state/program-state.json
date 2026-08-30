@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T15:15:00Z",
+  "asOf": "2026-08-30T15:15:00Z (the customer dogfooding experiment's governed follow-up, reconciled by the PR #87 rebase onto the post-WORK-064-finalization mainline f9ba02f: the 2026-08-30 onboarding-attempt dogfooding experiment was ATTEMPTED and STOPPED at onboarding — see spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md. Four new governed Work Orders — WORK-071 (Local Development Runtime Substrate), WORK-072 (Authentication State Synchronization), WORK-073 (Create Project Organization Selection), WORK-074 (Identity & Access Runtime Activation — the 'WORK-063-RUNTIME' of the dogfooding experiment's design) — are issued PLANNED, NOT activated, NOT started. They are NOT in this file's workOrders[] array until the architect activates them; they are recorded in dependency-state.json futureGeneration. The dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8) now requires WORK-074 complete AND WORK-071 complete (or equivalent supported runtime) — the repository no longer implies that merely merging WORK-063's architecture specification means real authentication exists. The program state itself carries 55/55 recorded work orders complete, nothing in flight: WORK-063 is the merged spec-only identity-and-access architecture decision, and WORK-064 (Continuous Product Validation — the domain/model authority) is COMPLETE: merged as c351451 via PR #86 and finalized §34.8/ADR-0007 via PR #95 (merged as f9ba02f))",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1524,7 +1524,7 @@
     }
   ],
   "resumption": {
-    "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency).",
+    "protocol": "On conversation loss, a fresh agent reads spec/work-orders/<ID>.md + this file + the ADRs, then continues from the handoff record of its Work Order. Handoff records are updated on the work item's own branch as work progresses (repository-resident, no chat dependency). The 2026-08-30 customer dogfooding experiment's governed follow-up added FOUR planned Work Orders (WORK-071, WORK-072, WORK-073, WORK-074) that are NOT yet activated — a fresh architect reads spec/architecture/v1.1/fresh-architect-bootstrap.md §12 and spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md to recover the dogfooding experiment's findings and the dogfooding gate (WORK-074 complete AND WORK-071 complete), then decides which planned Work Order to activate (the architect's non-delegable authorization).",
     "activeHandoffs": []
   },
   "decisions": [
