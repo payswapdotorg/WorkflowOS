@@ -200,7 +200,7 @@ shapes — while adding NO second workflow engine, NO second delegation
 authority, NO second execution authority, NO second verification authority,
 and NO Redis-backed source of truth (PostgreSQL stays authoritative). See
 `spec/work-orders/WORK-062.md` (issued by the 2026-08-30 governance correction;
-planned, not activated). WORK-061 depends on WORK-062: self-hosting cannot
+ACTIVATED 2026-08-30 — in flight). WORK-061 depends on WORK-062: self-hosting cannot
 honestly be considered complete without durable multi-agent execution and
 recovery.
 

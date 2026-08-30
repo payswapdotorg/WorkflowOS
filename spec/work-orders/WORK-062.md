@@ -1,12 +1,19 @@
 # WORK-062 — Durable Multi-Agent Orchestration Substrate
 
-Status: planned.
+Status: in flight (activated 2026-08-30 by the architect; implementation
+branch `feat/work-062-durable-orchestration-substrate` — the activation is
+recorded in `spec/development-state/program-state.json`). Round-1 architect
+review on the implementation PR (#82) required a persistence-integrity
+correction — graph/plan/unit/project consistency enforced BY POSTGRESQL
+(composite foreign keys + the graph tenant guard) with raw-SQL negative
+regressions — incorporated in the same PR (invariant 16, proof obligation 14). Round-1 architect
+review on the implementation PR (#82) required a persistence-integrity
+correction — graph/plan/unit/project consistency enforced BY POSTGRESQL
+(composite foreign keys + the graph tenant guard) with raw-SQL negative
+regressions — incorporated in the same PR (invariant 16, proof obligation 14).
 
 Issued by: the 2026-08-30 governance correction (the execution-substrate
-architecture decision). This Work Order establishes the next governed
-capability — it does NOT implement runtime code. Activation requires the
-architect's authorization and is recorded in
-`spec/development-state/program-state.json` (this change records none).
+architecture decision — merged as `9aadd50` via PR #80).
 
 Dependencies: WORK-046 (Multi-Agent Delegation — the delegation authority this
 substrate sits underneath). Downstream: WORK-061 (Self-Hosting Conformance and
@@ -156,6 +163,14 @@ WORK-062 must NEVER become:
 15. Native and external execution share the same orchestration semantics.
    (Leases, fencing, retries, reconciliation, and dependency enforcement apply
     identically to both execution modes.)
+16. Persistence-layer identity/tenant integrity. (The database itself enforces
+    the chain orchestration graph → exact delegation plan → exact delegation
+    unit → the SAME Work Item / the SAME project — composite foreign keys
+    (`(plan_id, work_item_id)`, `(unit_id, plan_id)`, `(graph_id, plan_id)`,
+    `(graph_id, project_id)`) plus the graph tenant guard resolving the Work
+    Item's project through the authoritative chain. A structurally impossible
+    graph/plan/unit/project tuple is unrepresentable in PostgreSQL, surviving
+    even a buggy application caller or a raw SQL writer.)
 
 ## Required proof (verification obligations of the future implementation)
 
@@ -190,8 +205,15 @@ The future implementation must prove, with objective evidence:
     single-connection simulations;
 13. **mutation/discrimination tests** — the invariants are discriminating:
     mutating the substrate (removing the fence, the lease check, the
-    dependency check, the idempotency key, or the tenant scope) makes the
-    corresponding test FAIL.
+    dependency check, the idempotency key, the tenant scope, or the
+    persistence-integrity constraints) makes the corresponding test FAIL;
+14. **persistence-layer integrity negatives** — raw-SQL regressions (NO
+    service layer in the path) prove PostgreSQL itself rejects a node
+    referencing another plan's unit, a node claiming another plan, a
+    cross-tenant node, a graph claiming another Work Item's plan, and a
+    graph claiming another tenant — on INSERT and UPDATE, with a
+    consistent-tuple positive control; discrimination-proven by removing
+    the composite constraints.
 
 ## Scope
 

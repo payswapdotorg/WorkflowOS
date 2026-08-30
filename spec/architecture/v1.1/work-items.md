@@ -31,4 +31,6 @@ All items remain architect-governed and require a Work Order file, declared surf
 > WORK-046 delegation, in the runtime chain WORK-047 recommendation → WORK-046 governed
 > delegation → WORK-062 durable orchestration → existing execution authority → verification →
 > review). WORK-061 now depends on it: self-hosting cannot honestly be considered complete
-> without durable multi-agent execution and recovery. WORK-062 is planned and NOT activated.
+> without durable multi-agent execution and recovery. WORK-062 was ACTIVATED by the
+> architect on 2026-08-30 and is IN FLIGHT (the implementation PR carries the
+> activation record in program-state.json).

@@ -59,6 +59,7 @@
  * cancels an execution — that belongs to the execution authority).
  */
 import type { DatabaseClient, Logger } from '@platform/index.js';
+import { randomUUID } from 'node:crypto';
 import { generateExecutionId } from '@platform/ids.js';
 import type {
   AgentRunRepository,
@@ -76,6 +77,15 @@ import type {
 } from '../types.js';
 import { DelegationError } from '../types.js';
 import { PgDelegationRepository } from './pg-delegation-repository.js';
+import type {
+  OrchestrationExecutor,
+  OrchestrationExecutorResult,
+  OrchestrationNodeContext,
+  OrchestrationNodeDriveResult,
+  OrchestrationSubstrate,
+} from '../../orchestration/index.js';
+import { DefaultOrchestrationSubstrate } from '../../orchestration/index.js';
+import { nodeOutcomeFromUnitStatus } from '../../orchestration/index.js';
 
 export interface DefaultDelegationCoordinatorDeps {
   readonly db: DatabaseClient;
@@ -84,6 +94,12 @@ export interface DefaultDelegationCoordinatorDeps {
   readonly executionRecordRepository: ExecutionRecordRepository;
   readonly agentRunRepository: AgentRunRepository;
   readonly logger: Logger;
+  /**
+   * WORK-062: the durable orchestration substrate underneath this
+   * coordinator. When absent, the default substrate over the same database
+   * is constructed (the composition root in app.ts wires it explicitly).
+   */
+  readonly orchestration?: OrchestrationSubstrate;
 }
 
 /**
@@ -104,9 +120,24 @@ type ObservedOutcome =
 
 export class DefaultDelegationCoordinator implements DelegationCoordinator {
   private readonly repo: PgDelegationRepository;
+  /**
+   * WORK-062: the durable orchestration substrate UNDERNEATH this
+   * coordinator — leases/ownership with fencing generations, durable
+   * dependency-aware admission, deterministic reconciliation, explicit
+   * partial completion, and safe dependency-aware parallelism. The substrate
+   * decides WHETHER a delegated execution may be driven; THIS coordinator
+   * (the delegation authority) decides HOW — the existing dispatch protocol
+   * below, with its exactly-one ExecutionService.submit() call site.
+   */
+  private readonly substrate: OrchestrationSubstrate;
+  private readonly instanceId = `coordinator-${randomUUID()}`;
+  private driveCounter = 0;
 
   constructor(private readonly deps: DefaultDelegationCoordinatorDeps) {
     this.repo = new PgDelegationRepository(deps.db);
+    this.substrate =
+      deps.orchestration ??
+      new DefaultOrchestrationSubstrate({ db: deps.db, logger: deps.logger });
   }
 
   async drivePlan(workItemId: string, planKey: string): Promise<DelegationDriveResult> {
@@ -120,36 +151,22 @@ export class DefaultDelegationCoordinator implements DelegationCoordinator {
       };
     }
 
-    const byKey = new Map(plan.units.map((u) => [u.unitKey, u]));
-    const results: DelegationUnitDriveResult[] = [];
-    for (const unit of plan.units) {
-      if (unit.status === 'pending') {
-        // Sequencing (coordination only): dispatch when ALL dependencies
-        // succeeded. A failed dependency does NOT fail dependents — they
-        // stay pending until the dependency is retried to success (partial
-        // completion is recoverable, W046-AC08).
-        const ready = unit.dependsOn.every((dep) => byKey.get(dep)?.status === 'succeeded');
-        if (!ready) {
-          results.push(driveResultFromUnit(unit, null, 'skipped'));
-          continue;
-        }
-        results.push(await this.dispatchUnit(unit));
-        continue;
-      }
-      if (unit.status === 'dispatched' || unit.status === 'unresolved') {
-        // The crash-recovery re-drive: observe-or-resubmit until converged.
-        // An 'unresolved' unit's last attempt provably caused NO provider
-        // side effect — re-submitting with the SAME identity + key is safe
-        // (nothing happened; the record creation is submit's first durable
-        // step), so the re-drive converges it without a new attempt.
-        results.push(await this.redriveInFlightUnit(unit));
-        continue;
-      }
-      // succeeded | failed | unresolved | cancelled — nothing to drive.
-      results.push(driveResultFromUnit(unit, null, 'skipped'));
-    }
-    // The sequencing map may be stale after the drives (a unit converged to
-    // succeeded this drive); re-read for the completion check.
+    // WORK-062: the drive executes THROUGH the durable orchestration
+    // substrate — durable dependency admission (never in-memory only),
+    // exclusive per-node leases (at most one active owner across concurrent
+    // coordinators), fencing at the mutation boundary, deterministic
+    // reconciliation of expired leases, and bounded parallel driving of
+    // INDEPENDENT nodes. The substrate drives each admitted node back
+    // through THIS coordinator's existing protocol (the executor adapter
+    // below) — the delegation semantics and the single submit call site are
+    // UNCHANGED.
+    const drive = await this.substrate.driveGraph(
+      { workItemId, planKey, ownerId: this.nextOwnerId() },
+      this.substrateExecutor,
+    );
+
+    // The unit rows remain the DELEGATION AUTHORITY — re-read for the
+    // authoritative post-drive statuses and the completion check.
     const refreshed = (await this.repo.findPlan(workItemId, planKey)) ?? plan;
 
     // Plan completion (coordination data only): every unit succeeded.
@@ -160,9 +177,17 @@ export class DefaultDelegationCoordinator implements DelegationCoordinator {
     ) {
       const completed = await this.repo.casPlanStatus(refreshed.id, 'active', 'completed');
       const finalStatus: DelegationPlan['status'] = completed ? 'completed' : 'abandoned';
-      return { planId: refreshed.id, planStatus: finalStatus, units: results };
+      return {
+        planId: refreshed.id,
+        planStatus: finalStatus,
+        units: mapSubstrateResultsToUnits(refreshed, drive.nodes),
+      };
     }
-    return { planId: refreshed.id, planStatus: refreshed.status, units: results };
+    return {
+      planId: refreshed.id,
+      planStatus: refreshed.status,
+      units: mapSubstrateResultsToUnits(refreshed, drive.nodes),
+    };
   }
 
   async retryUnit(
@@ -192,7 +217,17 @@ export class DefaultDelegationCoordinator implements DelegationCoordinator {
         `plan '${planKey}' is ${plan.status} — only an active plan can retry units`,
       );
     }
-    return this.dispatchUnit(unit);
+    // WORK-062: the retry executes through the substrate (exclusive lease +
+    // fencing; NO dependency gate — the WORK-046 retry contract: a unit
+    // that already ran may be retried regardless of its dependencies'
+    // current state).
+    const driven = await this.substrate.retryNode(
+      { workItemId, planKey, nodeKey: unitKey, ownerId: this.nextOwnerId() },
+      this.substrateExecutor,
+    );
+    const refreshed = (await this.repo.findPlan(workItemId, planKey)) ?? plan;
+    const refreshedUnit = refreshed.units.find((u) => u.unitKey === unitKey) ?? unit;
+    return mapSingleSubstrateResult(refreshedUnit, driven);
   }
 
   async interruptPlan(workItemId: string, planKey: string): Promise<DelegationPlan> {
@@ -218,6 +253,11 @@ export class DefaultDelegationCoordinator implements DelegationCoordinator {
     // Cancel PENDING units. In-flight executions are NOT touched — their
     // outcomes remain owned by the EXISTING execution authority.
     await this.repo.cancelPendingUnits(plan.id);
+    // WORK-062: mirror the interruption on the orchestration substrate —
+    // the graph becomes 'abandoned', every lease is released (fencing
+    // generations bumped — stale workers are fenced), and NO durable
+    // evidence is erased (idempotent).
+    await this.substrate.abandonGraph(workItemId, planKey);
     const reread = await this.repo.findPlan(workItemId, planKey);
     return reread ?? plan;
   }
@@ -225,6 +265,73 @@ export class DefaultDelegationCoordinator implements DelegationCoordinator {
   // -------------------------------------------------------------------------
   // The dispatch protocol
   // -------------------------------------------------------------------------
+
+  /**
+   * WORK-062: the substrate executor adapter — THIS coordinator's existing
+   * dispatch protocol, driven per node. The substrate decided WHETHER the
+   * node may be driven (durable admission + lease + fencing); THIS adapter
+   * decides HOW, exactly as before WORK-062:
+   *
+   *   dispatch purpose — a pending unit dispatches (fresh attempt);
+   *   redrive purpose  — a dispatched/unresolved unit re-drives
+   *                     (observe-or-resubmit);
+   *   retry purpose    — a failed/unresolved unit retries (a NEW attempt).
+   */
+  private readonly substrateExecutor: OrchestrationExecutor = {
+    execute: (node: OrchestrationNodeContext): Promise<OrchestrationExecutorResult> =>
+      this.executeNodeForSubstrate(node),
+  };
+
+  private async executeNodeForSubstrate(
+    node: OrchestrationNodeContext,
+  ): Promise<OrchestrationExecutorResult> {
+    const unit = await this.repo.findUnitById(node.unitId);
+    if (!unit) {
+      return {
+        nodeKey: node.nodeKey,
+        unitId: node.unitId,
+        outcome: null,
+        executionId: node.executionId,
+        attemptNo: node.attemptNo,
+        action: 'skipped',
+      };
+    }
+    let drive: DelegationUnitDriveResult;
+    if (node.purpose === 'retry') {
+      if (unit.status !== 'failed' && unit.status !== 'unresolved') {
+        drive = driveResultFromUnit(unit, null, 'skipped');
+      } else {
+        drive = await this.dispatchUnit(unit);
+      }
+    } else if (unit.status === 'pending') {
+      drive = await this.dispatchUnit(unit);
+    } else if (unit.status === 'dispatched' || unit.status === 'unresolved') {
+      drive = await this.redriveInFlightUnit(unit);
+    } else {
+      drive = driveResultFromUnit(unit, null, 'skipped');
+    }
+    // The post-drive unit row is the DELEGATION AUTHORITY for the observed
+    // outcome; the current attempt reference follows it.
+    const fresh = (await this.repo.findUnitById(unit.id)) ?? unit;
+    let executionId = drive.executionId;
+    if (executionId === null && fresh.attemptCount > 0) {
+      const attempts = await this.repo.listAttemptsByUnit(unit.id);
+      executionId = attempts.at(-1)?.executionId ?? null;
+    }
+    return {
+      nodeKey: node.nodeKey,
+      unitId: node.unitId,
+      outcome: nodeOutcomeFromUnitStatus(fresh.status),
+      executionId,
+      attemptNo: fresh.attemptCount > 0 ? fresh.attemptCount : null,
+      action: drive.action,
+    };
+  }
+
+  private nextOwnerId(): string {
+    this.driveCounter += 1;
+    return `${this.instanceId}-drive-${this.driveCounter}`;
+  }
 
   /**
    * Dispatch a unit (allocate the durable attempt + submit through the
@@ -527,6 +634,48 @@ function driveResultFromUnit(
   executionId: string | null,
   action: DelegationUnitDriveResult['action'],
 ): DelegationUnitDriveResult {
+  return {
+    unitId: unit.id,
+    unitKey: unit.unitKey,
+    status: unit.status,
+    executionId,
+    outcome: null,
+    action,
+  };
+}
+
+/**
+ * Map the substrate's per-node drive results onto the delegation units of
+ * the refreshed plan (the unit rows are the authority for `status`; the
+ * substrate result carries the drive action + the current execution
+ * reference). The substrate's richer actions ('blocked', 'lease-held')
+ * surface as 'skipped' — the delegation contract is unchanged: a node this
+ * drive did not dispatch is skipped.
+ */
+function mapSubstrateResultsToUnits(
+  plan: DelegationPlan,
+  nodeResults: readonly OrchestrationNodeDriveResult[],
+): DelegationUnitDriveResult[] {
+  const byUnit = new Map(nodeResults.map((n) => [n.unitId, n]));
+  return plan.units.map((unit) => {
+    const node = byUnit.get(unit.id);
+    if (!node) return driveResultFromUnit(unit, null, 'skipped');
+    return mapSingleSubstrateResult(unit, node);
+  });
+}
+
+function mapSingleSubstrateResult(
+  unit: DelegationUnit,
+  node: OrchestrationNodeDriveResult,
+): DelegationUnitDriveResult {
+  const action: DelegationUnitDriveResult['action'] =
+    node.action === 'dispatched' || node.action === 'in-flight' || node.action === 'converged'
+      ? node.action
+      : 'skipped';
+  const executionId =
+    node.action === 'dispatched' || node.action === 'in-flight' || node.action === 'converged'
+      ? node.executionId
+      : null;
   return {
     unitId: unit.id,
     unitKey: unit.unitKey,

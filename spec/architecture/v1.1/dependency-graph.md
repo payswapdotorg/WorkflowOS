@@ -49,8 +49,8 @@ existing execution authority → verification → review, while the dependency
 edge is WORK-062 ← WORK-046 and WORK-047's recorded dependency on WORK-046 is
 unchanged. WORK-061 now depends on WORK-062 because self-hosting cannot
 honestly be considered complete without durable multi-agent execution and
-recovery. WORK-062 is planned and NOT activated (see
-`spec/work-orders/WORK-062.md`).
+recovery. WORK-062 was ACTIVATED by the architect on 2026-08-30 and is IN
+FLIGHT (see `spec/work-orders/WORK-062.md` and the program state).
 
 Parallelization is permitted only where dependencies are complete and protected-surface coordination permits it. The graph is not itself an authorization token; derived frontier state must reconcile it with live program state and GitHub merge evidence.
 

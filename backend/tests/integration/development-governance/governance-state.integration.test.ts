@@ -67,7 +67,10 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
     expect(complete.length).toBeGreaterThanOrEqual(52); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7)
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    // WORK-062 (the durable orchestration substrate underneath WORK-046
+    // delegation) was ACTIVATED by the architect on 2026-08-30 and is the
+    // ONE in-flight item.
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-062']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -96,10 +99,13 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
 
     // Q4 — what can safely run in parallel? (frontier + conflicts)
     const frontier = fresh.getFrontier();
-    // WORK-050 is MERGED (8f27cc7) and finalized: NOTHING is in flight, and
-    // nothing remains pending — every recorded work order is complete. The
-    // dependency frontier is empty and nothing is blocked.
-    expect(frontier.inFlight).toEqual([]);
+    // WORK-062 (activated 2026-08-30) is the ONE in-flight item — its
+    // dependency WORK-046 is complete, so it carries no incomplete
+    // dependencies and no uncoordinated conflicts.
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-062']);
+    for (const item of frontier.inFlight) {
+      expect(item.incompleteDependencies).toEqual([]);
+    }
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag is TRUTHFUL (PR #62 round 1,
@@ -410,8 +416,12 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       const loaded = await new FileSystemGovernanceStateLoader({ repoRoot: REPO_ROOT, governanceDir: dir }).load();
       const claimsOnly = DefaultDevelopmentGovernanceService.fromLoadedState(loaded.model, loaded.program);
       const stillInFlight = claimsOnly.listWorkOrders({ status: 'in_flight' }).map((w) => w.id);
-      expect(stillInFlight).toEqual(['WORK-050']);
+      // WORK-050 stays in_flight (outcomes never complete work) — alongside
+      // the REAL in-flight WORK-062 (activated 2026-08-30; unchanged by the
+      // synthetic reconstruction).
+      expect(stillInFlight).toEqual(['WORK-050', 'WORK-062']);
       expect(claimsOnly.getWorkOrder('WORK-050').mergedAs).toBeUndefined();
+      expect(claimsOnly.getWorkOrder('WORK-062').mergedAs).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

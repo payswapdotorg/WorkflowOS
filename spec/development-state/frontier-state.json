@@ -6,7 +6,7 @@
     "spec/dependency-graph.md",
     "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction)"
   ],
-  "computedAt": "2026-08-30 (WORK-062 added to the planned future by the governance correction — the durable orchestration substrate underneath WORK-046 delegation; WORK-061 now depends on it. The 2026-08-29 identity resolution remains recorded in resolvedConflicts)",
+  "computedAt": "2026-08-30 (WORK-062 ACTIVATED by the architect and now in flight — it left plannedFuture; the frontier tracks the in-flight implementation through program-state.json. The WORK-063 governance PR (#81) remains open and is NOT merged — main does not yet carry WORK-063.)",
   "currentMain": "8f27cc755a2ffbb27de79c9b1a6e884a222b296b",
   "currentLiveImplementation": null,
   "liveImplementationNote": "Nothing is in flight: every recorded work order is complete (WORK-050 merged as 8f27cc7 by PR #78 and finalized by this package's reconciliation commit; 52/52 complete, merged finalized 7/7). The only open implementation PRs are this architecture package itself (#74) and the stale pre-wave test branch #50.",
@@ -17,7 +17,7 @@
   "plannedNext": [
     "WORK-053"
   ],
-  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete). The identity collision that previously halted authorization is RESOLVED (resolvedConflicts); WORK-053 remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet').",
+  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete). The identity collision that previously halted authorization is RESOLVED (resolvedConflicts); WORK-053 remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet'). WORK-062 (dependency-eligible on WORK-046) was activated 2026-08-30 and is IN FLIGHT — its activation is recorded in program-state.json (the architect authorized implementation); it is no longer merely planned.",
   "plannedFuture": [
     "WORK-054",
     "WORK-055",
@@ -26,7 +26,6 @@
     "WORK-058",
     "WORK-059",
     "WORK-060",
-    "WORK-062",
     "WORK-061"
   ],
   "resolvedConflicts": [

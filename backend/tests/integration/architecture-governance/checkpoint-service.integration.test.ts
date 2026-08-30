@@ -1104,7 +1104,9 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // WORK-046 integration (PR #60): 0057 is the delegation
           // coordination ledger — the 0052–0056 reservation resolved exactly
           // as coordinated, so the self-host head pin advances to 0057.
-          expectedLastMigrationNumber: 57,
+          // WORK-062 (the durable orchestration substrate underneath
+          // delegation): 0058 is the orchestration substrate ledger.
+          expectedLastMigrationNumber: 58,
         },
       },
     ]);

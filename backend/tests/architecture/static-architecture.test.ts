@@ -11212,7 +11212,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-046 delegation coordination ledger 0057 — after the merged WORK-051 migrations 0052–0056: /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0057_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-062 orchestration substrate ledger 0058 — after the WORK-046 delegation coordination ledger 0057 and the merged WORK-051 migrations 0052–0056: /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0058_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -17339,8 +17339,15 @@ describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not auth
     // The guard: only PENDING units are cancelled.
     const repoCode = stripCodeComments(readFileSync(REPO, 'utf8'));
     expect(repoCode).toMatch(/WHERE plan_id = \$1 AND status = 'pending'/);
-    // Sequencing: dispatch only when every dependency succeeded.
-    expect(coordinatorCode).toMatch(/dependsOn\.every\(\(dep\) => byKey\.get\(dep\)\?\.status === 'succeeded'\)/);
+    // Sequencing (WORK-062 generalization): dispatch admission is now the
+    // SUBSTRATE's DURABLE dependency gate (never in-memory only) — the
+    // coordinator delegates the drive to the orchestration substrate, whose
+    // admission requires every dependency's DURABLE node outcome to be
+    // 'succeeded' (and the repository's dispatch-lease acquisition enforces
+    // the same gate at the mutation boundary, backed by the migration
+    // trigger). The pinned code moved from the coordinator into the
+    // substrate — pinned there in the WORK-062 invariants block.
+    expect(coordinatorCode).toMatch(/this\.substrate\.driveGraph\(/);
   });
 
   // --- (h) the composition + the HTTP surface mirror the existing patterns ---
@@ -17399,7 +17406,7 @@ describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not auth
     expect(tests).toMatch(/structured state for WORK-047/);
     // The migration pin advanced (WORK-040's last-migration expectation).
     const staticSelf = readFileSync(join(BACKEND_ROOT, 'tests', 'architecture', 'static-architecture.test.ts'), 'utf8');
-    expect(staticSelf).toMatch(/the last migration is the WORK-046 delegation coordination ledger 0057/);
+    expect(staticSelf).toMatch(/the last migration is the WORK-062 orchestration substrate ledger 0058/);
   });
 
   // --- (k) the attempt-generation fence (architect round-3 correction) ---------
@@ -17427,6 +17434,242 @@ describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not auth
     // The interruption race guard regression stays pinned (round-1).
     expect(readFileSync(join(DELEGATION_TESTS_DIR, 'delegation-interruption-race.integration.test.ts'), 'utf8'))
       .toMatch(/rejects a stale dispatch after interruption/);
+  });
+});
+
+
+// ===========================================================================
+// WORK-062 — Durable Multi-Agent Orchestration Substrate (orchestration,
+// not authority — the layer UNDERNEATH WORK-046 delegation)
+// ===========================================================================
+// The substrate lives at src/orchestration/ (application-layer capability
+// outside src/modules/, mirroring the delegation pattern — NOT the 18th
+// frozen module). It is the durable orchestration layer UNDERNEATH WORK-046:
+// leases/ownership with fencing generations, durable dependency-aware
+// admission, deterministic reconciliation, explicit partial completion, and
+// safe dependency-aware parallelism — driving delegated executions ONLY
+// through the delegation coordinator's existing protocol (the
+// OrchestrationExecutor port), never through a second submit path.
+describe('WORK-062 invariants — the Durable Orchestration Substrate (orchestration, not authority)', () => {
+  const ORCH_DIR = join(BACKEND_ROOT, 'src', 'orchestration');
+  const ORCH_INTERNAL = join(ORCH_DIR, 'internal');
+  const ORCH_TYPES = join(ORCH_DIR, 'types.ts');
+  const ORCH_BARREL = join(ORCH_DIR, 'index.ts');
+  const ORCH_REPO = join(ORCH_INTERNAL, 'pg-orchestration-repository.ts');
+  const MIGRATION = join(
+    BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations',
+    '0058_orchestration_substrate.sql',
+  );
+  const COORDINATOR = join(BACKEND_ROOT, 'src', 'delegation', 'internal', 'delegation-coordinator.ts');
+  const ORCH_TESTS_DIR = join(BACKEND_ROOT, 'tests', 'integration', 'orchestration');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readOrchestrationFiles(): { path: string; code: string; raw: string }[] {
+    const out: { path: string; code: string; raw: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir).sort()) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) { walk(full); continue; }
+        if (!entry.endsWith('.ts')) continue;
+        const raw = readFileSync(full, 'utf8');
+        out.push({ path: full, code: stripCodeComments(raw), raw });
+      }
+    };
+    walk(ORCH_DIR);
+    return out;
+  }
+
+  it('the orchestration domain exists at src/orchestration/ and is NOT a frozen module (the set stays 17)', () => {
+    expect(existsSync(ORCH_DIR), 'src/orchestration/ must exist').toBe(true);
+    expect(existsSync(ORCH_BARREL), 'src/orchestration/index.ts must exist').toBe(true);
+    expect(existsSync(ORCH_TYPES), 'src/orchestration/types.ts must exist').toBe(true);
+    expect(existsSync(ORCH_INTERNAL), 'src/orchestration/internal/ must exist').toBe(true);
+    expect(existsSync(join(MODULES_DIR, 'orchestration'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'orchestration must not be a frozen module').not.toContain('/orchestration');
+  });
+
+  it('NO hidden lifecycle state — orchestration declares NO workflow vocabulary and NEVER writes a non-orchestration table', () => {
+    const types = stripCodeComments(readFileSync(ORCH_TYPES, 'utf8'));
+    // The orchestration vocabulary is disjoint from the frozen WorkflowState
+    // set (DRAFT/READY/ASSIGNED/IMPLEMENTING/PR_OPEN/VERIFYING/...).
+    for (const forbidden of ["'DRAFT'", "'READY'", "'ASSIGNED'", "'IMPLEMENTING'", "'PR_OPEN'", "'VERIFYING'", 'WorkflowState']) {
+      expect(types, `orchestration types must not declare workflow vocabulary ${forbidden}`).not.toContain(forbidden);
+    }
+    // The graph status vocabulary is the explicit partial-completion set.
+    expect(types).toMatch(/'orchestrating'\n? *\| *'partial'/);
+    expect(types).toMatch(/'partial'/);
+    // NEVER a write (INSERT/UPDATE/DELETE) to a non-orchestration table:
+    // delegation, workflow, executions, agent runs, verification, reviews.
+    for (const f of readOrchestrationFiles()) {
+      const writes = [...f.code.matchAll(/\b(INSERT INTO|UPDATE|DELETE FROM)\s+([a-z_]+)/g)];
+      for (const w of writes) {
+        expect(
+          w[2]!.startsWith('wfos_orchestration_'),
+          `${f.path}: the substrate writes ONLY its own tables (found ${w[1]} ${w[2]})`,
+        ).toBe(true);
+      }
+      // Never a mutation of the delegation tables (reading them IS the
+      // observation the substrate is allowed to make).
+      expect(f.code, `${f.path}: no delegation-table writes`).not.toMatch(/INSERT INTO wfos_delegation/);
+      expect(f.code, `${f.path}: no workflow-table access at all`).not.toMatch(/wfos_workflow_/);
+      expect(f.code, `${f.path}: no execution-record writes`).not.toMatch(/INSERT INTO wfos_executions/);
+      expect(f.code, `${f.path}: no agent-run writes`).not.toMatch(/INSERT INTO wfos_agent_runs/);
+    }
+  });
+
+  it('NO second execution authority — the substrate NEVER submits executions; the OrchestrationExecutor port is the only boundary (the ONE submit call site stays in the delegation coordinator)', () => {
+    for (const f of readOrchestrationFiles()) {
+      expect(f.code, `${f.path}: no ExecutionService reference`).not.toMatch(/ExecutionService/);
+      expect(f.code, `${f.path}: no execution submit call`).not.toMatch(/\.submit\(/);
+      expect(f.code, `${f.path}: no provider implementation`).not.toMatch(/implements\s+ExecutionProvider|NativeExecutionProvider|ExternalExecutionProvider/);
+      expect(f.code, `${f.path}: no agent gateway`).not.toMatch(/AgentGateway/);
+    }
+    // The delegation coordinator STILL owns the exactly-one submit call
+    // site and drives THROUGH the substrate (the executor adapter).
+    const coordinatorCode = stripCodeComments(readFileSync(COORDINATOR, 'utf8'));
+    expect([...coordinatorCode.matchAll(/this\.deps\.executionService\.submit\(/g)].length).toBe(1);
+    expect(coordinatorCode).toMatch(/this\.substrate\.driveGraph\(/);
+    expect(coordinatorCode).toMatch(/this\.substrate\.retryNode\(/);
+    expect(coordinatorCode).toMatch(/this\.substrate\.abandonGraph\(/);
+    // The executor adapter maps back into the EXISTING protocol.
+    expect(coordinatorCode).toMatch(/executeNodeForSubstrate\(/);
+  });
+
+  it('NO hidden autonomous scheduler — no timers, no queues, no loops: every drive is an explicit call', () => {
+    for (const f of readOrchestrationFiles()) {
+      expect(f.code, `${f.path}: no setInterval`).not.toMatch(/setInterval/);
+      expect(f.code, `${f.path}: no setTimeout`).not.toMatch(/setTimeout/);
+      expect(f.code, `${f.path}: no cron`).not.toMatch(/\bcron\b/i);
+      expect(f.code, `${f.path}: no queue polling`).not.toMatch(/\.poll\(|pollQueue|background|daemon/i);
+    }
+    // The substrate's public contract exposes ONLY explicit operations.
+    const types = readFileSync(ORCH_TYPES, 'utf8');
+    expect(types).toMatch(/every drive is an EXPLICIT call/);
+    expect(types).not.toMatch(/startScheduler|autoDrive|tick\(/);
+  });
+
+  it('NO Redis — PostgreSQL is authoritative for ALL orchestration state (a Redis loss can never lose or fork durable truth)', () => {
+    for (const f of readOrchestrationFiles()) {
+      expect(f.raw, `${f.path}: no redis import or client`).not.toMatch(/ioredis|from ['"]redis['"]|RedisClient|createClient\(/i);
+    }
+    // The durable state lives ONLY in the migration's PostgreSQL tables.
+    const migration = readFileSync(MIGRATION, 'utf8');
+    expect(migration).toMatch(/CREATE TABLE wfos_orchestration_graphs/);
+    expect(migration).toMatch(/CREATE TABLE wfos_orchestration_nodes/);
+  });
+
+  it('durable identity at the persistence layer — ONE graph per plan, ONE node per unit (UNIQUE constraints); tenant scoping on every row', () => {
+    const migration = readFileSync(MIGRATION, 'utf8');
+    // The durable orchestration identity (survives retries/restart/transfer).
+    expect(migration).toMatch(/UNIQUE \(plan_id\)/);
+    expect(migration).toMatch(/UNIQUE \(graph_id, node_key\)/);
+    expect(migration).toMatch(/UNIQUE \(unit_id\)/);
+    // The identity references the EXISTING authorities (never a second one).
+    expect(migration).toMatch(/plan_id UUID NOT NULL REFERENCES wfos_delegation_plans\(id\)/);
+    expect(migration).toMatch(/unit_id UUID NOT NULL REFERENCES wfos_delegation_units\(id\)/);
+    // TENANT scope on both tables (server-side, never caller-controlled).
+    expect(migration).toMatch(/project_id UUID NOT NULL REFERENCES wfos_projects\(id\)/);
+    // The fencing token column (bumped on EVERY ownership change).
+    expect(migration).toMatch(/generation INT NOT NULL DEFAULT 0/);
+    // Explicit partial-completion tallies are durable columns.
+    expect(migration).toMatch(/succeeded_count INT NOT NULL DEFAULT 0/);
+    expect(migration).toMatch(/reconciliation_count INT NOT NULL DEFAULT 0/);
+  });
+
+  it('persistence-layer IDENTITY/TENANT INTEGRITY — composite FKs tie graph→plan→Work Item and node→graph→plan→unit→project (PostgreSQL rejects structurally impossible tuples; the round-1 architect remediation)', () => {
+    const migration = readFileSync(MIGRATION, 'utf8');
+    // The enabling composite keys on the EXISTING delegation tables —
+    // additive and non-semantic (id is already unique; the tuple keys exist
+    // for referential integrity, never as a second identity).
+    expect(migration).toMatch(/ALTER TABLE wfos_delegation_plans[\s\S]{0,200}UNIQUE \(id, work_item_id\)/);
+    expect(migration).toMatch(/ALTER TABLE wfos_delegation_units[\s\S]{0,200}UNIQUE \(id, plan_id\)/);
+    // The graph's plan IS the plan of the graph's Work Item (the composite
+    // (plan_id, work_item_id) FK — a graph claiming another Work Item's plan
+    // is unrepresentable).
+    expect(migration).toMatch(/FOREIGN KEY \(plan_id, work_item_id\)[\s\S]{0,120}REFERENCES wfos_delegation_plans \(id, work_item_id\)/);
+    // The node carries its plan (the tuple key for the composite FKs).
+    expect(migration).toMatch(/plan_id UUID NOT NULL,/);
+    // The node's unit belongs to the node's EXACT plan.
+    expect(migration).toMatch(/FOREIGN KEY \(unit_id, plan_id\)[\s\S]{0,120}REFERENCES wfos_delegation_units \(id, plan_id\)/);
+    // The node's plan IS its graph's plan.
+    expect(migration).toMatch(/FOREIGN KEY \(graph_id, plan_id\)[\s\S]{0,120}REFERENCES wfos_orchestration_graphs \(id, plan_id\)/);
+    // The node's tenant IS its graph's tenant.
+    expect(migration).toMatch(/FOREIGN KEY \(graph_id, project_id\)[\s\S]{0,120}REFERENCES wfos_orchestration_graphs \(id, project_id\)/);
+    // The graph's tenant is the Work Item's project through the AUTHORITATIVE
+    // chain — enforced by the tenant-guard trigger (defense in depth).
+    expect(migration).toMatch(/wfos_orchestration_graph_tenant_guard/);
+    expect(migration).toMatch(/tenant mismatch/);
+    expect(migration).toMatch(/JOIN wfos_architecture_versions av ON av\.id = wi\.architecture_version_id/);
+    // The repository writes the full TUPLE (never a bare id) so the composite
+    // FKs verify consistency at the persistence boundary.
+    const repoCode = stripCodeComments(readFileSync(ORCH_REPO, 'utf8'));
+    expect(repoCode).toMatch(/\(graph_id, project_id, plan_id, unit_id, node_key, depends_on,/);
+    // And the raw-SQL negative regressions prove PostgreSQL rejects the
+    // impossible tuples WITHOUT the service layer (INSERT and UPDATE paths,
+    // with a consistent-tuple positive control).
+    const semantics = readFileSync(join(ORCH_TESTS_DIR, 'orchestration-substrate.integration.test.ts'), 'utf8');
+    expect(semantics).toMatch(/RAW-SQL PERSISTENCE INTEGRITY/);
+    expect(semantics).toMatch(/NO service layer in the path/);
+    expect(semantics).toMatch(/wfos_orchestration_nodes_unit_plan_fk/);
+    expect(semantics).toMatch(/wfos_orchestration_nodes_graph_project_fk/);
+    expect(semantics).toMatch(/wfos_orchestration_graphs_plan_work_item_fk/);
+    expect(semantics).toMatch(/tenant mismatch/);
+    expect(semantics).toMatch(/POSITIVE CONTROL/);
+  });
+
+  it('fencing at the MUTATION BOUNDARY — every node-state mutation is generation-fenced in the UPDATE\'s WHERE clause (PostgreSQL rejects stale workers)', () => {
+    const repoCode = stripCodeComments(readFileSync(ORCH_REPO, 'utf8'));
+    // recordNodeResult: the fenced outcome write.
+    expect(repoCode).toMatch(/AND generation = \$2[\s\S]{0,120}AND owner_id = \$6/);
+    // releaseLease: the fenced release.
+    expect(repoCode).toMatch(/WHERE id = \$1[\s\S]{0,80}AND generation = \$2[\s\S]{0,60}AND owner_id = \$3/);
+    // The typed fenced-out discrimination exists in the repository contract.
+    expect(readFileSync(ORCH_TYPES, 'utf8')).toMatch(/ORCHESTRATION_FENCED_OUT/);
+    // And the two-actor fencing regression pins the stale-generation proof.
+    const concurrency = readFileSync(join(ORCH_TESTS_DIR, 'orchestration-concurrency.integration.test.ts'), 'utf8');
+    expect(concurrency).toMatch(/STALE-WORKER FENCING/);
+    expect(concurrency).toMatch(/fenced-out/);
+  });
+
+  it('LEASE EXCLUSIVITY + DURABLE DEPENDENCY ADMISSION at the mutation boundary — one conditional UPDATE (owner free-or-expired) with the dependency gate', () => {
+    const repoCode = stripCodeComments(readFileSync(ORCH_REPO, 'utf8'));
+    // The exclusive acquisition: a single conditional UPDATE.
+    expect(repoCode).toMatch(/owner_id IS NULL OR \w+\.lease_expires_at IS NULL OR \w+\.lease_expires_at <= NOW\(\)/);
+    // The acquisition bumps the fencing generation.
+    expect(repoCode).toMatch(/generation = n\.generation \+ 1/);
+    // The DURABLE dependency gate (dispatch admission): every declared
+    // dependency must EXIST in the graph and be durably 'succeeded'.
+    expect(repoCode).toMatch(/jsonb_array_elements_text\(n\.depends_on\)/);
+    expect(repoCode).toMatch(/d\.outcome = 'succeeded'/);
+    // The migration's dependency-gate trigger re-enforces the same gate
+    // (defense in depth — a buggy caller cannot lease a never-dispatched
+    // node whose dependencies are unsatisfied).
+    const migration = readFileSync(MIGRATION, 'utf8');
+    expect(migration).toMatch(/wfos_orchestration_node_dependency_gate/);
+    expect(migration).toMatch(/BEFORE INSERT OR UPDATE OF owner_id/);
+    // And the typed dependency-violation rejection is proven in tests.
+    const semantics = readFileSync(join(ORCH_TESTS_DIR, 'orchestration-substrate.integration.test.ts'), 'utf8');
+    expect(semantics).toMatch(/dependency-not-satisfied/);
+    expect(semantics).toMatch(/dependenc/i);
+  });
+
+  it('the proof matrix exists — semantics, two-actor concurrency (independent connections), and crash/recovery suites', () => {
+    expect(existsSync(join(ORCH_TESTS_DIR, 'orchestration-substrate.integration.test.ts'))).toBe(true);
+    expect(existsSync(join(ORCH_TESTS_DIR, 'orchestration-concurrency.integration.test.ts'))).toBe(true);
+    expect(existsSync(join(ORCH_TESTS_DIR, 'orchestration-crash-recovery.integration.test.ts'))).toBe(true);
+    const concurrency = readFileSync(join(ORCH_TESTS_DIR, 'orchestration-concurrency.integration.test.ts'), 'utf8');
+    // Independent connections (the production topology) — never
+    // single-connection simulations for the concurrency claims.
+    expect(concurrency).toMatch(/createSecondClient/);
+    expect(concurrency).toMatch(/TWO INDEPENDENT PostgreSQL connections/);
+    const crash = readFileSync(join(ORCH_TESTS_DIR, 'orchestration-crash-recovery.integration.test.ts'), 'utf8');
+    // The failure-window matrix.
+    for (const window of ['W1', 'W2', 'W3', 'W4', 'W5', 'W6']) {
+      expect(crash, `the crash-window matrix must model ${window}`).toContain(`${window} —`);
+    }
   });
 });
 
@@ -17587,12 +17830,13 @@ describe('WORK-047 invariants — Agent Intelligence (advisory/ranking only, nev
     expect(repoCode).toMatch(/JOIN wfos_delegation_plans p ON p\.id = u\.plan_id/);
     expect(repoCode).toMatch(/WHERE ar\.project_id = \$1/);
     // NO new tables: the domain declares NO migration of its own — the last
-    // migration remains the WORK-046 delegation coordination ledger 0057.
+    // migration is the WORK-062 orchestration substrate ledger 0058 (the
+    // WORK-046 delegation ledger 0057 predates it); nothing beyond it.
     const migrations = readdirSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations'))
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    expect(migrations[migrations.length - 1]).toMatch(/^0057_/);
-    expect(migrations.some((m) => m.startsWith('0058'))).toBe(false);
+    expect(migrations[migrations.length - 1]).toMatch(/^0058_/);
+    expect(migrations.some((m) => m.startsWith('0059'))).toBe(false);
   });
 
   // --- (f) DETERMINISM — the documented constants + the total-order tie-break --

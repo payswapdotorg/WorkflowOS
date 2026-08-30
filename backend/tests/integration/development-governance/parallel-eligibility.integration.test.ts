@@ -190,11 +190,16 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     // the frontend/agents modules + the shared static-architecture suite) is
     // MERGED (8f27cc7) and finalized: the in-flight-only conflict scan is
     // empty. The frontier is the authoritative live view: NOTHING is in
-    // flight (every recorded work order is complete).
-    expect(a046.conflictsWith).toEqual([]);
-    expect(a052.conflictsWith).toEqual([]);
+    // flight (every recorded work order is complete) — EXCEPT the
+    // in-flight WORK-062 (activated 2026-08-30), which shares the
+    // static-architecture suite surface with BOTH merged items: the
+    // in-flight-only conflict scan TRUTHFULLY reports that live shared
+    // surface (an honest, observable conflict — not a silent pass; there is
+    // no other in-flight item to mutually coordinate with).
+    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-062']);
+    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-062']);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight).toEqual([]);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-062']);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -421,14 +426,14 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: WORK-050 is MERGED (8f27cc7) and finalized — nothing is in flight, nothing is dependency-eligible (all recorded items complete), nothing is blocked', () => {
+  it('W052-AC03 — the REAL frontier: WORK-062 (activated 2026-08-30, deps complete) is the ONE in-flight item; nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
     const frontier = realService.getFrontier();
     expect(frontier.dependencyEligible).toEqual([]);
-    // WORK-050 was the last started item (merged by the architect as 8f27cc7,
-    // PR #78; its post-merge finalization is carried by the v1.1 architecture
-    // package reconciliation) — every recorded work order is complete, the
-    // frontier holds no in-flight item, and nothing is blocked.
-    expect(frontier.inFlight).toEqual([]);
+    // WORK-062 (the durable orchestration substrate) was activated by the
+    // architect on 2026-08-30 — the frontier holds exactly that one
+    // in-flight item (its dependency WORK-046 is complete), and nothing is
+    // blocked.
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-062']);
     expect(frontier.blocked).toEqual([]);
   });
 });

@@ -11,7 +11,6 @@
     "WORK-058",
     "WORK-059",
     "WORK-060",
-    "WORK-062",
     "WORK-061"
   ],
   "parallelWaves": [
@@ -51,17 +50,11 @@
     {
       "wave": 6,
       "items": [
-        "WORK-062"
-      ]
-    },
-    {
-      "wave": 7,
-      "items": [
         "WORK-061"
       ]
     }
   ],
-  "rule": "Parallel waves are planning hints only; actual execution eligibility is derived from authoritative Work Order status, dependencies, protected-surface coordination, and current main revision. No Work Order starts without the architect's authorization (activation is recorded in program-state.json). WORK-053 is dependency-eligible and remains PLANNED — the architect's 2026-08-29 verdict says 'Do not activate WORK-053 yet'. WORK-062 (added by the 2026-08-30 governance correction; deps WORK-046, already complete) is dependency-eligible and likewise remains PLANNED and NOT activated. WORK-062 precedes WORK-061 in the sequence because WORK-061 now depends on it: self-hosting cannot honestly be considered complete without durable multi-agent execution and recovery.",
+  "rule": "Parallel waves are planning hints only; actual execution eligibility is derived from authoritative Work Order status, dependencies, protected-surface coordination, and current main revision. No Work Order starts without the architect's authorization (activation is recorded in program-state.json). WORK-053 is dependency-eligible and remains PLANNED — the architect's 2026-08-29 verdict says 'Do not activate WORK-053 yet'. WORK-062 (added by the 2026-08-30 governance correction; deps WORK-046, already complete) is dependency-eligible and likewise remains PLANNED and NOT activated. WORK-062 precedes WORK-061 in the sequence because WORK-061 now depends on it: self-hosting cannot honestly be considered complete without durable multi-agent execution and recovery. UPDATE 2026-08-30 (activation): WORK-062 was ACTIVATED by the architect (implementation authorized; branch feat/work-062-durable-orchestration-substrate) — it left this roadmap sequence (now tracked as in-flight in program-state.json/dependency-state.json) and wave 7 renumbered to 6.",
   "retiredUploadWave": {
     "note": "The architect's direct-to-main upload wave (2026-08-28T18:24..18:40Z) declared a parallel 'v2.0' roadmap that re-used the WORK-053..059 identifiers with different scopes. By the architect's 2026-08-29 PR #74 review verdict, the architect-issued GitHub issue track (this sequence) is the ONE canonical track; the upload-wave artifacts are RETIRED under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (explicitly non-authoritative historical material; machine-readable retirement record: spec/archive/upload-wave-2026-08-28/index.json).",
     "retiredIdentities": [

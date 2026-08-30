@@ -318,6 +318,14 @@ import type {
   DelegationCoordinator,
   DelegationPlanService,
 } from './delegation/index.js';
+// WORK-062: the application-layer durable orchestration substrate
+// UNDERNEATH delegation (orchestration, not authority — leases/ownership
+// with fencing generations, durable dependency-aware admission,
+// deterministic reconciliation, explicit partial completion, and safe
+// dependency-aware parallelism; drives delegated executions ONLY through
+// the delegation coordinator's existing protocol via the executor port).
+import { DefaultOrchestrationSubstrate } from './orchestration/index.js';
+import type { OrchestrationSubstrate } from './orchestration/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -769,6 +777,8 @@ export async function buildApp(
   // WORK-046: the delegation coordination services (application layer).
   let delegationPlanService: DelegationPlanService | undefined;
   let delegationCoordinator: DelegationCoordinator | undefined;
+  // WORK-062: the durable orchestration substrate (application layer).
+  let orchestrationSubstrate: OrchestrationSubstrate | undefined;
   // WORK-047: the agent-intelligence service (application layer — advisory).
   let agentIntelligenceService: AgentIntelligenceService | undefined;
   let benchmarkService: (BenchmarkService & BenchmarkTrialRunner) | undefined;
@@ -1520,6 +1530,18 @@ export async function buildApp(
       workItemRepository,
       roleCatalog: agentRoleCatalogService,
     });
+    // WORK-062: the durable orchestration substrate underneath the
+    // delegation coordinator — composed BEFORE the coordinator (it consumes
+    // the same database; the coordinator injects it as its orchestration
+    // layer). There is NO second engine here: the substrate owns only the
+    // durable orchestration state (leases, fencing generations, durable
+    // dependency admission, partial-completion tallies) and drives every
+    // delegated execution back through the coordinator's existing protocol
+    // (exactly one ExecutionService.submit() call site — unchanged).
+    orchestrationSubstrate = new DefaultOrchestrationSubstrate({
+      db: database,
+      logger,
+    });
     delegationCoordinator = new DefaultDelegationCoordinator({
       db: database,
       executionTaskService: executionTaskService!,
@@ -1527,6 +1549,7 @@ export async function buildApp(
       executionRecordRepository,
       agentRunRepository: agentRunRepository!,
       logger,
+      orchestration: orchestrationSubstrate,
     });
     executionHandoffService = new PolicyGatedExecutionHandoffService({
       inner: new DefaultExecutionHandoffService({
