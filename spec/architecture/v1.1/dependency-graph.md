@@ -22,6 +22,8 @@ WORK-046 + WORK-051 + WORK-052
            ↓
        WORK-060
            ↓
+       WORK-062  ←── WORK-046 (complete — the delegation authority)
+           ↓
        WORK-061
 ```
 
@@ -35,7 +37,20 @@ Exact edges:
 - WORK-058 ← WORK-053, WORK-055, WORK-046, WORK-051, WORK-052
 - WORK-059 ← WORK-055, WORK-056, WORK-058, WORK-019
 - WORK-060 ← WORK-055, WORK-056, WORK-058, WORK-059, WORK-005
-- WORK-061 ← WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050
+- WORK-062 ← WORK-046
+- WORK-061 ← WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062
+
+WORK-062 (Durable Multi-Agent Orchestration Substrate) was added by the
+2026-08-30 governance correction — the execution-substrate architecture
+decision. It is the durable orchestration substrate underneath WORK-046
+delegation: the runtime authority chain is WORK-047 (recommendation) →
+WORK-046 (governed delegation) → WORK-062 (durable orchestration) → the
+existing execution authority → verification → review, while the dependency
+edge is WORK-062 ← WORK-046 and WORK-047's recorded dependency on WORK-046 is
+unchanged. WORK-061 now depends on WORK-062 because self-hosting cannot
+honestly be considered complete without durable multi-agent execution and
+recovery. WORK-062 is planned and NOT activated (see
+`spec/work-orders/WORK-062.md`).
 
 Parallelization is permitted only where dependencies are complete and protected-surface coordination permits it. The graph is not itself an authorization token; derived frontier state must reconcile it with live program state and GitHub merge evidence.
 

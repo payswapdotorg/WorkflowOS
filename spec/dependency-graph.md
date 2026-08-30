@@ -170,6 +170,40 @@ WORK-047 Agent Intelligence
 
 Agent Intelligence may recommend roles/providers/models/modes from historical evidence, but must not override hard constraints or authoritative workflow/verification/review boundaries.
 
+WORK-046 → WORK-062
+
+```text
+WORK-047 Agent Intelligence          (advisory — recommends)
+        ↓ recommendation
+WORK-046 Multi-Agent Delegation      (the ONE delegation authority)
+        ↓ governed delegation
+WORK-062 Durable Multi-Agent Orchestration Substrate  (planned)
+        ↓ durable orchestration
+existing Execution Authority         (the ONE execution authority)
+        ↓
+existing Verification
+        ↓
+existing Review
+```
+
+The WORK-047 → WORK-046 → WORK-062 chain is the RUNTIME authority/flow ordering
+(who recommends, who governs delegation, who orchestrates durably) — not a
+restatement of build dependencies: the dependency edge is WORK-046 → WORK-062
+(the substrate is built underneath the delegation authority), and WORK-047's
+recorded dependency on WORK-046 is unchanged. The substrate makes every
+delegated execution durable — dependency-aware scheduling, one durable
+execution identity per delegated execution, idempotent retries, leases/ownership
+with fencing, crash/restart reconciliation, external execution convergence,
+explicit partial completion, deterministic reconciliation, and safe
+dependency-aware parallelism across simple/complex/very-complex execution
+shapes — while adding NO second workflow engine, NO second delegation
+authority, NO second execution authority, NO second verification authority,
+and NO Redis-backed source of truth (PostgreSQL stays authoritative). See
+`spec/work-orders/WORK-062.md` (issued by the 2026-08-30 governance correction;
+planned, not activated). WORK-061 depends on WORK-062: self-hosting cannot
+honestly be considered complete without durable multi-agent execution and
+recovery.
+
 ### Product experience
 
 WORK-040 + WORK-041 + WORK-042 + WORK-044 → WORK-048

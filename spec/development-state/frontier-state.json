@@ -4,9 +4,9 @@
   "sourceOfTruth": [
     "spec/development-state/program-state.json",
     "spec/dependency-graph.md",
-    "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73)"
+    "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction)"
   ],
-  "computedAt": "2026-08-29 (identity resolution: the upload-wave collision recorded on 2026-08-29 is RESOLVED — see resolvedConflicts)",
+  "computedAt": "2026-08-30 (WORK-062 added to the planned future by the governance correction — the durable orchestration substrate underneath WORK-046 delegation; WORK-061 now depends on it. The 2026-08-29 identity resolution remains recorded in resolvedConflicts)",
   "currentMain": "8f27cc755a2ffbb27de79c9b1a6e884a222b296b",
   "currentLiveImplementation": null,
   "liveImplementationNote": "Nothing is in flight: every recorded work order is complete (WORK-050 merged as 8f27cc7 by PR #78 and finalized by this package's reconciliation commit; 52/52 complete, merged finalized 7/7). The only open implementation PRs are this architecture package itself (#74) and the stale pre-wave test branch #50.",
@@ -26,6 +26,7 @@
     "WORK-058",
     "WORK-059",
     "WORK-060",
+    "WORK-062",
     "WORK-061"
   ],
   "resolvedConflicts": [

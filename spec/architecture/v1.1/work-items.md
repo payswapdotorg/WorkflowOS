@@ -12,7 +12,8 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-058 | Adaptive Assurance Engine | WORK-053, WORK-055, WORK-046, WORK-051, WORK-052 |
 | WORK-059 | Operational and Release Governance | WORK-055, WORK-056, WORK-058, WORK-019 |
 | WORK-060 | Continuous Architecture Evolution and ACR Feedback Loop | WORK-055, WORK-056, WORK-058, WORK-059, WORK-005 |
-| WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050 |
+| WORK-062 | Durable Multi-Agent Orchestration Substrate — durable execution underneath WORK-046 delegation | WORK-046 |
+| WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062 |
 
 All items remain architect-governed and require a Work Order file, declared surfaces, deterministic assurance, checkpoint requirements, proof contract, and architect-controlled merge.
 
@@ -23,3 +24,11 @@ All items remain architect-governed and require a Work Order file, declared surf
 > canonical track and the upload wave is retired under distinct UW-053..059 identities
 > (`spec/archive/upload-wave-2026-08-28/`) — see [`reconciliation-record.md`](reconciliation-record.md) §8.
 > No item here is activated.
+>
+> **WORK-062 note (2026-08-30 governance correction):** WORK-062 is NOT part of the original
+> issue track #65..#73 — it was issued by the 2026-08-30 governance correction (the
+> execution-substrate architecture decision: the durable orchestration substrate underneath
+> WORK-046 delegation, in the runtime chain WORK-047 recommendation → WORK-046 governed
+> delegation → WORK-062 durable orchestration → existing execution authority → verification →
+> review). WORK-061 now depends on it: self-hosting cannot honestly be considered complete
+> without durable multi-agent execution and recovery. WORK-062 is planned and NOT activated.

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
-  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73)",
-  "computedAt": "2026-08-29 (identity resolution: the upload-wave collision recorded on 2026-08-29 is RESOLVED — see resolvedConflicts)",
+  "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction)",
+  "computedAt": "2026-08-30 (WORK-062 added by the governance correction — the durable orchestration substrate underneath WORK-046 delegation; WORK-061 now depends on WORK-062. The 2026-08-29 identity-resolution remains recorded in resolvedConflicts)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -59,13 +59,17 @@
       "WORK-059",
       "WORK-005"
     ],
+    "WORK-062": [
+      "WORK-046"
+    ],
     "WORK-061": [
       "WORK-057",
       "WORK-058",
       "WORK-059",
       "WORK-060",
       "WORK-047",
-      "WORK-050"
+      "WORK-050",
+      "WORK-062"
     ]
   },
   "futureGenerationEligibility": {
@@ -77,7 +81,8 @@
     "WORK-058": "blocked — WORK-053, WORK-055 not started (WORK-046, WORK-051, WORK-052 complete)",
     "WORK-059": "blocked — WORK-055, WORK-056, WORK-058 not started (WORK-019 complete)",
     "WORK-060": "blocked — WORK-055, WORK-056, WORK-058, WORK-059 not started (WORK-005 complete)",
-    "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060 not started (WORK-047, WORK-050 complete)"
+    "WORK-062": "eligible — WORK-046 complete (dependency-eligible; issued by the 2026-08-30 governance correction as the durable orchestration substrate underneath delegation; remains planned and NOT activated — the architect's authorization is required)",
+    "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060, WORK-062 not started (WORK-047, WORK-050 complete)"
   },
   "knownConflicts": [],
   "resolvedConflicts": [
