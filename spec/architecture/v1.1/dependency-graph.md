@@ -22,7 +22,7 @@ WORK-046 + WORK-051 + WORK-052
            ↓
        WORK-060
            ↓
-       WORK-062  ←── WORK-046 (complete — the delegation authority)
+       WORK-062  ←── WORK-046 (complete — the delegation authority; merged f0855d2)
            ↓
        WORK-061
 ```
@@ -49,8 +49,13 @@ existing execution authority → verification → review, while the dependency
 edge is WORK-062 ← WORK-046 and WORK-047's recorded dependency on WORK-046 is
 unchanged. WORK-061 now depends on WORK-062 because self-hosting cannot
 honestly be considered complete without durable multi-agent execution and
-recovery. WORK-062 was ACTIVATED by the architect on 2026-08-30 and is IN
-FLIGHT (see `spec/work-orders/WORK-062.md` and the program state).
+recovery. WORK-062 was ACTIVATED by the architect on 2026-08-30 and COMPLETE:
+merged by the architect as `f0855d2` via PR #82 on 2026-08-30 (squash-merged at
+the approved review-remediated head `1caa259`; the merge tree is identical to
+the approved head) and finalized complete per §34.8/ADR-0007 (see
+`spec/work-orders/WORK-062.md` and the program state). WORK-061's WORK-062
+dependency edge is satisfied; WORK-061 remains blocked on
+WORK-057/058/059/060.
 
 Parallelization is permitted only where dependencies are complete and protected-surface coordination permits it. The graph is not itself an authorization token; derived frontier state must reconcile it with live program state and GitHub merge evidence.
 

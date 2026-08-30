@@ -32,5 +32,10 @@ All items remain architect-governed and require a Work Order file, declared surf
 > delegation → WORK-062 durable orchestration → existing execution authority → verification →
 > review). WORK-061 now depends on it: self-hosting cannot honestly be considered complete
 > without durable multi-agent execution and recovery. WORK-062 was ACTIVATED by the
-> architect on 2026-08-30 and is IN FLIGHT (the implementation PR carries the
-> activation record in program-state.json).
+> architect on 2026-08-30 and is COMPLETE — merged by the architect as `f0855d2` via
+> PR #82 on 2026-08-30 (squash-merged at the approved review-remediated head `1caa259`;
+> the merge tree is identical to the approved head) and finalized complete per
+> §34.8/ADR-0007 (program-state.json records status complete with the full `mergedAs`
+> provenance identity: pr 82, mergeCommit f0855d2955dcf2d3edea683e497902ad30778fc8).
+> WORK-061's WORK-062 dependency edge is thereby satisfied; WORK-061 remains blocked
+> on WORK-057/058/059/060 (the WORK-053..056 foundation chain).

@@ -66,11 +66,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(52); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7)
+    expect(complete.length).toBeGreaterThanOrEqual(53); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2)
     // WORK-062 (the durable orchestration substrate underneath WORK-046
-    // delegation) was ACTIVATED by the architect on 2026-08-30 and is the
-    // ONE in-flight item.
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-062']);
+    // delegation) was MERGED by the architect as f0855d2 (PR #82, 2026-08-30)
+    // and finalized per §34.8/ADR-0007 — NOTHING is in flight.
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -93,16 +93,19 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w049?.mergedAs).toEqual({ pr: 77, mergeCommit: '07ac9cc68b088c91c17a61cf2b3943d784a2aeb5' });
     const w050 = complete.find((w) => w.id === 'WORK-050');
     expect(w050?.mergedAs).toEqual({ pr: 78, mergeCommit: '8f27cc755a2ffbb27de79c9b1a6e884a222b296b' });
+    const w062 = complete.find((w) => w.id === 'WORK-062');
+    expect(w062?.mergedAs).toEqual({ pr: 82, mergeCommit: 'f0855d2955dcf2d3edea683e497902ad30778fc8' });
     for (const w of inFlight) {
       expect(w.mergedAs, `${w.id} (in_flight) must NOT carry merge evidence`).toBeUndefined();
     }
 
     // Q4 — what can safely run in parallel? (frontier + conflicts)
     const frontier = fresh.getFrontier();
-    // WORK-062 (activated 2026-08-30) is the ONE in-flight item — its
-    // dependency WORK-046 is complete, so it carries no incomplete
-    // dependencies and no uncoordinated conflicts.
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-062']);
+    // WORK-062 was merged as f0855d2 (PR #82) and finalized complete
+    // (§34.8/ADR-0007, 2026-08-30): every recorded work order is complete,
+    // NOTHING is in flight, and the frontier is empty (WORK-053..061 are
+    // future-generation items not yet recorded in program-state).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
     }
@@ -410,15 +413,26 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       w050.checkpointOutcomes = [
         { contractId: 'AUTH-PRESERVATION', status: 'evidenced', proofClasses: ['static'], evidenceRef: 'claim', at: '2026-08-29T04:40:00Z' },
       ];
+      // WORK-062 (merged as f0855d2 via PR #82 and finalized complete
+      // 2026-08-30) is RECONSTRUCTED the same way: started, carrying claims,
+      // with the merge evidence stripped — the live record is
+      // complete-and-merged, so the discrimination rebuilds the pre-merge
+      // state to prove outcomes never complete work.
+      const w062 = program.workOrders.find((w) => w.id === 'WORK-062')!;
+      w062.status = 'in_flight';
+      delete (w062 as { mergedAs?: unknown }).mergedAs;
+      w062.checkpointOutcomes = [
+        { contractId: 'AUTH-PRESERVATION', status: 'evidenced', proofClasses: ['static'], evidenceRef: 'claim', at: '2026-08-30T09:00:00Z' },
+      ];
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'governance-model.json'), JSON.stringify(realModel, null, 2));
       writeFileSync(join(dir, 'program-state.json'), JSON.stringify(program, null, 2));
       const loaded = await new FileSystemGovernanceStateLoader({ repoRoot: REPO_ROOT, governanceDir: dir }).load();
       const claimsOnly = DefaultDevelopmentGovernanceService.fromLoadedState(loaded.model, loaded.program);
       const stillInFlight = claimsOnly.listWorkOrders({ status: 'in_flight' }).map((w) => w.id);
-      // WORK-050 stays in_flight (outcomes never complete work) — alongside
-      // the REAL in-flight WORK-062 (activated 2026-08-30; unchanged by the
-      // synthetic reconstruction).
+      // WORK-050 and WORK-062 both stay in_flight (outcomes never complete
+      // work) — reconstructed started items because both live records are
+      // complete-and-merged.
       expect(stillInFlight).toEqual(['WORK-050', 'WORK-062']);
       expect(claimsOnly.getWorkOrder('WORK-050').mergedAs).toBeUndefined();
       expect(claimsOnly.getWorkOrder('WORK-062').mergedAs).toBeUndefined();

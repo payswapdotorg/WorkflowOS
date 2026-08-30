@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
   "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction)",
-  "computedAt": "2026-08-30 (WORK-062 ACTIVATED by the architect — moved from the future generation to in_flight; dependency-eligible on WORK-046 (complete). The 2026-08-30 governance corrections (WORK-062, WORK-063-not-yet-merged) and the 2026-08-29 identity-resolution remain recorded.)",
+  "computedAt": "2026-08-30 (WORK-062 COMPLETE — merged by the architect as f0855d2 via PR #82, squash-merged at branch head 1caa259; the post-merge finalization §34.8/ADR-0007 recomputed this derived state: every recorded work order is complete, nothing is in flight. WORK-061's WORK-062 dependency edge is now SATISFIED — self-hosting conformance has its durable orchestration substrate — though WORK-061 remains blocked on WORK-057/WORK-058/WORK-059/WORK-060 (themselves gated on WORK-053..056). The 2026-08-30 governance corrections (WORK-062, WORK-063-not-yet-merged) and the 2026-08-29 identity-resolution remain recorded.)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -10,11 +10,9 @@
     "staleState": "dependency graph and program state disagree; fail closed and require architect reconciliation"
   },
   "currentGeneration": {
-    "completedWorkOrders": 52,
-    "inFlight": [
-      "WORK-062"
-    ],
-    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2). The WORK-050 post-merge finalization (§34.8/ADR-0007) is carried by this package. WORK-062 (the durable orchestration substrate underneath WORK-046 delegation) is IN FLIGHT (activated 2026-08-30; branch feat/work-062-durable-orchestration-substrate) — it left the future generation."
+    "completedWorkOrders": 53,
+    "inFlight": [],
+    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), and WORK-062 (f0855d2 — the durable orchestration substrate underneath WORK-046 delegation, merged by the architect via PR #82 and finalized per §34.8/ADR-0007 on 2026-08-30). The WORK-050 post-merge finalization and the WORK-062 post-merge finalization are both carried in the canonical state. Nothing is in flight; the future generation (WORK-053..061) remains architect-gated."
   },
   "futureGeneration": {
     "WORK-053": [
@@ -80,7 +78,7 @@
     "WORK-058": "blocked — WORK-053, WORK-055 not started (WORK-046, WORK-051, WORK-052 complete)",
     "WORK-059": "blocked — WORK-055, WORK-056, WORK-058 not started (WORK-019 complete)",
     "WORK-060": "blocked — WORK-055, WORK-056, WORK-058, WORK-059 not started (WORK-005 complete)",
-    "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060, WORK-062 not started (WORK-047, WORK-050 complete)"
+    "WORK-061": "blocked — WORK-057, WORK-058, WORK-059, WORK-060 not started (WORK-047, WORK-050, and WORK-062 all COMPLETE — the WORK-062 edge was satisfied by the f0855d2 merge via PR #82 on 2026-08-30; the remaining gate is the WORK-053..056 foundation chain, which the architect has not activated)"
   },
   "knownConflicts": [],
   "resolvedConflicts": [

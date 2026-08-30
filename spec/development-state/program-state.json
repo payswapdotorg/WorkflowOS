@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T08:05:00Z",
+  "asOf": "2026-08-30T09:25:00Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1394,7 +1394,7 @@
     {
       "id": "WORK-062",
       "title": "Durable Multi-Agent Orchestration Substrate (durable execution underneath WORK-046 delegation)",
-      "status": "in_flight",
+      "status": "complete",
       "dependencies": [
         "WORK-046"
       ],
@@ -1431,7 +1431,12 @@
       ],
       "assuranceProfile": "CRITICAL",
       "runtimeImpactBinding": "high",
-      "note": "Activated by the architect (2026-08-30, the implementation instruction after the WORK-062 governance correction merged as 9aadd50 via PR #80). Implementation: the application-layer orchestration substrate (src/orchestration/ — migration 0058, leases/ownership with fencing generations, durable dependency-aware admission at the mutation boundary, deterministic reconciliation, explicit partial completion, safe dependency-aware parallelism) underneath the WORK-046 delegation coordinator, driving delegated executions ONLY through the existing protocol (the OrchestrationExecutor port — exactly one ExecutionService.submit() call site, unchanged). No second workflow/delegation/execution/verification authority; PostgreSQL authoritative; no Redis; no autonomous scheduler. Round-1 architect remediation (PR #82 review): graph/plan/unit/project consistency is now enforced BY POSTGRESQL — composite foreign keys ((plan_id, work_item_id), (unit_id, plan_id), (graph_id, plan_id), (graph_id, project_id)) plus the graph tenant-guard trigger — proven by raw-SQL negative regressions without the service layer (invariant 16, proof obligation 14)."
+      "note": "Merged by the architect as f0855d2955dcf2d3edea683e497902ad30778fc8 (PR #82, squash-merged at branch head 1caa259 on 2026-08-30T09:16:04Z; the merge tree is IDENTICAL to the approved review-remediated head — verified with an empty git diff 1caa259..f0855d2). The post-merge finalization (§34.8/ADR-0007, carried by the governance/WORK-062-post-merge-finalization change) records the completion: status complete with mergedAs carrying the ACTUAL merge commit, no active handoff (none was recorded on main — the activation rode the governance correction 9aadd50 and the in-flight record never carried a resumption handoff; merged work is not resumable), and the work-order document status updated; branch/pr/head kept as the historical record of how it merged. The architect's review required one round of remediation — the persistence-layer tenant/identity integrity correction (graph/plan/unit/project consistency enforced BY POSTGRESQL: composite foreign keys ((plan_id, work_item_id), (unit_id, plan_id), (graph_id, plan_id), (graph_id, project_id)) plus the graph tenant-guard trigger, proven by raw-SQL negative regressions without the service layer — invariant 16, proof obligation 14) — incorporated in the merged head 1caa259. The implementation: the application-layer orchestration substrate (src/orchestration/ — migration 0058, leases/ownership with fencing generations, durable dependency-aware admission at the mutation boundary, deterministic reconciliation, explicit partial completion, safe dependency-aware parallelism) underneath the WORK-046 delegation coordinator, driving delegated executions ONLY through the existing protocol (the OrchestrationExecutor port — exactly one ExecutionService.submit() call site, unchanged). No second workflow/delegation/execution/verification authority; PostgreSQL authoritative; no Redis; no autonomous scheduler.",
+      "head": "1caa259",
+      "mergedAs": {
+        "pr": 82,
+        "mergeCommit": "f0855d2955dcf2d3edea683e497902ad30778fc8"
+      }
     }
   ],
   "resumption": {

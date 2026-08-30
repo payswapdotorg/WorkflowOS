@@ -1,16 +1,18 @@
 # WORK-062 — Durable Multi-Agent Orchestration Substrate
 
-Status: in flight (activated 2026-08-30 by the architect; implementation
-branch `feat/work-062-durable-orchestration-substrate` — the activation is
-recorded in `spec/development-state/program-state.json`). Round-1 architect
-review on the implementation PR (#82) required a persistence-integrity
-correction — graph/plan/unit/project consistency enforced BY POSTGRESQL
-(composite foreign keys + the graph tenant guard) with raw-SQL negative
-regressions — incorporated in the same PR (invariant 16, proof obligation 14). Round-1 architect
-review on the implementation PR (#82) required a persistence-integrity
-correction — graph/plan/unit/project consistency enforced BY POSTGRESQL
-(composite foreign keys + the graph tenant guard) with raw-SQL negative
-regressions — incorporated in the same PR (invariant 16, proof obligation 14).
+Status: COMPLETE — merged by the architect as
+`f0855d2955dcf2d3edea683e497902ad30778fc8` (PR #82, squash-merged at branch head
+`1caa259` on 2026-08-30T09:16:04Z; the merge tree is IDENTICAL to the approved
+review-remediated head — verified with an empty `git diff 1caa259..f0855d2`).
+The post-merge finalization §34.8/ADR-0007 is recorded in the canonical state
+(`status complete` + `mergedAs {pr: 82, mergeCommit: f0855d2…}` + no active
+handoff — merged work is not resumable). Round-1 architect review on the
+implementation PR (#82) required a persistence-integrity correction —
+graph/plan/unit/project consistency enforced BY POSTGRESQL (composite foreign
+keys + the graph tenant guard) with raw-SQL negative regressions —
+incorporated in the same PR (invariant 16, proof obligation 14) and contained
+in the merged head. The activation (2026-08-30) is recorded in
+`spec/development-state/program-state.json`.
 
 Issued by: the 2026-08-30 governance correction (the execution-substrate
 architecture decision — merged as `9aadd50` via PR #80).
@@ -251,3 +253,57 @@ STOP and raise an Architecture Change Request if implementation requires:
 - PR contains only WORK-062 scope; independent Architect Review approves; the
   implementation PR is merged; WORK-062 is marked VERIFIED before WORK-061
   becomes eligible on it.
+
+## Implementation record (appended 2026-08-30 — the merge evidence, not a rewrite)
+
+Implemented on branch `feat/work-062-durable-orchestration-substrate`
+(activated 2026-08-30 by the architect; the activation record rode the
+governance correction merged as `9aadd50` via PR #80, with the in-flight
+`pr: 82` record added on the branch). The implementation head at merge was
+`1caa259aa4112b5e0328a05d7150a3e88d1be35a`:
+
+- `backend/src/orchestration/` — the durable orchestration substrate:
+  migration `0058_orchestration_substrate.sql` (durable graphs/nodes with
+  leases/ownership, fencing generations, dependency admission, explicit
+  partial completion), `pg-orchestration-repository.ts`,
+  `orchestration-substrate.ts`, `types.ts`, and the `app.ts` wiring — with
+  delegated executions driven ONLY through the existing protocol (the
+  `OrchestrationExecutor` port: exactly one `ExecutionService.submit()` call
+  site, unchanged).
+- Round-1 architect remediation (the PR #82 REQUEST CHANGES verdict):
+  PostgreSQL-level graph/plan/unit/project integrity — composite foreign
+  keys (`(plan_id, work_item_id)`, `(unit_id, plan_id)`, `(graph_id,
+  plan_id)`, `(graph_id, project_id)`) plus the graph tenant-guard trigger,
+  proven by raw-SQL negative regressions WITHOUT the service layer
+  (invariant 16; proof obligation 14), committed as `1caa259` ("WORK-062
+  round-1 remediation: PostgreSQL-level graph/plan/unit/project
+  integrity").
+- Verification recorded on the implementation branch: typecheck 0; lint 0
+  errors; static suite green (including the WORK-062 invariant blocks and
+  the migration 0058 pins); pglite full sweep green; the real-PostgreSQL
+  concurrency/crash-recovery suites green; mutation/discrimination drills
+  (removing the fence, the lease check, the dependency check, the
+  idempotency key, the tenant scope, and the persistence-integrity
+  composite constraints each makes the corresponding test FAIL).
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-30)
+
+The architect merged PR #82 as `f0855d2955dcf2d3edea683e497902ad30778fc8`
+(squash merge; single parent `9aadd50`; merged 2026-08-30T09:16:04Z). The
+merged tree is IDENTICAL to the approved review-remediated head `1caa259`
+(`git diff 1caa259 f0855d2` is empty; both trees are `c443fa6`). The
+finalization — a data-only change on branch
+`governance/WORK-062-post-merge-finalization` — records in the canonical
+state: `status = complete`, `mergedAs = {pr: 82, mergeCommit:
+f0855d2955dcf2d3edea683e497902ad30778fc8}`, the implementation head
+corrected to `1caa259`, no active handoff (none was ever recorded on main —
+`resumption.activeHandoffs` was empty before and after; merged work is not
+resumable), and this work-order document's status updated truthfully. The
+dependency frontier was recomputed: every recorded work order is complete
+(53/53; WORK-001..052 plus WORK-062), nothing is in flight, and WORK-061's
+WORK-062 dependency edge is SATISFIED — WORK-061 remains blocked on
+WORK-057/058/059/060 (the WORK-053..056 foundation chain) and was NOT
+activated. The merged-finalization audit binds WORK-062 ↔ PR #82 ↔ merge
+commit `f0855d2` on the real first-parent history (the `WORK-NNN:` subject
+convention); the red window that opened with the merge closes with this
+finalization (merged finalized 8/8, gaps `[]`).

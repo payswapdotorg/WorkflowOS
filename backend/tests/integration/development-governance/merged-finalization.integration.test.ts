@@ -256,9 +256,22 @@ describe('WORK-052 — the post-merge finalization audit binds canonical state t
     // …and WORK-051 through the classic merge shape (its declared pr 52) —
     // BOTH shapes audit clean with their full mergedAs identities.
     expect(evidence.byPr.get(52)).toEqual(['f2c996c26b0a1cdf6b0b946102e4aa669a2847c9']);
+    // WORK-062 (the 2026-08-30 merge): the real history binds it through the
+    // WORK-NNN colon convention — EXACTLY the architect's actual merge
+    // f0855d2 (PR #82, squash-merged at branch head 1caa259). The governance
+    // correction that preceded it (9aadd50, subject "Governance: WORK-062 —
+    // …") does NOT match the colon convention and is NOT evidence — and the
+    // WORK-062 post-merge FINALIZATION commit (this change's squash, subject
+    // "chore(governance): the WORK-062 post-merge finalization — …") never
+    // enters the evidence either: only the architect's merge binds WORK-062.
+    expect(evidence.byWorkOrder.get('WORK-062')).toEqual(['f0855d2955dcf2d3edea683e497902ad30778fc8']);
+    expect(evidence.byPr.has(82)).toBe(false); // the squash merge binds by work-order id, not PR subject
     const audit = auditMergedFinalization(realProgram, evidence);
     expect(audit.gaps).toEqual([]);
     expect(audit.mergedWorkOrderIds).toContain('WORK-052');
     expect(audit.mergedWorkOrderIds).toContain('WORK-051');
+    // The WORK-062 finalization closed the red window the merge opened:
+    // complete + mergedAs {pr: 82, mergeCommit: f0855d2…} audits clean.
+    expect(audit.mergedWorkOrderIds).toContain('WORK-062');
   });
 });

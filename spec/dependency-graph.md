@@ -177,7 +177,7 @@ WORK-047 Agent Intelligence          (advisory — recommends)
         ↓ recommendation
 WORK-046 Multi-Agent Delegation      (the ONE delegation authority)
         ↓ governed delegation
-WORK-062 Durable Multi-Agent Orchestration Substrate  (planned)
+WORK-062 Durable Multi-Agent Orchestration Substrate  (complete — merged f0855d2)
         ↓ durable orchestration
 existing Execution Authority         (the ONE execution authority)
         ↓
@@ -200,9 +200,12 @@ shapes — while adding NO second workflow engine, NO second delegation
 authority, NO second execution authority, NO second verification authority,
 and NO Redis-backed source of truth (PostgreSQL stays authoritative). See
 `spec/work-orders/WORK-062.md` (issued by the 2026-08-30 governance correction;
-ACTIVATED 2026-08-30 — in flight). WORK-061 depends on WORK-062: self-hosting cannot
+ACTIVATED 2026-08-30; MERGED by the architect as `f0855d2` via PR #82 on 2026-08-30
+— squash-merged at the approved review-remediated head `1caa259`, finalized complete
+per §34.8/ADR-0007). WORK-061 depends on WORK-062: self-hosting cannot
 honestly be considered complete without durable multi-agent execution and
-recovery.
+recovery — that dependency edge is now SATISFIED (WORK-061 remains blocked on
+WORK-057/058/059/060, the WORK-053..056 foundation chain).
 
 ### Product experience
 

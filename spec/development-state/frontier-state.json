@@ -6,10 +6,10 @@
     "spec/dependency-graph.md",
     "spec/work-orders/ (the architect-issued Work Order files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction)"
   ],
-  "computedAt": "2026-08-30 (WORK-062 ACTIVATED by the architect and now in flight — it left plannedFuture; the frontier tracks the in-flight implementation through program-state.json. The WORK-063 governance PR (#81) remains open and is NOT merged — main does not yet carry WORK-063.)",
-  "currentMain": "8f27cc755a2ffbb27de79c9b1a6e884a222b296b",
+  "computedAt": "2026-08-30 (WORK-062 MERGED by the architect as f0855d2 via PR #82 — squash-merged at branch head 1caa259; the post-merge finalization §34.8/ADR-0007 recomputed the frontier: nothing is in flight, every recorded work order is complete. The WORK-063 governance PR (#81) remains open and is NOT merged — main does not yet carry WORK-063.)",
+  "currentMain": "f0855d2955dcf2d3edea683e497902ad30778fc8",
   "currentLiveImplementation": null,
-  "liveImplementationNote": "Nothing is in flight: every recorded work order is complete (WORK-050 merged as 8f27cc7 by PR #78 and finalized by this package's reconciliation commit; 52/52 complete, merged finalized 7/7). The only open implementation PRs are this architecture package itself (#74) and the stale pre-wave test branch #50.",
+  "liveImplementationNote": "Nothing is in flight: every recorded work order is complete — WORK-062 (the durable orchestration substrate underneath WORK-046 delegation) merged as f0855d2 by PR #82 and finalized by the §34.8/ADR-0007 post-merge finalization carried by the governance/WORK-062-post-merge-finalization change (53/53 complete, merged finalized 8/8). The only open implementation PRs are the WORK-062 finalization PR itself and the stale pre-wave test branch #50.",
   "activeRule": "A derived frontier must never authorize work whose authoritative Work Order dependencies are incomplete. If live PR state and repository state disagree, halt authorization and require architect reconciliation.",
   "knownConflicts": [
     "Open PR #50 (test(WORK-043), base a1b88a9b) predates the WORK-046..050 wave and is stale relative to current main."
@@ -17,7 +17,7 @@
   "plannedNext": [
     "WORK-053"
   ],
-  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete). The identity collision that previously halted authorization is RESOLVED (resolvedConflicts); WORK-053 remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet'). WORK-062 (dependency-eligible on WORK-046) was activated 2026-08-30 and is IN FLIGHT — its activation is recorded in program-state.json (the architect authorized implementation); it is no longer merely planned.",
+  "plannedNextNote": "WORK-053 (Architecture v1.1 Foundation and Control Loop, issue #65) is the dependency-eligible head of the canonical forward track (deps WORK-046+WORK-051+WORK-052, all complete). The identity collision that previously halted authorization is RESOLVED (resolvedConflicts); WORK-053 remains PLANNED and is NOT activated — activation is the architect's authorization (and is additionally gated on the v1.1/ACR-001 disposition per the architect's 2026-08-29 verdict: 'Do not activate WORK-053 yet'). WORK-062 was activated 2026-08-30, merged as f0855d2 via PR #82 on 2026-08-30, and finalized complete — its completion satisfies WORK-061's WORK-062 dependency edge, but WORK-061 stays blocked on WORK-057/058/059/060 (the WORK-053..056 foundation chain).",
   "plannedFuture": [
     "WORK-054",
     "WORK-055",
