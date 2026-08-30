@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T09:25:00Z",
+  "asOf": "2026-08-30T11:05:00Z",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1527,6 +1527,13 @@
       "title": "WORK-062 — Durable Multi-Agent Orchestration Substrate (the execution-substrate architecture decision: WORK-047 recommendation → WORK-046 governed delegation → WORK-062 durable orchestration → the existing execution authority → verification → review; no second workflow/delegation/execution/verification authority; PostgreSQL authoritative, Redis non-authoritative)",
       "file": "spec/work-orders/WORK-062.md",
       "status": "planned (issued by the 2026-08-30 governance correction; not activated — no program-state workOrders record until the architect authorizes activation)"
+    },
+    {
+      "id": "SPEC-063",
+      "kind": "spec",
+      "title": "WORK-063 — Identity and Access Layer (the identity-and-access architecture decision: human login via OAuth/OIDC — Google/GitHub — and email, PLUS scoped machine identity — service accounts with capability-scoped API credentials; authentication separated from authorization; the existing server-side chain user → organization membership → role/permission → project access stays the ONE authorization path; API keys remain first-class for automation; the Workbench demo-key bootstrap is retired; no second workflow/business authority, no client-side authorization, no weakened tenant isolation)",
+      "file": "spec/work-orders/WORK-063.md",
+      "status": "planned (issued by the 2026-08-30 identity-and-access architecture decision; not activated — no program-state workOrders record until the architect authorizes activation)"
     }
   ]
 }

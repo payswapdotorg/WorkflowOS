@@ -4,14 +4,16 @@ Status: planned.
 
 Objective: Prove that WorkflowOS can use its own governed engineering lifecycle to plan, execute, verify, review, release, observe, and maintain WorkflowOS without bypassing its architecture authority.
 
-Dependencies: WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062.
+Dependencies: WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062, WORK-063.
 
 Scope: self-hosting conformance suite, recursive governance checks, recovery/resumption proof, internal change exercises.
 
 Required invariants: WorkflowOS implementation is governed as customer software; governing architecture cannot be self-modified without ACR/ArchitectureVersion approval; repository state remains sufficient for a fresh architect/worker; all internal changes use the same Work Item/Work Order/verification/review path.
 
-Required proof: end-to-end self-hosting exercise, conversation-loss recovery, unauthorized architecture mutation rejection, multi-agent parallel implementation proof through the durable orchestration substrate (WORK-062: same-key convergence, idempotent retry, crash/restart reconciliation, lease takeover and stale-worker fencing), release/observation feedback loop proof.
+Required proof: end-to-end self-hosting exercise, conversation-loss recovery, unauthorized architecture mutation rejection, multi-agent parallel implementation proof through the durable orchestration substrate (WORK-062: same-key convergence, idempotent retry, crash/restart reconciliation, lease takeover and stale-worker fencing), release/observation feedback loop proof, and the production identity experience (WORK-063: a human signs in, creates an organization, creates a project, invites a developer, and authorizes a scoped agent service account that runs governed work — with tenant isolation and privilege separation holding throughout).
 
 Note: WORK-062 (Durable Multi-Agent Orchestration Substrate) is a dependency because self-hosting cannot honestly be considered complete without durable multi-agent execution and recovery — delegated multi-agent work must survive crashes, restarts, and coordinator loss under the same governed lifecycle. Issued by the 2026-08-30 governance correction.
+
+Note: WORK-063 (Identity and Access Layer) is a dependency because the customer-facing self-hosting experience begins with a human signing in and ends with an authorized agent running governed work — neither is possible on a shared bootstrap demo key. Issued by the 2026-08-30 identity-and-access architecture decision.
 
 Definition of done: a fresh WorkflowOS instance can reconstruct and safely continue its own development program from repository/GitHub state alone.

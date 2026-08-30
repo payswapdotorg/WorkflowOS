@@ -221,6 +221,48 @@ WORK-050 Unified Execution UX
 
 The UX layer is a consumer of the same authoritative execution/workflow contracts and must not introduce frontend-owned workflow state.
 
+### Identity and access (production human + machine identity)
+
+WORK-002 + WORK-048 → WORK-063
+WORK-063 → WORK-061
+
+```text
+Human users                     Machine/agent clients
+(OAuth/OIDC: Google,            (service accounts with
+ GitHub; email)                  capability-scoped API credentials)
+        └──────────┬──────────────────┘
+                   ▼
+         Identity / Session           (authentication — who are you?)
+                   ▼
+         Organization / Membership
+                   ▼
+         Project authorization        (server-side, authoritative —
+                   ▼                   what may you do to this project?)
+         existing WorkflowOS authorities (unchanged)
+```
+
+WORK-063 (Identity and Access Layer) replaces the bootstrap demo-key login
+with the production identity model. It extends WORK-002's frozen foundation
+(the `AuthProvider` boundary, deterministic identity resolution,
+organizations/memberships/roles/permissions, the `AuthorizationService`
+decision chain with tenant isolation) and retires the Workbench's demo-key
+bootstrap (WORK-048). Authentication stays SEPARATED from authorization:
+login — human or machine — produces a principal; authorization is always a
+server-side decision on the existing chain (user → membership →
+role/permission → project access; AUTHZ-AC-01..03 unchanged). Both principal
+kinds are first-class and permanent: humans sign in with Google/GitHub/email;
+agents present scoped service-account credentials (e.g. CAN read Work
+Orders, create branches, create PRs, read execution state; CANNOT modify
+architecture, approve their own PR, alter verification evidence, or change
+tenant). API keys REMAIN available for automation — the layer is never an
+"OAuth-only" replacement. It adds NO second workflow/business authority, NO
+client-side authorization, and NO new tenant-isolation model. See
+`spec/work-orders/WORK-063.md` (issued by the 2026-08-30
+identity-and-access architecture decision; planned, not activated).
+WORK-061 depends on WORK-063: the customer-facing self-hosting experience
+begins with a human signing in and ends with an authorized agent running
+governed work — neither is possible on a shared demo key.
+
 ### Development governance and self-hosting
 
 WORK-005 + WORK-015 + WORK-017 + WORK-018 + WORK-019 + WORK-044 → WORK-051
@@ -255,7 +297,7 @@ and CONSUME (but do not duplicate) the ACR-001 capabilities when those
 Work Orders land.
 
 ```text
-WORK-063 (Identity & Access — PR #81, open; NOT yet in main)
+WORK-063 (Identity & Access — planned, NOT activated; spec/work-orders/WORK-063.md)
     │
     ↓
 WORK-064 (Continuous Product Validation — the domain/model authority)
@@ -281,7 +323,7 @@ WORK-068 (Feedback → Governed Work Items — through the EXISTING /work-items 
 
 Exact edges:
 
-- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (proposed in PR #81, open)
+- WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (planned — carried into main by PR #81; NOT activated, NOT implemented)
 - WORK-065 ← WORK-064
 - WORK-066 ← WORK-064, WORK-065, (soft: WORK-058)
 - WORK-067 ← WORK-064, WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056)
