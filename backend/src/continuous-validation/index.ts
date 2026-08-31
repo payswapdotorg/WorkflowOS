@@ -38,6 +38,10 @@ export {
   // §10 constructors
   defineValidationJourney,
   describeEnvironment,
+  // §10b the navigation-safety declaration entry guard (PR #97 fourth
+  // architect review correction — the declaration is owned by the journey
+  // authority and validated at the declaration boundary)
+  validateSafeNavigationTargetEntry,
   // errors
   ValidationDomainError,
   CONTINUOUS_VALIDATION_ERROR_CODES,

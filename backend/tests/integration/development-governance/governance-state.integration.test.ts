@@ -78,9 +78,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME)
     // was MERGED by the architect as cdedd0ca via PR #99 (2026-08-31,
     // squash-merged at the approved head 25512f4) and is recorded complete
-    // per §34.8/ADR-0007 by the WORK-074 post-merge finalization — NOTHING
-    // is in flight (57/57 recorded work orders complete).
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    // per §34.8/ADR-0007 by the WORK-074 post-merge finalization (PR #100,
+    // merged as 1e279a2). The ONE in-flight record is WORK-065 (Synthetic
+    // Browser Validation Agent — the execution mechanism, NOT an authority):
+    // ACTIVATED by the architect on 2026-08-30 (the implementation
+    // instruction after the WORK-064 finalization) and IN FLIGHT on branch
+    // feat/work-065-browser-validation-agent (PR #97) — this reconciliation
+    // onto the post-#100 mainline carries exactly that one in-flight record.
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-065']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -129,7 +134,7 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // yet recorded in program-state (WORK-065 and WORK-067 are
     // dependency-eligible on the complete WORK-064 — NOT activated, the
     // architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-065']);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
@@ -436,6 +441,17 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     const dir = mkdtempSync(join(tmpdir(), 'wfos-gov-claims-only-'));
     try {
       const program: ProgramState = structuredClone(realProgram);
+      // WORK-065 is in flight in the real program-state and is NOT part of
+      // this claims-only discrimination (WORK-050/062/064). Strip it: WORK-065
+      // depends on WORK-064 (which the discrimination reconstructs as
+      // in_flight — would require a coordination record covering WORK-064).
+      // WORK-071 and WORK-074 are complete-and-merged in the real
+      // program-state; their live records carry merge evidence and are NOT
+      // reconstructed — they survive the fixture rebuild untouched. The
+      // discrimination reconstructs exactly the three intended started items
+      // (WORK-050/062/064 — all three are complete-and-merged in the live
+      // record, so the discrimination rebuilds the pre-merge state).
+      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065');
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
       w050.status = 'in_flight';
       delete (w050 as { mergedAs?: unknown }).mergedAs;

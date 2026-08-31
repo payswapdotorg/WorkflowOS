@@ -48,6 +48,11 @@ export default defineConfig({
       // WORK-064: the continuous-validation domain suite (pure domain +
       // composition tests — no database required).
       'tests/continuous-validation/**/*.test.ts',
+      // WORK-065: the synthetic browser validation agent suite (pure domain +
+      // composition + a real-browser integration test that launches Playwright
+      // against a tiny local HTTP server — no database required for the unit
+      // tests; the real-browser test gates on PLAYWRIGHT being available).
+      'tests/browser-validation/**/*.test.ts',
     ],
     testTimeout: 15000,
     hookTimeout: 15000,

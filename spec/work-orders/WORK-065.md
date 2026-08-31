@@ -1,18 +1,50 @@
 # WORK-065 — Synthetic Browser Validation Agent
 
-Status: planned.
+Status: in_flight — activated by the architect (the implementation
+instruction) on 2026-08-30. The activation is recorded in
+`spec/development-state/program-state.json` (status `in_flight`, branch
+`feat/work-065-browser-validation-agent`, dependencies `["WORK-064"]`).
+The browser agent contract is persisted in
+`spec/architecture/v1.1/validation-model.md` §9 (the agent section,
+expanded by this change). NOT merged; NOT verified — the architect's
+review and the merge gate remain the only completion event (§34.8/ADR-0007).
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap — the closed-loop software engineering control system
 extension to v1.1). This Work Order establishes the synthetic browser
-validation agent — it does NOT implement runtime code. Activation requires
-the architect's authorization and is recorded in
-`spec/development-state/program-state.json` (this change records none).
+validation agent. Activation requires the architect's authorization and is
+recorded in `spec/development-state/program-state.json` (this change
+records the activation).
 
 Dependencies: WORK-064 (Continuous Product Validation — the authority this
 agent executes underneath). The browser agent is the EXECUTION MECHANISM
 for ValidationJourneys; WORK-064 is the AUTHORITY that defines them and the
-EffectPolicy that binds them. That dependency edge is now SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). WORK-065 is now DEPENDENCY-ELIGIBLE and remains NOT activated, NOT started — the architect's authorization is required.
+EffectPolicy that binds them. That dependency edge is SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). WORK-065 was accordingly DEPENDENCY-ELIGIBLE and was ACTIVATED by the architect on 2026-08-30 (see the Status header above; the earlier "NOT activated, NOT started" wording of this file predates the activation and is superseded by it).
+
+Reconciliation (2026-08-31): the implementation branch was first
+reconciled onto the post-#99 mainline (cdedd0ca — the WORK-074 PR #99
+merge) resolving the governance-only conflicts, declaring the ADR-0003
+mutual coordination between the then-two live in-flight records
+(WORK-065 ↔ WORK-074 on the shared static-architecture suite surface),
+and advancing the WORK-065 migration-set pin 58 → 59 for WORK-074's
+0059_identity_runtime (credit comment). The WORK-074 post-merge
+finalization then LANDED as PR #100 (merged as 1e279a2 — the canonical
+state records WORK-074 complete + finalized, 57/57 mainline work orders
+complete), and the branch was REBASED onto that finalization head: the
+governance state (program-state / frontier-state / dependency-state /
+future-roadmap + the governance snapshot suites) is recomputed onto the
+finalization truth — WORK-074 carries its complete + finalized record
+exactly as main carries it, the earlier merged-finalization red-window
+expectations (the pre-existing WORK-074 gap that PR #100 has now closed)
+are re-pinned to the NO-gap truth, and WORK-065 is the ONE in-flight
+record this branch carries. The historical ADR-0003 coordination
+declaration remains on the WORK-065 record (durable history — both
+parallel-era partners are now complete/merged). The rebase also REMOVED
+an out-of-scope commit that briefly rode the branch (the WORK-042
+cross-mode-handoff relay-drain budget recalibration):
+backend/tests/integration/agents/cross-mode-handoff.regression.test.ts
+is byte-identical to current main truth — this Work Order's scope
+boundary is restored.
 
 Downstream: WORK-066 (Validation Scheduling & Change Triggers) decides
 when this agent runs; WORK-067 (Engineering Signal & Regression Correlation)

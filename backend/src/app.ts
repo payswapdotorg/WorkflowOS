@@ -359,6 +359,16 @@ import {
   InMemoryValidationRunRepository,
 } from './continuous-validation/index.js';
 import type { ContinuousValidationService } from './continuous-validation/index.js';
+// WORK-065: the synthetic browser validation agent — the execution mechanism
+// for ValidationJourneys declared under WORK-064's authority. Consumes the
+// WORK-064 ContinuousValidationService (admission + finalization + evidence
+// mapping) and the existing BrowserDriver port (WORK-036 — NO second browser
+// framework). Production wiring fails closed without a driver (the agent
+// records environment_error — never a silent no-op). The driver adapter is
+// the explicit binding point for the future architect-authorized production
+// browser. Exposed for FUTURE consumers (WORK-066 scheduler).
+import { DefaultBrowserValidationAgent } from './browser-validation/index.js';
+import type { BrowserValidationAgent } from './browser-validation/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -505,6 +515,12 @@ export interface AppDeps {
    *  finalization, evidence mapping into /verification). Present when DB
    *  configured. Future consumers: WORK-065 browser agent, WORK-066 scheduler. */
   continuousValidationService?: ContinuousValidationService;
+  /** WORK-065: the synthetic browser validation agent (the execution
+   *  mechanism for ValidationJourneys). Present when DB configured. Consumes
+   *  the WORK-064 service + the existing BrowserDriver port (WORK-036).
+   *  Production fails closed without a driver (environment_error). Future
+   *  consumers: WORK-066 scheduler. */
+  browserValidationAgent?: BrowserValidationAgent;
   /** WORK-016: review service. Present when DB configured. */
   reviewService?: ReviewService;
   /** WORK-015: CI evidence ingestion service. Present when DB configured. */
@@ -857,6 +873,8 @@ export async function buildApp(
   let verificationService: VerificationService | undefined;
   // WORK-064: the continuous product validation domain service.
   let continuousValidationService: ContinuousValidationService | undefined;
+  // WORK-065: the synthetic browser validation agent.
+  let browserValidationAgent: BrowserValidationAgent | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
   let webhookProcessingService: WebhookProcessingService | undefined;
@@ -1113,6 +1131,22 @@ export async function buildApp(
     continuousValidationService = new DefaultContinuousValidationService({
       runRepository: new InMemoryValidationRunRepository(),
       verificationService: verificationService!,
+    });
+    // WORK-065: the synthetic browser validation agent — the execution
+    // mechanism for ValidationJourneys declared under WORK-064's authority.
+    // Composed from the WORK-064 service (admission + finalization + evidence
+    // mapping) and the existing BrowserDriver port (WORK-036 — NO second
+    // browser framework). Production fails closed WITHOUT a driver: the agent
+    // records environment_error on every call (never a silent no-op). The
+    // driver adapter (PlaywrightBrowserDriver) is the explicit binding point
+    // for the future architect-authorized production browser driver — it is
+    // NOT wired here (no production browser is authorized today). Tests inject
+    // a driver; WORK-066 (the future scheduler) is the future runtime consumer.
+    browserValidationAgent = new DefaultBrowserValidationAgent({
+      continuousValidationService: continuousValidationService!,
+      // driver: undefined — production fails closed. The future
+      // architect-authorized production browser driver binds here.
+      logger,
     });
     // WORK-008/009: webhook event repository + processing service.
     const pgWebhookEventRepo = new PgWebhookEventRepository(database);
@@ -2224,6 +2258,7 @@ export async function buildApp(
       planApplier,
       verificationService,
       continuousValidationService,
+      browserValidationAgent,
       reviewService,
       ciEvidenceIngestionService,
       webhookProcessingService,

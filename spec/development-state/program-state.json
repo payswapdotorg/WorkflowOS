@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-31T05:24:00Z (the WORK-074 post-merge finalization, §34.8/ADR-0007 — the WORK-063/WORK-064 precedent: PR #99 was MERGED by the architect as cdedd0ca3c72821d289d8d9d683f9902ddca480f on 2026-08-31T05:08:54Z (squash-merged at the approved head 25512f4d5be89001c4774ed8440f9de15cf42364 — the merge tree is IDENTICAL to the approved head, verified with an empty git diff 25512f4..cdedd0ca). WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME) is recorded COMPLETE with its merge evidence: 57/57 recorded work orders complete, NOTHING in flight. WORK-065/067/072/073 remain NOT activated and NOT implemented by this finalization. The dogfooding gate's two enabler edges (WORK-074 + WORK-071) are SATISFIED — the first full authenticated/local dogfooding experiment is PERMITTED and NOT started (the architect's authorization governs the run).)",
+  "asOf": "2026-08-31T11:00:00Z (the PR #97 reconciliation onto the post-#100 mainline 1e279a2 (feat/work-065-browser-validation-agent rebased; the WORK-042 relay-deflake budget recalibration is REMOVED from this change — out of WORK-065 scope, the file restored to main truth). The WORK-074 post-merge finalization (§34.8/ADR-0007, PR #100, merged as 1e279a2) is LANDED: WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME) is recorded COMPLETE with its merge evidence (cdedd0ca3c72821d289d8d9d683f9902ddca480f via PR #99, squash-merged at the approved head 25512f4d5be89001c4774ed8440f9de15cf42364 — the merge tree is identical); WORK-071 (Local Development Runtime Substrate) is COMPLETE (8604c8a5286b7533caf907c25fcd4dfdeeb662eb, PR #96): 57 recorded work orders complete, NO in-flight claim on either. WORK-065 (Synthetic Browser Validation Agent — the execution mechanism, NOT an authority) is ACTIVATED as in_flight on branch feat/work-065-browser-validation-agent (PR #97; the architect's 2026-08-30 implementation instruction after the WORK-064 finalization); the browser agent contract is persisted in spec/architecture/v1.1/validation-model.md §9; NOT merged; NOT verified — the architect's review and the merge gate remain the only completion event (§34.8/ADR-0007). WORK-066/067/068/069/070/072/073 remain NOT activated, NOT started. The dogfooding gate's two enabler edges (WORK-074 + WORK-071) are SATISFIED — the first full authenticated/local dogfooding experiment is PERMITTED and NOT started (the architect's authorization governs the run).)",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1571,6 +1571,51 @@
       "mergedAs": {
         "pr": 96,
         "mergeCommit": "8604c8a5286b7533caf907c25fcd4dfdeeb662eb"
+      }
+    },
+    {
+      "id": "WORK-065",
+      "title": "Synthetic Browser Validation Agent (the execution mechanism for ValidationJourneys)",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-064"
+      ],
+      "branch": "feat/work-065-browser-validation-agent",
+      "workOrder": "spec/work-orders/WORK-065.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [
+          "browser-validation"
+        ],
+        "migrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-065.md",
+          "spec/architecture/v1.1/validation-model.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/vitest.config.ts"
+        ]
+      },
+      "surfaceFlags": [
+        "authorityBoundary",
+        "publicContracts",
+        "externalSideEffects"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "note": "Activated by the architect (2026-08-30, the implementation instruction for WORK-065 after the WORK-064 finalization). Implementation: the synthetic browser validation agent at src/browser-validation/ (the application-layer pattern — NOT an 18th frozen module): the execution contract (navigate/observe/evidence-capture/effect-policy enforcement) that CONSUMES the WORK-064 domain authority (admitValidationRun/finalizeValidationRun/mapValidationOutcomeToVerification) and the existing BrowserDriver port (WORK-036 — the neutral navigation/inspection port; NO second browser automation framework). The agent enforces the EffectPolicy at execution time (a mutation under READ_ONLY is rejected before execution with a typed effect_policy_violation; a FORBIDDEN action is rejected before execution under every policy; an ISOLATED_MUTATION action requires the synthetic identity's tenant to match the environment's isolated tenant), captures observations with the full run→journey→step→environment→time provenance chain, and maps the completed run's outcome into the EXISTING /verification authority through its public attachEvidence boundary (claim authority, server-side classification — NO parallel evidence store). The TestIdentity is PRESENTED (never minted): the agent binds an already-authenticated AuthenticatedPrincipal via the WORK-064 admission boundary (machine-credential providers only — the closed 'apikey' set today; human principals rejected). The agent never mutates code, merges PRs, approves reviews, or transitions workflow state (static-architecture invariant). The Playwright-backed BrowserDriver adapter is the ONE place browser-automation libraries appear (the explicit boundary); production wiring fails closed without a driver (environment_error — never a silent no-op). Discrimination-proven: removing the EffectPolicy enforcement, the provenance binding, or the no-code-mutation boundary makes the corresponding test FAIL. NOT merged; NOT verified — the architect's review and the merge gate remain the only completion event (§34.8/ADR-0007). WORK-066 (scheduling), WORK-067 (signals), WORK-068 (feedback), WORK-069 (progressive release), WORK-070 (architecture fitness), and the customer-product dogfooding experiment are NOT pulled into scope.",
+      "coordination": {
+        "with": [
+          "WORK-071",
+          "WORK-074"
+        ],
+        "reason": "WORK-071 (Local Development Runtime Substrate) was in flight in parallel at the ACTIVATION of this Work Order; both touched backend/src/app.ts + backend/tests/architecture/static-architecture.test.ts. The surfaces are disjoint at the code level (WORK-065 adds src/browser-validation/ + a browserValidationAgent field on AppDeps; WORK-071 added the dev runtime branch + platform/redis/in-memory-redis.ts); the shared files are appended-to in distinct sections (durable history — WORK-071 has since COMPLETED, merged as 8604c8a5286b7533caf907c25fcd4dfdeeb662eb via PR #96). WORK-074 (Identity & Access Runtime Activation) was the second parallel-era partner on the shared backend/tests/architecture/static-architecture.test.ts surface; it has likewise since COMPLETED (merged as cdedd0ca3c72821d289d8d9d683f9902ddca480f via PR #99, finalized §34.8/ADR-0007 by PR #100 as 1e279a2): this PR #97 reconciliation onto the post-#100 mainline RESOLVED the shared surface (WORK-074's 823-check static-architecture suite + WORK-065's invariants are BOTH retained; the joined seam is verified by the full battery on the reconciled head). This record is the ADR-0003 declaration of that coordination.",
+        "adrs": [
+          "docs/adr/ADR-0003-parallel-protocol-surface-declaration.md"
+        ]
       }
     },
     {

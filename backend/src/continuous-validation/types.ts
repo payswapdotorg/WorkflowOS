@@ -258,6 +258,19 @@ export interface ValidationJourney {
   readonly allowedModes: readonly ValidationMode[];
   /** EXACTLY ONE declared effect policy per journey (Work Order invariant 1). */
   readonly effectPolicy: EffectPolicy;
+  /**
+   * The AUTHORITATIVE navigation-safety declaration (PR #97 fourth architect
+   * review correction): the journey's trusted allowlist of read-only-safe
+   * navigation targets. This is PART OF THE JOURNEY ITSELF — declared under
+   * WORK-064's authority at {@link defineValidationJourney}, validated there
+   * (each entry: a non-empty string, a parseable http(s) URL, no embedded
+   * userinfo), and frozen on the immutable journey record. It is NOT a
+   * separate declaration object and NOT an executor-supplied input: the
+   * browser agent (WORK-065) reads it from the canonical journey record and
+   * has NO input channel to create, replace, or expand it. May be empty (the
+   * safe default — no navigation is proven read-only-safe).
+   */
+  readonly readonlySafeNavigationTargets: readonly string[];
   readonly steps: readonly ValidationStep[];
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -269,6 +282,15 @@ export interface ValidationJourneyInput {
   readonly identityRequirement: IdentityRequirement;
   readonly allowedModes: readonly ValidationMode[];
   readonly effectPolicy: EffectPolicy;
+  /**
+   * The journey authority's declaration of read-only-safe navigation targets
+   * (see {@link ValidationJourney.readonlySafeNavigationTargets}). Optional at
+   * the input boundary — absent defaults to `[]` (the safe default: no
+   * navigation is proven read-only-safe). Every entry is validated: a
+   * non-empty string, a parseable http(s) URL, no embedded userinfo — the
+   * trusted declaration must be syntactically safe at declaration time.
+   */
+  readonly readonlySafeNavigationTargets?: readonly string[];
   readonly steps: readonly ValidationStep[];
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -548,6 +570,37 @@ function isObservationMatcher(value: unknown): value is ObservationMatcher {
 }
 
 /**
+ * Validate one `readonlySafeNavigationTargets` entry at the declaration
+ * boundary (PR #97 fourth architect review correction — the navigation-safety
+ * declaration is owned by the WORK-064 journey authority). An entry must be a
+ * non-empty string that parses as an http(s) URL with no embedded userinfo —
+ * the trusted declaration must be syntactically safe AT DECLARATION TIME.
+ * Returns null when the entry is valid, or the violation reason when invalid.
+ *
+ * (The browser agent's execution-time classification — WORK-065's
+ * `classifyNavigationTarget` — re-checks scheme/userinfo as defense in depth;
+ * this guard is the declaration boundary's own validation of what it declares.)
+ */
+export function validateSafeNavigationTargetEntry(url: string): string | null {
+  if (typeof url !== 'string' || url.trim() === '') {
+    return 'readonlySafeNavigationTargets entry must be a non-empty string';
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return `readonlySafeNavigationTargets entry ${JSON.stringify(url)} is not a parseable URL`;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `readonlySafeNavigationTargets entry ${JSON.stringify(url)} scheme '${parsed.protocol}' is not http(s) — the trusted navigation-safety declaration must be syntactically safe`;
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    return `readonlySafeNavigationTargets entry ${JSON.stringify(url)} embeds userinfo — the trusted navigation-safety declaration must not carry credentials`;
+  }
+  return null;
+}
+
+/**
  * Construct a validated, immutable {@link ValidationJourney}. Rejects empty
  * identifiers/names, invalid vocabularies, duplicate step ids, expected
  * observations whose stepId does not match their owning step, invalid
@@ -660,6 +713,29 @@ export function defineValidationJourney(input: ValidationJourneyInput): Validati
       `journey ${input.id}: a journey declares at least one success criterion`,
     );
   }
+  // THE NAVIGATION-SAFETY DECLARATION (PR #97 fourth architect review
+  // correction): the trusted allowlist is declared HERE, under WORK-064's
+  // authority, as part of the journey itself — every entry must be
+  // syntactically safe (a parseable http(s) URL with no embedded userinfo).
+  // The browser agent has NO input channel to create, replace, or expand this
+  // set; it reads the frozen canonical field. Absent → [] (the safe default:
+  // no navigation is proven read-only-safe).
+  const readonlySafeNavigationTargets = input.readonlySafeNavigationTargets ?? [];
+  if (!Array.isArray(readonlySafeNavigationTargets)) {
+    throw new ValidationDomainError(
+      'VALIDATION_JOURNEY_INVALID',
+      `journey ${input.id}: readonlySafeNavigationTargets must be an array`,
+    );
+  }
+  for (const entry of readonlySafeNavigationTargets) {
+    const violation = validateSafeNavigationTargetEntry(entry);
+    if (violation !== null) {
+      throw new ValidationDomainError(
+        'VALIDATION_JOURNEY_INVALID',
+        `journey ${input.id}: ${violation}`,
+      );
+    }
+  }
   for (const criterion of input.successCriteria) {
     if (!criterion || typeof criterion.id !== 'string' || criterion.id.trim() === '') {
       throw new ValidationDomainError(
@@ -684,6 +760,7 @@ export function defineValidationJourney(input: ValidationJourneyInput): Validati
   }
   return Object.freeze({
     ...input,
+    readonlySafeNavigationTargets: Object.freeze([...readonlySafeNavigationTargets]),
     steps: Object.freeze(input.steps.map((step) => Object.freeze({ ...step }))),
     successCriteria: Object.freeze(input.successCriteria.map((c) => Object.freeze({ ...c }))),
   });

@@ -18,6 +18,7 @@ import {
   TEST_PRINCIPAL_CLASSES,
   defineValidationJourney,
   describeEnvironment,
+  validateSafeNavigationTargetEntry,
   ValidationDomainError,
   type ValidationRun,
   type ExpectedObservation,
@@ -282,6 +283,110 @@ describe('WORK-064 domain — defineValidationJourney guards', () => {
         ],
       }),
     ).toThrow(ValidationDomainError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §2b The navigation-safety declaration (journey-owned) — the PR #97 fourth
+//     architect review correction: readonlySafeNavigationTargets is declared,
+//     validated, and frozen ON THE JOURNEY under WORK-064's authority. There
+//     is no separate declaration object and no executor input channel.
+// ---------------------------------------------------------------------------
+
+describe('WORK-064 domain — the journey-owned navigation-safety declaration guards', () => {
+  it('a journey declared WITHOUT the field defaults to the EMPTY declaration (the safe default — no navigation is proven read-only-safe)', () => {
+    const journey = defineValidationJourney(validJourneyInput);
+    expect(journey.readonlySafeNavigationTargets).toEqual([]);
+  });
+
+  it('a declared navigation-safety declaration is echoed on the canonical journey record and FROZEN', () => {
+    const journey = defineValidationJourney({
+      ...validJourneyInput,
+      readonlySafeNavigationTargets: ['https://example.com/sign-in', 'https://example.com/dashboard'],
+    });
+    expect(journey.readonlySafeNavigationTargets).toEqual([
+      'https://example.com/sign-in',
+      'https://example.com/dashboard',
+    ]);
+    // The declaration is frozen on the immutable record — an executor cannot
+    // mutate the trusted set after declaration:
+    expect(() => {
+      (journey as unknown as { readonlySafeNavigationTargets: string[] }).readonlySafeNavigationTargets = [
+        'https://example.com/delete/123',
+      ];
+    }).toThrow();
+  });
+
+  it('a non-array declaration is rejected (VALIDATION_JOURNEY_INVALID)', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        // @ts-expect-error — the runtime guard rejects a non-array at runtime
+        readonlySafeNavigationTargets: 'https://example.com/sign-in',
+      }),
+    ).toThrow(ValidationDomainError);
+  });
+
+  it('a non-string entry is rejected', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        // @ts-expect-error — the runtime guard rejects a non-string entry
+        readonlySafeNavigationTargets: [42],
+      }),
+    ).toThrow(/non-empty string/);
+  });
+
+  it('an unparseable URL entry is rejected (the trusted declaration must be syntactically safe)', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        readonlySafeNavigationTargets: ['not-a-url'],
+      }),
+    ).toThrow(/not a parseable URL/);
+  });
+
+  it('a non-http(s) scheme entry is rejected (file:, data:, javascript:)', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        readonlySafeNavigationTargets: ['file:///etc/passwd'],
+      }),
+    ).toThrow(/not http\(s\)/);
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        readonlySafeNavigationTargets: ['javascript:void(0)'],
+      }),
+    ).toThrow(/not http\(s\)/);
+  });
+
+  it('an entry with embedded userinfo is rejected (the declaration must not carry credentials)', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        readonlySafeNavigationTargets: ['https://user:pass@example.com/sign-in'],
+      }),
+    ).toThrow(/userinfo/);
+  });
+
+  it('an empty-string entry is rejected', () => {
+    expect(() =>
+      defineValidationJourney({
+        ...validJourneyInput,
+        readonlySafeNavigationTargets: [''],
+      }),
+    ).toThrow(/non-empty string/);
+  });
+
+  it('validateSafeNavigationTargetEntry — the exported boundary guard (null = valid; the reason = the violation)', () => {
+    expect(validateSafeNavigationTargetEntry('https://example.com/sign-in')).toBeNull();
+    expect(validateSafeNavigationTargetEntry('http://127.0.0.1:5173/sign-in')).toBeNull();
+    expect(validateSafeNavigationTargetEntry('https://example.com/confirm?token=abc')).toBeNull(); // a query string is NOT proof of mutation
+    expect(validateSafeNavigationTargetEntry('file:///etc/passwd')).toMatch(/not http\(s\)/);
+    expect(validateSafeNavigationTargetEntry('https://user:pass@example.com/x')).toMatch(/userinfo/);
+    expect(validateSafeNavigationTargetEntry('not-a-url')).toMatch(/not a parseable URL/);
+    expect(validateSafeNavigationTargetEntry('')).toMatch(/non-empty string/);
   });
 });
 
