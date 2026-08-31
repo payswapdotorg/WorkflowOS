@@ -456,4 +456,102 @@ describe('WORK-052 — the post-merge finalization audit binds canonical state t
       auditMergedFinalization(falsePr063, evidence).gaps.join('\n'),
     ).toMatch(/does not match the authoritative PR identity/);
   });
+
+  it('DISCRIMINATION (the WORK-074 finalization — the scope shape binds the RUNTIME work order, NEVER the SPEC it names as a topic): the real history binds WORK-074 ↔ PR #99 ↔ cdedd0ca and does NOT bind WORK-063 through the WORK-074 merge subject; state-only finalization subjects stay excluded', () => {
+    // The actual WORK-074 architect merge (PR #99, squash-merged at the
+    // approved head 25512f4 on 2026-08-31T05:08:54Z) carries the subject
+    // "feat(work-074): Identity & Access Runtime Activation — the WORK-063
+    // RUNTIME (human login, server-side sessions, scoped machine identity,
+    // the demo-key retirement) (#99)" — the FOURTH shape (the work-order id
+    // in the SCOPE position), with a title that names WORK-063 as the SPEC
+    // being implemented. The binding position is the scope: the commit is
+    // WORK-074's merge evidence — and precisely BECAUSE the binding is the
+    // scope, the WORK-063 mention in the title (topic position) must NOT
+    // bind WORK-063: WORK-063's merge evidence remains EXACTLY its own
+    // governance-decision merge (8dac9c4, PR #81). The audit-level identity:
+    // WORK-074 ↔ PR #99 ↔ cdedd0ca on the real first-parent history.
+    const evidence = collectMergeEvidenceFromRepository(REPO_ROOT);
+    const WORK_074_MERGE = 'cdedd0ca3c72821d289d8d9d683f9902ddca480f';
+    const WORK_071_MERGE = '8604c8a5286b7533caf907c25fcd4dfdeeb662eb';
+    // EXACT equality — the scope shape binds the WORK-074 merge, and nothing
+    // else (no state-only commit) hides in the evidence list.
+    expect(evidence.byWorkOrder.get('WORK-074')).toEqual([WORK_074_MERGE]);
+    // The WORK-071 merge (PR #96, subject "feat(work-071): the Local
+    // Development Runtime Substrate — … (#96)") binds EXACTLY the same way.
+    expect(evidence.byWorkOrder.get('WORK-071')).toEqual([WORK_071_MERGE]);
+    // THE SPEC/RUNTIME DISCRIMINATION: the WORK-074 merge subject NAMES
+    // WORK-063 ("the WORK-063 RUNTIME") — and WORK-063's evidence must
+    // remain EXACTLY its own merge. Exact equality proves the WORK-074 merge
+    // (and the WORK-074 finalization commit, once on main) can never leak
+    // into WORK-063's evidence.
+    expect(evidence.byWorkOrder.get('WORK-063')).toEqual(['8dac9c47f7397e22765478520ac71659d37e1783']);
+    expect(evidence.byWorkOrder.get('WORK-063')!).not.toContain(WORK_074_MERGE);
+    // Squash merges bind by work-order id, not PR subject: PR #99 and #96
+    // have NO "Merge pull request" subject on the first-parent chain.
+    expect(evidence.byPr.has(99)).toBe(false);
+    expect(evidence.byPr.has(96)).toBe(false);
+    // COLLECTOR-LEVEL exclusion of the state-only finalization subjects: the
+    // actual finalization convention `chore(governance): the WORK-074
+    // post-merge finalization — … (#PR)` (scope = the word `governance`) and
+    // the hypothetical mis-scoped `chore(work-074): the WORK-074 post-merge
+    // finalization — …` (the title names the SAME work order as a topic —
+    // the id must appear exactly once, in the binding position) NEVER enter
+    // the evidence.
+    const finalizationOnly = collectMergeEvidenceFromLines([
+      '4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e chore(governance): the WORK-074 post-merge finalization (§34.8/ADR-0007) — the canonical state reconciled with the cdedd0ca merge (#100)',
+      '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f chore(work-074): the WORK-074 post-merge finalization — state-only reconciliation',
+      '6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a Governance: the WORK-074 post-merge finalization — state-only reconciliation',
+      '7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b WORK-074 post-merge finalization — state-only reconciliation',
+    ]);
+    expect(finalizationOnly.byWorkOrder.has('WORK-074')).toBe(false);
+    expect(finalizationOnly.byWorkOrder.has('WORK-063')).toBe(false);
+    // AUDIT-LEVEL proof: a history containing ONLY the finalization shapes
+    // does NOT bind WORK-074 (or WORK-063) as merged — a state-only
+    // reconciliation is not a completion event and can never satisfy (or
+    // violate) the merged-finalization invariant.
+    const auditFinalizationOnly = auditMergedFinalization(realProgram, finalizationOnly);
+    expect(auditFinalizationOnly.mergedWorkOrderIds).not.toContain('WORK-074');
+    expect(auditFinalizationOnly.mergedWorkOrderIds).not.toContain('WORK-063');
+    expect(auditFinalizationOnly.gaps).toEqual([]);
+    // The REAL program (post-finalization): WORK-074 is complete with the
+    // FULL provenance identity — mergedAs {pr: 99, mergeCommit: cdedd0ca…} —
+    // and the real history audits clean (the finalization closed the red
+    // window the merge opened).
+    const audit = auditMergedFinalization(realProgram, evidence);
+    expect(audit.gaps).toEqual([]);
+    expect(audit.mergedWorkOrderIds).toContain('WORK-071');
+    expect(audit.mergedWorkOrderIds).toContain('WORK-074');
+    const w074 = realProgram.workOrders.find((w) => w.id === 'WORK-074')!;
+    expect(w074.status).toBe('complete');
+    expect(w074.mergedAs).toEqual({ pr: 99, mergeCommit: WORK_074_MERGE });
+    // DISCRIMINATION (in memory, the REAL evidence): the exact false state
+    // the finalization exists to prevent — WORK-074 merged (cdedd0ca) while
+    // still represented as in_flight — is DETECTED on the real history (this
+    // was the live red window between the PR #99 merge and this
+    // finalization: the audit reported exactly this gap, 11/12 finalized).
+    const unfinalized074 = structuredClone(realProgram);
+    const mutated074 = unfinalized074.workOrders.find((w) => w.id === 'WORK-074')!;
+    mutated074.status = 'in_flight';
+    delete (mutated074 as { mergedAs?: unknown }).mergedAs;
+    const gaps074 = auditMergedFinalization(unfinalized074, evidence).gaps;
+    expect(gaps074.join('\n')).toMatch(/WORK-074.*MERGED/);
+    expect(gaps074.join('\n')).toContain('cdedd0ca3');
+    expect(gaps074.join('\n')).toMatch(/post-merge finalization protocol/);
+    // DISCRIMINATION (the PR identity, the PR #63 round-2 rule): a complete
+    // WORK-074 record whose mergedAs.pr is not the authoritative PR identity
+    // (99) is DETECTED — the PR number is validated, not stored.
+    const falsePr074 = structuredClone(realProgram);
+    falsePr074.workOrders.find((w) => w.id === 'WORK-074')!.mergedAs = {
+      pr: 999,
+      mergeCommit: WORK_074_MERGE,
+    };
+    expect(
+      auditMergedFinalization(falsePr074, evidence).gaps.join('\n'),
+    ).toMatch(/does not match the authoritative PR identity/);
+    // …and the same full identity holds for WORK-071 (complete since the
+    // PR #99 reconciliation recorded it).
+    const w071 = realProgram.workOrders.find((w) => w.id === 'WORK-071')!;
+    expect(w071.status).toBe('complete');
+    expect(w071.mergedAs).toEqual({ pr: 96, mergeCommit: WORK_071_MERGE });
+  });
 });

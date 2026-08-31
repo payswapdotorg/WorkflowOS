@@ -66,7 +66,7 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(56); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a)
+    expect(complete.length).toBeGreaterThanOrEqual(57); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a) + WORK-074 (cdedd0ca)
     // WORK-064 (Continuous Product Validation — the domain/model authority)
     // was ACTIVATED by the architect on 2026-08-30, implemented on branch
     // feat/work-064-continuous-validation (PR #86), MERGED by the architect
@@ -76,10 +76,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // complete with its merge evidence — the reconciliation of PR #99 onto
     // the post-#96 mainline recomputed the governance state accordingly.
     // WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME)
-    // is now the ONE IN-FLIGHT item (branch
-    // feat/work-074-identity-access-runtime) — the dogfooding gate's
-    // authentication precondition under implementation.
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-074']);
+    // was MERGED by the architect as cdedd0ca via PR #99 (2026-08-31,
+    // squash-merged at the approved head 25512f4) and is recorded complete
+    // per §34.8/ADR-0007 by the WORK-074 post-merge finalization — NOTHING
+    // is in flight (57/57 recorded work orders complete).
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -110,6 +111,8 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w064?.mergedAs).toEqual({ pr: 86, mergeCommit: 'c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b' });
     const w071 = complete.find((w) => w.id === 'WORK-071');
     expect(w071?.mergedAs).toEqual({ pr: 96, mergeCommit: '8604c8a5286b7533caf907c25fcd4dfdeeb662eb' });
+    const w074 = complete.find((w) => w.id === 'WORK-074');
+    expect(w074?.mergedAs).toEqual({ pr: 99, mergeCommit: 'cdedd0ca3c72821d289d8d9d683f9902ddca480f' });
     for (const w of inFlight) {
       expect(w.mergedAs, `${w.id} (in_flight) must NOT carry merge evidence`).toBeUndefined();
     }
@@ -118,13 +121,15 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     const frontier = fresh.getFrontier();
     // WORK-064 was ACTIVATED 2026-08-30, MERGED by the architect as c351451
     // via PR #86, and FINALIZED complete per §34.8/ADR-0007. WORK-071 was
-    // MERGED as 8604c8a5 via PR #96 and recorded complete in this
-    // reconciliation. WORK-074 (the identity & access runtime) is now the
-    // ONE in-flight item; WORK-053..061 and WORK-065..070 are
-    // future-generation items not yet recorded in program-state (WORK-065
-    // and WORK-067 are dependency-eligible on the complete WORK-064 — NOT
-    // activated, the architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-074']);
+    // MERGED as 8604c8a5 via PR #96 and recorded complete in the PR #99
+    // reconciliation. WORK-074 was MERGED as cdedd0ca via PR #99 (2026-08-31,
+    // squash-merged at the approved head 25512f4) and recorded complete per
+    // §34.8/ADR-0007 by the WORK-074 post-merge finalization — NOTHING is in
+    // flight; WORK-053..061 and WORK-065..070 are future-generation items not
+    // yet recorded in program-state (WORK-065 and WORK-067 are
+    // dependency-eligible on the complete WORK-064 — NOT activated, the
+    // architect's authorization is required).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
@@ -483,18 +488,19 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // started items (all three live records are complete-and-merged:
       // WORK-050 by 8f27cc7/PR #78, WORK-062 by f0855d2/PR #82, WORK-064 by
       // c351451/PR #86 — the last finalized by the change under test).
-      // WORK-071 (complete-and-merged as 8604c8a5/PR #96 by this
-      // reconciliation) is therefore NOT in the rebuilt in-flight set — its
-      // live record carries its merge evidence. WORK-074 is ALSO in the
-      // rebuilt state — the LIVE in-flight record (the identity runtime
-      // under implementation); outcomes never complete it either.
-      expect(stillInFlight.sort()).toEqual(['WORK-050', 'WORK-062', 'WORK-064', 'WORK-074']);
+      // WORK-071 (complete-and-merged as 8604c8a5/PR #96 by the PR #99
+      // reconciliation) and WORK-074 (complete-and-merged as cdedd0ca/PR #99
+      // by the §34.8/ADR-0007 post-merge finalization) are therefore NOT in
+      // the rebuilt in-flight set — their live records carry their merge
+      // evidence.
+      expect(stillInFlight.sort()).toEqual(['WORK-050', 'WORK-062', 'WORK-064']);
       expect(claimsOnly.getWorkOrder('WORK-050').mergedAs).toBeUndefined();
       expect(claimsOnly.getWorkOrder('WORK-062').mergedAs).toBeUndefined();
       expect(claimsOnly.getWorkOrder('WORK-064').mergedAs).toBeUndefined();
-      // WORK-074 is the LIVE in-flight record — no merge evidence (it has
-      // not merged; the in-flight discipline).
-      expect(claimsOnly.getWorkOrder('WORK-074').mergedAs).toBeUndefined();
+      // WORK-071 and WORK-074 are live complete-and-merged records — their
+      // merge evidence survives the fixture rebuild untouched.
+      expect(claimsOnly.getWorkOrder('WORK-071').mergedAs).toEqual({ pr: 96, mergeCommit: '8604c8a5286b7533caf907c25fcd4dfdeeb662eb' });
+      expect(claimsOnly.getWorkOrder('WORK-074').mergedAs).toEqual({ pr: 99, mergeCommit: 'cdedd0ca3c72821d289d8d9d683f9902ddca480f' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

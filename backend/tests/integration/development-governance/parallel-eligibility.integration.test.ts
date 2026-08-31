@@ -185,21 +185,22 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     const a052 = report.assessments.find((a) => a.workOrderId === 'WORK-052')!;
     expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
-    // Evaluating the merged pair as candidates surfaces exactly ONE live
-    // conflict partner: WORK-074 (Identity & Access Runtime Activation) is
-    // IN FLIGHT and shares the static-architecture suite surface this
-    // historical pair made durable history on. WORK-064 (merged c351451 via
-    // PR #86, finalized §34.8/ADR-0007), WORK-050 (merged 8f27cc7),
-    // WORK-062 (merged f0855d2 via PR #82, finalized complete per
-    // §34.8/ADR-0007), and WORK-071 (merged 8604c8a5 via PR #96 before this
-    // reconciliation — its overlap with WORK-046 on app.ts and the suite
-    // surface is now durable history too) are NOT live partners — merged
-    // items are durable history. The frontier is the authoritative live
-    // view: WORK-074 is the ONE item in flight.
-    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-074']);
-    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-074']);
+    // Evaluating the merged pair as candidates surfaces NO live conflict
+    // partner: WORK-074 (Identity & Access Runtime Activation) — which
+    // shares the static-architecture suite surface this historical pair made
+    // durable history on — was MERGED by the architect as cdedd0ca via PR #99
+    // (2026-08-31, finalized §34.8/ADR-0007) and is durable history like the
+    // rest: WORK-064 (merged c351451 via PR #86, finalized §34.8/ADR-0007),
+    // WORK-050 (merged 8f27cc7), WORK-062 (merged f0855d2 via PR #82,
+    // finalized complete per §34.8/ADR-0007), and WORK-071 (merged 8604c8a5
+    // via PR #96 — its overlap with WORK-046 on app.ts and the suite surface
+    // is durable history too) are NOT live partners — merged items are
+    // durable history. The frontier is the authoritative live view: NOTHING
+    // is in flight.
+    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
+    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-074']);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -426,7 +427,7 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: 56 recorded items complete; WORK-074 (the identity & access runtime) is the ONE in-flight item; nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
+  it('W052-AC03 — the REAL frontier: 57 recorded items complete (WORK-074 — the identity & access runtime — COMPLETE since the cdedd0ca/PR #99 merge); NOTHING is in flight; nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
     const frontier = realService.getFrontier();
     expect(frontier.dependencyEligible).toEqual([]);
     // WORK-064 (Continuous Product Validation — the domain/model authority)
@@ -439,15 +440,16 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     // architect via PR #96 (2026-08-31) and is recorded complete with its
     // merge evidence — the reconciliation of PR #99 onto the post-#96
     // mainline recomputed the governance state accordingly. WORK-074
-    // (Identity & Access Runtime Activation — the WORK-063 RUNTIME) is now
-    // ACTIVATED and IN FLIGHT (branch feat/work-074-identity-access-runtime)
-    // — the dogfooding gate's authentication precondition under
-    // implementation. Nothing is blocked (WORK-053..061 and WORK-065..070
+    // (Identity & Access Runtime Activation — the WORK-063 RUNTIME) was
+    // MERGED by the architect as cdedd0ca via PR #99 (2026-08-31,
+    // squash-merged at the approved head 25512f4) and is recorded complete
+    // per §34.8/ADR-0007 by the WORK-074 post-merge finalization — NOTHING
+    // is in flight. Nothing is blocked (WORK-053..061 and WORK-065..070
     // are future-generation items not yet recorded in program-state;
     // WORK-065 and WORK-067 are dependency-eligible on the complete
     // WORK-064 but NOT activated).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-074']);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.blocked).toEqual([]);
-    expect(frontier.complete.length).toBeGreaterThanOrEqual(56);
+    expect(frontier.complete.length).toBeGreaterThanOrEqual(57);
   });
 });

@@ -205,24 +205,32 @@ The dogfood run is the canonical acceptance journey.
 The first official dogfood run is gated on:
 
 1. **WORK-074 (Identity & Access Runtime Activation — the runtime
-   implementation of WORK-063's spec) is complete and merged** (the normal
-   authentication path is functional: Google/GitHub/email login, server-side
-   sessions, scoped machine identity; the demo key is retired from the customer
-   login path). WORK-063 (the SPEC) is already merged complete as
-   `8dac9c4` via PR #81 (spec-only, finalized §34.8/ADR-0007) — but the spec
-   merge is NOT the runtime. The gate references the RUNTIME Work Order
-   (WORK-074), not the spec (WORK-063), because the runtime identity layer
-   remains UNIMPLEMENTED until WORK-074 lands. The dogfooding experiment
-   confirmed this empirically (finding F-1: the LoginPage exposes ONLY an
-   API-key input; there is NO Google/GitHub/email login surface).
+   implementation of WORK-063's spec) is complete and merged** — SATISFIED
+   (2026-08-31, the WORK-074 post-merge finalization): WORK-074 was merged by
+   the architect as `cdedd0ca3c72821d289d8d9d683f9902ddca480f` via PR #99
+   (squash-merged at the approved head `25512f4`; finalized per
+   §34.8/ADR-0007) — the normal authentication path is functional:
+   Google/GitHub/email login, server-side sessions, scoped machine identity;
+   the demo key is retired from the customer login path. WORK-063 (the SPEC)
+   is already merged complete as `8dac9c4` via PR #81 (spec-only, finalized
+   §34.8/ADR-0007) — the spec merge is NOT the runtime; the gate references
+   the RUNTIME Work Order (WORK-074), not the spec (WORK-063). The dogfooding
+   experiment had confirmed the gap empirically (finding F-1: the LoginPage
+   exposed ONLY an API-key input; there was NO Google/GitHub/email login
+   surface). WORK-063 remains complete = the architecture/specification
+   identity; WORK-074 is complete = the runtime implementation — the two
+   identities are NOT collapsed.
 2. **WORK-071 (Local Development Runtime Substrate) is complete, OR an
-   equivalent supported runtime environment is available** (a real customer —
-   and the dogfooding experiment — can run the application locally against real
-   authorities without requiring an externally hosted PostgreSQL). The
-   dogfooding experiment confirmed the gap empirically (finding F-2: the
-   composition root leaves `database` undefined when `DATABASE_URL` is absent;
-   there is no local fallback; a PGlite `DatabaseClient` adapter already exists
-   but the production composition does not wire it for a dev path).
+   equivalent supported runtime environment is available** — SATISFIED
+   (2026-08-31): WORK-071 was merged as
+   `8604c8a5286b7533caf907c25fcd4dfdeeb662eb` via PR #96 (the explicit
+   `WORKFLOWOS_DEV_RUNTIME=pglite` dev path — a real customer can run the
+   application locally against real authorities without an externally hosted
+   PostgreSQL). The dogfooding experiment had confirmed the gap empirically
+   (finding F-2: the composition root left `database` undefined when
+   `DATABASE_URL` was absent; there was no local fallback; a PGlite
+   `DatabaseClient` adapter already existed but the production composition
+   did not wire it for a dev path).
 3. WORK-064 (Continuous Product Validation) is implemented and merged
    (the ValidationJourney/EffectPolicy model is in force) — SATISFIED:
    COMPLETE (merged as `c351451` via PR #86 and finalized §34.8/ADR-0007
@@ -236,9 +244,15 @@ The first official dogfood run is gated on:
 
 Until these are in place, the dogfood run is staged: the customer
 journeys that do not require authentication (public read paths) can run
-in PRE_MERGE; the authenticated journeys are FORBIDDEN until WORK-074
-lands (the runtime identity layer specified by WORK-063 is UNIMPLEMENTED
-without it).
+in PRE_MERGE; the authenticated journeys were FORBIDDEN until WORK-074
+landed (the runtime identity layer specified by WORK-063 was UNIMPLEMENTED
+without it). **Live state (2026-08-31, the WORK-074 post-merge
+finalization):** gate items 1 and 2 are SATISFIED (WORK-074 merged `cdedd0ca`
+via PR #99 and finalized §34.8/ADR-0007; WORK-071 merged `8604c8a` via
+PR #96) — the first full authenticated/local dogfooding experiment is
+PERMITTED and NOT started (the architect's authorization governs the run;
+the browser-validation portion remains gated on item 4 — WORK-065..070,
+PLANNED, NOT activated).
 
 The repository records that this is the canonical acceptance journey
 for WorkflowOS-as-a-product. A fresh Architect LLM resuming the program
@@ -260,11 +274,16 @@ equivalent supported runtime) lets the dogfood run actually exercise the
 application locally.
 
 The dogfooding experiment's governed follow-up Work Orders (WORK-071,
-WORK-072, WORK-073, WORK-074) are PLANNED, NOT activated, NOT started — the
-architect's authorization is required. WORK-072 (Authentication State
-Synchronization) and WORK-073 (Create Project Organization Selection) are
-independent frontend product-defect fixes (findings F-3 and F-4) that may be
-done in parallel with the dogfooding-gate enablers; they do NOT gate the
+WORK-072, WORK-073, WORK-074) were issued PLANNED, NOT activated — the
+architect's authorization was required. **Live state (2026-08-31):** the two
+dogfooding-gate enablers are COMPLETE (WORK-074 merged `cdedd0ca` via PR #99
+and finalized §34.8/ADR-0007; WORK-071 merged `8604c8a` via PR #96) — the
+gate's authentication + local-runtime edges are SATISFIED and the first full
+authenticated/local dogfooding experiment is PERMITTED and NOT started;
+WORK-072 (Authentication State Synchronization) and WORK-073 (Create Project
+Organization Selection) remain PLANNED, NOT activated, NOT started — the
+architect's authorization is required. They are independent frontend
+product-defect fixes (findings F-3 and F-4) that do NOT gate the
 dogfood run, but they remove P2 UX defects a real customer would encounter.
 See `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`
 for the full experiment record and the finding→Work-Order mapping.

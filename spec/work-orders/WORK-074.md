@@ -1,10 +1,31 @@
 # WORK-074 — Identity & Access Runtime Activation
 
-Status: in flight (activated 2026-08-30 by the architect's implementation
+Status: COMPLETE — merged by the architect as
+`cdedd0ca3c72821d289d8d9d683f9902ddca480f` (PR #99, squash-merged at the
+approved review-remediated head `25512f4d5be89001c4774ed8440f9de15cf42364` on
+2026-08-31T05:08:54Z; single parent `8604c8a` — the post-#96 mainline; the
+merge tree is IDENTICAL to the approved head, verified with an empty
+`git diff 25512f4..cdedd0ca`). The post-merge finalization §34.8/ADR-0007
+(the WORK-063/WORK-064 precedent) records the completion in the canonical
+state (`status complete` + `mergedAs {pr: 99, mergeCommit: cdedd0ca…}` +
+no active handoff — merged work is not resumable) and the branch/PR are kept
+as the historical record of how it merged. The merged-finalization audit
+binds WORK-074 ↔ PR #99 ↔ `cdedd0ca` on the real first-parent history (the
+`type(work-NNN): title (#PR)` conventional-commit scope subject — the fourth
+merge-evidence shape the audit recognizes; the title names WORK-063 as the
+SPEC being implemented, which does NOT bind WORK-063 — WORK-063's merge
+evidence remains exactly the `8dac9c4` governance-decision merge). The
+delivery is the WORK-063 identity model as RUNTIME — nothing re-architected,
+no second authority. WORK-063 remains complete = the
+architecture/specification identity (spec-only, `8dac9c4`); WORK-074 is
+complete = the runtime implementation — the two identities are NOT collapsed.
+
+Activation record (preserved history): activated 2026-08-30 by the architect's
+implementation
 instruction — the dogfooding gate's authentication precondition, finding F-1;
-the activation is recorded in
+the activation was recorded in
 `spec/development-state/program-state.json`, branch
-`feat/work-074-identity-access-runtime`, implementation PR #99). The implementation delivers the WORK-063 identity
+`feat/work-074-identity-access-runtime`, implementation PR #99. The implementation delivered the WORK-063 identity
 model as RUNTIME — nothing re-architected, no second authority:
 
 1. **Human login** — the WORK-063 providers behind the SAME `AuthProvider`
@@ -478,3 +499,64 @@ STOP and raise an Architecture Change Request if implementation requires:
   design. WORK-063's own Definition of Done — the spec delivery — is already
   complete. This Work Order's Definition of Done is satisfied only when the
   runtime is implemented, proven, and merged.)
+
+## Post-merge finalization (§34.8/ADR-0007 — recorded 2026-08-31)
+
+The post-merge finalization (the WORK-052/WORK-063/WORK-064 precedent; a
+data-only governance change plus the merged-finalization audit's discriminating
+regressions — this finalization commit deliberately does NOT follow any
+architect-merge convention: the subject is `chore(governance): the WORK-074
+post-merge finalization — …`, whose scope is the word `governance`, never a
+work-order id, so it can never be misclassified as the architect's merge
+evidence):
+
+- The canonical state reconciled with the `cdedd0ca` merge (PR #99,
+  squash-merged at the approved head `25512f4` on 2026-08-31T05:08:54Z; single
+  parent `8604c8a`; the merge tree is IDENTICAL to the approved head —
+  verified with an empty `git diff 25512f4..cdedd0ca`, the same §34.8
+  provenance verification the WORK-063 and WORK-064 finalizations ran):
+  status complete + `mergedAs {pr: 99, mergeCommit:
+  cdedd0ca3c72821d289d8d9d683f9902ddca480f}` + this work-order document's
+  status updated truthfully with the finalization evidence APPENDED (history
+  preserved, not rewritten); branch/pr kept as the historical record of how it
+  merged. The merged delivery is the WORK-063 RUNTIME (the implementation
+  summary above, including the PR #99 review's OAuth browser-binding
+  login-CSRF remediation — the pre-auth transaction cookie bound to the
+  initiating browser, the state+binding+expiry atomic single-use consume, and
+  the cross-browser discrimination regressions) — and the PR #99
+  reconciliation onto the post-#96 mainline had already carried WORK-071's
+  completion (`8604c8a` via PR #96) into the canonical state. NO other Work
+  Order is activated or implemented by the finalization: WORK-065/067/072/073
+  remain PLANNED, NOT activated, NOT started; dogfooding has NOT started.
+- The active handoff: NONE existed to remove — `resumption.activeHandoffs`
+  was empty before and after (the in-flight record carried no handoff: its
+  delivery was the live implementation PR itself); merged work is not
+  resumable.
+- The merged-finalization audit: the actual WORK-074 architect merge carries
+  the subject `feat(work-074): Identity & Access Runtime Activation — the
+  WORK-063 RUNTIME (…) (#99)` — the conventional-commit scope convention (the
+  FOURTH merge-evidence shape, recognized since the WORK-064 finalization: the
+  work-order id in the SCOPE position, canonicalized from the lowercase
+  branch-derived form). The audit binds WORK-074 ↔ PR #99 ↔ `cdedd0ca` on the
+  real first-parent history. The discriminating property is pinned by the
+  WORK-074 finalization's regression: the title names WORK-063 (`the WORK-063
+  RUNTIME`) — as the SPEC being implemented, in TOPIC position — and the audit
+  does NOT bind the commit to WORK-063 (the scope-position binding + the
+  topic-position exclusion hold: WORK-063's merge evidence remains exactly the
+  `8dac9c4` governance-decision merge). State-only finalization subjects
+  (`chore(governance): the WORK-074 post-merge finalization — …`) remain
+  structurally excluded from merge evidence — the exclusion is proven by the
+  same regression at the collector level and by the audit level (a history
+  containing only the finalization subject binds nothing).
+- The dependency frontier recomputed: 57/57 recorded work orders complete,
+  NOTHING in flight; `currentMain` = `cdedd0ca3c72821d289d8d9d683f9902ddca480f`.
+- The dogfooding gate re-evaluated (spec/architecture/v1.1/dogfooding-model.md
+  §8): the two enabler edges — item 1 (WORK-074 complete) and item 2
+  (WORK-071 complete) — are SATISFIED. Per the gate's design, the first full
+  authenticated/local dogfooding experiment is PERMITTED and NOT started (the
+  architect's authorization governs the run; the browser-validation portion
+  remains gated on WORK-065..070).
+- WORK-063's identity is preserved: complete = the architecture/specification
+  (spec-only, `8dac9c4`, PR #81). WORK-074's completion claims NO runtime
+  authorship of WORK-063 — WORK-063 implemented nothing; WORK-074 implemented
+  what WORK-063 specified.

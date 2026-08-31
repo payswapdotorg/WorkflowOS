@@ -197,36 +197,45 @@ WORK-063 (Identity & Access — COMPLETE: merged 8dac9c4 via PR #81, spec-only, 
     ↓
 WORK-074 (Identity & Access Runtime Activation — the "WORK-063-RUNTIME" of
           the dogfooding experiment's design; the runtime implementation of
-          WORK-063's spec; PLANNED, NOT activated, NOT started)
+          WORK-063's spec; COMPLETE: merged cdedd0ca via PR #99 on 2026-08-31,
+          finalized §34.8/ADR-0007)
     │
     └── enables ──→ authenticated dogfooding (the dogfooding gate's
                     authentication precondition; the repo no longer implies
                     that merely merging WORK-063's architecture specification
-                    means real authentication exists)
+                    means real authentication exists) — SATISFIED: the runtime
+                    identity layer is on main
 
 WORK-003 (complete) + WORK-023 (complete)
     │
     ↓
 WORK-071 (Local Development Runtime Substrate — a dev-only PGlite-backed
           path so WorkflowOS can be exercised without externally hosted
-          PostgreSQL; PLANNED, NOT activated, NOT started)
+          PostgreSQL; COMPLETE: merged 8604c8a via PR #96 on 2026-08-31)
     │
     └── enables ──→ local dogfooding (the dogfooding gate's local-runtime
                     precondition; parallel-safe with WORK-074 — different
                     protected surfaces: the platform/runtime substrate vs
-                    the identity/auth runtime)
+                    the identity/auth runtime) — SATISFIED
 
 # the dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8):
 #   WORK-074 complete AND WORK-071 complete (or equivalent supported runtime)
 #   → the canonical first full dogfooding journey may begin.
+#   (2026-08-31, the WORK-074 post-merge finalization: BOTH edges are SATISFIED
+#   — WORK-074 merged cdedd0ca via PR #99; WORK-071 merged 8604c8a via PR #96.
+#   The first full authenticated/local dogfooding experiment is PERMITTED and
+#   NOT started — the architect's authorization governs the run.)
 
 WORK-072 (Authentication State Synchronization — a frontend product-defect
           fix; no hard deps; the defect exists in the current frontend and the
           fix is frontend-only and provider-independent; PLANNED, NOT
           activated, NOT started)
     │
-    └── CONFLICTING with WORK-074 on the shared LoginPage/useAuth/App.tsx
-        surface (coordinate, or sequence WORK-072 after WORK-074)
+    └── CONFLICTING (historical) with WORK-074 on the shared
+        LoginPage/useAuth/App.tsx surface — RESOLVED on the surface: WORK-074
+        is COMPLETE (merged cdedd0ca via PR #99), so no live in-flight partner
+        remains; the fuller auth-state discrimination suite remains WORK-072's
+        scope
 
 WORK-073 (Create Project Organization Selection — a frontend product-defect
           fix; no hard deps; uses the existing organizations/projects
@@ -241,19 +250,21 @@ WORK-073 (Create Project Organization Selection — a frontend product-defect
 # Safe parallelism (the dogfooding follow-up):
 #   - WORK-071 || WORK-074 (wave 12): the two dogfooding-gate enablers;
 #     different protected surfaces (platform/runtime substrate vs identity/
-#     auth runtime).
+#     auth runtime). (Both are now COMPLETE — WORK-071 as 8604c8a via PR #96,
+#     WORK-074 as cdedd0ca via PR #99; wave 12 is done.)
 #   - WORK-072 || WORK-073 (wave 13): the two frontend product-defect fixes;
 #     different protected surfaces (LoginPage/useAuth/App vs ProjectListPage).
-#   - WORK-072 CONFLICTS with WORK-074 (shared LoginPage/useAuth/App.tsx
-#     surface) — wave 13 follows wave 12 to the conflict, or the two
-#     coordinate if concurrent.
+#   - WORK-072 CONFLICTED (historical) with WORK-074 (shared
+#     LoginPage/useAuth/App.tsx surface) — resolved on the surface: WORK-074
+#     is COMPLETE (merged cdedd0ca via PR #99), so no live in-flight partner
+#     remains.
 #   - WORK-073 is parallel-safe with everything (independent frontend surface).
 ```
 
 Exact edges (the dogfooding follow-up):
 
-- WORK-074 ← WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-074 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-071 ← WORK-003 (complete), WORK-023 (complete) → WORK-071 is DEPENDENCY-ELIGIBLE and NOT activated
+- WORK-074 ← WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-074 was ACTIVATED and is COMPLETE: merged cdedd0ca via PR #99 (2026-08-31, finalized §34.8/ADR-0007 — the RUNTIME is on main)
+- WORK-071 ← WORK-003 (complete), WORK-023 (complete) → WORK-071 was ACTIVATED and is COMPLETE: merged 8604c8a via PR #96 (2026-08-31)
 - WORK-072 ← (no hard dependencies) → WORK-072 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-073 ← (no hard dependencies) → WORK-073 is DEPENDENCY-ELIGIBLE and NOT activated
 
@@ -273,11 +284,16 @@ does NOT rewrite that invariant. The dogfooding evidence artifact
 (`spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`,
 finding F-1) records the empirical confirmation: the LoginPage exposes ONLY an
 API-key input; there is NO Google/GitHub/email login surface; the runtime
-identity layer is UNIMPLEMENTED. WORK-074 implements it. The dogfooding gate
-(`spec/architecture/v1.1/dogfooding-model.md` §8) now requires WORK-074
-complete AND WORK-071 complete (or an equivalent supported runtime environment)
-— the repository no longer implies that merely merging WORK-063's architecture
-specification means real authentication exists.
+identity layer WAS UNIMPLEMENTED (the dogfooding experiment's finding F-1).
+WORK-074 implemented it: the runtime is on main since the cdedd0ca merge via
+PR #99 (2026-08-31, finalized §34.8/ADR-0007 — human login, server-side
+sessions, scoped machine identity, the Workbench off the demo key). The
+dogfooding gate (`spec/architecture/v1.1/dogfooding-model.md` §8) requires
+WORK-074 complete AND WORK-071 complete (or an equivalent supported runtime
+environment) — the repository no longer implies that merely merging WORK-063's
+architecture specification means real authentication exists, and BOTH edges are
+now SATISFIED (2026-08-31): the first full authenticated/local dogfooding
+experiment is PERMITTED and NOT started.
 
 WORK-071 (Local Development Runtime Substrate) is the dev-only runtime path.
 The dogfooding evidence artifact (finding F-2) records the empirical
@@ -307,8 +323,11 @@ update (App.tsx:26 and LoginPage.tsx:9 each instantiate `useAuth()` separately
 The fix establishes a single canonical auth-state source (an auth-context
 provider or an observable auth client) observed synchronously by the App shell
 and all consumers — provider-independent (it carries forward to the real
-OAuth/email path WORK-074 will provide). WORK-072 CONFLICTS with WORK-074 on
-the shared LoginPage/useAuth/App.tsx surface.
+OAuth/email path WORK-074 now provides — WORK-074 is COMPLETE (merged cdedd0ca
+via PR #99) and WORK-072's fuller auth-state discrimination suite remains that
+Work Order's scope). WORK-072's historical conflict with WORK-074 on the shared
+LoginPage/useAuth/App.tsx surface is RESOLVED on the surface (no live in-flight
+partner remains).
 
 WORK-073 (Create Project Organization Selection) is the frontend product-defect
 fix. The dogfooding evidence artifact (finding F-4, independently verified
@@ -323,16 +342,19 @@ explicit errors when the authority is unavailable (no fabricated empty state),
 and preserves tenant isolation (the frontend never invents organization
 membership).
 
-WORK-071, WORK-072, WORK-073, WORK-074 are PLANNED and NOT activated. The
-architect's authorization is required to activate any of them (recorded in
-`program-state.json`). Each carries parallel-execution metadata
-(`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
-`parallel-execution-metadata.md` and each Work Order's `Parallel-execution
-metadata` section. The dogfooding gate (the canonical first full dogfooding
-journey) requires WORK-074 complete AND WORK-071 complete (or an equivalent
-supported runtime environment); WORK-072 and WORK-073 are independent
-product-defect fixes that may be done in parallel with the dogfooding-gate
-enablers (subject to the WORK-072↔WORK-074 conflict).
+WORK-072 and WORK-073 are PLANNED and NOT activated; WORK-071 and WORK-074 —
+the two dogfooding-gate enablers — were ACTIVATED by the architect and are
+COMPLETE (WORK-071 merged 8604c8a via PR #96; WORK-074 merged cdedd0ca via
+PR #99, finalized §34.8/ADR-0007). The architect's authorization is required
+to activate any planned Work Order (recorded in `program-state.json`). Each
+carries parallel-execution metadata (`parallelEligibility`,
+`parallelConflicts`, `protectedSurfaces`) — see `parallel-execution-metadata.md`
+and each Work Order's `Parallel-execution metadata` section. The dogfooding
+gate (the canonical first full dogfooding journey) requires WORK-074 complete
+AND WORK-071 complete (or an equivalent supported runtime environment) — BOTH
+edges are SATISFIED (2026-08-31): the first full authenticated/local dogfooding
+experiment is PERMITTED and NOT started; WORK-072 and WORK-073 remain
+independent product-defect fixes, PLANNED, NOT activated, NOT started.
 
 > **Customer dogfooding follow-up note (2026-08-30):** WORK-071, WORK-072,
 > WORK-073, WORK-074 are NEW Work Orders issued by the 2026-08-30 customer
@@ -345,6 +367,10 @@ enablers (subject to the WORK-072↔WORK-074 conflict).
 > (`spec/architecture/v1.1/dogfooding-model.md` §8) is updated to require
 > WORK-074 complete AND WORK-071 complete (or equivalent supported runtime) —
 > the repository no longer implies that merely merging WORK-063's architecture
-> specification means real authentication exists. All four are PLANNED, NOT
-> activated, NOT started (the eligibility is recorded honestly in
-> `dependency-state.json` → `futureGenerationEligibility`).
+> specification means real authentication exists. All four were PLANNED, NOT
+> activated at issuance (the eligibility was recorded honestly in
+> `dependency-state.json` → `futureGenerationEligibility`). **Live state
+> (2026-08-31, the WORK-074 post-merge finalization, §34.8/ADR-0007):** WORK-071
+> and WORK-074 are COMPLETE (8604c8a via PR #96; cdedd0ca via PR #99) — the
+> gate's two enabler edges are SATISFIED; WORK-072 and WORK-073 remain PLANNED,
+> NOT activated, NOT started.

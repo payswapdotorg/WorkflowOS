@@ -1,9 +1,20 @@
 # WORK-071 — Local Development Runtime Substrate
 
-Status: in flight (activated 2026-08-30 by the architect — the implementation
-instruction on the post-#87/#95 mainline `4eb48b7`; the activation is recorded
+Status: COMPLETE — merged by the architect as
+`8604c8a5286b7533caf907c25fcd4dfdeeb662eb` (PR #96, 2026-08-31; the merge
+commit with parent `4eb48b7` on the pre-#99 mainline). The completion was
+recorded in the canonical state by the PR #99 reconciliation onto the
+post-#96 mainline (the §34.8/ADR-0007 post-merge pattern: `status complete`
++ `mergedAs {pr: 96, mergeCommit: 8604c8a…}`; no active handoff — merged
+work is not resumable) and is reaffirmed by the 2026-08-31 WORK-074
+post-merge finalization; the branch/PR are kept as the historical record of
+how it merged. The dogfooding gate's local-runtime precondition is SATISFIED
+on this Work Order (its authentication edge is WORK-074's — also complete).
+
+Activation record (preserved history): activated 2026-08-30 by the architect — the implementation
+instruction on the post-#87/#95 mainline `4eb48b7`; the activation was recorded
 in `spec/development-state/program-state.json`, branch
-`feat/work-071-local-dev-runtime`). The implementation delivers the dev-only
+`feat/work-071-local-dev-runtime`. The implementation delivered the dev-only
 runtime path as an explicit environment branch in the composition root:
 `backend/src/config.ts` reads the explicit, never-ambient
 `WORKFLOWOS_DEV_RUNTIME=pglite` signal (failing closed on ambiguity with
@@ -391,3 +402,19 @@ STOP and raise an Architecture Change Request if implementation requires:
   requires WORK-074 complete AND WORK-071 complete. WORK-071
   unblocks the local-runtime precondition; WORK-074 unblocks the
   production-authentication precondition. Both are required.)
+
+## Completion record (§34.8/ADR-0007 — recorded 2026-08-31)
+
+WORK-071 was MERGED by the architect as `8604c8a5286b7533caf907c25fcd4dfdeeb662eb`
+via PR #96 (2026-08-31; the merge commit with parent `4eb48b7`). The
+completion was recorded in the canonical state by the PR #99 reconciliation
+onto the post-#96 mainline (status complete + `mergedAs {pr: 96, mergeCommit:
+8604c8a…}`; branch/pr kept as the historical record of how it merged;
+`resumption.activeHandoffs` empty — no handoff was ever recorded for this
+implementation, whose delivery was the live implementation PR itself) and is
+reaffirmed by the 2026-08-31 WORK-074 post-merge finalization, which also
+recomputed the frontier (57/57 recorded work orders complete, nothing in
+flight; currentMain `cdedd0ca…`). The dogfooding gate's local-runtime edge is
+SATISFIED on WORK-071; with WORK-074 (the authentication edge) also complete,
+the first full authenticated/local dogfooding experiment is PERMITTED and NOT
+started.
