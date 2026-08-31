@@ -369,6 +369,22 @@ import type { ContinuousValidationService } from './continuous-validation/index.
 // browser. Exposed for FUTURE consumers (WORK-066 scheduler).
 import { DefaultBrowserValidationAgent } from './browser-validation/index.js';
 import type { BrowserValidationAgent } from './browser-validation/index.js';
+// WORK-066: the validation scheduler — the scheduling/trigger DECISION layer
+// over the WORK-064 authority (trigger classification + eligibility + the
+// assurance-aware journey selection + deduplication + deterministic
+// identity + admission REQUESTS through the WORK-064 service). It owns NO
+// validation semantics, NO browser execution, NO evidence, NO workflow/
+// release authority, and NO autonomous runtime drive (CONTINUOUS runs
+// happen only under explicit configuration, invoked by an explicit
+// scheduling request — the runtime drive surfaces are future governed
+// consumers). The claim store is the in-memory port adapter (NO schema
+// migration is authorized by WORK-066; the durable binding point is
+// documented at the port).
+import {
+  DefaultValidationScheduler,
+  InMemoryScheduledTriggerClaimStore,
+} from './validation-scheduling/index.js';
+import type { ValidationScheduler } from './validation-scheduling/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -521,6 +537,13 @@ export interface AppDeps {
    *  Production fails closed without a driver (environment_error). Future
    *  consumers: WORK-066 scheduler. */
   browserValidationAgent?: BrowserValidationAgent;
+  /** WORK-066: the validation scheduler (the scheduling/trigger decision
+   *  layer). Present when DB configured. Consumes the WORK-064 service (the
+   *  admission authority) + the claim-store port (in-memory adapter — the
+   *  documented non-durable boundary, the future ACR binding point). Future
+   *  consumers: the governed runtime drive surfaces (job handlers, the
+   *  dogfooding experiment). */
+  validationScheduler?: ValidationScheduler;
   /** WORK-016: review service. Present when DB configured. */
   reviewService?: ReviewService;
   /** WORK-015: CI evidence ingestion service. Present when DB configured. */
@@ -875,6 +898,8 @@ export async function buildApp(
   let continuousValidationService: ContinuousValidationService | undefined;
   // WORK-065: the synthetic browser validation agent.
   let browserValidationAgent: BrowserValidationAgent | undefined;
+  // WORK-066: the validation scheduler (the decision layer).
+  let validationScheduler: ValidationScheduler | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
   let webhookProcessingService: WebhookProcessingService | undefined;
@@ -1147,6 +1172,17 @@ export async function buildApp(
       // driver: undefined — production fails closed. The future
       // architect-authorized production browser driver binds here.
       logger,
+    });
+    // WORK-066: the validation scheduler — the scheduling/trigger decision
+    // layer composed over the WORK-064 authority. The clock is INJECTED
+    // (deterministic decisions; no implicit global time in the decision
+    // path). The claim store is the in-memory adapter (the documented
+    // non-durable boundary — NO migration is authorized by WORK-066).
+    validationScheduler = new DefaultValidationScheduler({
+      continuousValidationService: continuousValidationService!,
+      claimStore: new InMemoryScheduledTriggerClaimStore(),
+      logger,
+      now: () => new Date(),
     });
     // WORK-008/009: webhook event repository + processing service.
     const pgWebhookEventRepo = new PgWebhookEventRepository(database);
@@ -2259,6 +2295,7 @@ export async function buildApp(
       verificationService,
       continuousValidationService,
       browserValidationAgent,
+      validationScheduler,
       reviewService,
       ciEvidenceIngestionService,
       webhookProcessingService,

@@ -1,6 +1,11 @@
 # WORK-066 — Validation Scheduling & Change Triggers
 
-Status: planned.
+Status: IN FLIGHT — activated by the architect on 2026-09-01
+(the implementation instruction after the WORK-065 post-merge finalization
+landed on main as `5f0b058`, PR #101) and implemented on branch
+`feat/WORK-066-validation-scheduling`. The activation record is appended
+below (the architect's review + merge remain the completion gate; the
+§34.8/ADR-0007 post-merge finalization follows the merge).
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap). This Work Order establishes the validation scheduling
@@ -199,3 +204,71 @@ STOP and raise an Architecture Change Request if implementation requires:
 - Typecheck and lint clean; the full repository regression suite clean.
 - PR contains only WORK-066 scope; independent Architect Review approves;
   WORK-066 is marked VERIFIED before WORK-067/069 become eligible on it.
+
+## Activation record (2026-09-01 — appended by the implementation)
+
+Activated by the architect (the WORK-066 implementation instruction), after
+verifying against the actual repository that every prerequisite held:
+WORK-064 complete (`c351451`/PR #86, finalized), WORK-065 complete +
+finalized (`5de5e83`/PR #97; the finalization PR #101 merged as `5f0b058`),
+58/58 recorded work orders complete, nothing else in flight, and no
+existing WORK-066 branch or PR. Branch: `feat/WORK-066-validation-scheduling`
+(created from the actual `origin/main` at `5f0b058`).
+
+**Implementation (the scheduling/trigger decision layer — not an
+authority):** the scheduler lives at `backend/src/validation-scheduling/`
+(the WORK-064/WORK-065 application-layer precedent — NOT an 18th frozen
+module), composed in `buildApp` and exposed on AppDeps as
+`validationScheduler` for the future governed runtime drive surfaces (a
+governed job handler / the dogfooding experiment — future decisions; this
+Work Order wires the service, not a background scheduler).
+
+- **Trigger classification** — the closed WORK-064 vocabulary
+  (`VALIDATION_TRIGGERS` + `TRIGGER_MODE_BINDING`, consumed through the
+  authority's barrel — the scheduler invents no trigger kinds; `MANUAL` is
+  not a kind, a merge-shaped event is not a scheduler trigger). Every
+  foreign kind fails closed with `SCHEDULING_TRIGGER_UNKNOWN`.
+- **Required authority bindings per trigger** — the revision for PRE_MERGE
+  legs, the recorded release reference for POST_RELEASE legs (repository
+  truth: NO release authority exists yet — the reference is recorded, never
+  invented; POST_RELEASE fails closed without it), the explicit continuous
+  configuration for CONTINUOUS legs (no autonomous unsupervised scheduling —
+  no timers, no loops, no queue consumers anywhere in the domain).
+- **Assurance-aware selection** — the FIXED mapping declared in this Work
+  Order (profile × mode → effect-policy allowance + the journey-set scope:
+  LIGHT → affected READ_ONLY smoke; STANDARD → affected RO/SM;
+  HIGH_ASSURANCE → affected ∪ integration RO/SM/IM; CRITICAL → the full
+  declared suite) until WORK-058 lands. FORBIDDEN is never selected. The
+  selection is a scope filter, never a grant — the WORK-064 admission gate
+  remains the authority.
+- **Determinism** — the scheduling identity is sha256 over the canonical
+  logical-event fields (trigger, project, journey, environment, mode,
+  reference); the run id is derived deterministically; the clock is
+  INJECTED at the service boundary (no implicit global time in the decision
+  path — pinned by static invariant 13).
+- **Deduplication** — the `ScheduledTriggerClaimStore` PORT with the
+  in-memory adapter as the composition default (this Work Order authorizes
+  NO schema migration; the durable binding point is documented at the port —
+  the WORK-064 run-repository precedent). The PostgreSQL contract — keyed
+  uniqueness where the database constraint, not an application race, decides
+  the winner under true two-actor concurrency — is proven by the real-PG
+  integration suite against a test-schema table implementing the same port
+  (two independent connections; the mutation leg proves the same-key test
+  FAILS without the constraint).
+- **Failure semantics** — the typed `SCHEDULING_*` outcome vocabulary
+  (unknown trigger, missing journey/registry, invalid environment, missing
+  release reference, missing continuous configuration, conflict, dependency
+  unavailable, admission-rejected echoes, no-eligible-journeys): every
+  failure is an explicit scheduling outcome, never a healthy validation,
+  never a silent skip.
+- **Governed linkage** — trigger → project → journey → environment →
+  revision/release/window → scheduling decision → validation run, readable
+  through `findSchedulingDecision` (the resumable reconciliation read).
+
+**Verification on the branch:** the validation-scheduling suite (121 tests:
+classification 17 + selection 15 + cadence 8 + identity 9 + decisions 24 +
+idempotency 8 + concurrency 9 + authority 8 + mutation 5 + composition 3) +
+the real-PG two-actor suite (6 tests, `WORKFLOWOS_DATABASE_URL`) + 19 new
+static-architecture invariants (858/858) + the WORK-064 regression (144) +
+the WORK-065 regression (91) + the full backend regression on real
+PostgreSQL. See the PR body for the exact counts on the final head.

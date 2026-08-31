@@ -258,7 +258,9 @@ PERMITTED and NOT started (the architect's authorization governs the run;
 item 4 is now ALSO SATISFIED — WORK-065 is COMPLETE and the
 browser-validation CAPABILITY exists — but that does NOT start the run: the
 scheduling/feedback/release Work Orders that drive continuous validation
-(WORK-066..070) remain PLANNED, NOT activated, and the experiment itself
+(WORK-067..070 remain PLANNED, NOT activated; WORK-066, the scheduling
+decision layer, was ACTIVATED 2026-09-01 and is IN FLIGHT — the capability
+comes closer but still does NOT start the run: the experiment itself
 requires the architect's authorization).
 
 The repository records that this is the canonical acceptance journey

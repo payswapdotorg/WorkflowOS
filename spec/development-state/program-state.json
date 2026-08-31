@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-31T12:30:00Z (the WORK-065 post-merge finalization, §34.8/ADR-0007 — the WORK-063/WORK-064/WORK-074 precedent: PR #97 was MERGED by the architect as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 on 2026-08-31T12:01:14Z (squash-merged at the approved head c06a3e3 — the post-#100 reconciliation head rebased onto 1e279a2, the WORK-042 relay-deflake change removed, all 11 CI workflows green on that head; single parent 1e279a2; the merge tree is IDENTICAL to the approved head — verified with an empty git diff c06a3e3..5de5e83, both trees 8b6469c8). WORK-065 (Synthetic Browser Validation Agent — the execution mechanism, NOT an authority) is recorded COMPLETE with its merge evidence and FINALIZED: 58/58 recorded work orders complete, NOTHING in flight. WORK-071 (Local Development Runtime Substrate) is COMPLETE (8604c8a via PR #96); WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME) is COMPLETE + FINALIZED (cdedd0ca via PR #99; the WORK-074 post-merge finalization PR #100/1e279a2). WORK-066 (Validation Scheduling & Change Triggers) is now DEPENDENCY-ELIGIBLE (WORK-064 + WORK-065 complete; WORK-058 soft) and NOT activated — the architect's authorization is required; WORK-067/068/069/070/072/073 remain NOT activated, NOT started. The dogfooding gate's two enabler edges (WORK-074 + WORK-071) remain SATISFIED — the first full authenticated/local dogfooding experiment is PERMITTED and NOT started (the architect's authorization governs the run; WORK-065's completion adds the synthetic-browser validation capability, it does NOT claim the experiment was performed).)",
+  "asOf": "2026-09-01T00:00:00Z (the WORK-066 activation, governed by the architect's implementation instruction: WORK-066 (Validation Scheduling & Change Triggers — the scheduling/trigger DECISION layer) is ACTIVATED and in flight on branch feat/WORK-066-validation-scheduling, after the WORK-065 finalization landed on main (PR #101 merged as 5f0b058 — current main at activation). Prerequisites verified against the repository: WORK-064 COMPLETE (c351451/PR #86) and WORK-065 COMPLETE+FINALIZED (5de5e83/PR #97; the finalization PR #101 merged as 5f0b058), 58/58 recorded work orders complete, NOTHING else in flight, WORK-066 dependency-eligible. The activation records the in-flight implementation: the scheduler at src/validation-scheduling/ (the application-layer pattern — NOT an 18th frozen module) consuming the WORK-064 admission authority through its public barrel; the claim-store PORT with the in-memory adapter (NO schema migration is authorized — the durable binding point is documented); the fixed assurance-aware journey selection (the lifecycle §2/adaptive-assurance §4 matrix) until WORK-058 lands; the deterministic scheduling identities (sha256, injected clock); and the 19 new static-architecture invariants. The architect's review + merge remain the completion gate (§34.8/ADR-0007 finalization follows the merge); WORK-067/068/069/070/072/073 remain NOT activated; the dogfooding experiment remains PERMITTED and NOT run. PRIOR STATE (preserved as durable history): 2026-08-31T12:30:00Z (the WORK-065 post-merge finalization, §34.8/ADR-0007 — the WORK-063/WORK-064/WORK-074 precedent: PR #97 was MERGED by the architect as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 on 2026-08-31T12:01:14Z (squash-merged at the approved head c06a3e3 — the post-#100 reconciliation head rebased onto 1e279a2, the WORK-042 relay-deflake change removed, all 11 CI workflows green on that head; single parent 1e279a2; the merge tree is IDENTICAL to the approved head — verified with an empty git diff c06a3e3..5de5e83, both trees 8b6469c8). WORK-065 (Synthetic Browser Validation Agent — the execution mechanism, NOT an authority) is recorded COMPLETE with its merge evidence and FINALIZED: 58/58 recorded work orders complete, NOTHING in flight. WORK-071 (Local Development Runtime Substrate) is COMPLETE (8604c8a via PR #96); WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME) is COMPLETE + FINALIZED (cdedd0ca via PR #99; the WORK-074 post-merge finalization PR #100/1e279a2). WORK-066 (Validation Scheduling & Change Triggers) is now DEPENDENCY-ELIGIBLE (WORK-064 + WORK-065 complete; WORK-058 soft) and NOT activated — the architect's authorization is required; WORK-067/068/069/070/072/073 remain NOT activated, NOT started. The dogfooding gate's two enabler edges (WORK-074 + WORK-071) remain SATISFIED — the first full authenticated/local dogfooding experiment is PERMITTED and NOT started (the architect's authorization governs the run; WORK-065's completion adds the synthetic-browser validation capability, it does NOT claim the experiment was performed).)",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1685,6 +1685,41 @@
         "pr": 99,
         "mergeCommit": "cdedd0ca3c72821d289d8d9d683f9902ddca480f"
       }
+    },
+    {
+      "id": "WORK-066",
+      "title": "Validation Scheduling & Change Triggers (the scheduling/trigger decision layer)",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-064",
+        "WORK-065"
+      ],
+      "branch": "feat/WORK-066-validation-scheduling",
+      "workOrder": "spec/work-orders/WORK-066.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [
+          "validation-scheduling"
+        ],
+        "migrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-066.md",
+          "spec/architecture/v1.1/continuous-validation-lifecycle.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/tests/architecture/static-architecture.test.ts",
+          "backend/vitest.config.ts"
+        ]
+      },
+      "surfaceFlags": [
+        "authorityBoundary",
+        "publicContracts"
+      ],
+      "assuranceProfile": "CRITICAL",
+      "runtimeImpactBinding": "high",
+      "note": "Activated by the architect (2026-09-01, the WORK-066 implementation instruction after the WORK-065 post-merge finalization landed as 5f0b058). Implementation: the validation scheduler at src/validation-scheduling/ (the application-layer pattern — NOT an 18th frozen module): the scheduling/trigger DECISION layer that CONSUMES the WORK-064 continuous-validation authority (admitRun is THE admission gate — the scheduler selects and requests, never admits/finalizes/evaluates) and the closed trigger vocabulary (VALIDATION_TRIGGERS + TRIGGER_MODE_BINDING — the scheduler invents no trigger kinds; MANUAL is not a kind). The scheduler owns: trigger classification (fail-closed on foreign kinds), the required authority bindings per trigger (the revision for PRE_MERGE legs, the recorded release reference for POST_RELEASE legs — no release authority exists yet, one is never invented; the explicit continuous configuration for CONTINUOUS legs — no autonomous unsupervised scheduling), the assurance-aware journey selection (the FIXED profile x mode -> policy allowance from lifecycle SS2/adaptive-assurance SS4 until WORK-058 lands; FORBIDDEN is never selected), the deterministic scheduling identity (sha256 over the canonical logical-event fields; the run id derived deterministically; the injected clock — no implicit global time), and the trigger deduplication PORT (the in-memory adapter in this Work Order — NO schema migration is authorized; the PostgreSQL contract is proven by the real-PG two-actor integration suite against a test-schema table; the durable binding point is a future ACR at the same port). The scheduler NEVER: transitions Work Items, creates PRs, or merges (the /workflows + /github authorities own those); evaluates validation health (WORK-064); executes browser actions (WORK-065 — zero imports from the browser domain); creates verification evidence (/verification); or runs timers/loops/queues (CONTINUOUS runs happen only under explicit configuration invoked by an explicit scheduling request). Wired through buildApp and exposed on AppDeps for the future governed runtime drive surfaces (a governed job handler / the dogfooding experiment — future decisions). 15 static-architecture invariants pin the authority-boundary matrix; 121 domain tests + 6 real-PG two-actor proofs + 19 static checks + the full regression battery on the branch."
     }
   ],
   "resumption": {

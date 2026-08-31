@@ -112,9 +112,9 @@ validation sub-evolution) approval by the architecture authority.
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
   state. `workOrders[]` records the activated Work Orders (complete,
-  in_flight). PLANNED Work Orders (WORK-053..061, WORK-066..070,
-  WORK-072..074) are spec files only — they are NOT in `program-state.json`
-  until the architect activates them.
+  in_flight — WORK-066 is the current in-flight item). PLANNED Work Orders
+  (WORK-053..061, WORK-067..070, WORK-072..073) are spec files only — they
+  are NOT in `program-state.json` until the architect activates them.
 - `spec/development-state/dependency-state.json` — the canonical
   dependency mapping. `futureGeneration` maps each planned Work Order
   to its dependencies; `futureGenerationEligibility` records the
@@ -228,8 +228,12 @@ product validation roadmap):
   c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b; the domain/model authority is on
   main at `backend/src/continuous-validation/`).
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
-- WORK-066..070 are `planned` (spec files only; NOT in program-state;
-  new in this package). **WORK-065 is `complete`** (recorded in
+- WORK-067..070 are `planned` (spec files only; NOT in program-state).
+- **WORK-066 is `in_flight`** (activated by the architect 2026-09-01 on
+  `feat/WORK-066-validation-scheduling`: the validation scheduler at
+  `backend/src/validation-scheduling/` — the scheduling/trigger decision
+  layer consuming the WORK-064 admission authority; the claim-store port
+  with the in-memory adapter; NO migration authorized). **WORK-065 is `complete`** (recorded in
   program-state with its merge evidence): the synthetic browser validation
   agent (the execution mechanism for ValidationJourneys, NOT an authority)
   was ACTIVATED 2026-08-30, merged by the architect as
@@ -445,7 +449,9 @@ first full authenticated/local dogfooding experiment is PERMITTED and NOT
 started.** The run itself is the architect's non-delegable decision (this
 finalization does NOT start it); item 4 is now ALSO SATISFIED (WORK-065 is
 COMPLETE — the browser-validation capability exists), but the continuous-validation
-Work Orders that DRIVE it (WORK-066..070) remain PLANNED, NOT activated, and
+Work Orders that DRIVE it (WORK-067..070) remain PLANNED, NOT activated
+(WORK-066, the scheduling decision layer, is IN FLIGHT since 2026-09-01 —
+the capability comes closer but still does NOT start the run), and
 the run is NOT claimed to have been performed.
 
 **The dogfooding experiment was ATTEMPTED on 2026-08-30 and STOPPED at

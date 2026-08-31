@@ -53,6 +53,11 @@ export default defineConfig({
       // against a tiny local HTTP server — no database required for the unit
       // tests; the real-browser test gates on PLAYWRIGHT being available).
       'tests/browser-validation/**/*.test.ts',
+      // WORK-066: the validation scheduling suite (the trigger/scheduling
+      // decision layer — pure domain + composition tests; the real-PG
+      // two-actor concurrency proofs live under tests/integration/
+      // validation-scheduling/ and gate on WORKFLOWOS_DATABASE_URL).
+      'tests/validation-scheduling/**/*.test.ts',
     ],
     testTimeout: 15000,
     hookTimeout: 15000,

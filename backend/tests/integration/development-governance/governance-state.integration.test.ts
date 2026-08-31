@@ -85,8 +85,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // (2026-08-31, squash-merged at the approved head c06a3e3 — the
     // post-#100 reconciliation head, the merge tree identical) and is
     // recorded complete per §34.8/ADR-0007 by the WORK-065 post-merge
-    // finalization: NOTHING is in flight (58/58 complete).
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    // finalization. WORK-066 (Validation Scheduling & Change Triggers —
+    // the scheduling/trigger decision layer) was ACTIVATED by the architect
+    // on 2026-09-01 after the finalization landed (PR #101 merged as
+    // 5f0b058): it is the ONE in-flight item (58 complete + WORK-066).
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-066']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -143,7 +146,7 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // recorded in program-state (WORK-066 is dependency-eligible on the
     // complete WORK-064 + WORK-065, and WORK-067 on the complete WORK-064 —
     // NOT activated, the architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-066']);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
@@ -464,7 +467,12 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // exactly the three intended started items (WORK-050/062/064 — all
       // three are complete-and-merged in the live record, so the
       // discrimination rebuilds the pre-merge state).
-      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065');
+      // WORK-066 (in flight since the 2026-09-01 activation, depending on
+      // the complete WORK-064 + WORK-065) is likewise stripped: the fixture
+      // reconstructs WORK-064 as in_flight, and an in-flight WORK-066 over
+      // the reconstructed dependency would require fixture coordination
+      // bookkeeping irrelevant to this discrimination.
+      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066');
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
       w050.status = 'in_flight';
       delete (w050 as { mergedAs?: unknown }).mergedAs;

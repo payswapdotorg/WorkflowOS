@@ -129,27 +129,26 @@ invariants. Concretely:
 - a SAFE_MUTATION journey cannot run against an environment authorized
   only for READ_ONLY (the environment-policy binding is enforced).
 
-## 6. The runtime profile engine (NOT implemented in this task)
+## 6. The runtime profile engine (implemented under WORK-066 — activated 2026-09-01)
 
-The runtime profile engine that selects journeys and binds
-EffectPolicies per assurance level will be implemented under WORK-066
-(Validation Scheduling & Change Triggers) when it is activated. Until
-then:
-
-- the v1.0 frozen model governs (the four profiles, the deterministic
-  selection, the code-pinned minimums);
-- the v1.1 validation-aware dimension in this document is design-time
-  proposed state;
-- no runtime code implements the dimension.
-
-This task does NOT implement the runtime profile engine. It persists
-the model.
+The runtime profile engine that selects journeys and binds the
+effect-policy allowance per assurance level is implemented under WORK-066
+(Validation Scheduling & Change Triggers), activated by the architect on
+2026-09-01: the FIXED profile × mode → journey selection declared in this
+document (§4's table is the selection matrix — the WORK-064 admission gate
+remains the authority) ships as the deterministic fixed mapping the
+WORK-066 Work Order itself declared ("the scheduler uses a fixed mapping
+(trigger → assurance level → journey set) declared in this Work Order").
+When WORK-058 lands, the selection delegates to its deterministic
+function (§7). The original v1.1-package statement is preserved as
+history: "This task does NOT implement the runtime profile engine. It
+persists the model."
 
 ## 7. The relationship to WORK-058 (Adaptive Assurance Engine)
 
 WORK-058 (Adaptive Assurance Engine — planned) is the v1.1 evolution
 Work Order that implements the runtime engine for the v1.0 assurance
-model. WORK-066 (Validation Scheduling & Change Triggers — planned) is
+model. WORK-066 (Validation Scheduling & Change Triggers — in flight since the 2026-09-01 activation) is
 the v1.1 evolution Work Order that implements the runtime engine for
 the validation-aware dimension in this document.
 

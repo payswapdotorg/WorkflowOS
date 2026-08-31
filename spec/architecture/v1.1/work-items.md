@@ -17,7 +17,7 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062, WORK-063 |
 | WORK-064 | Continuous Product Validation — the ValidationJourney/EffectPolicy domain model | WORK-048, WORK-050, WORK-063 (all complete — WORK-064 COMPLETE: merged `c351451` via PR #86, finalized §34.8/ADR-0007) |
 | WORK-065 | Synthetic Browser Validation Agent — the execution mechanism for ValidationJourneys | WORK-064 (complete — WORK-065 COMPLETE: merged `5de5e83` via PR #97, finalized §34.8/ADR-0007) |
-| WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065 (both complete — WORK-066 now DEPENDENCY-ELIGIBLE, NOT activated), (soft: WORK-058) |
+| WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065 (both complete — WORK-066 ACTIVATED 2026-09-01, IN FLIGHT on `feat/WORK-066-validation-scheduling`), (soft: WORK-058) |
 | WORK-067 | Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood | WORK-064, WORK-015, WORK-040, WORK-041, (soft: WORK-056) |
 | WORK-068 | Feedback → Governed Work Items — convert signals through the EXISTING /work-items authority | WORK-067 |
 | WORK-069 | Progressive Release & Runtime Validation — canary/partial rollout with governed continue/halt/recover | WORK-064, WORK-066, WORK-019, WORK-026, WORK-020, (soft: WORK-059) |
@@ -94,11 +94,16 @@ All items remain architect-governed and require a Work Order file, declared surf
 > §34.8/ADR-0007 (the WORK-065 post-merge finalization) — the synthetic browser validation
 > agent (the execution mechanism, NOT an authority) is on main at `backend/src/browser-validation/`,
 > with the journey-owned navigation-safety declaration (`readonlySafeNavigationTargets`).
-> WORK-066 is now DEPENDENCY-ELIGIBLE (its hard dependencies WORK-064 + WORK-065 are BOTH
-> complete; its WORK-058 edge is soft) and remains NOT activated, NOT started; WORK-067
+> WORK-066 (Validation Scheduling & Change Triggers) was ACTIVATED by the architect on
+> 2026-09-01 (the implementation instruction after the WORK-065 post-merge finalization
+> landed as `5f0b058`) and is IN FLIGHT on branch `feat/WORK-066-validation-scheduling`:
+> the scheduling/trigger decision layer at `backend/src/validation-scheduling/` consuming
+> the WORK-064 admission authority (the closed trigger vocabulary, the fixed
+> assurance-aware selection, the deterministic identities + injected clock, the
+> claim-store port with the in-memory adapter — NO migration authorized). WORK-067
 > remains dependency-eligible on the complete WORK-064 (different protected surfaces) and
 > NOT activated, NOT started (recorded honestly in `dependency-state.json` →
-> `futureGenerationEligibility`). The five remaining Work Orders (WORK-066..070) are PLANNED
+> `futureGenerationEligibility`). The four remaining Work Orders (WORK-067..070) are PLANNED
 > and NOT activated. Each carries parallel-execution metadata
 > (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
 > [`parallel-execution-metadata.md`](parallel-execution-metadata.md).
@@ -138,17 +143,18 @@ All items remain architect-governed and require a Work Order file, declared surf
 > was activated or in flight; NO runtime implementation rode it —
 > governance/persistence only.)
 >
-> **Live state (the 2026-08-31 WORK-065 post-merge finalization, §34.8/ADR-0007
-> — updated from the WORK-074 post-merge finalization's 57/57 snapshot):**
+> **Live state (the 2026-09-01 WORK-066 activation — updated from the WORK-065
+> post-merge finalization's 58/58-nothing-in-flight snapshot):**
 > WORK-071 is COMPLETE (merged `8604c8a` via PR #96), WORK-074 is COMPLETE
 > (merged `cdedd0ca` via PR #99 — the runtime identity layer is on main: human
 > login, server-side sessions, scoped machine identity, the Workbench off the
-> demo key), and WORK-065 is COMPLETE (merged `5de5e83` via PR #97 — the
-> synthetic browser validation agent, the execution mechanism for
-> ValidationJourneys, is on main at `backend/src/browser-validation/` with the
-> journey-owned navigation-safety declaration); the program is 58/58 recorded
-> work orders complete with NOTHING in
-> flight. WORK-072 and WORK-073 remain PLANNED, NOT activated, NOT started. The
+> demo key), and WORK-065 is COMPLETE (merged `5de5e83` via PR #97, finalized
+> by PR #101/`5f0b058` — the synthetic browser validation agent, the execution
+> mechanism for ValidationJourneys, is on main at `backend/src/browser-validation/`
+> with the journey-owned navigation-safety declaration); the program is 58/58
+> recorded work orders complete with WORK-066 IN FLIGHT on
+> `feat/WORK-066-validation-scheduling` (the scheduling/trigger decision layer).
+> WORK-072 and WORK-073 remain PLANNED, NOT activated, NOT started. The
 > dogfooding gate's two enabler edges (WORK-074 + WORK-071) are SATISFIED — the
 > first full authenticated/local dogfooding experiment is PERMITTED and NOT
 > started (the architect's authorization governs the run; WORK-065's completion

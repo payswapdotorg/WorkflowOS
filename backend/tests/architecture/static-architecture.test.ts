@@ -19799,3 +19799,355 @@ describe('WORK-065 invariants — Synthetic Browser Validation Agent (the execut
   });
 });
 
+
+// ============================================================================
+// WORK-066 — Validation Scheduling & Change Triggers (the scheduling/trigger
+// decision layer — the 15 static architecture invariants)
+// ============================================================================
+
+describe('WORK-066 invariants — Validation Scheduling & Change Triggers (the decision layer, not an authority)', () => {
+  const VS_DIR = join(BACKEND_ROOT, 'src', 'validation-scheduling');
+  const VS_INTERNAL = join(VS_DIR, 'internal');
+  const VS_TYPES = join(VS_DIR, 'types.ts');
+  const VS_BARREL = join(VS_DIR, 'index.ts');
+  const VS_TRIGGER_CLASSIFICATION = join(VS_INTERNAL, 'trigger-classification.ts');
+  const VS_ASSURANCE_SELECTION = join(VS_INTERNAL, 'assurance-selection.ts');
+  const VS_CADENCE = join(VS_INTERNAL, 'continuous-cadence.ts');
+  const VS_IDENTITY = join(VS_INTERNAL, 'scheduling-identity.ts');
+  const VS_CLAIM_STORE = join(VS_INTERNAL, 'in-memory-claim-store.ts');
+  const VS_SERVICE = join(VS_INTERNAL, 'validation-scheduler.ts');
+  const MIGRATIONS_DIR = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readVsFiles(): { path: string; src: string }[] {
+    if (!existsSync(VS_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(VS_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module -----------------------
+
+  it('the validation-scheduling domain exists at src/validation-scheduling/ (index.ts + types.ts + internal/) and is NOT an 18th frozen module', () => {
+    expect(existsSync(VS_DIR), 'src/validation-scheduling/ must exist').toBe(true);
+    expect(existsSync(VS_BARREL), 'src/validation-scheduling/index.ts must exist').toBe(true);
+    expect(existsSync(VS_TYPES), 'src/validation-scheduling/types.ts must exist').toBe(true);
+    expect(existsSync(VS_INTERNAL), 'src/validation-scheduling/internal/ must exist').toBe(true);
+    for (const file of [VS_TRIGGER_CLASSIFICATION, VS_ASSURANCE_SELECTION, VS_CADENCE, VS_IDENTITY, VS_CLAIM_STORE, VS_SERVICE]) {
+      expect(existsSync(file), `${relative(BACKEND_ROOT, file)} must exist`).toBe(true);
+    }
+    expect(existsSync(join(MODULES_DIR, 'validation-scheduling'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'validation-scheduling must not be a frozen module').not.toContain('/validation-scheduling');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) the scheduler imports ONLY the allowed surfaces ------------------
+
+  it('the domain imports only allowed surfaces: @platform/*, the WORK-064 continuous-validation barrel, node:* — never a module internal/, never the browser domain, never workflows/verification/work-items', () => {
+    const files = readVsFiles();
+    expect(files.length).toBeGreaterThan(0);
+    for (const { path, src } of files) {
+      const stripped = stripCodeComments(src);
+      const importLines = stripped.match(/from\s+'[^']+'/g) ?? [];
+      for (const importLine of importLines) {
+        const target = importLine.replace(/^from\s+'/, '').replace(/'$/, '');
+        if (target.startsWith('.')) continue; // intra-domain relative imports
+        expect(
+          target.startsWith('@platform/') ||
+            target.startsWith('../../continuous-validation/index.js') ||
+            target.startsWith('../../continuous-validation/types.js') ||
+            target.startsWith('node:'),
+          `${relative(BACKEND_ROOT, path)} imports forbidden surface '${target}' (allowed: @platform/*, the WORK-064 continuous-validation barrel/types, node:*)`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  // --- invariant 1: only WORK-066 owns scheduling decisions ------------------
+
+  it('INVARIANT 1 — only WORK-066 owns scheduling decisions: the decision vocabulary/pipeline lives ONLY in src/validation-scheduling/ (no other src surface derives scheduling decisions)', () => {
+    // The scheduling decision exports exist only in the validation-scheduling barrel:
+    const barrel = readFileSync(VS_BARREL, 'utf8');
+    expect(barrel).toMatch(/DefaultValidationScheduler/);
+    expect(barrel).toMatch(/SCHEDULING_ERROR_CODES/);
+    expect(barrel).toMatch(/PROFILE_MODE_POLICY_ALLOWANCE/);
+    // No other src/ directory declares a scheduling decision surface:
+    const schedulingSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (full === VS_DIR) continue; // the owner
+          walk(full);
+        } else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/class\s+\w*ValidationScheduler\b|interface\s+ValidationScheduler\b|deriveSchedulingIdentity|SchedulingDecisionResult/.test(src)) {
+            schedulingSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(schedulingSurfaces, `scheduling-decision surfaces must exist ONLY in validation-scheduling (found elsewhere: ${schedulingSurfaces.join(', ')})`).toEqual([]);
+    // The static-architecture suite itself + tests are outside src/.
+  });
+
+  // --- invariant 2: no second workflow authority ------------------------------
+
+  it('INVARIANT 2 — no second workflow authority: the scheduler imports no workflow engine/orchestrator and cannot transition Work Items, create PRs, or merge', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the workflow authority`).not.toMatch(/@modules\/workflows/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the github adapter (PR creation/merge)`).not.toMatch(/@modules\/github/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not transition workflow state`).not.toMatch(/createPullRequest|mergePullRequest|transitionWorkItem|createWorkItem/);
+    }
+  });
+
+  // --- invariant 3: no second validation authority ----------------------------
+
+  it('INVARIANT 3 — no second validation authority: the scheduler CONSUMES the WORK-064 service and never re-implements admission, effect-policy, or identity binding', () => {
+    const service = stripCodeComments(readFileSync(VS_SERVICE, 'utf8'));
+    // The scheduler calls the authority's public method:
+    expect(service).toMatch(/continuousValidationService\.admitRun/);
+    // ...and never re-implements the admission stack:
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement the effect-policy matrix`).not.toMatch(/admitEffectPolicy/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement identity binding`).not.toMatch(/bindTestIdentity/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement run admission`).not.toMatch(/function\s+admitValidationRun/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not construct validation runs directly`).not.toMatch(/status:\s*'admitted'/);
+    }
+    // The trigger vocabulary + binding are CONSUMED from WORK-064, never re-declared:
+    const types = readFileSync(VS_TYPES, 'utf8');
+    expect(types).not.toMatch(/export const VALIDATION_TRIGGERS/);
+    expect(types).not.toMatch(/export const TRIGGER_MODE_BINDING/);
+    const classification = readFileSync(VS_TRIGGER_CLASSIFICATION, 'utf8');
+    expect(classification).toMatch(/from '\.\.\/\.\.\/continuous-validation\/types\.js'/);
+  });
+
+  // --- invariant 4: the scheduler cannot determine validation health ----------
+
+  it('INVARIANT 4 — the scheduler cannot determine validation health: no outcome evaluation, no healthy/failure semantics in the domain', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not evaluate validation outcomes`).not.toMatch(/evaluateObservation|finalizeValidationRun|VALIDATION_OUTCOME_KINDS/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not declare run health`).not.toMatch(/outcome:\s*'healthy'|'validation_failure'|'effect_policy_violation'|'environment_error'/);
+    }
+  });
+
+  // --- invariant 5: the scheduler cannot execute browser actions --------------
+
+  it('INVARIANT 5 — the scheduler cannot execute browser actions: NO import from the browser domain, no Playwright, no BrowserDriver, no navigation-safety classification', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the browser-validation domain`).not.toMatch(/browser-validation/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import Playwright`).not.toMatch(/playwright/i);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not touch a BrowserDriver`).not.toMatch(/BrowserDriver|browser-tool-executor/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not classify navigation safety (WORK-065/WORK-064 own it)`).not.toMatch(/readonlySafeNavigationTargets|classifyNavigationTarget/);
+    }
+  });
+
+  // --- invariant 6: the scheduler cannot create verification evidence ---------
+
+  it('INVARIANT 6 — the scheduler cannot create verification evidence: no /verification import, no attachEvidence, no evidence construction', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the verification authority`).not.toMatch(/@modules\/verification/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not attach evidence`).not.toMatch(/attachEvidence|mapValidationOutcomeToVerification/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not construct evidence`).not.toMatch(/ValidationEvidenceReference/);
+    }
+  });
+
+  // --- invariant 7: the scheduler cannot create governed Work Items -----------
+
+  it('INVARIANT 7 — the scheduler cannot create governed Work Items: no /work-items import, no work-item construction', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the work-items authority`).not.toMatch(/@modules\/work-items/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not create work items`).not.toMatch(/createWorkItem|WorkItemProposal/);
+    }
+  });
+
+  // --- invariant 8: the scheduler cannot modify code --------------------------
+
+  it('INVARIANT 8 — the scheduler cannot modify code: no fs writes, no child_process/exec, no dynamic code evaluation', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not write the filesystem`).not.toMatch(/writeFile|appendFile|rmSync|unlink/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not spawn processes`).not.toMatch(/child_process|execSync|spawn/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not evaluate dynamic code`).not.toMatch(/new Function|eval\(/);
+    }
+  });
+
+  // --- invariant 9: duplicate trigger suppression is enforced ------------------
+
+  it('INVARIANT 9 — duplicate-trigger suppression is enforced: the claim-store port + the keyed in-memory adapter (the synchronous check-and-set boundary)', () => {
+    const store = readFileSync(VS_CLAIM_STORE, 'utf8');
+    // The adapter's claim is a synchronous check-and-set (no await between
+    // check and set — comments stripped so the discipline check sees code):
+    const claimBody = stripCodeComments(store).slice(
+      stripCodeComments(store).indexOf('async claim('),
+      stripCodeComments(store).indexOf('async record('),
+    );
+    expect(claimBody).toMatch(/this\.claims\.get\(schedulingId\)/);
+    expect(claimBody).toMatch(/this\.claims\.set\(schedulingId/);
+    expect(claimBody, 'the claim check-and-set must be synchronous (no await between check and set)').not.toMatch(/await/);
+    // The service consults the store BEFORE admission:
+    const service = stripCodeComments(readFileSync(VS_SERVICE, 'utf8'));
+    const claimIdx = service.indexOf('claimStore.claim(');
+    const admitIdx = service.indexOf('admitRun(');
+    expect(claimIdx, 'the claim call must be present').toBeGreaterThan(-1);
+    expect(admitIdx, 'the admission call must be present').toBeGreaterThan(-1);
+    expect(claimIdx, 'the dedup claim must precede the admission request').toBeLessThan(admitIdx);
+    // The conflict detection (same identity, different content):
+    expect(store).toMatch(/'conflict'/);
+    expect(store).toMatch(/contentFingerprint/);
+  });
+
+  // --- invariant 10: tenant/project boundaries are enforced --------------------
+
+  it('INVARIANT 10 — tenant/project boundaries are enforced: the scheduling identity includes the project (the tenant predicate) and the decision echoes only the input project', () => {
+    const identity = stripCodeComments(readFileSync(VS_IDENTITY, 'utf8'));
+    // The canonical fields include projectId:
+    expect(identity).toMatch(/projectId/);
+    const identitySource = readFileSync(VS_IDENTITY, 'utf8');
+    const canonicalIdx = identitySource.indexOf('canonical({');
+    const canonicalBlock = identitySource.slice(canonicalIdx, canonicalIdx + 400);
+    expect(canonicalBlock, 'the canonical identity fields must include the projectId').toMatch(/projectId/);
+    // The classification validates the project BEFORE any leg resolution:
+    const classification = stripCodeComments(readFileSync(VS_TRIGGER_CLASSIFICATION, 'utf8'));
+    expect(classification).toMatch(/SCHEDULING_PROJECT_REQUIRED/);
+    // The identity derivation fails closed on an empty project (the tenant
+    // predicate is part of the canonical identity):
+    const identitySrc = stripCodeComments(readFileSync(VS_IDENTITY, 'utf8'));
+    expect(identitySrc).toMatch(/SCHEDULING_PROJECT_REQUIRED/);
+    // The continuous configuration scope check (cross-scope fails closed):
+    expect(classification).toMatch(/SCHEDULING_CONTINUOUS_SCOPE_MISMATCH/);
+  });
+
+  // --- invariant 11: unsupported triggers fail closed ---------------------------
+
+  it('INVARIANT 11 — unsupported triggers fail closed: the closed-vocabulary membership check (foreign kinds → SCHEDULING_TRIGGER_UNKNOWN)', () => {
+    const classification = stripCodeComments(readFileSync(VS_TRIGGER_CLASSIFICATION, 'utf8'));
+    expect(classification).toMatch(/VALIDATION_TRIGGERS/);
+    expect(classification).toMatch(/SCHEDULING_TRIGGER_UNKNOWN/);
+    // The vocabulary is WORK-064's (consumed, not re-declared):
+    expect(classification).toMatch(/includes\(input\.trigger\)/);
+  });
+
+  // --- invariant 12: missing release identity fails closed ----------------------
+
+  it('INVARIANT 12 — missing authoritative release identity fails closed: POST_RELEASE requires the recorded release reference (no release authority exists — one is never invented)', () => {
+    const classification = stripCodeComments(readFileSync(VS_TRIGGER_CLASSIFICATION, 'utf8'));
+    expect(classification).toMatch(/SCHEDULING_RELEASE_REFERENCE_REQUIRED/);
+    expect(classification).toMatch(/releaseRef/);
+    // The service releases the claim when the admission dependency fails (no stuck claims):
+    const service = stripCodeComments(readFileSync(VS_SERVICE, 'utf8'));
+    expect(service).toMatch(/claimStore\.release/);
+  });
+
+  // --- invariant 13: deterministic scheduling is preserved -----------------------
+
+  it('INVARIANT 13 — deterministic scheduling: the injected clock discipline (no Date.now/new Date in the DECISION path) + sha256 identities (no Math.random)', () => {
+    // The decision-path files take the clock ONLY through injection:
+    const decisionFiles = [
+      join(VS_DIR, 'types.ts'),
+      VS_TRIGGER_CLASSIFICATION,
+      VS_ASSURANCE_SELECTION,
+      VS_CADENCE,
+      VS_IDENTITY,
+      VS_SERVICE,
+    ];
+    for (const file of decisionFiles) {
+      const stripped = stripCodeComments(readFileSync(file, 'utf8'));
+      expect(stripped, `${relative(BACKEND_ROOT, file)} must not read the global clock (the clock is injected)`).not.toMatch(/Date\.now\(\)|new Date\(\)/);
+      expect(stripped, `${relative(BACKEND_ROOT, file)} must not use randomness (identities are deterministic)`).not.toMatch(/Math\.random|randomUUID/);
+    }
+    // The service REQUIRES the injected clock (no default):
+    const service = stripCodeComments(readFileSync(VS_SERVICE, 'utf8'));
+    expect(service).toMatch(/now:\s*\(\)\s*=>\s*Date/);
+    // The identity derivation is sha256 over canonical fields:
+    const identity = stripCodeComments(readFileSync(VS_IDENTITY, 'utf8'));
+    expect(identity).toMatch(/createHash\('sha256'\)/);
+  });
+
+  // --- invariant 14: no new Redis source of truth --------------------------------
+
+  it('INVARIANT 14 — no new Redis source of truth: no redis/ioredis in the domain; the composition binds the in-memory adapter; the migration set is unchanged (59 — NO schema migration is authorized by WORK-066)', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not touch Redis`).not.toMatch(/redis|ioredis|RedisQueue/i);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not open a database connection (durable state is the port + future ACR)`).not.toMatch(/DatabaseClient|pg\b|new Client\(/);
+    }
+    // The migration set is unchanged by WORK-066 (no durable scheduling table):
+    const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql'));
+    expect(migrationFiles).toHaveLength(59);
+    for (const name of migrationFiles) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
+      expect(
+        /CREATE\s+TABLE\s+[^;]*scheduling|CREATE\s+TABLE\s+[^;]*trigger_claim|wfos_scheduling|wfos_validation_scheduling|wfos_scheduled_trigger/i.test(sql),
+        `migration ${name} must not create a WORK-066 scheduling store`,
+      ).toBe(false);
+    }
+  });
+
+  // --- invariant 15: WORK-064 admission remains THE validation gate --------------
+
+  it('INVARIANT 15 — the existing WORK-064 admission remains THE validation gate: the scheduler REQUESTS admission through the service and has NO other run-creation channel', () => {
+    const service = stripCodeComments(readFileSync(VS_SERVICE, 'utf8'));
+    // The single admission channel:
+    expect(service).toMatch(/continuousValidationService\.admitRun\(/);
+    // ...and NO direct repository/persistence access:
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not touch the run repository directly`).not.toMatch(/runRepository|InMemoryValidationRunRepository/);
+    }
+    // The admission request passes the deterministic runId + the mode-specific bindings:
+    expect(service).toMatch(/runId:\s*identity\.runId/);
+    expect(service).toMatch(/continuousConfigured:\s*leg\.continuousConfigured/);
+    expect(service).toMatch(/releaseRef:\s*leg\.releaseRef/);
+  });
+
+  // --- composition + the no-autonomous-drive discipline ---------------------------
+
+  it('app.ts constructs DefaultValidationScheduler from the WORK-064 service + the in-memory claim store + an EXPLICITLY injected clock, and exposes it on AppDeps', () => {
+    const appSource = readFileSync(APP_TS, 'utf8');
+    expect(appSource).toMatch(/validationScheduler = new DefaultValidationScheduler\(/);
+    expect(appSource).toMatch(/claimStore: new InMemoryScheduledTriggerClaimStore\(\)/);
+    expect(appSource).toMatch(/validationScheduler\?: ValidationScheduler/);
+  });
+
+  it('NO autonomous unsupervised scheduler: the domain registers NO timers, NO intervals, NO queue consumers, NO job handlers (CONTINUOUS runs happen only under explicit configuration invoked by an explicit request)', () => {
+    for (const { path, src } of readVsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not start timers`).not.toMatch(/setInterval|setTimeout/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not register job handlers or queue consumers`).not.toMatch(/createWebhookJobHandler|registerHandler|queue\.enqueue|JobHandler/);
+    }
+    // The CONTINUOUS configuration requirement is structural (the classifier):
+    const classification = stripCodeComments(readFileSync(VS_TRIGGER_CLASSIFICATION, 'utf8'));
+    expect(classification).toMatch(/SCHEDULING_CONTINUOUS_CONFIGURATION_REQUIRED/);
+    // No route exposes the scheduler as an autonomous surface (the API
+    // surface is a future governed decision):
+    const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    for (const entry of readdirSync(routesDir)) {
+      if (!entry.endsWith('.ts')) continue;
+      const src = readFileSync(join(routesDir, entry), 'utf8');
+      expect(src, `routes/${entry} must not expose the validation scheduler (a future governed decision)`).not.toMatch(/validationScheduler|ValidationScheduler/);
+    }
+  });
+});
