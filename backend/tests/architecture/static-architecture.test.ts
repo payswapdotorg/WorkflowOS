@@ -20860,6 +20860,48 @@ describe('WORK-069 invariants — Progressive Release & Runtime Validation (the 
     expect(service).toMatch(/'HALT_RUNTIME_OBSERVATION_UNAVAILABLE'/);
   });
 
+  // --- invariant 11: the reserve-first consequence durability protocol ----
+
+  it('INVARIANT 11 — the reserve-first consequence durability protocol (the PR #108 architect-review correction): the decision record is durable BEFORE any governed consequence executes, the pending tombstone fails closed, and the completion transition exists at the port (no ungated single-shot save)', () => {
+    const types = readFileSync(PR_TYPES, 'utf8');
+    // The phase vocabulary + the typed pending error live in the contract:
+    expect(types).toMatch(/PROGRESSIVE_CONSEQUENCE_PHASES\s*=/);
+    expect(types).toMatch(/'PR_DECISION_CONSEQUENCES_PENDING'/);
+    expect(types).toMatch(/'PR_DECISION_COMPLETION_REJECTED'/);
+    // The port exposes the explicit two-phase write:
+    expect(types).toMatch(/reserve\(record: ProgressiveReleaseDecisionRecord\)/);
+    expect(types).toMatch(/completeDecision\(/);
+    // The service pins the pending tombstone classification:
+    const service = stripCodeComments(readFileSync(PR_SERVICE, 'utf8'));
+    expect(service).toMatch(/PR_DECISION_CONSEQUENCES_PENDING/);
+    // THE ORDERING IS LOAD-BEARING (the correction's core): the
+    // reservation write precedes the consequence execution, which
+    // precedes the completion write — in the service source order:
+    const reserveCall = service.indexOf('this.deps.decisionRepository.reserve(');
+    const consequenceCall = service.indexOf('await this.emitFailureSignals(');
+    const rollbackCall = service.indexOf('await this.invokeRollback(');
+    const completionCall = service.indexOf('this.deps.decisionRepository.completeDecision(');
+    expect(reserveCall, 'the reservation write must exist in the service source').toBeGreaterThan(-1);
+    expect(consequenceCall, 'the signal consequence execution must exist in the service source').toBeGreaterThan(-1);
+    expect(rollbackCall, 'the rollback consequence execution must exist in the service source').toBeGreaterThan(-1);
+    expect(completionCall, 'the completion write must exist in the service source').toBeGreaterThan(-1);
+    expect(
+      reserveCall,
+      'the reservation MUST precede the consequence execution (the pre-correction defect: consequences before persistence)',
+    ).toBeLessThan(consequenceCall);
+    expect(reserveCall).toBeLessThan(rollbackCall);
+    expect(
+      completionCall,
+      'the completion write MUST follow the consequence execution (it records their real outcomes)',
+    ).toBeGreaterThan(rollbackCall);
+    // …and the un-gated single-shot save can NEVER return: the in-memory
+    // adapter implements reserve/completeDecision and NO save:
+    const repository = stripCodeComments(readFileSync(PR_REPOSITORY, 'utf8'));
+    expect(repository).not.toMatch(/\bsave\s*\(/);
+    expect(repository).toMatch(/reserve\s*\(/);
+    expect(repository).toMatch(/completeDecision\s*\(/);
+  });
+
   // --- composition pin: buildApp wires the service on AppDeps ------------------
 
   it('the app.ts composition pins: the service + the in-memory repository + the consumed authorities + the UNBOUND rollback port + NO route surface', () => {

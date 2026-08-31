@@ -40,6 +40,7 @@ export {
   PROGRESSIVE_DECISION_REASONS,
   PROGRESSIVE_DEPLOYMENT_STATUSES,
   PROGRESSIVE_DELIVERY_OUTCOMES,
+  PROGRESSIVE_CONSEQUENCE_PHASES,
   // §2 the typed error surface
   PROGRESSIVE_RELEASE_ERROR_CODES,
   ProgressiveReleaseError,
@@ -74,6 +75,7 @@ export type {
   ProgressiveDecisionReason,
   ProgressiveDeploymentStatus,
   ProgressiveDeliveryOutcome,
+  ProgressiveConsequencePhase,
   // §2 errors
   ProgressiveReleaseErrorCode,
   // §3 the decision request
@@ -92,6 +94,8 @@ export type {
   ProgressiveReleaseDecisionResult,
   // §8 the persistence port
   ProgressiveReleaseDecisionRepository,
+  DecisionConsequenceOutcomes,
+  DecisionReservation,
   // §9 the service contract
   ProgressiveReleaseServiceDeps,
   ProgressiveReleaseService,

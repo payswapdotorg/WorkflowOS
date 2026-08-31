@@ -218,19 +218,34 @@ describe('WORK-069 — the halt/recover signal flow (the WORK-067 authority cons
     expect(events[0]!.metadata).toMatchObject({ rollbackInvoked: null, signalsEmitted: 0 });
   });
 
-  it('the signal channel fails closed when the WORK-067 authority is unbound (a halt NEVER silently no-ops)', async () => {
+  it('the signal channel fails closed when the WORK-067 authority is unbound (a halt NEVER silently no-ops) — and the failed consequence leaves a DURABLE pending reservation the re-delivery fails closed on (the PR #108 protocol)', async () => {
     const stack = buildDecisionStack();
     await completedPostReleaseRun(stack.continuousValidationService, {
       runId: 'run-failed-1',
       releaseRef: 'release-2026.09.01',
       outcome: 'validation_failure',
     });
+    const request = decisionRequestFixture({ rolloutStage: 'partial', validationRunId: 'run-failed-1' });
     // sabotage the signal authority binding:
     (stack as unknown as { service: { deps: Record<string, unknown> } }).service.deps.engineeringSignalService = undefined;
     await expect(
-      stack.service.decideProgressiveRelease(
-        decisionRequestFixture({ rolloutStage: 'partial', validationRunId: 'run-failed-1' }),
-      ),
+      stack.service.decideProgressiveRelease(request),
     ).rejects.toThrowError(/\[PR_SIGNAL_AUTHORITY_UNBOUND\]/);
+    // The consequence authority failed AFTER the reservation (the exact
+    // crash-window the PR #108 correction covers): the decision record is
+    // DURABLE and PENDING — the re-delivery fails closed with the typed
+    // pending tombstone (it does NOT re-attempt the consequences and does
+    // NOT report a clean duplicate):
+    const history = await stack.decisionRepository.listForRollout('tenant-1', 'project-1', 'release-2026.09.01');
+    expect(history).toHaveLength(1);
+    expect(history[0]!.decision).toBe('halt');
+    expect(history[0]!.consequencePhase).toBe('pending');
+    await expect(
+      stack.service.decideProgressiveRelease(request),
+    ).rejects.toThrowError(/\[PR_DECISION_CONSEQUENCES_PENDING\]/);
+    // …and NO consequence/audit side effect was produced for the failed delivery:
+    expect(
+      stack.auditWriter.events.filter((e) => e.eventType === 'PROGRESSIVE_RELEASE_DECISION'),
+    ).toHaveLength(0);
   });
 });

@@ -214,6 +214,19 @@ independent decision. Every decision record carries the full provenance
 policy version, decision, and why) and emits one `/audit` forensic event
 (WORK-020).
 
+The consequence durability protocol (the PR #108 architect-review
+correction): the decision record is the only durable idempotency boundary,
+so it is RESERVED (insert-only, through the repository port's `reserve`)
+BEFORE any governed consequence executes — the halt/recover consequences
+(signal emission, the rollback invocation) run only for the reservation
+owner, then the `completeDecision` transition records their real outcomes;
+a `continue` reserves atomically final (it carries no governed
+consequences). A crash or a concurrent delivery can therefore never
+re-execute a non-idempotent consequence for an identity that is already
+durable: the re-delivery that finds a durable-but-unresolved (pending)
+reservation fails closed with the typed `PR_DECISION_CONSEQUENCES_PENDING`
+— never a re-execution, never a clean duplicate.
+
 When WORK-059 (Operational and Release Governance) lands, the release
 mechanics are delegated to it at the same public ports — WORK-069's
 binding model (the decision, the evidence gates, the consequence chain)

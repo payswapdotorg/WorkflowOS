@@ -247,4 +247,37 @@ describe('WORK-069 — fail-closed safety (§14: every unsafe/unknown state is a
       stack.service.decideProgressiveRelease(decisionRequestFixture({ rolloutStage: 'blue-green' })),
     ).rejects.toThrowError(/\[PR_INPUT_STAGE_INVALID\]/);
   });
+
+  it('MALFORMED releaseObservedAt (the PR #108 architect-review observation): EVERY non-string or unparseable value is the TYPED input rejection — never a native TypeError from Date.parse coercion', async () => {
+    const stack = buildDecisionStack();
+    // Non-string values (the pre-correction implementation called
+    // Date.parse BEFORE the typeof check — a Symbol/BigInt escaped as a
+    // native TypeError instead of the typed error):
+    const malformedValues: unknown[] = [
+      123,
+      true,
+      { iso: '2026-09-01T12:00:00Z' },
+      ['2026-09-01T12:00:00Z'],
+      null,
+      Symbol('release-boundary'),
+      123n,
+      'not-an-iso-timestamp',
+    ];
+    for (const malformed of malformedValues) {
+      const delivered = await stack.service
+        .decideProgressiveRelease(
+          decisionRequestFixture({ releaseObservedAt: malformed as string }),
+        )
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      // EVERY malformed value is rejected — and TYPED (the native
+      // TypeError the architect observed must never escape):
+      expect(delivered, `releaseObservedAt ${String(malformed)} must be rejected`).not.toBeNull();
+      expect(delivered).toBeInstanceOf(Error);
+      expect((delivered as Error).name).not.toBe('TypeError');
+      expect(String(delivered)).toMatch(/\[PR_INPUT_RELEASE_OBSERVED_AT_INVALID\]/);
+    }
+  });
 });

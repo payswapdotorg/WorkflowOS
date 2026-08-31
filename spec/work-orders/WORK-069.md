@@ -317,11 +317,13 @@ not a drive surface; the future governed consumers wire those).
   declaration): NO schema migration. The `ProgressiveReleaseDecision-
   Repository` PORT carries the in-memory adapter (the WORK-064 run-
   repository / WORK-066 claim-store / WORK-067 signal-repository
-  precedent); the keyed-uniqueness contract (`decision_id` PRIMARY KEY +
+  precedent) and exposes the consequence-durability two-phase write
+  (`reserve` + `completeDecision` — no ungated single-shot save); the
+  keyed-uniqueness contract (`decision_id` PRIMARY KEY +
   the identity fingerprint UNIQUE — the DATABASE constraint, not an
-  application race, decides the winner) is proven under real PostgreSQL by
-  the two-actor integration suite; the durable binding point is a future
-  ACR at the same port.
+  application race, decides the reservation winner) is proven under real
+  PostgreSQL by the two-actor integration suite; the durable binding
+  point is a future ACR at the same port.
 - **Idempotency and independence (§13):** the deterministic decision
   identity (tenant + project + release + stage + validation run + runtime
   observation event) — a duplicate delivery returns the recorded decision
@@ -330,6 +332,23 @@ not a drive surface; the future governed consumers wire those).
   re-derived after the rollout state moved underneath it is the TYPED
   `PR_DECISION_IDENTITY_CONFLICT` (never a silent rewrite); a different
   project/stage/release/observation is an INDEPENDENT decision.
+- **The consequence durability protocol (the PR #108 architect-review
+  correction):** the decision record is the ONLY durable idempotency
+  boundary, so it is RESERVED (insert-only, through the port's
+  `reserve`) BEFORE any governed consequence executes — a `halt`/
+  `recover`'s consequences run ONLY for the reservation owner (the loser
+  of a concurrent insert race converges and executes nothing), then the
+  `completeDecision` transition (pending → executed) records their REAL
+  outcomes; a `continue` reserves directly as executed (it carries no
+  governed consequences, so the reservation is atomically final). A
+  crash or a concurrent delivery can therefore NEVER re-execute a
+  non-idempotent consequence (a rollback invocation, a signal emission)
+  for a decision identity that is already durable: the re-delivery that
+  finds a durable-but-unresolved (pending) reservation fails closed with
+  the TYPED `PR_DECISION_CONSEQUENCES_PENDING` — never a re-execution,
+  never a clean duplicate, never a silent continue. The port exposes NO
+  ungated single-shot save (the pre-correction `save`-after-consequences
+  ordering is structurally impossible).
 
 ### The verification battery
 
@@ -339,14 +358,55 @@ determinism), the §14 fail-closed safety matrix (missing validation,
 incomplete validation, wrong mode/trigger/release/tenant/environment,
 missing and ambiguous runtime observation, already-halted,
 already-recovered, invalid stage transition, foreign stage), the §13
-idempotency/independence matrix, and the halt/recover signal flow (the
+idempotency/independence matrix, the consequence-durability regression
+suite (the PR #108 architect-review cases: concurrent halt deliveries,
+concurrent recover deliveries with the rollback authority bound — both
+the insert-race and the in-flight windows, the crash between the
+consequence execution and the completion persistence, and the preserved
+duplicate-delivery guarantee), and the halt/recover signal flow (the
 WORK-067 authority consumed — the release-correlated signal chain, the
 rollback invocation through the port, the honest no-signal continue case,
-the unbound-authority fail-closed cases). The mutation/discrimination
+the unbound-authority fail-closed cases — extended with the durable
+pending-tombstone assertions). The mutation/discrimination
 proofs prove the protections (removing the validation binding, the runtime
 binding, the governed-decision boundary, the rollback boundary, the
 no-second-authority boundary, or the signal channel makes the corresponding
 test FAIL). The static-architecture suite pins the no-second-authority
-matrix at the source level. The real-PG two-actor integration suite proves
+matrix at the source level — including INVARIANT 11 (the reserve-first
+consequence durability protocol: the reservation write precedes the
+consequence execution which precedes the completion write, the pending
+tombstone fails closed, and the in-memory adapter implements NO ungated
+save). The real-PG two-actor integration suite proves
 the keyed-uniqueness contract under true concurrency (two independent
-connections, no sequential-call shortcuts).
+connections, no sequential-call shortcuts) — including the full-service
+two-actor halt/recover proofs (the shared non-idempotent consequence
+counters: the rollback authority invoked EXACTLY ONCE, one audit event)
+and the crash-window proof (the durable pending record + the typed
+closed re-delivery).
+
+### The architect-review correction record (PR #108 — 2026-09-01)
+
+The architect review of PR #108 found ONE merge-blocking correctness
+defect: the governed halt/recover consequences executed BEFORE the
+decision record was persisted, so a crash or a concurrent delivery could
+repeat the signal emission and, once the rollback authority is bound,
+potentially repeat the rollback for the same decision identity (the
+in-memory production composition made the decision record the only
+durable boundary, and the pre-correction ordering left NO record in the
+crash window). The correction is the consequence durability protocol
+recorded above: reserve (durable, insert-only) → execute (the reservation
+owner only) → complete (the pending → executed transition), with the
+typed `PR_DECISION_CONSEQUENCES_PENDING` fail-closed tombstone for the
+crash window — implemented WITHOUT a schema migration (the Work Order's
+`migrations: []` ruling is untouched: the protocol lives entirely at the
+existing repository PORT; the real-PG proofs use the test-schema
+fixture table as before). The secondary observation (a malformed
+non-string `releaseObservedAt` could escape as a native `TypeError`
+from `Date.parse` before the `typeof` check) is corrected in the same
+change: the typed `PR_INPUT_RELEASE_OBSERVED_AT_INVALID` rejection now
+covers every non-string/unparseable value, with the regression matrix in
+the fail-closed safety suite. The regression coverage the architect
+required (concurrent halt, concurrent recover with the rollback bound,
+the crash window, and the preserved duplicate guarantee) is implemented
+in `backend/tests/progressive-release/consequence-idempotency.test.ts`
+and extended in the real-PG integration suite.

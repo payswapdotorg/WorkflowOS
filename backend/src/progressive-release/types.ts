@@ -146,6 +146,29 @@ export type ProgressiveDeploymentStatus = (typeof PROGRESSIVE_DEPLOYMENT_STATUSE
 export const PROGRESSIVE_DELIVERY_OUTCOMES = ['decided', 'duplicate'] as const;
 export type ProgressiveDeliveryOutcome = (typeof PROGRESSIVE_DELIVERY_OUTCOMES)[number];
 
+/**
+ * The consequence-execution phase of a decision record — the durability
+ * protocol that makes a decision identity's governed consequences
+ * AT-MOST-ONCE (the PR #108 architect-review correction: consequences
+ * may NEVER execute before the decision record is durable, or a crash or
+ * a concurrent delivery can repeat them — signal re-emission and, once
+ * the rollback authority is bound, a repeated rollback for the same
+ * decision identity).
+ *
+ *   - `pending` — the record is RESERVED (durable) and its consequence
+ *     execution is unresolved: in flight, or interrupted by a crash or an
+ *     authority failure between the reservation and the completion. A
+ *     re-delivery that finds a pending record NEVER re-executes the
+ *     consequences and NEVER reports a clean duplicate — it fails closed
+ *     with the typed `PR_DECISION_CONSEQUENCES_PENDING`.
+ *   - `executed` — the governed consequences are executed and their
+ *     outcomes recorded (or none were required: a `continue` decision
+ *     reserves DIRECTLY as executed — it carries no governed
+ *     consequences, so the reservation is atomically final).
+ */
+export const PROGRESSIVE_CONSEQUENCE_PHASES = ['pending', 'executed'] as const;
+export type ProgressiveConsequencePhase = (typeof PROGRESSIVE_CONSEQUENCE_PHASES)[number];
+
 // ============================================================================
 // §2  The typed error surface (fail closed)
 // ============================================================================
@@ -161,6 +184,9 @@ export const PROGRESSIVE_RELEASE_ERROR_CODES = [
   'PR_INPUT_RELEASE_OBSERVED_AT_INVALID',
   // §3 identity discipline
   'PR_DECISION_IDENTITY_CONFLICT',
+  // §3a the consequence durability protocol (the PR #108 correction)
+  'PR_DECISION_CONSEQUENCES_PENDING',
+  'PR_DECISION_COMPLETION_REJECTED',
   // §4 dependency discipline
   'PR_VALIDATION_AUTHORITY_UNBOUND',
   'PR_SIGNAL_AUTHORITY_UNBOUND',
@@ -349,6 +375,15 @@ export interface ProgressiveReleaseDecisionRecord {
   readonly signalOutcomes: readonly HaltSignalOutcome[];
   /** Present on recover decisions (invoked or the typed unbound reason). */
   readonly rollback: RollbackInvocationResult | null;
+  /**
+   * The consequence-execution phase (the reserve-first durability
+   * protocol — the PR #108 architect-review correction): `pending`
+   * records are durable RESERVATIONS whose governed consequences are
+   * unresolved (in flight or interrupted); `executed` records carry the
+   * final outcomes. The record is the idempotency boundary, so it is
+   * durable BEFORE any consequence executes.
+   */
+  readonly consequencePhase: ProgressiveConsequencePhase;
   /** The WORK-064 outcome kind consumed as the decisive evidence (null when the run was unusable). */
   readonly validationOutcomeKind: string | null;
   /** The deterministic policy version (the decision is reproducible). */
@@ -367,19 +402,70 @@ export interface ProgressiveReleaseDecisionResult {
 // §8  The persistence port (in-memory adapter; NO migration authorized)
 // ============================================================================
 
+/** The consequence outcomes recorded by the reservation owner at the completion transition. */
+export interface DecisionConsequenceOutcomes {
+  /** The WORK-067 signal consequences (empty when none were required). */
+  readonly signalOutcomes: readonly HaltSignalOutcome[];
+  /** The rollback invocation outcome (null when no rollback was required/possible). */
+  readonly rollback: RollbackInvocationResult | null;
+}
+
+/**
+ * The outcome of the INSERT-ONLY reservation claim:
+ *   - `reserved` — THIS caller created the durable record and therefore
+ *     OWNS the governed consequence execution for the decision identity
+ *     (exactly one owner; the loser of a concurrent insert race receives
+ *     `converged` and executes NOTHING);
+ *   - `converged` — a record with the same decision identity already
+ *     exists (a concurrent delivery won the insert, or a prior delivery
+ *     reserved it); the STORED record decides the caller's semantics.
+ */
+export type DecisionReservation =
+  | { readonly status: 'reserved'; readonly record: ProgressiveReleaseDecisionRecord }
+  | { readonly status: 'converged'; readonly record: ProgressiveReleaseDecisionRecord };
+
 /**
  * The decision persistence port. ARCHITECTURAL RULING: the Work Order
  * declares `migrations: []` — the domain stays at this PORT with the
  * in-memory adapter (the WORK-064/066/067 precedent). The keyed
  * uniqueness contract (`decision_id` PRIMARY KEY + the identity
  * fingerprint UNIQUE — the DATABASE constraint, not an application race,
- * decides the winner) is proven under real PostgreSQL by the two-actor
- * integration suite; the durable binding point is a future ACR at this
- * port.
+ * decides the reservation winner) is proven under real PostgreSQL by the
+ * two-actor integration suite; the durable binding point is a future ACR
+ * at this port.
+ *
+ * THE CONSEQUENCE DURABILITY PROTOCOL (the PR #108 architect-review
+ * correction): the decision record is the ONLY durable idempotency
+ * boundary, so it MUST be durable BEFORE any governed consequence
+ * executes. The port therefore exposes an explicit two-phase write —
+ * `reserve` (the insert-only durable claim) then `completeDecision` (the
+ * pending → executed transition with the real outcomes) — and NO ungated
+ * single-shot save: a crash or a concurrent delivery can never re-execute
+ * a non-idempotent consequence (a rollback invocation, a signal emission)
+ * for a decision identity that is already durable.
  */
 export interface ProgressiveReleaseDecisionRepository {
-  /** Persist a decision (insert-or-converge; a same-id/different-fingerprint save is a typed conflict). */
-  save(record: ProgressiveReleaseDecisionRecord): Promise<ProgressiveReleaseDecisionRecord>;
+  /**
+   * RESERVE the decision record — the durable, INSERT-ONLY claim that
+   * MUST precede any governed consequence execution. A reserve whose
+   * decisionId already exists with the SAME identity fingerprint
+   * converges (the stored record decides); with a DIFFERENT identity
+   * fingerprint it is the typed PR_DECISION_IDENTITY_CONFLICT (the same
+   * id cannot carry two logical decisions — defense in depth; the
+   * DATABASE constraint is the production arbiter).
+   */
+  reserve(record: ProgressiveReleaseDecisionRecord): Promise<DecisionReservation>;
+  /**
+   * COMPLETE a pending reservation with the executed consequence
+   * outcomes (the pending → executed transition). Only the reservation
+   * owner calls it; completing an already-executed record converges to
+   * the stored record (idempotent); completing a record that was never
+   * reserved is the typed PR_DECISION_COMPLETION_REJECTED.
+   */
+  completeDecision(
+    decisionId: string,
+    outcomes: DecisionConsequenceOutcomes,
+  ): Promise<ProgressiveReleaseDecisionRecord>;
   /** Read a decision by id (null when absent — never fabricated). */
   findById(decisionId: string): Promise<ProgressiveReleaseDecisionRecord | null>;
   /** List the decision history of one rollout (oldest first — the recorded rollout state). */
@@ -423,13 +509,19 @@ export interface ProgressiveReleaseServiceDeps {
 export interface ProgressiveReleaseService {
   /**
    * Derive the governed continue/halt/recover decision for one rollout
-   * stage binding, execute its governed consequences (the WORK-067 signal
-   * flow, the rollback authority invocation, the /audit event), and
-   * persist the decision record. Deterministic for identical (tenant,
-   * project, release, stage, validation run, runtime observation, rollout
-   * history, clock). Idempotent under duplicate delivery (same identity →
-   * the recorded decision is returned; no duplicate halt action). Fail
-   * closed: every unsafe/unknown state is a typed halt, never a continue.
+   * stage binding and persist it through the consequence durability
+   * protocol: the decision record is RESERVED (durably, insert-only)
+   * BEFORE any governed consequence executes, the consequences (the
+   * WORK-067 signal flow, the rollback authority invocation) run only for
+   * the reservation owner, and the completion transition records their
+   * real outcomes. Deterministic for identical (tenant, project, release,
+   * stage, validation run, runtime observation, rollout history, clock).
+   * Idempotent under duplicate delivery (same identity → the recorded
+   * decision is returned; no consequence is re-executed); a delivery that
+   * finds a durable-but-unresolved reservation fails closed with the
+   * typed PR_DECISION_CONSEQUENCES_PENDING (never a re-execution, never
+   * a silent continue). Fail closed: every unsafe/unknown state is a
+   * typed halt, never a continue.
    */
   decideProgressiveRelease(input: DecideProgressiveReleaseInput): Promise<ProgressiveReleaseDecisionResult>;
   /** Read a decision by id (null when absent — never fabricated). */

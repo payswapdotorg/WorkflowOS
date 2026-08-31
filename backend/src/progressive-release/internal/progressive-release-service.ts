@@ -22,6 +22,18 @@
  *   - the decision record is persisted through the repository port and
  *     emitted through the /audit application boundary.
  *
+ * CONSEQUENCE DURABILITY PROTOCOL (the PR #108 architect-review
+ * correction): the decision record is the ONLY durable idempotency
+ * boundary, so it is RESERVED (insert-only) BEFORE any governed
+ * consequence executes — a halt/recover's consequences run only for the
+ * reservation owner, then the completion transition records their real
+ * outcomes. A `continue` reserves directly as executed (it carries no
+ * governed consequences). A crash or a concurrent delivery can therefore
+ * NEVER re-execute a non-idempotent consequence (a rollback invocation, a
+ * signal emission) for an identity that is already durable: the next
+ * delivery that finds a durable-but-unresolved (pending) reservation
+ * fails closed with the typed PR_DECISION_CONSEQUENCES_PENDING.
+ *
  * IDEMPOTENCY: the deterministic decision identity (release, stage,
  * validation run, runtime observation, scope) — a duplicate delivery
  * returns the recorded decision and re-executes NOTHING (no duplicate
@@ -33,6 +45,7 @@ import type {
   DecideProgressiveReleaseInput,
   HaltSignalOutcome,
   PriorRolloutState,
+  ProgressiveConsequencePhase,
   ProgressiveDecisionReason,
   ProgressiveReleaseDecisionRecord,
   ProgressiveReleaseDecisionResult,
@@ -122,39 +135,29 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     //    an exact match is the idempotent duplicate (no consequence is
     //    re-executed); a mismatch means the same logical decision event
     //    would carry two different outcomes (the rollout history moved
-    //    underneath it) — a typed conflict, never a silent rewrite.
+    //    underneath it) — a typed conflict, never a silent rewrite. A
+    //    durable-but-PENDING record is the typed fail-closed tombstone
+    //    (its consequences are unresolved — NEVER re-executed, never a
+    //    clean duplicate).
     const prior = await this.deps.decisionRepository.findById(decisionId);
     if (prior !== null) {
-      if (prior.contentFingerprint === contentFingerprint) {
-        this.deps.logger?.info('progressive-release.decision.duplicate', {
-          decisionId,
-          releaseRef: input.releaseRef,
-          stage,
-          decision: prior.decision,
-        });
-        return { outcome: 'duplicate', decision: prior };
-      }
-      throw new ProgressiveReleaseError(
-        'PR_DECISION_IDENTITY_CONFLICT',
-        `decision ${decisionId} (release '${input.releaseRef}', stage '${stage}', run '${input.validationRunId}') is already recorded as ${prior.decision}/${prior.reason} but the current facts derive ${derivation.decision}/${derivation.reason} — the same logical decision event cannot carry two different outcomes; reconcile the rollout state before re-delivering`,
-      );
+      return this.classifyRecordedDecision(prior, contentFingerprint, input, stage);
     }
 
-    // 7. execute the governed consequences (BEFORE persistence so the
-    //    record carries the real outcomes; the WORK-067 ingestion is
-    //    itself idempotent, and a crash mid-consequence leaves NO record
-    //    — a re-delivery re-derives everything deterministically).
-    const signalOutcomes: HaltSignalOutcome[] = [];
-    let rollback: RollbackInvocationResult | null = null;
-    if (derivation.decision === 'halt' || derivation.decision === 'recover') {
-      signalOutcomes.push(...(await this.emitFailureSignals(input, stage, derivation.reason, validationEvidence, runtimeObservation, now)));
-    }
-    if (derivation.decision === 'recover') {
-      rollback = await this.invokeRollback(input, stage, decisionId, derivation.reason);
-    }
-
-    // 8. persist the decision record.
-    const record: ProgressiveReleaseDecisionRecord = {
+    // 7. RESERVE the decision record FIRST — the durable idempotency claim
+    //    that MUST precede any governed consequence (the PR #108
+    //    architect-review correction: consequences executing before the
+    //    record is durable could repeat under a crash or a concurrent
+    //    delivery — signal re-emission and, once the rollback authority is
+    //    bound, a repeated rollback for the same decision identity). A
+    //    `continue` decision carries NO governed consequences, so it
+    //    reserves directly as EXECUTED (atomically final); a halt/recover
+    //    reserves as PENDING and only the reservation owner executes and
+    //    completes. A concurrent delivery that loses the insert race
+    //    converges to the stored record and executes NOTHING.
+    const consequencePhase: ProgressiveConsequencePhase =
+      derivation.decision === 'continue' ? 'executed' : 'pending';
+    const reservationRecord: ProgressiveReleaseDecisionRecord = {
       decisionId,
       identityFingerprint,
       contentFingerprint,
@@ -175,17 +178,48 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
       decision: derivation.decision,
       reason: derivation.reason,
       explanation: derivation.explanation,
-      signalOutcomes,
-      rollback,
+      signalOutcomes: [],
+      rollback: null,
+      consequencePhase,
       validationOutcomeKind,
       policyVersion: PROGRESSIVE_POLICY_VERSION,
       decidedAt: now().toISOString(),
     };
-    const stored = await this.deps.decisionRepository.save(record);
+    const reservation = await this.deps.decisionRepository.reserve(reservationRecord);
+    if (reservation.status === 'converged') {
+      // A concurrent delivery owns the decision identity (it won the
+      // insert race): the STORED record decides our semantics — we execute
+      // NOTHING.
+      return this.classifyRecordedDecision(reservation.record, contentFingerprint, input, stage);
+    }
 
-    // 9. the /audit forensic trail (supplementary — the /audit boundary's
-    //    own discipline: audit is forensic history, not authority; a
-    //    write failure after persistence must not fabricate a different
+    // 8. execute the governed consequences — the RESERVATION OWNER ONLY
+    //    (the record is already durable; a crash from here on can never
+    //    cause a re-execution).
+    const signalOutcomes: HaltSignalOutcome[] = [];
+    let rollback: RollbackInvocationResult | null = null;
+    if (derivation.decision === 'halt' || derivation.decision === 'recover') {
+      signalOutcomes.push(...(await this.emitFailureSignals(input, stage, derivation.reason, validationEvidence, runtimeObservation, now)));
+    }
+    if (derivation.decision === 'recover') {
+      rollback = await this.invokeRollback(input, stage, decisionId, derivation.reason);
+    }
+
+    // 9. COMPLETE the reservation: the pending → executed transition
+    //    recording the REAL consequence outcomes (the record now carries
+    //    what actually happened). A `continue` record was atomically final
+    //    at its reservation.
+    const stored: ProgressiveReleaseDecisionRecord =
+      derivation.decision === 'continue'
+        ? reservation.record
+        : await this.deps.decisionRepository.completeDecision(decisionId, {
+            signalOutcomes,
+            rollback,
+          });
+
+    // 10. the /audit forensic trail (supplementary — the /audit boundary's
+    //     own discipline: audit is forensic history, not authority; a
+    //     write failure after persistence must not fabricate a different
     //    decision, so it propagates as a typed error while the record
     //    stays durable).
     if (this.deps.auditWriter !== undefined) {
@@ -236,6 +270,48 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     releaseRef: string,
   ): Promise<readonly ProgressiveReleaseDecisionRecord[]> {
     return this.deps.decisionRepository.listForRollout(tenantId, projectId, releaseRef);
+  }
+
+  // --- the recorded-decision classification (the idempotency gate) ------
+
+  /**
+   * The classification of an already-durable record against the CURRENT
+   * derivation: a content mismatch is the typed conflict (the same
+   * logical decision event cannot carry two different outcomes); an
+   * EXECUTED record is the idempotent duplicate (no consequence is
+   * re-executed); a PENDING record is the typed fail-closed tombstone —
+   * its consequence execution is unresolved (in flight or interrupted by
+   * a crash/authority failure between the reservation and the
+   * completion), so the re-delivery NEVER re-executes the consequences
+   * and NEVER reports a clean duplicate (the PR #108 architect-review
+   * correction: a decision identity cannot execute a non-idempotent
+   * consequence more than once).
+   */
+  private classifyRecordedDecision(
+    prior: ProgressiveReleaseDecisionRecord,
+    contentFingerprint: string,
+    input: DecideProgressiveReleaseInput,
+    stage: ProgressiveRolloutStage,
+  ): ProgressiveReleaseDecisionResult {
+    if (prior.contentFingerprint !== contentFingerprint) {
+      throw new ProgressiveReleaseError(
+        'PR_DECISION_IDENTITY_CONFLICT',
+        `decision ${prior.decisionId} (release '${input.releaseRef}', stage '${stage}', run '${input.validationRunId}') is already recorded as ${prior.decision}/${prior.reason} but the current facts derive a different outcome — the same logical decision event cannot carry two different outcomes; reconcile the rollout state before re-delivering`,
+      );
+    }
+    if (prior.consequencePhase === 'executed') {
+      this.deps.logger?.info('progressive-release.decision.duplicate', {
+        decisionId: prior.decisionId,
+        releaseRef: input.releaseRef,
+        stage,
+        decision: prior.decision,
+      });
+      return { outcome: 'duplicate', decision: prior };
+    }
+    throw new ProgressiveReleaseError(
+      'PR_DECISION_CONSEQUENCES_PENDING',
+      `decision ${prior.decisionId} (release '${prior.releaseRef}', stage '${prior.rolloutStage}', run '${prior.validationRunId}') is durable but its governed consequences are unresolved (reserved and not completed — in flight, or interrupted by a crash/authority failure between the reservation and the completion); the re-delivery does NOT re-execute them and does NOT report a duplicate: reconcile the pending reservation through the governed path`,
+    );
   }
 
   // --- the validation evidence (the WORK-064 authority consumed) ----------

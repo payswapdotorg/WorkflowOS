@@ -28,11 +28,17 @@ export function requireValidDecisionRequest(input: DecideProgressiveReleaseInput
     throw new ProgressiveReleaseError('PR_INPUT_VALIDATION_RUN_ID_REQUIRED', 'the decision request requires the WORK-064 validationRunId binding');
   }
   if (input.releaseObservedAt !== undefined) {
-    const parsed = Date.parse(input.releaseObservedAt);
-    if (typeof input.releaseObservedAt !== 'string' || Number.isNaN(parsed)) {
+    // The typeof check MUST precede the parse: a malformed NON-STRING value
+    // (a Symbol, a BigInt, an object) must be rejected as the TYPED input
+    // error — never escape as a native TypeError from Date.parse's
+    // string-coercion (the PR #108 architect-review observation).
+    if (
+      typeof input.releaseObservedAt !== 'string' ||
+      Number.isNaN(Date.parse(input.releaseObservedAt))
+    ) {
       throw new ProgressiveReleaseError(
         'PR_INPUT_RELEASE_OBSERVED_AT_INVALID',
-        'releaseObservedAt, when supplied, must be the caller-RECORDED ISO-8601 release boundary time (never inferred here)',
+        'releaseObservedAt, when supplied, must be the caller-RECORDED ISO-8601 release boundary time (a non-string or unparseable value is rejected typed — never a native coercion error)',
       );
     }
   }
