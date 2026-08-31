@@ -23,3 +23,7 @@
 
 # Test caches
 **/.vitest-cache/
+
+# WORK-071: the local development runtime's persistent dev database
+# (backend/.workflowos-dev-data/ — PGlite files; never commit dev state)
+**/.workflowos-dev-data/

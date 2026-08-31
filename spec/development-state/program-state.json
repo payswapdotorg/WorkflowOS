@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "artifact": "workflowos-development-state/program-state",
   "protocol": "WORK-052 parallel implementation protocol (docs/adr/ADR-0003-parallel-protocol-surface-declaration.md)",
-  "asOf": "2026-08-30T15:15:00Z (the customer dogfooding experiment's governed follow-up, reconciled by the PR #87 rebase onto the post-WORK-064-finalization mainline f9ba02f: the 2026-08-30 onboarding-attempt dogfooding experiment was ATTEMPTED and STOPPED at onboarding — see spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md. Four new governed Work Orders — WORK-071 (Local Development Runtime Substrate), WORK-072 (Authentication State Synchronization), WORK-073 (Create Project Organization Selection), WORK-074 (Identity & Access Runtime Activation — the 'WORK-063-RUNTIME' of the dogfooding experiment's design) — are issued PLANNED, NOT activated, NOT started. They are NOT in this file's workOrders[] array until the architect activates them; they are recorded in dependency-state.json futureGeneration. The dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8) now requires WORK-074 complete AND WORK-071 complete (or equivalent supported runtime) — the repository no longer implies that merely merging WORK-063's architecture specification means real authentication exists. The program state itself carries 55/55 recorded work orders complete, nothing in flight: WORK-063 is the merged spec-only identity-and-access architecture decision, and WORK-064 (Continuous Product Validation — the domain/model authority) is COMPLETE: merged as c351451 via PR #86 and finalized §34.8/ADR-0007 via PR #95 (merged as f9ba02f))",
+  "asOf": "2026-08-30T21:46:00Z (WORK-071 ACTIVATED and IN FLIGHT — the local development runtime substrate, issued by the dogfooding experiment's governed follow-up (finding F-2) and activated by the architect's implementation instruction on the post-#87/#95 mainline 4eb48b7; it left the futureGeneration and is recorded in flight on branch feat/work-071-local-dev-runtime. WORK-065/067/074 remain NOT activated, NOT started — parallel-wave activation is per-Work-Order authorization. 55/55 prior recorded work orders complete; WORK-071 is the one in-flight item)",
   "governing": {
     "architectureVersion": "v1.0",
     "architectureVersionState": "frozen",
@@ -1521,6 +1521,53 @@
         "pr": 86,
         "mergeCommit": "c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b"
       }
+    },
+    {
+      "id": "WORK-071",
+      "title": "Local Development Runtime Substrate (the dev-only runtime path: PGlite without externally hosted PostgreSQL)",
+      "status": "in_flight",
+      "dependencies": [
+        "WORK-003",
+        "WORK-023"
+      ],
+      "branch": "feat/work-071-local-dev-runtime",
+      "pr": 96,
+      "workOrder": "spec/work-orders/WORK-071.md",
+      "origin": "architect",
+      "surfaces": {
+        "modules": [],
+        "appLayer": [],
+        "migrations": [],
+        "specDocs": [
+          "spec/work-orders/WORK-071.md"
+        ],
+        "sharedIntegrationSurfaces": [
+          "backend/src/app.ts",
+          "backend/src/config.ts",
+          "backend/src/platform/index.ts",
+          "backend/src/platform/postgres/database-factory.ts",
+          "backend/src/platform/postgres/pglite-database-client.ts",
+          "backend/src/platform/persistence/infrastructure.ts",
+          "backend/src/platform/redis/",
+          "backend/tests/architecture/static-architecture.test.ts",
+          ".env.example",
+          "README.md",
+          "spec/development-state/program-state.json",
+          "spec/development-state/dependency-state.json",
+          "spec/development-state/frontier-state.json",
+          "spec/governance/future-roadmap.json",
+          "spec/architecture/v1.1/dogfooding-model.md",
+          "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
+        ]
+      },
+      "surfaceFlags": [
+        "publicContracts",
+        "concurrency",
+        "localBehavior"
+      ],
+      "assuranceProfile": "HIGH_ASSURANCE",
+      "runtimeImpactBinding": "high",
+      "note": "Activated by the architect (2026-08-30, the implementation instruction on the post-#87/#95 mainline 4eb48b7; the Work Order was issued by the 2026-08-30 customer dogfooding experiment's governed follow-up — finding F-2: buildApp left `database` undefined without DATABASE_URL, so local runs required Docker-hosted PostgreSQL). Implementation: the dev-only runtime path wired as an EXPLICIT environment branch in the composition root — config.ts reads WORKFLOWOS_DEV_RUNTIME=pglite (the explicit, never-ambient signal) and FAILS CLOSED on ambiguity (dev signal + DATABASE_URL), on production (NODE_ENV=production), and on unsupported values; buildApp's dev branch constructs the EXISTING PgliteDatabaseClient (real PostgreSQL compiled to WASM — DATA-AC-03 satisfied, NOT a fake in-memory database) persisted to WORKFLOWOS_DEV_DATABASE_DIR (default backend/.workflowos-dev-data/pglite, gitignored), running the SAME runMigrations + the SAME domain code through the SAME DatabaseClient boundary (no second persistence authority; the production DATABASE_URL branch is unchanged and first; the production factory createDatabaseClient still returns pg.Pool). The Redis requirement is resolved with a dev-only in-memory Redis substitute (platform/redis/in-memory-redis.ts — the §29 NON-authoritative locks/cache/readiness layer only; unknown Lua fails closed; the same treatment InMemoryQueue gives the queue boundary), so the FULL Infrastructure container + the workflow orchestrator (convergence loop) run without a Redis server; the queue stays the existing InMemoryQueue (non-durable, explicitly warned); the object store keeps the existing FsObjectStore/InMemoryObjectStore fallbacks. Local development needs NO externally hosted PostgreSQL, NO Redis, NO Docker. Evidence artifacts updated: .env.example + README document the local-development path. Verification on the implementation branch: the WORK-071 suite 22/22 (env-boundary selection + fail-closed ambiguity/production/value discriminations; dev-path startup through the REAL buildApp with full product deps; the SAME 58 migrations applied on the dev database; the Infrastructure container + orchestrator constructed without Redis; restart persistence through the local filesystem; product routes through the real HTTP server incl. /health/ready ready, 401-without-credentials, the API-key login/bootstrap path, tenant isolation through the local runtime, and concurrent requests; the DEFAULT nested dev data directory boots on a clean checkout — the browser-proof regression: PGlite does not create parent directories; production-path discrimination — DATABASE_URL still selects pg.Pool (connection failure, no silent PGlite fallback) and no-signal-no-URL stays database-less (the dev wiring is not ambient)); static architecture 817/817 (13 new WORK-071 invariants: the dev branch is gated on the explicit config signal, ambiguity/production/value fail closed, production pg.Pool authoritative and first, no PGlite references outside platform/ + the composition root, the SAME migration runner on both branches, the PGlite adapter implements the ONE DatabaseClient boundary, the in-memory Redis is a non-authoritative dev stand-in fail-closed on unknown Lua, the documented .env.example/README local-development path); development-governance 67/67; backend typecheck 0 / lint 0 errors (2 pre-existing warnings, untouched); FULL backend regression 2669 passed / 44 skipped / 0 failed; frontend typecheck 0 / lint 0 errors (1 pre-existing warning) / 122 tests passed. Browser proof on the dev runtime (the REAL entrypoint, NO DATABASE_URL, NO REDIS_URL, NO Docker): /health/ready ready (postgres+redis+objectStore all ok), the seeded login/bootstrap path through the actual LoginPage → Projects → Project Overview → the Developer Workbench (all tabs; Work Graph interactive) with zero page/console errors and all API calls 200; the seeded org/project/users persisted across a backend restart; all three fail-closed startup refusals verified through the real entrypoint with clear errors. The dogfooding gate (dogfooding-model §8) still requires WORK-074 (the identity/auth runtime) AND WORK-071 — this Work Order unblocks the local-runtime precondition only."
     }
   ],
   "resumption": {

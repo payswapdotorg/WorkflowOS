@@ -331,6 +331,8 @@ const PROVIDER_IMPLEMENTATION_FILES = new Set([
   'src/platform/redis/redis-queue.ts', // RedisQueue (imports ioredis)
   'src/platform/redis/transient-lock.ts', // TransientLock (imports ioredis)
   'src/platform/redis/transient-cache.ts', // TransientCache (imports ioredis)
+  // WORK-071: the dev-only in-memory Redis substitute (concrete infra impl).
+  'src/platform/redis/in-memory-redis.ts', // createInMemoryRedis
   'src/platform/queue/in-memory-queue.ts', // InMemoryQueue (concrete queue impl)
   // --- Object storage (DATA-003) ---
   'src/platform/storage/in-memory-object-store.ts', // InMemoryObjectStore
@@ -379,6 +381,10 @@ const FORBIDDEN_CONCRETE_EXPORTS = new Set([
   'RedisQueue',
   'InMemoryQueue',
   'createRedisClient',
+  // WORK-071: the dev-only in-memory Redis substitute (locks/cache/
+  // readiness stand-in — a concrete infrastructure factory; domain modules
+  // receive it from the composition root, never construct it).
+  'createInMemoryRedis',
   'TransientLock',
   'TransientCache',
   // Object storage
@@ -18987,5 +18993,164 @@ describe('WORK-064 invariants — Continuous Product Validation (the domain/mode
     expect(mappingSrc).toMatch(/validationRunId: string/);
     expect(mappingSrc).toMatch(/validationJourneyId: string/);
     expect(mappingSrc).toMatch(/readonly observationIds: readonly string\[\]/);
+  });
+});
+
+// ============================================================================
+// WORK-071 — Local Development Runtime Substrate
+// ============================================================================
+// The dev-only runtime path: a supported local development environment that
+// runs WorkflowOS against PGlite (real PostgreSQL compiled to WASM —
+// DATA-AC-03 satisfied) with NO externally hosted PostgreSQL, wired through
+// the SAME DatabaseClient boundary, the SAME migrations, and the SAME
+// composition root. The production PostgreSQL path remains authoritative and
+// unchanged. These checks pin the environment boundary as STRUCTURAL facts:
+// the dev path is explicit (never ambient), fails closed on ambiguity and on
+// production, and introduces no second persistence authority.
+// ============================================================================
+
+describe('WORK-071 invariants — the local development runtime substrate', () => {
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+  const CONFIG_TS = join(BACKEND_ROOT, 'src', 'config.ts');
+  const FACTORY_TS = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'database-factory.ts');
+  const PGLITE_TS = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'pglite-database-client.ts');
+  const IN_MEMORY_REDIS_TS = join(BACKEND_ROOT, 'src', 'platform', 'redis', 'in-memory-redis.ts');
+  const ENV_EXAMPLE = join(BACKEND_ROOT, '..', '.env.example');
+  const README = join(BACKEND_ROOT, '..', 'README.md');
+
+  // --- (1) the dev path is EXPLICIT (never ambient) -----------------------------
+
+  it('the dev database branch is gated on the explicit dev-runtime config signal (removing the gate fails this check)', () => {
+    const appSrc = readFileSync(APP_TS, 'utf8');
+    // The PGlite construction happens ONLY inside the dev-runtime branch:
+    expect(appSrc).toMatch(
+      /else if \(config\.devRuntime === 'pglite'\) \{[\s\S]*?createPgliteDatabaseClient\(/,
+    );
+    // And nowhere else in the composition root:
+    expect(appSrc.match(/createPgliteDatabaseClient\(/g)?.length).toBe(1);
+  });
+
+  it('the in-memory Redis substitute is gated on the explicit dev-runtime config signal', () => {
+    const appSrc = readFileSync(APP_TS, 'utf8');
+    expect(appSrc).toMatch(
+      /if \(config\.devRuntime === 'pglite'\) \{[\s\S]*?createInMemoryRedis\(\)/,
+    );
+    expect(appSrc.match(/createInMemoryRedis\(\)/g)?.length).toBe(1);
+  });
+
+  it('the dev signal is read from an explicit env var (WORKFLOWOS_DEV_RUNTIME), not ambient detection', () => {
+    const configSrc = readFileSync(CONFIG_TS, 'utf8');
+    expect(configSrc).toMatch(/WORKFLOWOS_DEV_RUNTIME/);
+    // The dev runtime is ONLY selected from that env var:
+    expect(configSrc).toMatch(/devRuntime\?: DevRuntime/);
+  });
+
+  // --- (2) ambiguity + production fail closed -----------------------------------
+
+  it('the configuration REFUSES the dev signal alongside DATABASE_URL (ambiguity fails closed)', () => {
+    const configSrc = readFileSync(CONFIG_TS, 'utf8');
+    // A throw inside the dev-runtime resolution referencing both signals:
+    expect(configSrc).toMatch(
+      /if \(databaseUrl\) \{\s*throw new Error\(\s*`Ambiguous runtime configuration: \$\{DEV_RUNTIME_ENV_VAR\}=pglite is set AND DATABASE_URL/,
+    );
+  });
+
+  it('the configuration REFUSES the dev signal in a production-declared environment (no dev code in production)', () => {
+    const configSrc = readFileSync(CONFIG_TS, 'utf8');
+    expect(configSrc).toMatch(
+      /if \(process\.env\.NODE_ENV === 'production'\) \{\s*throw new Error\(/,
+    );
+  });
+
+  it('the configuration REFUSES unsupported dev-runtime values (a typo never silently selects a runtime)', () => {
+    const configSrc = readFileSync(CONFIG_TS, 'utf8');
+    expect(configSrc).toMatch(/if \(raw !== 'pglite'\) \{\s*throw new Error\(/);
+  });
+
+  // --- (3) production PostgreSQL remains authoritative ---------------------------
+
+  it('the production database branch is UNCHANGED and takes precedence (DATABASE_URL → createDatabaseClient → pg.Pool)', () => {
+    const appSrc = readFileSync(APP_TS, 'utf8');
+    // The production branch is the FIRST database branch:
+    const prodIdx = appSrc.indexOf('if (config.databaseUrl) {');
+    const devIdx = appSrc.indexOf("else if (config.devRuntime === 'pglite') {");
+    expect(prodIdx).toBeGreaterThan(-1);
+    expect(devIdx).toBeGreaterThan(prodIdx);
+    // The production branch constructs the pg.Pool-backed client:
+    expect(appSrc.slice(prodIdx, devIdx)).toMatch(/createDatabaseClient\(/);
+    // The production factory still returns a real pg.Pool client:
+    const factorySrc = readFileSync(FACTORY_TS, 'utf8');
+    expect(factorySrc).toMatch(/pg.*Pool/);
+    expect(factorySrc).not.toMatch(/pglite|PGlite/i);
+  });
+
+  it('NO dev-path code executes in the production composition (no PGlite construction outside the dev branch)', () => {
+    // The only file outside src/platform/** that may reference the PGlite
+    // client factory is the composition root (app.ts), inside its gated
+    // branch. No domain module, route, or service may construct it.
+    const violations: string[] = [];
+    for (const file of walkTs(SRC_ROOT)) {
+      const rel = relative(BACKEND_ROOT, file).split(sep).join('/');
+      if (rel === 'src/app.ts' || rel.startsWith('src/platform/')) continue;
+      const src = readFileSync(file, 'utf8');
+      if (/createPgliteDatabaseClient|PgliteDatabaseClient/.test(src)) {
+        violations.push(`${rel} references the PGlite client — only platform/ and the composition root may`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  // --- (4) no second persistence authority --------------------------------------
+
+  it('the dev path runs the SAME migrations (the existing runMigrations — no divergent schema path)', () => {
+    const appSrc = readFileSync(APP_TS, 'utf8');
+    // Both branches call the SAME migration runner on the SAME migration
+    // files (the dev branch must not introduce a second migration source).
+    const prodBranch = appSrc.slice(
+      appSrc.indexOf('if (config.databaseUrl) {'),
+      appSrc.indexOf("else if (config.devRuntime === 'pglite') {"),
+    );
+    const devBranch = appSrc.slice(
+      appSrc.indexOf("else if (config.devRuntime === 'pglite') {"),
+      appSrc.indexOf('let objectStore: ObjectStore;'),
+    );
+    expect(prodBranch).toMatch(/await runMigrations\(database, logger\)/);
+    expect(devBranch).toMatch(/await runMigrations\(database, logger\)/);
+  });
+
+  it('the PGlite adapter implements the ONE DatabaseClient boundary (no parallel persistence contract)', () => {
+    const pgliteSrc = readFileSync(PGLITE_TS, 'utf8');
+    expect(pgliteSrc).toMatch(/implements DatabaseClient/);
+    expect(pgliteSrc).toMatch(/import \{ PGlite \} from '@electric-sql\/pglite'/);
+  });
+
+  it('the in-memory Redis substitute is a NON-authoritative dev stand-in (locks/cache/readiness only — never a store)', () => {
+    const src = readFileSync(IN_MEMORY_REDIS_TS, 'utf8');
+    // It is dev-only, it substitutes the §29 non-authoritative Redis role,
+    // and it fails closed on unknown Lua (it never invents Redis semantics):
+    expect(src).toMatch(/WORK-071 local development runtime/);
+    expect(src).toMatch(/DATA2-AC-02/);
+    expect(src).toMatch(/never persisted WorkflowOS state/i);
+    // It does NOT implement the RedisQueue surface (the queue boundary has
+    // its own sanctioned InMemoryQueue — the dev path does not queue through
+    // a fake Redis):
+    expect(src).not.toMatch(/\brpush\b|\blpop\b|\bsadd\b|\bsrem\b/);
+  });
+
+  // --- (5) the documented local-development path exists --------------------------
+
+  it('.env.example documents the local development runtime (the explicit env boundary)', () => {
+    const src = readFileSync(ENV_EXAMPLE, 'utf8');
+    expect(src).toMatch(/WORKFLOWOS_DEV_RUNTIME=pglite/);
+    expect(src).toMatch(/WORKFLOWOS_DEV_DATABASE_DIR/);
+    // The doc states the constraints:
+    expect(src).toMatch(/MUST NOT be combined with DATABASE_URL/);
+    expect(src).toMatch(/MUST NOT be used in production/);
+  });
+
+  it('the README documents the local development quick start (no externally hosted PostgreSQL required)', () => {
+    const src = readFileSync(README, 'utf8');
+    expect(src).toMatch(/WORKFLOWOS_DEV_RUNTIME=pglite/);
+    expect(src).toMatch(/local development/i);
   });
 });

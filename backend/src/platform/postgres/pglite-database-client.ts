@@ -5,20 +5,33 @@ import type { QueryResult, QueryResultRow } from 'pg';
 /**
  * Pglite-backed {@link DatabaseClient} (real PostgreSQL compiled to WASM).
  *
- * Used for local development and tests when no PostgreSQL server is
- * available. Pglite is NOT a fake in-memory database: it is the actual
- * PostgreSQL server compiled to WebAssembly, enforcing the same relational
+ * Two sanctioned consumers:
+ *
+ * 1. The test suite — every integration test runs against a per-test PGlite
+ *    instance (real PostgreSQL semantics without a database server).
+ * 2. The WORK-071 local development runtime — the composition root's
+ *    dev-only branch (`WORKFLOWOS_DEV_RUNTIME=pglite`, `DATABASE_URL`
+ *    unset) constructs this adapter with a LOCAL FILESYSTEM directory so a
+ *    clean local developer runs the real product surface with a persistent
+ *    dev database and no externally hosted PostgreSQL.
+ *
+ * Pglite is NOT a fake in-memory database: it is the actual PostgreSQL
+ * server compiled to WebAssembly, enforcing the same relational
  * constraints, foreign keys, and transaction semantics as a networked
  * PostgreSQL. This satisfies the DATA-AC-03 requirement that proof come
  * from a real relational database, not a fake.
  *
  * The API surface mirrors `pg`'s `query` so domain code written against
- * {@link DatabaseClient} works unchanged against either implementation.
+ * {@link DatabaseClient} works unchanged against either implementation —
+ * the dev path runs the SAME migrations and the SAME domain code; it is a
+ * different implementation of the ONE persistence boundary, never a second
+ * authority.
  *
- * Production uses {@link PgDatabaseClient} (real `pg.Pool` against a networked
- * PostgreSQL). This adapter is used by the test suite (and may be used in
- * local dev) so tests run without a database server while still exercising
- * real PostgreSQL behavior.
+ * Production uses {@link PgDatabaseClient} (real `pg.Pool` against a
+ * networked PostgreSQL) constructed by {@link createDatabaseClient} from
+ * `DATABASE_URL`; the dev branch never executes in production (the config
+ * layer refuses the dev signal under `NODE_ENV=production` and alongside
+ * `DATABASE_URL`).
  */
 export class PgliteDatabaseClient implements DatabaseClient {
   private readonly pglite: PGlite;

@@ -185,19 +185,21 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     const a052 = report.assessments.find((a) => a.workOrderId === 'WORK-052')!;
     expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
-    // Evaluating the merged pair as candidates surfaces NO live conflict
-    // partner: WORK-064 (Continuous Product Validation) shared the
-    // static-architecture suite surface with the historical pair while in
-    // flight, but it is now COMPLETE (merged c351451 via PR #86 and
-    // finalized §34.8/ADR-0007) — merged items are durable history, not
-    // live partners. WORK-050 (merged 8f27cc7) and WORK-062 (merged
-    // f0855d2 via PR #82 and finalized complete per §34.8/ADR-0007) are
-    // likewise NOT live partners. The frontier is the authoritative live
-    // view: NOTHING is in flight.
-    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
-    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
+    // Evaluating the merged pair as candidates surfaces the ONE live
+    // in-flight conflict partner: WORK-071 (Local Development Runtime
+    // Substrate — activated 2026-08-30) shares the static-architecture
+    // suite surface AND app.ts with WORK-046 (and the suite surface with
+    // WORK-052) — the SAME durable-history surface pattern WORK-064 shared
+    // while it was in flight. WORK-064 itself (merged c351451 via PR #86
+    // and finalized complete §34.8/ADR-0007), WORK-050 (merged 8f27cc7),
+    // and WORK-062 (merged f0855d2 via PR #82 and finalized complete per
+    // §34.8/ADR-0007) are NOT live partners — merged items are durable
+    // history. The frontier is the authoritative live view: the ONLY
+    // in-flight item is WORK-071.
+    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-071']);
+    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-071']);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-071']);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -424,20 +426,17 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: every recorded item is complete (55/55 — WORK-064 merged c351451 via PR #86 and finalized §34.8/ADR-0007); nothing is in flight; nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
+  it('W052-AC03 — the REAL frontier: every recorded item is complete EXCEPT the in-flight WORK-071 (activated 2026-08-30); nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
     const frontier = realService.getFrontier();
     expect(frontier.dependencyEligible).toEqual([]);
-    // WORK-064 (Continuous Product Validation — the domain/model authority)
-    // was ACTIVATED by the architect on 2026-08-30 (the implementation
-    // instruction after the approved plan merged as 4018f42), implemented on
-    // branch feat/work-064-continuous-validation (PR #86), MERGED by the
-    // architect as c351451 on 2026-08-30 (squash-merged at the approved head
-    // 524c3f4) and FINALIZED complete per §34.8/ADR-0007. Every recorded
-    // work order is complete (55/55), nothing is in flight, and nothing is
-    // blocked (WORK-053..061 and WORK-065..070 are future-generation items
-    // not yet recorded in program-state; WORK-065 and WORK-067 are
-    // dependency-eligible on the complete WORK-064 but NOT activated).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    // WORK-071 (Local Development Runtime Substrate) was ACTIVATED by the
+    // architect on 2026-08-30 (the implementation instruction on the
+    // post-#87/#95 mainline 4eb48b7) and is the ONLY in-flight item (branch
+    // feat/work-071-local-dev-runtime; dependencies WORK-003/WORK-023 both
+    // complete). Every OTHER recorded work order is complete (55/55), and
+    // nothing is blocked (WORK-053..061, WORK-065..070, and WORK-072..074
+    // are future-generation items not yet recorded in program-state).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-071']);
     expect(frontier.blocked).toEqual([]);
     expect(frontier.complete.length).toBeGreaterThanOrEqual(55);
   });

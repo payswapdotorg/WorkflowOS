@@ -1,6 +1,54 @@
 # WORK-071 — Local Development Runtime Substrate
 
-Status: planned.
+Status: in flight (activated 2026-08-30 by the architect — the implementation
+instruction on the post-#87/#95 mainline `4eb48b7`; the activation is recorded
+in `spec/development-state/program-state.json`, branch
+`feat/work-071-local-dev-runtime`). The implementation delivers the dev-only
+runtime path as an explicit environment branch in the composition root:
+`backend/src/config.ts` reads the explicit, never-ambient
+`WORKFLOWOS_DEV_RUNTIME=pglite` signal (failing closed on ambiguity with
+`DATABASE_URL`, on `NODE_ENV=production`, and on unsupported values);
+`backend/src/app.ts` `buildApp` constructs the EXISTING
+`PgliteDatabaseClient` (real PostgreSQL compiled to WASM — DATA-AC-03
+satisfied, not a fake in-memory database) persisted to
+`WORKFLOWOS_DEV_DATABASE_DIR` (default `backend/.workflowos-dev-data/pglite`,
+gitignored), running the SAME `runMigrations` and the SAME domain code
+through the SAME `DatabaseClient` boundary (no second persistence authority;
+the production `DATABASE_URL` branch is unchanged and first; the production
+factory still returns `pg.Pool`). The Redis requirement is resolved with a
+dev-only in-memory Redis substitute
+(`backend/src/platform/redis/in-memory-redis.ts` — the §29 NON-authoritative
+locks/cache/readiness layer only; unknown Lua fails closed), so the FULL
+`Infrastructure` container and the workflow orchestrator (convergence loop)
+run without a Redis server; the queue stays the existing `InMemoryQueue`
+(non-durable, explicitly warned); the object store keeps the existing
+`FsObjectStore`/`InMemoryObjectStore` fallbacks. Local development requires
+NO externally hosted PostgreSQL, NO Redis, NO Docker. Verification on the
+branch: the WORK-071 suite 22/22 (env-boundary selection + fail-closed
+discriminations, dev-path startup through the real `buildApp` with the full
+product deps, the SAME 58 migrations on the dev database, the Infrastructure
+container + orchestrator without Redis, restart persistence through the
+local filesystem, product routes through the real HTTP server —
+`/health/ready` ready, 401-without-credentials, the API-key login/bootstrap
+path, tenant isolation through the local runtime, concurrent requests, the
+DEFAULT nested dev data directory booting on a clean checkout (the
+browser-proof regression: PGlite does not create parent directories) —
+production-path discrimination: `DATABASE_URL` still selects `pg.Pool` with
+no silent PGlite fallback, and no-signal-no-URL stays database-less (the dev
+wiring is not ambient)); static architecture 817/817 (13 new WORK-071
+invariants); development-governance 67/67; backend typecheck 0 / lint 0
+errors (2 pre-existing warnings, untouched); FULL backend regression 2669
+passed / 44 skipped / 0 failed; frontend typecheck 0 / lint 0 errors (1
+pre-existing warning) / 122 tests passed. Browser proof on the dev runtime
+(the REAL entrypoint — NO DATABASE_URL, NO REDIS_URL, NO Docker):
+`/health/ready` ready (postgres + redis + objectStore all ok); fresh browser
+→ LoginPage → API-key login → Projects → Project Overview → the Developer
+Workbench (all tabs; Work Graph interactive), zero page/console errors, all
+API calls 200; the seeded org/project/user persisted across a backend
+restart; all three fail-closed startup refusals verified through the real
+entrypoint with clear errors. The dev path does NOT by itself satisfy the
+dogfooding gate — the gate still requires WORK-074 complete AND this Work
+Order complete.
 
 Issued by: the 2026-08-30 customer dogfooding experiment's governed follow-up
 (the dogfooding evidence artifact
@@ -8,9 +56,10 @@ Issued by: the 2026-08-30 customer dogfooding experiment's governed follow-up
 finding F-2). This Work Order establishes the local-development runtime
 substrate — a supported dev-only runtime path so WorkflowOS can be exercised
 without requiring an externally hosted PostgreSQL server. It does NOT alter
-production semantics. Activation requires the architect's authorization and is
-recorded in `spec/development-state/program-state.json` (this change records
-none).
+production semantics. Activation requires the architect's authorization and
+is recorded in `spec/development-state/program-state.json` (the issuing
+change recorded none; the activation is carried by the implementation change
+that updated this status line).
 
 Dependencies: WORK-003 (PostgreSQL, Redis, object storage — the frozen
 persistence boundary whose dev path this Work Order provides) and WORK-023

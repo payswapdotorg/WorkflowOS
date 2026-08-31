@@ -46,6 +46,10 @@ export type {
 export { InMemoryQueue } from './queue/in-memory-queue.js';
 export { RedisQueue } from './redis/redis-queue.js';
 export { createRedisClient } from './redis/redis-client.js';
+// WORK-071: the local-development in-memory Redis substitute (locks/cache/
+// health-readiness only — Redis is non-authoritative §29; dev-only wiring,
+// constructed exclusively by the composition root's dev branch).
+export { createInMemoryRedis } from './redis/in-memory-redis.js';
 // Re-export the Redis type so other layers (health route, etc.) can type
 // Redis clients without importing ioredis directly (WORK-023: provider-package
 // boundary).

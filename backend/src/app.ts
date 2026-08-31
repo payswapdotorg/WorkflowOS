@@ -1,4 +1,5 @@
 import type { Logger, Queue, WorkerHostOptions, EchoJobOptions, Infrastructure, ObjectStore, DatabaseClient, SecretStore } from '@platform/index.js';
+import { mkdirSync } from 'node:fs';
 import {
   InMemoryQueue,
   RedisQueue,
@@ -8,6 +9,8 @@ import {
   createLogger,
   createRedisClient,
   createDatabaseClient,
+  createInMemoryRedis,
+  createPgliteDatabaseClient,
   runMigrations,
   FsObjectStore,
   InMemoryObjectStore,
@@ -145,6 +148,7 @@ import type { AuditService } from '@modules/audit/index.js';
 import { DefaultNotificationService, createNotificationJobHandler } from './modules/notifications/internal/notification-service.js';
 import type { NotificationService } from '@modules/notifications/index.js';
 import type { AppConfig } from './config.js';
+import { DEFAULT_DEV_DATABASE_DIR } from './config.js';
 import { DefaultWorkflowEngine } from './modules/workflows/internal/workflow-engine.js';
 import type { WorkflowEngine } from '@modules/workflows/index.js';
 import { DefaultWorkflowOrchestrator, createConvergenceJobHandler } from './modules/workflows/internal/workflow-orchestrator.js';
@@ -663,6 +667,20 @@ export async function buildApp(
     logger.warn('app.queue.in_memory', {
       reason: 'REDIS_URL not set; using non-durable in-memory queue',
     });
+    // WORK-071: the local development runtime's in-memory Redis substitute.
+    // Redis is NON-authoritative (§29, DATA2-AC-02) — it backs the transient
+    // lock/cache + readiness only — so a dev-only in-memory stand-in lets
+    // the FULL Infrastructure container and the workflow orchestrator run
+    // without a Redis server (the same treatment InMemoryQueue gives the
+    // queue boundary). Gated EXPLICITLY on the dev-runtime signal: the
+    // production composition never constructs it.
+    if (config.devRuntime === 'pglite') {
+      redisClient = createInMemoryRedis();
+      logger.warn('app.redis.in_memory_substitute', {
+        runtime: config.devRuntime,
+        reason: 'WORK-071 local development runtime: REDIS_URL not set; using the in-memory Redis substitute for locks/cache/readiness (non-authoritative, non-durable, dev-only)',
+      });
+    }
   }
 
   // Handler registry is built AFTER database wiring (below) so that
@@ -674,6 +692,16 @@ export async function buildApp(
   // object store is constructed; otherwise an in-memory store is used for dev.
   // Domain modules obtain these from the Infrastructure container rather than
   // constructing their own clients.
+  //
+  // --- WORK-071: the local development runtime branch. When the EXPLICIT
+  // dev-runtime signal is present (WORKFLOWOS_DEV_RUNTIME=pglite — loadConfig
+  // refuses it in production and refuses it alongside DATABASE_URL), the
+  // database is a PGlite-backed DatabaseClient: real PostgreSQL compiled to
+  // WASM persisted to a local filesystem directory — the SAME migrations,
+  // the SAME domain code, the SAME DatabaseClient boundary. This is a
+  // dev-only implementation of the one persistence authority, NOT a second
+  // authority and NOT a production fallback: production always takes the
+  // DATABASE_URL branch above (unchanged).
   let infrastructure: Infrastructure | undefined;
   let ownsDatabase = false;
   let database: DatabaseClient | undefined;
@@ -684,6 +712,25 @@ export async function buildApp(
     // start simultaneously (as in docker-compose), both would race to apply
     // migrations and the loser crashes with a duplicate-key error. The
     // worker trusts that the API has already applied the schema.
+    if (config.role !== 'worker') {
+      await runMigrations(database, logger);
+    }
+  } else if (config.devRuntime === 'pglite') {
+    const devDatabaseDir = config.devDatabaseDir ?? DEFAULT_DEV_DATABASE_DIR;
+    // WORK-071: PGlite does not create parent directories — ensure the dev
+    // data directory exists so the DEFAULT location (a nested path under the
+    // backend root) works on a clean checkout.
+    mkdirSync(devDatabaseDir, { recursive: true });
+    database = await createPgliteDatabaseClient(devDatabaseDir);
+    ownsDatabase = true;
+    logger.warn('app.database.dev_runtime', {
+      runtime: 'pglite',
+      dir: devDatabaseDir,
+      reason: 'WORKFLOWOS_DEV_RUNTIME=pglite and no DATABASE_URL: running on the local development runtime (PGlite — real PostgreSQL compiled to WASM, persisted to the local filesystem). Dev-only: single-process, not for production.',
+    });
+    // The SAME migration runner and the SAME migration files as production —
+    // the dev schema is never divergent (a PGlite-incompatible migration is a
+    // migration-design problem, not a dev-path workaround).
     if (config.role !== 'worker') {
       await runMigrations(database, logger);
     }
