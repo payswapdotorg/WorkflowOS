@@ -88,8 +88,12 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // finalization. WORK-066 (Validation Scheduling & Change Triggers —
     // the scheduling/trigger decision layer) was ACTIVATED by the architect
     // on 2026-09-01 after the finalization landed (PR #101 merged as
-    // 5f0b058): it is the ONE in-flight item (58 complete + WORK-066).
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-066']);
+    // 5f0b058), MERGED by the architect as 0a506b1 via PR #102
+    // (2026-08-31T16:37:09Z, squash-merged at the approved head 493ae59 —
+    // the merge tree identical) and recorded complete per §34.8/ADR-0007
+    // by the WORK-066 post-merge finalization: 59/59 complete, NOTHING in
+    // flight.
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -141,12 +145,16 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // §34.8/ADR-0007 by the WORK-074 post-merge finalization. WORK-065 was
     // MERGED by the architect as 5de5e83 via PR #97 (2026-08-31,
     // squash-merged at the approved head c06a3e3) and recorded complete per
-    // §34.8/ADR-0007 by the WORK-065 post-merge finalization — NOTHING is in
-    // flight; WORK-053..061 and WORK-066..070 are future-generation items not
-    // recorded in program-state (WORK-066 is dependency-eligible on the
-    // complete WORK-064 + WORK-065, and WORK-067 on the complete WORK-064 —
+    // §34.8/ADR-0007 by the WORK-065 post-merge finalization. WORK-066 was
+    // MERGED by the architect as 0a506b1 via PR #102 (2026-08-31,
+    // squash-merged at the approved head 493ae59) and recorded complete per
+    // §34.8/ADR-0007 by the WORK-066 post-merge finalization — NOTHING is in
+    // flight; WORK-053..061 and WORK-067..070 are future-generation items not
+    // recorded in program-state (WORK-067 is the next ACR-002 sequence head —
+    // dependency-eligible on the complete WORK-064 + WORK-015 + WORK-040 +
+    // WORK-041, and WORK-069 now that its WORK-066 edge is satisfied —
     // NOT activated, the architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-066']);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
@@ -467,9 +475,10 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // exactly the three intended started items (WORK-050/062/064 — all
       // three are complete-and-merged in the live record, so the
       // discrimination rebuilds the pre-merge state).
-      // WORK-066 (in flight since the 2026-09-01 activation, depending on
-      // the complete WORK-064 + WORK-065) is likewise stripped: the fixture
-      // reconstructs WORK-064 as in_flight, and an in-flight WORK-066 over
+      // WORK-066 (complete-and-merged in the live record since the WORK-066
+      // post-merge finalization — merged 0a506b1 via PR #102 — but depending
+      // on WORK-064 + WORK-065) is likewise stripped: the fixture
+      // reconstructs WORK-064 as in_flight, and a record over
       // the reconstructed dependency would require fixture coordination
       // bookkeeping irrelevant to this discrimination.
       program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066');

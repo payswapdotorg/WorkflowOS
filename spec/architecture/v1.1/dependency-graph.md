@@ -71,10 +71,10 @@ v1.1 continuous product validation sub-evolution (ACR-002) edges:
 
 - WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 — the approved head 524c3f4, tree identical — and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
 - WORK-065 ← WORK-064 (complete) → WORK-065 is COMPLETE (merged as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 via PR #97 on 2026-08-31 — the approved head c06a3e3 (the post-#100 reconciliation head), tree identical — and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism is on main at backend/src/browser-validation/)
-- WORK-066 ← WORK-064 (complete), WORK-065 (complete), WORK-058 (soft — adaptive assurance engine, planned) → WORK-066 is IN FLIGHT (activated by the architect 2026-09-01 on branch feat/WORK-066-validation-scheduling; the fixed-mapping assurance selection ships in this Work Order and delegates to WORK-058 when it lands)
+- WORK-066 ← WORK-064 (complete), WORK-065 (complete), WORK-058 (soft — adaptive assurance engine, planned) → WORK-066 is COMPLETE (merged as 0a506b10e5526151929366bb11197230334b620c via PR #102 on 2026-08-31T16:37:09Z — the approved head 493ae59, tree identical — and finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization; the scheduling/trigger decision layer is on main at backend/src/validation-scheduling/; the fixed-mapping assurance selection ships in this Work Order and delegates to WORK-058 when it lands)
 - WORK-067 ← WORK-064 (complete), WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned) → WORK-067 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-068 ← WORK-067
-- WORK-069 ← WORK-064 (complete), WORK-066, WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned)
+- WORK-069 ← WORK-064 (complete), WORK-066 (complete — merged as 0a506b1 via PR #102, finalized §34.8/ADR-0007), WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned) → WORK-069 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-070 ← WORK-067, WORK-069, WORK-051 (complete — architecture checkpoint framework), WORK-055 (soft — quality-attribute model, planned), WORK-060 (soft — ACR feedback loop, planned)
 
 WORK-062 (Durable Multi-Agent Orchestration Substrate) was added by the
@@ -153,14 +153,17 @@ WORK-065 is COMPLETE (ACTIVATED 2026-08-30, merged as `5de5e83` via PR #97 on
 2026-08-31 — the approved head `c06a3e3`, tree identical — and finalized
 §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism
 is on main at `backend/src/browser-validation/`). WORK-067..070 are PLANNED and
-NOT activated. WORK-066 was ACTIVATED by the architect on 2026-09-01 (the
-implementation instruction after the WORK-065 post-merge finalization landed
-as `5f0b058`) and is IN FLIGHT on branch `feat/WORK-066-validation-scheduling`:
-the scheduling/trigger decision layer at `backend/src/validation-scheduling/`
+NOT activated. WORK-066 is likewise COMPLETE: ACTIVATED by the architect on
+2026-09-01, merged as `0a506b1` via PR #102 on 2026-08-31T16:37:09Z (the
+approved head `493ae59`, tree identical) and finalized §34.8/ADR-0007 by the
+WORK-066 post-merge finalization:
+the scheduling/trigger decision layer is on main at `backend/src/validation-scheduling/`
 (the WORK-064 admission authority consumed; the claim-store port with the
-in-memory adapter — NO migration authorized). WORK-067 remains
-DEPENDENCY-ELIGIBLE (it depends only on the complete WORK-064 —
-parallel-eligible, different protected surfaces). The architect's
+in-memory adapter — NO migration authorized; the durable binding point stays a
+documented future ACR at the same port). WORK-067 is the next ACR-002 sequence
+head, DEPENDENCY-ELIGIBLE (its hard edges WORK-064 + WORK-015 + WORK-040 +
+WORK-041 all complete; parallel-eligible, different protected surfaces);
+WORK-069's hard WORK-066 edge is SATISFIED (dependency-eligible). The architect's
 authorization is required to activate any of them (recorded in
 `program-state.json`).
 Each carries parallel-execution metadata
@@ -192,12 +195,15 @@ Parallelization is permitted only where dependencies are complete and protected-
 > WORK-065 is likewise COMPLETE: ACTIVATED 2026-08-30, merged as `5de5e83` via
 > PR #97 on 2026-08-31 (the approved head `c06a3e3` — the post-#100
 > reconciliation head, tree identical) and finalized §34.8/ADR-0007 by the
-> WORK-065 post-merge finalization. WORK-066 was ACTIVATED by the architect on
-> 2026-09-01 (in flight on `feat/WORK-066-validation-scheduling` — the scheduling/
-> trigger decision layer consuming the complete WORK-064 + WORK-065 edges; its
-> WORK-058 edge stays soft: the fixed-mapping selection ships now and delegates
-> when WORK-058 lands). WORK-067 remains DEPENDENCY-ELIGIBLE (on the complete
-> WORK-064) and NOT activated, NOT started (the eligibility is recorded honestly
+> WORK-065 post-merge finalization. WORK-066 is likewise COMPLETE: ACTIVATED
+> by the architect on 2026-09-01, merged as `0a506b1` via PR #102 on
+> 2026-08-31T16:37:09Z (the approved head `493ae59`, tree identical) and
+> finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization — the
+> scheduling/trigger decision layer consuming the complete WORK-064 + WORK-065
+> edges; its WORK-058 edge stays soft: the fixed-mapping selection ships now
+> and delegates when WORK-058 lands. WORK-067 is now the next ACR-002 sequence
+> head — DEPENDENCY-ELIGIBLE (on the complete WORK-064) and NOT activated, NOT
+> started (the eligibility is recorded honestly
 > in `dependency-state.json` → `futureGenerationEligibility`).
 
 # ── v1.1 customer dogfooding follow-up (2026-08-30) ──

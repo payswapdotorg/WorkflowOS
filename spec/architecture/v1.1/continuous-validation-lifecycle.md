@@ -132,12 +132,14 @@ A failure is NEVER silently discarded, NEVER converted into a false
 healthy state, and NEVER directly converted into an ungoverned code
 change (the WORK-064 invariant, carried forward).
 
-## 6. The runtime scheduling engine (implemented under WORK-066 — activated 2026-09-01)
+## 6. The runtime scheduling engine (implemented under WORK-066 — complete)
 
 The runtime scheduling engine that decides WHEN validation runs is
 implemented under WORK-066 (Validation Scheduling & Change Triggers),
-activated by the architect on 2026-09-01 (branch
-`feat/WORK-066-validation-scheduling`): the scheduling/trigger DECISION
+activated by the architect on 2026-09-01 and COMPLETE — merged as
+`0a506b1` via PR #102 on 2026-08-31T16:37:09Z (squash-merged at the
+approved head `493ae59`, the tree identical) and finalized §34.8/ADR-0007
+by the WORK-066 post-merge finalization: the scheduling/trigger DECISION
 layer at `backend/src/validation-scheduling/` that consumes this
 document's model — the §3 trigger→mode binding (through WORK-064's
 `TRIGGER_MODE_BINDING`), the §2/§4 scheduling rules (the effect-policy
@@ -147,7 +149,7 @@ CONTINUOUS discipline (no autonomous unsupervised scheduling). The
 original v1.1-package statement is preserved as history: "This task does
 NOT implement the scheduling engine. It persists the model." — the model
 was persisted by the package; WORK-066 implements the decision layer over
-it.
+it (the activation record is preserved in program-state.json's note).
 
 ## 7. The relationship to WORK-069 (Progressive Release & Runtime Validation)
 

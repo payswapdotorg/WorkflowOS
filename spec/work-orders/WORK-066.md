@@ -1,11 +1,21 @@
 # WORK-066 — Validation Scheduling & Change Triggers
 
-Status: IN FLIGHT — activated by the architect on 2026-09-01
-(the implementation instruction after the WORK-065 post-merge finalization
-landed on main as `5f0b058`, PR #101) and implemented on branch
-`feat/WORK-066-validation-scheduling`. The activation record is appended
-below (the architect's review + merge remain the completion gate; the
-§34.8/ADR-0007 post-merge finalization follows the merge).
+Status: COMPLETE — merged by the architect as
+`0a506b10e5526151929366bb11197230334b620c` via PR #102 on 2026-08-31
+(squash-merged at the approved head
+`493ae593da59edf0375e3c7e8e57147e36d065b5` on 2026-08-31T16:37:09Z; single
+parent `5f0b058` — the WORK-065 post-merge finalization mainline; the merge
+tree is IDENTICAL — `git diff 493ae59 0a506b1` is empty) and finalized per
+§34.8/ADR-0007 (see the post-merge finalization record appended below; the
+activation and implementation history below is preserved, not rewritten).
+The completion is recorded in `spec/development-state/program-state.json`
+(status `complete`, `pr` 102, `head` `493ae59`, `mergedAs`
+{pr: 102, mergeCommit: 0a506b10…}; branch
+`feat/WORK-066-validation-scheduling` preserved as the historical record of
+how it merged). The implementation delivered the validation scheduler at
+`backend/src/validation-scheduling/` (the application-layer pattern — NOT
+an 18th frozen module): the scheduling/trigger DECISION layer consuming the
+WORK-064 admission authority.
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap). This Work Order establishes the validation scheduling
@@ -272,3 +282,54 @@ the real-PG two-actor suite (6 tests, `WORKFLOWOS_DATABASE_URL`) + 19 new
 static-architecture invariants (858/858) + the WORK-064 regression (144) +
 the WORK-065 regression (91) + the full backend regression on real
 PostgreSQL. See the PR body for the exact counts on the final head.
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-31)
+
+The architect merged PR #102 as `0a506b10e5526151929366bb11197230334b620c`
+(squash merge; single parent `5f0b058` — the WORK-065 post-merge
+finalization mainline; merged 2026-08-31T16:37:09Z). The merged tree is
+IDENTICAL to the approved head `493ae59`
+(`git diff 493ae59 0a506b1` is empty) — the branch head the architect
+reviewed, created from the post-#101 mainline `5f0b058` and never diverged
+(no reconciliation was needed; all 11 CI workflows were green on that
+head). The finalization — a data-only change on branch
+`governance/WORK-066-post-merge-finalization` — records in the canonical
+state: `status = complete`, `mergedAs = {pr: 102, mergeCommit:
+0a506b10e5526151929366bb11197230334b620c}`, the implementation head
+recorded as `493ae59` (the WORK-064/WORK-065 finalization head
+convention), no active handoff (none was ever recorded —
+`resumption.activeHandoffs` was empty before and after; merged work is not
+resumable), and this work-order document's status updated truthfully with
+this evidence APPENDED (history preserved, not rewritten).
+
+The merged-finalization audit binds WORK-066 ↔ PR #102 ↔ merge commit
+`0a506b1` on the real first-parent history: the merge subject follows the
+`type(work-NNN): … (#PR)` conventional-commit scope squash convention
+(`feat(work-066): Validation Scheduling & Change Triggers (the
+scheduling/trigger DECISION layer, not an authority) (#102)`) — the FOURTH
+merge-evidence shape, recognized since the WORK-064 finalization (NO
+detector change needed). The pre-finalization red window was exactly the
+WORK-066 gap the protocol exists to surface: the audit reported
+`workOrders[WORK-066]: MERGED (0a506b10e) but the canonical status is
+"in_flight"` (13/14 finalized); this finalization closes it
+(governance:status reports 14/14 finalized, gaps []). The audit validates
+the full provenance identity: `mergedAs.pr` must equal the declared PR
+(102) and `mergedAs.mergeCommit` must match the ACTUAL merge evidence.
+State-only finalization subjects (the `chore(governance): …` convention
+this finalization itself follows) remain structurally excluded from merge
+evidence — a finalization commit can never be mistaken for the architect's
+implementation merge.
+
+The dependency frontier was recomputed: WORK-066 is complete (59/59
+recorded work orders, nothing in flight), and WORK-067 (Engineering Signal
+& Regression Correlation) is the next ACR-002 sequence head —
+DEPENDENCY-ELIGIBLE (its hard edges WORK-064 + WORK-015 + WORK-040 +
+WORK-041 are ALL complete) and remains PLANNED, NOT activated, NOT
+started; the architect's authorization is required. WORK-069 is likewise
+DEPENDENCY-ELIGIBLE (its hard WORK-066 edge is now SATISFIED;
+WORK-064/019/026/020 complete) and NOT activated; WORK-068/070/072/073
+remain planned. Dogfooding: the gate's two enabler edges (WORK-074
+complete + WORK-071 complete) were already SATISFIED and remain so — the
+first full authenticated/local dogfooding experiment is PERMITTED and NOT
+started (WORK-066's completion adds the scheduling CAPABILITY; it does NOT
+claim the experiment was performed, and this finalization does NOT run it).

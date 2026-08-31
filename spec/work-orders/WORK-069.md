@@ -9,7 +9,7 @@ Activation requires the architect's authorization and is recorded in
 `spec/development-state/program-state.json` (this change records none).
 
 Dependencies: WORK-064 (Continuous Product Validation — the validation
-authority whose runs this Work Order binds to progressive rollout That dependency edge is now SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). WORK-069 remains blocked on WORK-066),
+authority whose runs this Work Order binds to progressive rollout That dependency edge is now SATISFIED — WORK-064 is COMPLETE (implemented on branch feat/work-064-continuous-validation, merged by the architect as `c351451` via PR #86 on 2026-08-30 and finalized per §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/). The WORK-066 edge is likewise SATISFIED — WORK-066 is COMPLETE (implemented on branch feat/WORK-066-validation-scheduling, merged by the architect as `0a506b1` via PR #102 on 2026-08-31T16:37:09Z, squash-merged at the approved head `493ae59` — the tree identical — and finalized per §34.8/ADR-0007 by the WORK-066 post-merge finalization; the scheduling/trigger decision layer is on main at backend/src/validation-scheduling/). WORK-069 is therefore DEPENDENCY-ELIGIBLE and remains PLANNED, NOT activated, NOT started),
 WORK-066 (Validation Scheduling & Change Triggers — the scheduler whose
 triggers this Work Order extends with release-stage triggers). Existing
 authorities consumed: deployment governance (WORK-019 — complete; the

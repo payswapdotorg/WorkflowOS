@@ -312,7 +312,7 @@ WORK-064 (Continuous Product Validation — COMPLETE: merged as c351451 via PR #
 WORK-065 (Synthetic Browser Validation Agent — the execution mechanism — COMPLETE: merged as 5de5e83 via PR #97, finalized §34.8/ADR-0007)
     │
     ↓
-WORK-066 (Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS)
+WORK-066 (Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS — COMPLETE: merged as 0a506b1 via PR #102, finalized §34.8/ADR-0007)
     │                                  ← soft: WORK-058 (Adaptive Assurance Engine)
     ↓
 WORK-067 (Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood)
@@ -331,10 +331,10 @@ Exact edges:
 
 - WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007; the runtime identity layer remains future architect-gated work) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
 - WORK-065 ← WORK-064 (complete — merged as c351451 via PR #86, finalized §34.8/ADR-0007) → WORK-065 is COMPLETE (merged as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 via PR #97 on 2026-08-31 and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism is on main at backend/src/browser-validation/)
-- WORK-066 ← WORK-064 (complete), WORK-065 (complete), (soft: WORK-058) → WORK-066 is IN FLIGHT (activated by the architect 2026-09-01 on branch feat/WORK-066-validation-scheduling, after the WORK-065 finalization landed as 5f0b058)
+- WORK-066 ← WORK-064 (complete), WORK-065 (complete), (soft: WORK-058) → WORK-066 is COMPLETE (merged as 0a506b10e5526151929366bb11197230334b620c via PR #102 on 2026-08-31T16:37:09Z and finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization; the scheduling/trigger decision layer is on main at backend/src/validation-scheduling/)
 - WORK-067 ← WORK-064 (complete), WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056) → WORK-067 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-068 ← WORK-067
-- WORK-069 ← WORK-064 (complete), WORK-066, WORK-019 (complete), WORK-026 (complete), WORK-020 (complete), (soft: WORK-059)
+- WORK-069 ← WORK-064 (complete), WORK-066 (complete — merged as 0a506b1 via PR #102, finalized §34.8/ADR-0007), WORK-019 (complete), WORK-026 (complete), WORK-020 (complete), (soft: WORK-059) → WORK-069 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-070 ← WORK-067, WORK-069, WORK-051 (complete), (soft: WORK-055, WORK-060)
 
 The `VALIDATE` stage (between RELEASE and OBSERVE in the v1.1 control loop)

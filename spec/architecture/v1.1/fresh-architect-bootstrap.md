@@ -111,8 +111,9 @@ validation sub-evolution) approval by the architecture authority.
   superseded identity material lives in `spec/archive/` under distinct
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
-  state. `workOrders[]` records the activated Work Orders (complete,
-  in_flight — WORK-066 is the current in-flight item). PLANNED Work Orders
+  state. `workOrders[]` records the activated Work Orders (all 59 records
+  are `complete` — NOTHING is in flight after the WORK-066 post-merge
+  finalization). PLANNED Work Orders
   (WORK-053..061, WORK-067..070, WORK-072..073) are spec files only — they
   are NOT in `program-state.json` until the architect activates them.
 - `spec/development-state/dependency-state.json` — the canonical
@@ -229,11 +230,17 @@ product validation roadmap):
   main at `backend/src/continuous-validation/`).
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
 - WORK-067..070 are `planned` (spec files only; NOT in program-state).
-- **WORK-066 is `in_flight`** (activated by the architect 2026-09-01 on
-  `feat/WORK-066-validation-scheduling`: the validation scheduler at
+- **WORK-066 is `complete` + FINALIZED** (recorded in program-state with its
+  merge evidence): activated by the architect 2026-09-01 on
+  `feat/WORK-066-validation-scheduling`, merged by the architect as
+  `0a506b10e5526151929366bb11197230334b620c` via PR #102
+  (2026-08-31T16:37:09Z, squash-merged at the approved head `493ae59` —
+  the tree is identical), and finalized complete per §34.8/ADR-0007 (the
+  WORK-066 post-merge finalization): the validation scheduler at
   `backend/src/validation-scheduling/` — the scheduling/trigger decision
   layer consuming the WORK-064 admission authority; the claim-store port
-  with the in-memory adapter; NO migration authorized). **WORK-065 is `complete`** (recorded in
+  with the in-memory adapter; NO migration authorized (the durable binding
+  point stays a documented future ACR at the same port). **WORK-065 is `complete`** (recorded in
   program-state with its merge evidence): the synthetic browser validation
   agent (the execution mechanism for ValidationJourneys, NOT an authority)
   was ACTIVATED 2026-08-30, merged by the architect as
@@ -263,12 +270,12 @@ The frontier's `plannedNext` holds TWO dependency-eligible heads across two
 tracks, both PLANNED and NOT activated: WORK-053 (ACR-001;
 dependency-eligible on WORK-046+WORK-051+WORK-052, all complete; remains
 PLANNED — the architect's 2026-08-29 verdict says "Do not activate WORK-053
-yet", additionally gated on the v1.1/ACR-001 disposition) and WORK-066
-(ACR-002; dependency-eligible now that its hard dependencies WORK-064 and
-WORK-065 are BOTH complete — its WORK-058 edge is soft; remains PLANNED, NOT
+yet", additionally gated on the v1.1/ACR-001 disposition) and WORK-067
+(ACR-002 sequence head now that WORK-066 is COMPLETE — dependency-eligible on
+WORK-064 + WORK-015 + WORK-040 + WORK-041, all complete; remains PLANNED, NOT
 activated, NOT started — the architect's authorization is required;
-WORK-067 is equally eligible on the complete WORK-064 alone — different
-protected surfaces — and equally NOT activated). The two dogfooding-gate enablers
+WORK-069 is likewise eligible now that its WORK-066 edge is SATISFIED — but
+it is the wave-10 downstream node, not the sequence head). The two dogfooding-gate enablers
 issued by the 2026-08-30 customer dogfooding experiment's governed follow-up —
 WORK-071 (Local Development Runtime Substrate) and WORK-074 (Identity & Access
 Runtime Activation — the "WORK-063-RUNTIME" of the experiment's design) — were
@@ -448,10 +455,12 @@ authentication + local-runtime preconditions of this gate are SATISFIED — the
 first full authenticated/local dogfooding experiment is PERMITTED and NOT
 started.** The run itself is the architect's non-delegable decision (this
 finalization does NOT start it); item 4 is now ALSO SATISFIED (WORK-065 is
-COMPLETE — the browser-validation capability exists), but the continuous-validation
-Work Orders that DRIVE it (WORK-067..070) remain PLANNED, NOT activated
-(WORK-066, the scheduling decision layer, is IN FLIGHT since 2026-09-01 —
-the capability comes closer but still does NOT start the run), and
+COMPLETE — the browser-validation capability exists), and the scheduling
+decision layer that would drive continuous validation is likewise on main
+(WORK-066 is COMPLETE — merged `0a506b1` via PR #102, finalized
+§34.8/ADR-0007), but the continuous-validation
+Work Orders that DRIVE the closed loop (WORK-067..070) remain PLANNED, NOT
+activated (the capabilities exist but still do NOT start the run), and
 the run is NOT claimed to have been performed.
 
 **The dogfooding experiment was ATTEMPTED on 2026-08-30 and STOPPED at

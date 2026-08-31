@@ -129,12 +129,14 @@ invariants. Concretely:
 - a SAFE_MUTATION journey cannot run against an environment authorized
   only for READ_ONLY (the environment-policy binding is enforced).
 
-## 6. The runtime profile engine (implemented under WORK-066 — activated 2026-09-01)
+## 6. The runtime profile engine (implemented under WORK-066 — complete)
 
 The runtime profile engine that selects journeys and binds the
 effect-policy allowance per assurance level is implemented under WORK-066
 (Validation Scheduling & Change Triggers), activated by the architect on
-2026-09-01: the FIXED profile × mode → journey selection declared in this
+2026-09-01 and COMPLETE — merged as `0a506b1` via PR #102 on 2026-08-31
+and finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization: the
+FIXED profile × mode → journey selection declared in this
 document (§4's table is the selection matrix — the WORK-064 admission gate
 remains the authority) ships as the deterministic fixed mapping the
 WORK-066 Work Order itself declared ("the scheduler uses a fixed mapping
@@ -148,14 +150,17 @@ persists the model."
 
 WORK-058 (Adaptive Assurance Engine — planned) is the v1.1 evolution
 Work Order that implements the runtime engine for the v1.0 assurance
-model. WORK-066 (Validation Scheduling & Change Triggers — in flight since the 2026-09-01 activation) is
+model. WORK-066 (Validation Scheduling & Change Triggers — complete,
+merged `0a506b1` via PR #102) is
 the v1.1 evolution Work Order that implements the runtime engine for
 the validation-aware dimension in this document.
 
 When WORK-058 lands, the assurance selection (profile → required
-proofs/checkpoints) delegates to it. When WORK-066 lands, the validation
-selection (profile → journey set + EffectPolicy binding) delegates to
-it. Until then, both are design-time proposed state in this document.
+proofs/checkpoints) delegates to it. WORK-066 has LANDED (complete — the
+validation selection (profile → journey set + EffectPolicy binding) is
+now the runtime fixed mapping at `backend/src/validation-scheduling/`);
+the assurance selection (profile → required proofs/checkpoints) remains
+design-time proposed state in this document until WORK-058 lands.
 
 WORK-058 and WORK-066 are SEPARATE Work Orders because they own
 SEPARATE concerns (assurance depth vs. validation depth). They are

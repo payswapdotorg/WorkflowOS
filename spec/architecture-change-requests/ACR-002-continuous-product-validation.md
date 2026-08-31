@@ -174,9 +174,12 @@ activated; abandoning them is a `git revert` of this package. (WORK-064
 has since been activated and is COMPLETE — merged as `c351451` via PR #86
 and finalized §34.8/ADR-0007 on 2026-08-30; WORK-065 is likewise COMPLETE —
 merged as `5de5e83` via PR #97 on 2026-08-31 and finalized §34.8/ADR-0007
-by the WORK-065 post-merge finalization; abandoning either MERGED delivery
-would be a governed revert of the merge, not of this package alone. The five
-remaining Work Orders WORK-066..070 are still spec files only, NOT
+by the WORK-065 post-merge finalization; WORK-066 is likewise COMPLETE —
+merged as `0a506b1` via PR #102 on 2026-08-31T16:37:09Z (squash-merged at
+the approved head `493ae59`, the tree identical) and finalized §34.8/ADR-0007
+by the WORK-066 post-merge finalization; abandoning any MERGED delivery
+would be a governed revert of the merge, not of this package alone. The four
+remaining Work Orders WORK-067..070 are still spec files only, NOT
 activated.)
 
 ## Approval rule
