@@ -402,6 +402,17 @@ import {
   InMemoryEngineeringSignalRepository,
 } from './engineering-signals/index.js';
 import type { EngineeringSignalService } from './engineering-signals/index.js';
+// WORK-069: the progressive-release decision layer (the FEEDBACK BINDING
+// LAYER over the WORK-064 validation authority, the WORK-067 signal
+// authority, the /runtime deployment observation authority, and the /audit
+// boundary — continue/halt/recover; NO second release/workflow/runtime/
+// verification authority).
+import {
+  DefaultProgressiveReleaseService,
+  InMemoryProgressiveReleaseDecisionRepository,
+  RuntimeModuleDeploymentObservationReader,
+} from './progressive-release/index.js';
+import type { ProgressiveReleaseService } from './progressive-release/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -567,6 +578,12 @@ export interface AppDeps {
    *  (the validation-originated source). Future consumers: WORK-068
    *  (governed Work Item conversion), WORK-070 (architecture fitness). */
   engineeringSignalService?: EngineeringSignalService;
+  /** WORK-069: the progressive-release decision layer (the feedback binding
+   *  layer: continue/halt/recover over the WORK-064 validation runs + the
+   *  /runtime deployment observations + the WORK-067 signal channel + the
+   *  /audit forensic trail). Present when DB configured. Future consumers:
+   *  the governed runtime drive surfaces, WORK-070 (architecture fitness). */
+  progressiveReleaseService?: ProgressiveReleaseService;
   /** WORK-016: review service. Present when DB configured. */
   reviewService?: ReviewService;
   /** WORK-015: CI evidence ingestion service. Present when DB configured. */
@@ -925,6 +942,7 @@ export async function buildApp(
   let validationScheduler: ValidationScheduler | undefined;
   // WORK-067: the engineering signal correlation service (the advisory layer).
   let engineeringSignalService: EngineeringSignalService | undefined;
+  let progressiveReleaseService: ProgressiveReleaseService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
   let webhookProcessingService: WebhookProcessingService | undefined;
@@ -1389,6 +1407,33 @@ export async function buildApp(
         reason: 'VERCEL_API_TOKEN not set; runtime deployments surface not-configured',
       });
     }
+
+    // --- WORK-069: the progressive-release decision layer (the feedback
+    // binding layer). Composed over the CONSUMED authorities: the WORK-064
+    // continuous-validation service (the completed POST_RELEASE runs), the
+    // WORK-067 engineering-signal service (the halt/recover signal channel),
+    // and the /runtime deployment observation authority (the read-only port
+    // adapter over the module's public DeploymentRepository — constructed
+    // above). The rollback authority port stays UNBOUND (repository truth:
+    // no rollback authority exists today — the documented future binding
+    // point; a RECOVER decision records the typed unbound outcome, never a
+    // silent continue). The decision repository is the in-memory adapter
+    // (NO migration authorized; the durable binding point is a future ACR at
+    // the port). The clock is INJECTED (deterministic decisions). NO HTTP
+    // route is wired here (the Work Order authorizes the decision service,
+    // not a drive surface — the future governed consumers wire those). ---
+    progressiveReleaseService = new DefaultProgressiveReleaseService({
+      continuousValidationService: continuousValidationService!,
+      engineeringSignalService: engineeringSignalService!,
+      runtimeObservationReader: new RuntimeModuleDeploymentObservationReader(
+        deploymentRepository!,
+      ),
+      rollbackAuthority: undefined,
+      decisionRepository: new InMemoryProgressiveReleaseDecisionRepository(),
+      auditWriter: auditService,
+      logger,
+      now: () => new Date(),
+    });
 
     // --- /work-items module: ImplementationContextBuilder (SUB-D). ---
     // The builder consumes the 10 repository deps + 4 optional callback
@@ -2337,6 +2382,7 @@ export async function buildApp(
       browserValidationAgent,
       validationScheduler,
       engineeringSignalService,
+      progressiveReleaseService,
       reviewService,
       ciEvidenceIngestionService,
       webhookProcessingService,

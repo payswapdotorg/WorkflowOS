@@ -20436,7 +20436,21 @@ describe('WORK-067 invariants — Engineering Signal & Regression Correlation (t
 
   // --- invariant 16: no second signal intake authority --------------------------------
 
-  it('INVARIANT 16 — no second signal intake authority: no other src surface declares a raw-observation intake or EngineeringSignal model (WORK-056 owns the future taxonomy; the seam is engineering-signals-local)', () => {
+  it('INVARIANT 16 — no second signal intake authority: no other src surface DECLARES a raw-observation intake or EngineeringSignal model (WORK-056 owns the future taxonomy; the seam is engineering-signals-local; WORK-069 is the declared halt-consequence CONSUMER)', () => {
+    // The detection is DECLARATION-level (evolved with the WORK-069
+    // activation): WORK-069 (progressive-release) is the governed consumer
+    // of the authority's PUBLIC intake — its service CALLS
+    // `engineeringSignalService.ingestValidationRun/ingestObservation/
+    // correlateToReleases` and references the `RawObservationInput` type
+    // through the public barrel (the Work Order's halt-consequence chain:
+    // "a halt produces an Engineering Signal (WORK-067)"). Those references
+    // are consumption, never re-implementation. What stays forbidden
+    // everywhere outside engineering-signals is DECLARING the intake or
+    // the model: a `RawObservationInput`/`EngineeringSignal`/`Engineering-
+    // SignalService` interface or class declaration, or an
+    // `ingestObservation` METHOD declaration (a second intake authority).
+    // The WORK-069 block pins the consumer's own boundary: barrel-only
+    // imports + no signal-model declarations + no second intake.
     const intakeSurfaces: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir)) {
@@ -20447,14 +20461,16 @@ describe('WORK-067 invariants — Engineering Signal & Regression Correlation (t
           walk(full);
         } else if (entry.endsWith('.ts')) {
           const src = stripCodeComments(readFileSync(full, 'utf8'));
-          if (/RawObservationInput|EngineeringSignal\b|ingestObservation/.test(src)) {
+          if (
+            /interface\s+RawObservationInput\b|interface\s+EngineeringSignal\b|interface\s+EngineeringSignalService\b|class\s+\w*EngineeringSignalService\b|async\s+ingestObservation\s*\(|ingestObservation\s*\([^)]*\)\s*:\s*Promise/.test(src)
+          ) {
             intakeSurfaces.push(relative(SRC_ROOT, full));
           }
         }
       }
     };
     walk(SRC_ROOT);
-    expect(intakeSurfaces, `signal-intake surfaces must exist ONLY in engineering-signals (found elsewhere: ${intakeSurfaces.join(', ')})`).toEqual([]);
+    expect(intakeSurfaces, `signal-intake declarations must exist ONLY in engineering-signals (found elsewhere: ${intakeSurfaces.join(', ')})`).toEqual([]);
   });
 
   // --- invariant 17: no second evidence/verification authority (src-wide) ---------------
@@ -20554,6 +20570,314 @@ describe('WORK-067 invariants — Engineering Signal & Regression Correlation (t
     const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
     for (const entry of readdirSync(routesDir)) {
       expect(entry, 'no engineering-signals route surface exists').not.toMatch(/signal/i);
+    }
+  });
+});
+
+// ============================================================================
+// WORK-069 — Progressive Release & Runtime Validation (the feedback binding
+// layer, not a second release engine)
+// ============================================================================
+
+describe('WORK-069 invariants — Progressive Release & Runtime Validation (the feedback binding layer, not a second release engine)', () => {
+  const PR_DIR = join(BACKEND_ROOT, 'src', 'progressive-release');
+  const PR_INTERNAL = join(PR_DIR, 'internal');
+  const PR_TYPES = join(PR_DIR, 'types.ts');
+  const PR_BARREL = join(PR_DIR, 'index.ts');
+  const PR_IDENTITY = join(PR_INTERNAL, 'decision-identity.ts');
+  const PR_POLICY = join(PR_INTERNAL, 'decision-policy.ts');
+  const PR_REPOSITORY = join(PR_INTERNAL, 'in-memory-decision-repository.ts');
+  const PR_READER = join(PR_INTERNAL, 'runtime-observation-reader.ts');
+  const PR_SERVICE = join(PR_INTERNAL, 'progressive-release-service.ts');
+  const PR_INTERNAL_INDEX = join(PR_INTERNAL, 'index.ts');
+  const MIGRATIONS_DIR = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readPrFiles(): { path: string; src: string }[] {
+    if (!existsSync(PR_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(PR_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module -----------------------
+
+  it('the progressive-release domain exists at src/progressive-release/ (index.ts + types.ts + internal/) and is NOT an 18th frozen module', () => {
+    expect(existsSync(PR_DIR), 'src/progressive-release/ must exist').toBe(true);
+    expect(existsSync(PR_BARREL), 'src/progressive-release/index.ts must exist').toBe(true);
+    expect(existsSync(PR_TYPES), 'src/progressive-release/types.ts must exist').toBe(true);
+    expect(existsSync(PR_INTERNAL), 'src/progressive-release/internal/ must exist').toBe(true);
+    for (const file of [PR_IDENTITY, PR_POLICY, PR_REPOSITORY, PR_READER, PR_SERVICE, PR_INTERNAL_INDEX]) {
+      expect(existsSync(file), `${relative(BACKEND_ROOT, file)} must exist`).toBe(true);
+    }
+    expect(existsSync(join(MODULES_DIR, 'progressive-release'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'progressive-release must not be a frozen module').not.toContain('/progressive-release');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) the domain imports ONLY the allowed surfaces ----------------------
+
+  it('the domain imports only allowed surfaces: @platform/*, the WORK-064 continuous-validation barrel (types), the WORK-067 engineering-signals barrel (types), the /runtime + /audit module public barrels (the composition adapters), node:* — never a module internal/, never workflows/verification/work-items/github, never the browser or scheduling or feedback-conversion domains', () => {
+    const files = readPrFiles();
+    expect(files.length).toBeGreaterThan(0);
+    for (const { path, src } of files) {
+      const stripped = stripCodeComments(src);
+      const importLines = stripped.match(/from\s+'[^']+'/g) ?? [];
+      for (const importLine of importLines) {
+        const target = importLine.replace(/^from\s+'/, '').replace(/'$/, '');
+        if (target.startsWith('.')) continue; // intra-domain relative imports
+        expect(
+          target.startsWith('@platform/') ||
+            target.startsWith('../../continuous-validation/index.js') ||
+            target.startsWith('../../continuous-validation/types.js') ||
+            target.startsWith('../../engineering-signals/index.js') ||
+            target.startsWith('../../engineering-signals/types.js') ||
+            target.startsWith('@modules/runtime/index.js') ||
+            target.startsWith('@modules/audit/index.js') ||
+            target.startsWith('node:'),
+          `${relative(BACKEND_ROOT, path)} imports forbidden surface '${target}' (allowed: @platform/*, the WORK-064/WORK-067 barrels, the /runtime + /audit module public barrels for the composition adapters, node:*)`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  // --- invariant 1: only WORK-069 owns the progressive-release decision ------
+
+  it('INVARIANT 1 — only WORK-069 owns the progressive-release decision: the decision vocabulary/derivation lives ONLY in src/progressive-release/ (no other src surface derives continue/halt/recover decisions or decision identities)', () => {
+    const barrel = readFileSync(PR_BARREL, 'utf8');
+    expect(barrel).toMatch(/deriveProgressiveDecision/);
+    expect(barrel).toMatch(/DefaultProgressiveReleaseService/);
+    expect(barrel).toMatch(/PROGRESSIVE_ROLLOUT_STAGES/);
+    // No other src/ directory declares a progressive-release decision surface:
+    const decisionSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (full === PR_DIR) continue; // the owner
+          walk(full);
+        } else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (
+            /class\s+\w*ProgressiveReleaseService\b|interface\s+ProgressiveReleaseService\b|deriveProgressiveDecision|deriveDecisionIdentity|deriveContentFingerprint|derivePriorRolloutState|classifyRuntimeObservation|PROGRESSIVE_ROLLOUT_STAGES\s*=|PROGRESSIVE_DECISION_REASONS\s*=/.test(src)
+          ) {
+            decisionSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(decisionSurfaces, `progressive-release decision surfaces must exist ONLY in progressive-release (found elsewhere: ${decisionSurfaces.join(', ')})`).toEqual([]);
+  });
+
+  // --- invariant 2: NO second release engine ---------------------------------
+
+  it('INVARIANT 2 — no second release engine: NO ReleaseService/wfos_releases exists anywhere in src/, and NO src surface outside progressive-release advances a rollout (the existing /workflows + /github + /runtime authorities stay the release mechanics)', () => {
+    const releaseEngines: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/class\s+ReleaseService\b|interface\s+ReleaseService\b|wfos_releases|createReleaseRollout|advanceRolloutToStage|promoteRollout/.test(src)) {
+            releaseEngines.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(releaseEngines, `no second release engine may exist (found: ${releaseEngines.join(', ')})`).toEqual([]);
+    // The decision layer records decisions — it never advances the rollout:
+    // the runtime observation reader port is READ-ONLY (no updateStatus call):
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        stripped,
+        `${relative(BACKEND_ROOT, path)} must not advance rollouts or write deployment state (the existing release authority owns the mechanics)`,
+      ).not.toMatch(/updateStatus\s*\(|promoteRollout|advanceRollout|triggerDeployment\s*\(/);
+    }
+  });
+
+  // --- invariant 3: the decision is GOVERNED, never autonomous ----------------
+
+  it('INVARIANT 3 — no autonomous decision loops: the domain owns NO timers, cron, queues, or polling (the explicit governed decideProgressiveRelease invocation is the ONLY entry point)', () => {
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        !/setInterval|setTimeout|cron|schedule\w*Job|enqueue\w*Job|WorkerHost|startPolling/.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not schedule or poll autonomously (WORK-066 owns triggers; the decision is caller-invoked)`,
+      ).toBe(true);
+    }
+    // …and the caller-RECORDED request discipline: the domain never invents
+    // the release identity, stage, or validation run (no defaults, no
+    // inference from timestamps/commits/URLs):
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        stripped,
+        `${relative(BACKEND_ROOT, path)} must not invent release identities or infer release boundaries`,
+      ).not.toMatch(/releaseRef\s*=\s*['"`][^'"`]+['"`]|releaseRef\s*\?\?|releaseRef\s*=\s*`release-/);
+    }
+  });
+
+  // --- invariant 4: the rollback authority is consumed through its port -------
+
+  it('INVARIANT 4 — NO rollback mechanics in the domain: the EXISTING rollback authority is consumed through the RollbackAuthority port only (no GitHub/Vercel/HTTP rollback calls — repository truth: the port composes UNBOUND today)', () => {
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        !/(revertDeployment|deleteDeployment|vercel\.delete|POST\s+\/deployments\/[^/]+\/rollback|github\.repos\.\w+\.createDeploymentStatus\s*\(.*failure)/.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not implement rollback mechanics (the existing rollback authority is the port)`,
+      ).toBe(true);
+      expect(
+        !/invokeRollback\s*\(.*\)\s*\{\s*\/\/\s*.*(http|fetch|request)/i.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not perform network rollback calls`,
+      ).toBe(true);
+    }
+    // The port contract is pinned in the domain's own types:
+    const types = readFileSync(PR_TYPES, 'utf8');
+    expect(types).toMatch(/interface RollbackAuthority\b/);
+    expect(types).toMatch(/ROLLBACK_AUTHORITY_UNBOUND/);
+  });
+
+  // --- invariant 5: no Work Item / workflow / code mutation / PR authority ----
+
+  it('INVARIANT 5 — the domain creates NO Work Items, transitions NO workflow state, mutates NO code, and creates/merges NO PRs (a halt feeds the WORK-067 signal channel; WORK-068 + the existing authorities own the rest)', () => {
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        !/(workItemRepository|createWorkItem|proposeWorkItem|workItems\.create)\s*[\(.]/.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not create Work Items (WORK-068 + the existing /work-items authority own that)`,
+      ).toBe(true);
+      expect(
+        !/(transitionWorkflow|workflowState|advanceWorkflow)\s*\(/.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not transition workflow state (the /workflows authority owns it)`,
+      ).toBe(true);
+      expect(
+        !/(createPullRequest|mergePullRequest|octokit\.pulls|git\s+push|git\s+commit|writeFileSync\s*\(\s*join\([^)]*src)/.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not mutate code or create/merge PRs`,
+      ).toBe(true);
+    }
+  });
+
+  // --- invariant 6: no browser-agent runtime in the domain ---------------------
+
+  it('INVARIANT 6 — the domain depends on NO browser library (WORK-065 owns the browser agent; WORK-069 consumes only its WORK-064 validation results)', () => {
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        !/(puppeteer|playwright|chromium|launchBrowser|browserAgent)\b/i.test(stripped),
+        `${relative(BACKEND_ROOT, path)} must not carry browser-agent runtime`,
+      ).toBe(true);
+    }
+  });
+
+  // --- invariant 7: NO migration / no parallel decision store ------------------
+
+  it('INVARIANT 7 — no migration creates a progressive-release decision store (the Work Order declares migrations: []; the in-memory adapter + the future ACR at the same port is the persistence ruling)', () => {
+    const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql'));
+    for (const name of migrationFiles) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
+      expect(
+        !/progressive_release|progressive-release|prd_/i.test(sql),
+        `migration ${name} must not create a WORK-069 decision store`,
+      ).toBe(true);
+    }
+    // …and the domain itself touches no database:
+    for (const { path, src } of readPrFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(
+        stripped,
+        `${relative(BACKEND_ROOT, path)} must not touch a database (durable decision state is a future ACR at the port)`,
+      ).not.toMatch(/pg\.Pool|new Client\s*\(|database\.query|CREATE TABLE/i);
+    }
+  });
+
+  // --- invariant 8: no secret leakage -----------------------------------------
+
+  it('INVARIANT 8 — the domain leaks no credentials (no tokens, keys, or private-key literals)', () => {
+    for (const { path, src } of readPrFiles()) {
+      expect(
+        src,
+        `${relative(BACKEND_ROOT, path)} must not contain credential literals`,
+      ).not.toMatch(/(ghp_|gho_|github_pat_|sk-or-|sk-|AIza[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/);
+    }
+  });
+
+  // --- invariant 9: the public-barrel boundary ---------------------------------
+
+  it('INVARIANT 9 — the internal/ modules are importable ONLY from within the domain (the public barrel is the only cross-boundary surface)', () => {
+    const internalPattern = /['"](?:\.\.?\/)*(?:[\w./-]*\/)?progressive-release\/internal\/[\w.-]+['"]/;
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (full === PR_DIR) continue; // intra-domain imports are allowed
+          walk(full);
+        } else if (entry.endsWith('.ts')) {
+          const src = readFileSync(full, 'utf8');
+          if (internalPattern.test(src)) offenders.push(relative(SRC_ROOT, full));
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(offenders, `no src surface may import progressive-release internals (found: ${offenders.join(', ')})`).toEqual([]);
+  });
+
+  // --- invariant 10: the closed fail-closed vocabularies ------------------------
+
+  it('INVARIANT 10 — the fail-closed vocabularies are pinned: the decision reasons are a CLOSED list; missing runtime observation is NEVER healthy; the foreign-stage/foreign-status inputs fail closed', () => {
+    const types = readFileSync(PR_TYPES, 'utf8');
+    // The closed reason vocabulary includes the fail-closed halts:
+    expect(types).toMatch(/'HALT_VALIDATION_RUN_NOT_FOUND'/);
+    expect(types).toMatch(/'HALT_RUNTIME_OBSERVATION_UNAVAILABLE'/);
+    expect(types).toMatch(/'HALT_ROLLOUT_PREVIOUSLY_HALTED'/);
+    expect(types).toMatch(/'ROLLBACK_AUTHORITY_UNBOUND'/);
+    // The runtime status vocabulary mirrors the /runtime authority's own:
+    expect(types).toMatch(/'queued'\s*,\s*'building'\s*,\s*'ready'\s*,\s*'error'\s*,\s*'canceled'/);
+    // The service file pins the unavailable → halt classification:
+    const service = readFileSync(PR_SERVICE, 'utf8');
+    expect(service).toMatch(/state:\s*'unavailable'/);
+    expect(service).toMatch(/'HALT_RUNTIME_OBSERVATION_UNAVAILABLE'/);
+  });
+
+  // --- composition pin: buildApp wires the service on AppDeps ------------------
+
+  it('the app.ts composition pins: the service + the in-memory repository + the consumed authorities + the UNBOUND rollback port + NO route surface', () => {
+    const appTs = readFileSync(APP_TS, 'utf8');
+    expect(appTs).toMatch(/progressiveReleaseService = new DefaultProgressiveReleaseService\(/);
+    expect(appTs).toMatch(/decisionRepository: new InMemoryProgressiveReleaseDecisionRepository\(\)/);
+    expect(appTs).toMatch(/continuousValidationService: continuousValidationService!/);
+    expect(appTs).toMatch(/engineeringSignalService: engineeringSignalService!/);
+    expect(appTs).toMatch(/runtimeObservationReader: new RuntimeModuleDeploymentObservationReader\(/);
+    expect(appTs).toMatch(/rollbackAuthority: undefined/);
+    expect(appTs).toMatch(/progressiveReleaseService\?: ProgressiveReleaseService;/);
+    expect(appTs).toMatch(/now: \(\) => new Date\(\)/);
+    // …and NO autonomous runtime drive: the domain exposes no routes/job
+    // handlers/queue consumers of its own (the future governed consumers
+    // wire the drive surfaces):
+    const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    for (const entry of readdirSync(routesDir)) {
+      expect(entry, 'no progressive-release route surface exists').not.toMatch(/progressive/i);
     }
   });
 });

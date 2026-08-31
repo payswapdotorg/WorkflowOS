@@ -166,3 +166,55 @@ When WORK-069 lands, the POST_RELEASE mode is extended with the
 canary-bound continue/halt/recover loop. Until then, POST_RELEASE is
 defined in this document as the immediate-post-release validation
 without the progressive-rollout binding.
+
+## 8. The progressive release loop (implemented under WORK-069 — in flight)
+
+The canary-bound continue/halt/recover loop this document's §7 anticipated
+is implemented under WORK-069 (Progressive Release & Runtime Validation),
+activated by the architect on 2026-08-31 and IN FLIGHT on branch
+`feat/WORK-069-progressive-release` (the activation record and the full
+binding model are in `spec/work-orders/WORK-069.md`): the feedback binding
+layer at `backend/src/progressive-release/` — the application-layer
+pattern, NOT an 18th frozen module — that binds this document's POST_RELEASE
+mode to the progressive rollout.
+
+The loop, as governed by the Work Order and implemented:
+
+```text
+release (the EXISTING /workflows + /github + /runtime authorities — distributed, consumed, never replaced)
+    ↓
+canary / partial rollout (the existing deployment surface — the stage is DECLARED to the decision layer, never advanced by it)
+    ↓
+synthetic validation (WORK-064, scheduled by WORK-066 at POST_RELEASE/RELEASE — the decision layer binds the COMPLETED run through findRun)
+    ↓
+runtime observation (the existing /runtime deployment authority — consumed through the read-only RuntimeObservationReader port)
+    ↓
+continue / halt / recover (the PURE deterministic policy — a governed derivation, never an autonomous agent decision)
+    ↓
+    ├─ continue → the existing release authority proceeds with the rollout
+    ├─ halt → the failure evidence becomes an Engineering Signal (WORK-067) → WORK-068 → the existing /work-items authority
+    └─ recover → the EXISTING rollback authority (consumed through its port; unbound today = the typed fail-closed outcome, never a silent continue)
+```
+
+The decision layer's fail-closed ruling (the §5 semantics, enforced):
+missing or unusable validation evidence, a missing or ambiguous runtime
+observation, a cross-scope binding mismatch, or an inconsistent recorded
+rollout state is a TYPED HALT — never a continue, never a synthesized
+healthy state. A RECOVER is derived only for the contained-rollback cases
+(an effect-policy violation at any stage; a validation failure or an
+unhealthy runtime while still contained at the canary); at the exposed
+stages (partial/full) the same failures are HALTS (stop the rollout, feed
+the governed chain — do not auto-rollback).
+
+The decision identity is deterministic (tenant, project, release, stage,
+validation run, runtime-observation event): a duplicate delivery converges
+on the recorded decision and re-executes nothing; a different scope is an
+independent decision. Every decision record carries the full provenance
+(which release, environment, stage, validation run, runtime observation,
+policy version, decision, and why) and emits one `/audit` forensic event
+(WORK-020).
+
+When WORK-059 (Operational and Release Governance) lands, the release
+mechanics are delegated to it at the same public ports — WORK-069's
+binding model (the decision, the evidence gates, the consequence chain)
+is unchanged by that delegation.
