@@ -40,7 +40,9 @@
  *      project B's SECRET execution), never a fabricated empty section.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
+import { buildIdentityStack, type TestIdentityStack } from '../helpers/test-identity-stack.js';
+import { buildAuthPluginDeps, buildIdentityRouteDeps, buildOrganizationsRouteDeps } from '../helpers/test-identity-server.js';
+import { loginWithServerSession } from '../helpers/browser-session.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger } from '@platform/index.js';
 import { DefaultWorkflowEngine } from '../../src/modules/workflows/internal/workflow-engine.js';
@@ -55,7 +57,7 @@ import { DefaultDelegationPlanService } from '../../src/delegation/index.js';
 import { DefaultAgentRoleCatalogService } from '../../src/agent-roles/index.js';
 import type { FastifyInstance } from 'fastify';
 
-let stack: TestAuthStack;
+let stack: TestIdentityStack;
 let server: FastifyInstance;
 let worker: WorkerHost;
 let queue: InMemoryQueue;
@@ -68,7 +70,8 @@ let wiBId: string;
 const API_KEY = 'raw-key-w050-e2e';
 
 test.beforeAll(async () => {
-  stack = await buildAuthStack({ WFOS_TEST_W050_KEY: API_KEY });
+  process.env['WFOS_TEST_W050_KEY'] = API_KEY;
+  stack = await buildIdentityStack();
 
   const logger = createLogger({ level: 'warn', destination: process.stdout });
   const db = stack.db.client;
@@ -253,7 +256,9 @@ test.beforeAll(async () => {
   server = await buildServer({
     queue,
     logger: stack.db.logger,
-    auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
+    auth: buildAuthPluginDeps(stack),
+    identity: buildIdentityRouteDeps(stack),
+    organizations: buildOrganizationsRouteDeps(stack),
     projects: {
       authorizationService: stack.authorizationService,
       projectRepository: stack.projectRepository,
@@ -359,10 +364,17 @@ test.afterAll(async () => {
 });
 
 async function login(page: Page): Promise<void> {
+  // WORK-074: the demo-key localStorage login is RETIRED from the frontend
+  // (the customer login path is the human login; the API-key path remains
+  // automation-only). The specs seed a REAL server-side session through the
+  // SAME SessionService the /auth routes use and attach the HttpOnly
+  // `wfos_session` cookie — the production transport.
+  const user = await stack.userRepository.upsertByExternalId({
+    externalId: 'w050-e2e-user-a',
+    displayName: 'User A',
+  });
+  await loginWithServerSession(page, stack.sessionService, user.id);
   await page.goto('/');
-  await page.evaluate((key: string) => {
-    localStorage.setItem('wfos_api_key', key);
-  }, API_KEY);
 }
 
 test('the unified execution section renders the AUTHORITATIVE facts: the record\'s own selection, the handoff log, the delegated units, the verification state, and the next action', async ({ page }) => {

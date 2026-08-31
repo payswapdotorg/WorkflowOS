@@ -12,7 +12,14 @@
  * consumed by /auth for identity resolution.
  */
 import type { ModuleContract } from '@platform/module-contract.js';
-export type { User, UserRepository, CreateUserInput } from './internal/user.types.js';
+export type {
+  User,
+  UserRepository,
+  CreateUserInput,
+  LinkedIdentity,
+  LinkedIdentityRepository,
+  CreateLinkedIdentityInput,
+} from './internal/user.types.js';
 
 /**
  * Public capabilities exposed by the /users module to other modules.

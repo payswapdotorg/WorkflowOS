@@ -9,8 +9,8 @@ export default function SettingsPage() {
       <Card>
         <CardHeader><CardTitle className="text-base">Session</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <p className="text-sm text-muted-foreground">You are authenticated with an API key. The backend retains all authoritative state.</p>
-          <Button variant="destructive" onClick={() => auth.clearApiKey()}>Sign Out</Button>
+          <p className="text-sm text-muted-foreground">You are signed in. The backend retains all authoritative state.</p>
+          <Button variant="destructive" onClick={() => void auth.logout()}>Sign Out</Button>
         </CardContent>
       </Card>
     </div>

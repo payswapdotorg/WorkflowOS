@@ -20,4 +20,15 @@ export class EnvSecretStore implements SecretStore {
   ref(key: string): SecretRef {
     return { key };
   }
+
+  /**
+   * WORK-074: runtime secret writes for dynamically issued credentials. The
+   * env store writes into `process.env` of the running process (local dev /
+   * tests). Production substitutes a real secret backend without changing
+   * domain code.
+   */
+  putSecret(ref: SecretRef, value: string): Promise<void> {
+    process.env[ref.key] = value;
+    return Promise.resolve();
+  }
 }

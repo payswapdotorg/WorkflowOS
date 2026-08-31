@@ -79,13 +79,17 @@ export async function projectsRoutes(app: FastifyInstance, deps: ProjectsRouteDe
   app.get('/projects/:projectId', async (req, reply) => {
     return runAuthed(req, async () => {
       const { projectId } = req.params as { projectId: string };
-      const user = await requireProjectAuthorization(req, reply, deps, {
+      // WORK-074: readable by scoped machine principals holding the
+      // 'project.read' capability (granted to the implementation-agent set);
+      // the decision still flows through the SAME AuthorizationService.
+      const actor = await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        machineCapability: 'project.read',
       });
       const project = await deps.projectRepository.findById(projectId);
       if (!project) return reply.code(404).send({ error: 'not-found' });
-      return { ...project, accessedBy: user.id };
+      return { ...project, accessedBy: actor.id };
     });
   });
 

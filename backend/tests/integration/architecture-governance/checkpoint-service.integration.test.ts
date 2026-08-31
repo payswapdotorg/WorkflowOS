@@ -1106,7 +1106,12 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // as coordinated, so the self-host head pin advances to 0057.
           // WORK-062 (the durable orchestration substrate underneath
           // delegation): 0058 is the orchestration substrate ledger.
-          expectedLastMigrationNumber: 58,
+          // WORK-074 (the identity & access runtime — the WORK-063 RUNTIME
+          // activation): 0059 is the identity/session/machine-identity
+          // schema (wfos_linked_identities, wfos_sessions,
+          // wfos_password_credentials, wfos_service_accounts, the
+          // wfos_api_key_credentials scopes extension, wfos_oauth_states).
+          expectedLastMigrationNumber: 59,
         },
       },
     ]);

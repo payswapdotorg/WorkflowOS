@@ -33,21 +33,16 @@ export class ApiError extends Error {
   }
 }
 
-function getApiKey(): string | null {
-  return localStorage.getItem('wfos_api_key');
-}
-
 async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const apiKey = getApiKey();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
   };
-  if (apiKey) {
-    headers['x-api-key'] = apiKey;
-  }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'same-origin' });
   if (res.status === 401) {
+    // The backend is the authority: a 401 transitions the whole app to
+    // unauthenticated (the canonical auth-state source observes it).
+    auth.handleUnauthorized();
     throw new ApiError(401, 'Authentication required');
   }
   if (res.status === 403) {
@@ -101,24 +96,164 @@ async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   }
 }
 
-// --- Auth ---
+// --- Auth (WORK-074: session-based; the ONE canonical frontend auth-state source) ---
 
-export const auth = {
-  setApiKey(key: string): void {
-    localStorage.setItem('wfos_api_key', key);
-  },
-  clearApiKey(): void {
-    localStorage.removeItem('wfos_api_key');
-  },
-  hasApiKey(): boolean {
-    return !!getApiKey();
-  },
-  getApiKeyPrefix(): string {
-    const k = getApiKey();
-    if (!k) return '';
-    return k.length > 10 ? `${k.slice(0, 6)}…${k.slice(-3)}` : '••••';
-  },
-};
+/**
+ * The canonical auth-state source (the WORK-022/WORK-072 state-ownership
+ * pattern carrying WORK-074's real login). ONE observable client holds the
+ * auth state; every consumer — including the App shell — observes the SAME
+ * state synchronously, so a successful sign-in makes the protected routes
+ * visible WITHOUT a manual reload.
+ *
+ * State-ownership discipline (WORK-063 / WORK-074):
+ *   - the frontend state is a CACHE of "who is signed in" as reported by the
+ *     backend (`GET /auth/session`) — it is NEVER an authorization decision
+ *     (the WORK-022 invariant holds: a 401/403 from the backend is the
+ *     authority, and a 401 transitions the state to unauthenticated);
+ *   - the session token lives ONLY in an HttpOnly cookie — no JS-readable
+ *     storage ever holds credential material;
+ *   - there is NO second auth store (the old per-instance `useState` API-key
+ *     pattern and the demo-key localStorage path are retired).
+ */
+export interface SessionUser {
+  id: string;
+  displayName: string;
+  email: string | null;
+}
+
+export interface AuthState {
+  status: 'loading' | 'authenticated' | 'unauthenticated';
+  user: SessionUser | null;
+}
+
+export interface LoginProviderInfo {
+  id: 'google' | 'github';
+  configured: boolean;
+}
+
+type AuthListener = () => void;
+
+class AuthClient {
+  private state: AuthState = { status: 'loading', user: null };
+  private readonly listeners = new Set<AuthListener>();
+
+  /** useSyncExternalStore subscription. */
+  subscribe = (listener: AuthListener): (() => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+
+  /** useSyncExternalStore snapshot (stable identity until the state changes). */
+  getSnapshot = (): AuthState => this.state;
+
+  private setState(next: AuthState): void {
+    this.state = next;
+    for (const listener of this.listeners) listener();
+  }
+
+  /**
+   * Read the session from the backend (whoami). Called once at app mount:
+   * after a full page reload the protected routes remain visible when a valid
+   * session cookie exists (refresh persistence).
+   */
+  async fetchSession(): Promise<void> {
+    try {
+      const res = await fetch(`${API_BASE}/auth/session`, { credentials: 'same-origin' });
+      if (res.ok) {
+        const body = (await res.json()) as { user: SessionUser };
+        this.setState({ status: 'authenticated', user: body.user });
+        return;
+      }
+    } catch {
+      // Network failure → unauthenticated (the login page is the honest state).
+    }
+    this.setState({ status: 'unauthenticated', user: null });
+  }
+
+  async loginWithPassword(email: string, password: string): Promise<SessionUser> {
+    const res = await fetch(`${API_BASE}/auth/password/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (body.error === 'invalid-credentials') {
+        throw new ApiError(401, 'Invalid email or password.');
+      }
+      throw new ApiError(res.status, body.error ?? `Error ${res.status}`);
+    }
+    const body = (await res.json()) as { user: SessionUser };
+    this.setState({ status: 'authenticated', user: body.user });
+    return body.user;
+  }
+
+  async registerWithPassword(email: string, password: string, displayName?: string): Promise<SessionUser> {
+    const res = await fetch(`${API_BASE}/auth/password/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ email, password, displayName }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      const messages: Record<string, string> = {
+        'email-taken': 'An account with this email already exists. Try signing in.',
+        'weak-password': 'The password must be at least 8 characters.',
+        'invalid-email': 'That email address does not look valid.',
+      };
+      throw new ApiError(res.status, messages[body.error ?? ''] ?? body.message ?? body.error ?? `Error ${res.status}`);
+    }
+    const body = (await res.json()) as { user: SessionUser };
+    this.setState({ status: 'authenticated', user: body.user });
+    return body.user;
+  }
+
+  /** Which human login providers are configured (the UI renders the honest state). */
+  async fetchProviders(): Promise<LoginProviderInfo[]> {
+    const body = await apiGet<{ providers: LoginProviderInfo[] }>('/auth/providers');
+    return body.providers ?? [];
+  }
+
+  /** Begin the OAuth journey: returns the provider's authorization URL to redirect to. */
+  async startOAuth(provider: 'google' | 'github', redirectTo = '/'): Promise<string> {
+    const body = await apiGet<{ authorizeUrl: string }>(
+      `/auth/oauth/${provider}/start?redirectTo=${encodeURIComponent(redirectTo)}`,
+    );
+    return body.authorizeUrl;
+  }
+
+  /** Logout: revoke the server-side session and clear the cookie. */
+  async logout(): Promise<void> {
+    try {
+      await fetch(`${API_BASE}/auth/session/logout`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } finally {
+      this.clearLocalSession();
+    }
+  }
+
+  /** The backend is the authority: a 401 from ANY api call lands here. */
+  handleUnauthorized(): void {
+    if (this.state.status !== 'unauthenticated') {
+      this.clearLocalSession();
+    }
+  }
+
+  private clearLocalSession(): void {
+    // Best-effort cookie cleanup for stale cookies — the server has already
+    // revoked the session; the HttpOnly cookie is cleared server-side too.
+    document.cookie = 'wfos_session=; Path=/; Max-Age=0';
+    this.setState({ status: 'unauthenticated', user: null });
+  }
+}
+
+export const auth = new AuthClient();
 
 // --- Organizations ---
 
@@ -1440,7 +1575,7 @@ export const executionProviders = {
 // CONSUMER — it never derives integrity, computes scores, or picks winners.
 // It only renders backend-supplied experiment/trial/metric/comparison state
 // and surfaces backend-supplied recommendations (always evidence-backed).
-// All routes require the x-api-key header (handled by apiFetch/apiGet/apiPost).
+// All routes authenticate through the session cookie (credentials: 'same-origin' — WORK-074).
 
 export type BenchmarkExperimentStatus =
   | 'created'
@@ -1896,12 +2031,9 @@ export const benchmarks = {
     experimentId: string,
     format: BenchmarkExportFormat,
   ): Promise<Blob> => {
-    const apiKey = getApiKey();
-    const headers: Record<string, string> = {};
-    if (apiKey) headers['x-api-key'] = apiKey;
     const res = await fetch(
       `${API_BASE}/benchmarks/${experimentId}/export?format=${format}`,
-      { headers },
+      { credentials: 'same-origin' },
     );
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

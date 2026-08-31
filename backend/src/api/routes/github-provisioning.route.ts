@@ -94,6 +94,9 @@ export async function githubProvisioningRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.write',
         projectId,
+        // WORK-074: repository/branch provisioning is exercisable by scoped
+        // machine principals holding the 'branches.create' capability.
+        machineCapability: 'branches.create',
       });
       const body = req.body as {
         owner?: string;

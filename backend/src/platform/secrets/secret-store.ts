@@ -52,4 +52,14 @@ export interface SecretStore {
    * persist a *reference* (not the value) to a secret it will later need.
    */
   ref(key: string): SecretRef;
+
+  /**
+   * WORK-074: persist a raw secret value under `ref.key`. OPTIONAL capability:
+   * only stores that support runtime writes implement it (the env-backed dev
+   * store does; a vault-backed store may not). Used by /auth's machine
+   * identity runtime so a dynamically issued API key's raw value is retrievable
+   * through the SAME SecretStore boundary it is verified through (SEC-AC-01) —
+   * the value itself still never enters domain records (SEC-AC-02).
+   */
+  putSecret?(ref: SecretRef, value: string): Promise<void>;
 }

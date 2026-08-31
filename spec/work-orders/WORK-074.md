@@ -1,6 +1,99 @@
 # WORK-074 — Identity & Access Runtime Activation
 
-Status: planned.
+Status: in flight (activated 2026-08-30 by the architect's implementation
+instruction — the dogfooding gate's authentication precondition, finding F-1;
+the activation is recorded in
+`spec/development-state/program-state.json`, branch
+`feat/work-074-identity-access-runtime`, implementation PR #99). The implementation delivers the WORK-063 identity
+model as RUNTIME — nothing re-architected, no second authority:
+
+1. **Human login** — the WORK-063 providers behind the SAME `AuthProvider`
+   boundary: Google (OIDC) and GitHub (OAuth app) adapters (confidential
+   clients; server-side code exchange; assertion retrieval over TLS; a provider
+   is an adapter, never an authority), plus the **email/password** mechanism
+   (scrypt verifiers only; the smaller production-appropriate option that needs
+   no mail infrastructure — WORK-063 allows either). Unconfigured providers
+   surface as honestly "unavailable" on the login page (fail closed). OAuth
+   callbacks validate + atomically consume a single-use server-side CSRF state
+   (`wfos_oauth_states`); a replayed/unknown state never yields a session.
+2. **Identity** — deterministic provider-subject → user resolution
+   (`wfos_linked_identities`, owned by /users; AUTH-AC-01 generalized to OIDC
+   subjects) and identity linking: a provider-VERIFIED email links to an
+   existing VERIFIED account (one human, multiple providers, same user);
+   linking NEVER auto-attaches to an unverified (password-created) account — a
+   typed `email-conflict` rejection (no takeover path).
+3. **Sessions** — server-side, authoritative, revocable (`wfos_sessions`):
+   opaque 256-bit tokens in HttpOnly SameSite=Lax cookies (Secure in
+   production), SHA-256 digest-only persistence, sliding refresh, typed
+   expired/revoked/invalid verification, logout actually removes access.
+4. **Authorization** — ONE chain, unchanged: humans flow through the existing
+   `AuthorizationService.authorize` (user → membership → role → permission →
+   project access; AUTHZ-AC-01..03 untouched); machine principals flow through
+   `authorizeForMachinePrincipal` INSIDE the same service (resource → owning
+   org → tenant anchor → closed capability → permission mapping; typed
+   `capability-not-granted`; machine access requires explicit route opt-in —
+   undeclared routes deny machines fail-closed). Governance capabilities
+   (`architecture.modify`, `review.approve`, `verification.evidence.write`,
+   `tenant.change`, `org.admin`, `org.members`) are deliberately UNGRANTABLE
+   (privilege separation).
+5. **Machine identity** — `wfos_service_accounts` are first-class NON-user
+   principals (never a `wfos_users` row; the plugin never resolves them to
+   users) with explicit capability ceilings; scoped keys EXTEND
+   `wfos_api_key_credentials` (scopes + service_account_id + revoked_at +
+   created_at) — never removed; legacy unscoped keys keep their exact behavior
+   (API-key automation preserved). Raw key material is shown exactly once and
+   lives only behind the SecretStore boundary (an OPTIONAL `putSecret`
+   capability was added to `platform/secrets`; a non-writable store cannot
+   issue keys — fail closed).
+6. **Workbench off the demo key** — the LoginPage is the human login (NO
+   API-key input); the API client holds NO credential material (the canonical
+   auth-state source is an observable session client — the App gate re-renders
+   synchronously after sign-in, NO manual reload: proof #15). The
+   **WORK-072 overlap is documented, not silently absorbed**: the canonical
+   auth-state source + synchronous propagation are REQUIRED by WORK-074's own
+   proof 15; WORK-072's fuller discrimination suite remains that Work Order's
+   scope. `provision-key.ts` carries an explicit DEVELOPMENT-ONLY banner.
+7. **Audit** — identity.login/logout, service-account creation, key
+   issuance/revocation, membership assignment/removal are recorded through the
+   EXISTING /audit surface (invariant #12).
+
+Migration `0059_identity_runtime` (the identity/session/machine-identity
+schema); the self-host head pin and the static-architecture baseline pins
+advance to 59 / 34 route files with credit comments. Verification on the
+branch: WORK-074 suites 73/73 (sessions 8, identity-providers 11,
+machine-identity 15, routes 18, browser E2E 2, frontend login/auth 19);
+static architecture 809/809 (WORK-074 boundary invariants: one authorization
+authority, cookie-only sessions, no demo-key login surface, identity files
+inside the frozen /auth + /users boundaries, digest-only persistence);
+governance suites clean; full backend regression clean; backend + frontend
+typecheck/lint clean (pre-existing warnings untouched). Browser evidence: a
+fresh-context Playwright journey (honest login surface → email sign-up →
+authenticated shell WITHOUT reload → reload persistence → logout →
+protected-route rejection) plus a manual agent-browser pass (desktop + mobile)
+on the live topology. NOT in this change: WORK-071/072/073, SSO/SAML (a
+recorded future extension), and the dogfooding run itself (the gate also
+requires WORK-071).
+
+**Security remediation (architect review of PR #99 — login-CSRF):** the
+original OAuth state proved single-use but did NOT bind the authorization
+request to the initiating browser — an attacker could obtain a valid state and
+have a victim's browser present the callback (OAuth login-CSRF / session
+swapping). Remediation: `/auth/oauth/:provider/start` now mints (or reuses) a
+cryptographically random pre-auth transaction cookie (`wfos_oauth_tx`,
+HttpOnly, SameSite=Lax, Secure in production, Max-Age locked to the state TTL)
+and the state row stores its SHA-256 DIGEST (`transaction_digest`); the
+callback REQUIRES the presenting browser to carry the SAME transaction value
+and the consume checks state + provider + binding + expiry in ONE atomic
+single-use DELETE, BEFORE any provider assertion is accepted — a state minted
+for browser A is rejected when presented by browser B (no session, no user
+row; an unmatched attempt leaves A's transaction intact for A to complete).
+Regression discriminations added: cross-browser (no cookie / foreign cookie)
+rejection with no session and no identity resolution, the honest same-browser
+success, replay-with-correct-binding rejection, cookie attribute + one-time
+value checks, and digest-only persistence (the raw transaction value appears
+in no `wfos_*` column). A static-architecture invariant pins the boundary
+(binding checked before exchange, atomic digest-bound consume, cookie
+discipline, TTL agreement).
 
 > **Canonical identity and the WORK-063-RUNTIME alias.** WORK-074 is the
 > canonical numeric identity for this Work Order, per the repository's

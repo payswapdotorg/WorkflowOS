@@ -235,7 +235,13 @@ export async function buildTestDatabase(): Promise<TestDatabase> {
       TRUNCATE wfos_specification_versions RESTART IDENTITY CASCADE;
       TRUNCATE wfos_specifications RESTART IDENTITY CASCADE;
       TRUNCATE wfos_project_repositories RESTART IDENTITY CASCADE;
+      -- WORK-074: the identity runtime tables (child-first order).
+      TRUNCATE wfos_oauth_states RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_password_credentials RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_sessions RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_linked_identities RESTART IDENTITY CASCADE;
       TRUNCATE wfos_api_key_credentials RESTART IDENTITY CASCADE;
+      TRUNCATE wfos_service_accounts RESTART IDENTITY CASCADE;
       TRUNCATE wfos_project_access RESTART IDENTITY CASCADE;
       TRUNCATE wfos_organization_memberships RESTART IDENTITY CASCADE;
       TRUNCATE wfos_projects RESTART IDENTITY CASCADE;

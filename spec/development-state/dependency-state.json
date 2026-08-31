@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "derived-dependency-state",
   "sourceOfTruth": "spec/dependency-graph.md + spec/development-state/program-state.json + spec/work-orders/ (the architect-issued files, GitHub issues #64..#73, plus WORK-062 issued by the 2026-08-30 governance correction, plus WORK-063 issued by the 2026-08-30 identity-and-access architecture decision and MERGED COMPLETE as 8dac9c4 via PR #81 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-064..070 issued by the 2026-08-30 continuous-product-validation sub-evolution / ACR-002, of which WORK-064 was ACTIVATED 2026-08-30 and is MERGED COMPLETE as c351451 via PR #86 (finalized §34.8/ADR-0007 on 2026-08-30), plus WORK-074 + WORK-071 + WORK-072 + WORK-073 issued by the 2026-08-30 customer dogfooding experiment's governed follow-up — see spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md)",
-  "computedAt": "2026-08-30 (WORK-071 ACTIVATED by the architect — the implementation instruction on the post-#87/#95 mainline 4eb48b7; it left the futureGeneration and is IN FLIGHT on branch feat/work-071-local-dev-runtime, recorded in program-state.json. WORK-053, WORK-065, WORK-067, and WORK-074 remain the dependency-eligible PLANNED heads of their tracks. The remaining futureGeneration is unchanged.)",
+  "computedAt": "2026-08-31 (the PR #99 reconciliation onto the post-#96 mainline: WORK-071 was MERGED as 8604c8a via PR #96 and recorded COMPLETE — 56/56 recorded work orders complete; WORK-074 is IN FLIGHT on branch feat/work-074-identity-access-runtime (PR #99) and has left the futureGeneration. The remaining futureGeneration is unchanged.)",
   "rules": {
     "eligible": "all declared dependencies are complete",
     "parallelEligible": "eligible AND no uncoordinated protected-surface overlap",
@@ -10,11 +10,11 @@
     "staleState": "dependency graph and program state disagree; fail closed and require architect reconciliation"
   },
   "currentGeneration": {
-    "completedWorkOrders": 55,
+    "completedWorkOrders": 56,
     "inFlight": [
-      "WORK-071"
+      "WORK-074"
     ],
-    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 via PR #82, finalized §34.8/ADR-0007), WORK-063 (8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007), and WORK-064 (c351451 via PR #86 — the continuous product validation domain/model authority, finalized §34.8/ADR-0007) — 55/55 complete. IN FLIGHT: WORK-071 (Local Development Runtime Substrate — activated 2026-08-30 by the architect's implementation instruction; branch feat/work-071-local-dev-runtime; the dev-only PGlite runtime path through the existing DatabaseClient boundary — dependencies WORK-003/WORK-023 both complete)."
+    "note": "Every recorded work order is complete: WORK-001..045, WORK-046 (1f2bef9), WORK-047 (e2b665c), WORK-048 (5c48257), WORK-049 (07ac9cc), WORK-050 (8f27cc7), WORK-051 (f2c996c), WORK-052 (47615c2), WORK-062 (f0855d2 via PR #82, finalized §34.8/ADR-0007), WORK-063 (8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007), WORK-064 (c351451 via PR #86 — the continuous product validation domain/model authority, finalized §34.8/ADR-0007), and WORK-071 (8604c8a via PR #96 — the local development runtime substrate; the completion recorded by the PR #99 reconciliation onto the post-#96 mainline) — 56/56 complete. IN FLIGHT: WORK-074 (Identity & Access Runtime Activation — the WORK-063 RUNTIME; activated 2026-08-30 by the architect's implementation instruction; branch feat/work-074-identity-access-runtime, PR #99; the human login (Google/GitHub/email), server-side sessions, deterministic identity resolution + linking, scoped machine identity, the Workbench login migration off the demo key, and the required proofs on real PostgreSQL; carries the OAuth browser-binding login-CSRF remediation from the architect's review)."
   },
   "futureGeneration": {
     "WORK-053": [
@@ -100,10 +100,7 @@
       "WORK-051"
     ],
     "WORK-072": [],
-    "WORK-073": [],
-    "WORK-074": [
-      "WORK-063"
-    ]
+    "WORK-073": []
   },
   "futureGenerationEligibility": {
     "WORK-053": "eligible — WORK-046, WORK-051, WORK-052 all complete (the identity collision is RESOLVED; WORK-053 remains planned and NOT activated — the architect's authorization is required, and the 2026-08-29 verdict says 'Do not activate WORK-053 yet')",
@@ -122,8 +119,7 @@
     "WORK-069": "blocked — WORK-066 not started (WORK-064, WORK-019, WORK-026, WORK-020 complete; soft: WORK-059 not started — WORK-069 operates directly on the existing v1.0 release/runtime authorities until WORK-059 lands)",
     "WORK-070": "blocked — WORK-067, WORK-069 not started (WORK-051 complete; soft: WORK-055, WORK-060 not started — WORK-070 performs continuous evaluation directly against the existing architecture assertions until WORK-055/060 land)",
     "WORK-072": "eligible — no hard dependencies (the defect exists in the current frontend code and the fix is frontend-only and provider-independent). WORK-072 fixes the auth-state synchronization defect (LoginPage updates local state; App-level auth state not synchronously observing; requires reload). Dependency-eligible does NOT mean activated: WORK-072 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-072.md. The dogfooding evidence artifact finding F-3 records the defect, independently verified against the code. PARALLEL-SAFE with WORK-071 and WORK-073; CONFLICTING with WORK-074 on the shared LoginPage/useAuth/App.tsx surface — coordinate or sequence.)",
-    "WORK-073": "eligible — no hard dependencies (the defect exists in the current frontend code; the fix uses the existing organizations.listForUser() and projects.create() authorities, both complete). WORK-073 fixes the Create Project organization-selection defect (the UI tells the user to enter an org ID manually but exposes no org-ID input; the org-authority failure is silently swallowed into a fabricated empty state). Dependency-eligible does NOT mean activated: WORK-073 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-073.md. The dogfooding evidence artifact finding F-4 records the defect, independently verified against the code. PARALLEL-SAFE with WORK-071, WORK-074, and WORK-072 — different protected surfaces; the explicit example of safe parallelism.)",
-    "WORK-074": "eligible — WORK-063 is COMPLETE (merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007 on 2026-08-30). WORK-074 is the RUNTIME ACTIVATION of the identity-and-access spec WORK-063 already merged (referred to in the dogfooding experiment's design as 'WORK-063-RUNTIME' — the logical alias; the canonical numeric identity is WORK-074 per the repo's identity-surface invariant); it is dependency-eligible immediately (the spec it implements is complete). Dependency-eligible does NOT mean activated: WORK-074 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-074.md. The dogfooding evidence artifact spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md finding F-1 records that the runtime identity layer is UNIMPLEMENTED; this Work Order implements it. The dogfooding gate (spec/architecture/v1.1/dogfooding-model.md §8) now requires this Work Order complete AND WORK-071 complete.)"
+    "WORK-073": "eligible — no hard dependencies (the defect exists in the current frontend code; the fix uses the existing organizations.listForUser() and projects.create() authorities, both complete). WORK-073 fixes the Create Project organization-selection defect (the UI tells the user to enter an org ID manually but exposes no org-ID input; the org-authority failure is silently swallowed into a fabricated empty state). Dependency-eligible does NOT mean activated: WORK-073 remains PLANNED, NOT activated, NOT started — the architect's authorization is required. (See spec/work-orders/WORK-073.md. The dogfooding evidence artifact finding F-4 records the defect, independently verified against the code. PARALLEL-SAFE with WORK-071, WORK-074, and WORK-072 — different protected surfaces; the explicit example of safe parallelism.)"
   },
   "futureGenerationSoftDependencies": {
     "note": "Soft dependencies are NOT in the futureGeneration dependency lists above (those lists are the hard dependencies the validation engine checks). Soft dependencies are Work Orders that the new Work Orders CONSUME (but do not require) when they land. The soft dependency is recorded here so an Architect LLM can see the full relationship.",
@@ -131,26 +127,26 @@
       "soft": [
         "WORK-058"
       ],
-      "reason": "WORK-058 (Adaptive Assurance Engine) — the scheduler can ship with a simpler fixed-mapping assurance model and delegate to WORK-058's deterministic function when WORK-058 lands."
+      "reason": "WORK-058 (Adaptive Assurance Engine) \u2014 the scheduler can ship with a simpler fixed-mapping assurance model and delegate to WORK-058's deterministic function when WORK-058 lands."
     },
     "WORK-067": {
       "soft": [
         "WORK-056"
       ],
-      "reason": "WORK-056 (Engineering Signals and Feedback Intake) — WORK-067 is the CORRELATION/REGRESSION-DETECTION LAYER that CONSUMES WORK-056's signal taxonomy when WORK-056 lands; until then, WORK-067 operates on raw observations directly with the same provenance discipline."
+      "reason": "WORK-056 (Engineering Signals and Feedback Intake) \u2014 WORK-067 is the CORRELATION/REGRESSION-DETECTION LAYER that CONSUMES WORK-056's signal taxonomy when WORK-056 lands; until then, WORK-067 operates on raw observations directly with the same provenance discipline."
     },
     "WORK-069": {
       "soft": [
         "WORK-059"
       ],
-      "reason": "WORK-059 (Operational and Release Governance) — WORK-069 is the CLOSED-LOOP RUNTIME VALIDATION LAYER that CONSUMES WORK-059's release framework when WORK-059 lands; until then, WORK-069 operates directly on the existing v1.0 release/runtime authorities."
+      "reason": "WORK-059 (Operational and Release Governance) \u2014 WORK-069 is the CLOSED-LOOP RUNTIME VALIDATION LAYER that CONSUMES WORK-059's release framework when WORK-059 lands; until then, WORK-069 operates directly on the existing v1.0 release/runtime authorities."
     },
     "WORK-070": {
       "soft": [
         "WORK-055",
         "WORK-060"
       ],
-      "reason": "WORK-055 (Quality Attributes and Architecture Fitness) + WORK-060 (Continuous Architecture Evolution and ACR Feedback Loop) — WORK-070 is the CLOSED-LOOP SYNTHESIS of WORK-055 (the model) + WORK-060 (the loop) + WORK-067 (signals) + WORK-069 (release/runtime evidence); until WORK-055/060 land, WORK-070 performs continuous evaluation directly against the existing architecture assertions and feeds the existing /architecture ACR authority."
+      "reason": "WORK-055 (Quality Attributes and Architecture Fitness) + WORK-060 (Continuous Architecture Evolution and ACR Feedback Loop) \u2014 WORK-070 is the CLOSED-LOOP SYNTHESIS of WORK-055 (the model) + WORK-060 (the loop) + WORK-067 (signals) + WORK-069 (release/runtime evidence); until WORK-055/060 land, WORK-070 performs continuous evaluation directly against the existing architecture assertions and feeds the existing /architecture ACR authority."
     }
   },
   "futureGenerationParallelMetadata": {
@@ -215,26 +211,12 @@
         "spec/work-orders/WORK-073.md",
         "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
       ]
-    },
-    "WORK-074": {
-      "parallelEligibility": "conditional",
-      "protectedSurfaces": [
-        "backend/src/modules/auth/",
-        "backend/src/modules/users/",
-        "backend/src/modules/organizations/",
-        "frontend/src/pages/LoginPage.tsx",
-        "frontend/src/hooks/useAuth.ts",
-        "frontend/src/App.tsx",
-        "spec/work-orders/WORK-074.md",
-        "spec/architecture/v1.1/dogfooding-model.md",
-        "spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md"
-      ]
     }
   },
   "knownConflicts": [],
   "resolvedConflicts": [
     {
-      "conflict": "The architect's uploaded work-order files (originally spec/work-orders/WORK-053 — Architecture Checkpoint Framework.md .. WORK-059 — WorkflowOS Self-Hosting Lifecycle.md) declared a DIFFERENT dependency set for the re-used identifiers WORK-053..059 (053←[052], 054←[053], 055←[052], 056←[053,055], 057←[053,055], 058←[056,057], 059←[058]) than the futureGeneration above (which follows the architect-issued issues #65..#73 and spec/architecture/v1.1/dependency-graph.md).",
+      "conflict": "The architect's uploaded work-order files (originally spec/work-orders/WORK-053 \u2014 Architecture Checkpoint Framework.md .. WORK-059 \u2014 WorkflowOS Self-Hosting Lifecycle.md) declared a DIFFERENT dependency set for the re-used identifiers WORK-053..059 (053\u2190[052], 054\u2190[053], 055\u2190[052], 056\u2190[053,055], 057\u2190[053,055], 058\u2190[056,057], 059\u2190[058]) than the futureGeneration above (which follows the architect-issued issues #65..#73 and spec/architecture/v1.1/dependency-graph.md).",
       "resolvedAt": "2026-08-29",
       "resolution": "The architect's PR #74 review verdict chose the issue track as canonical. The uploaded files are retired under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (non-authoritative; the retired dependency claims are preserved there as history). futureGeneration above is the ONE canonical dependency mapping for WORK-053..061.",
       "resolutionRecord": "spec/architecture/v1.1/reconciliation-record.md#8-the-2026-08-29-architect-verdict--identity-resolution-implemented"

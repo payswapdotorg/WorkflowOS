@@ -46,6 +46,24 @@ export class PgMembershipRepository implements MembershipRepository {
     );
     return result.rows.map(mapRow);
   }
+
+  async listForOrganization(organizationId: string): Promise<OrganizationMembership[]> {
+    const result = await this.db.query<MembershipRow>(
+      `SELECT id, user_id, organization_id, role_id, created_at
+       FROM wfos_organization_memberships WHERE organization_id = $1 ORDER BY created_at ASC`,
+      [organizationId],
+    );
+    return result.rows.map(mapRow);
+  }
+
+  async remove(userId: string, organizationId: string): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>(
+      `DELETE FROM wfos_organization_memberships
+       WHERE user_id = $1 AND organization_id = $2 RETURNING id`,
+      [userId, organizationId],
+    );
+    return result.rows.length > 0;
+  }
 }
 
 /**

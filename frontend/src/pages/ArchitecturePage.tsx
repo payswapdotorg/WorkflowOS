@@ -11,10 +11,6 @@ import { StatusBadge } from '@/components/domain/status-badge';
 import { architecture, type Architecture, type ArchitectureVersion } from '@/api/client';
 import { Snowflake, Plus, FileText, Lock, ArrowRight } from 'lucide-react';
 
-function getApiKey(): string {
-  return localStorage.getItem('wfos_api_key') || '';
-}
-
 export default function ArchitecturePage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -160,7 +156,7 @@ function CreateArchitectureForm({ projectId, onCreated, onCancel }: { projectId:
     try {
       const res = await fetch('/api/projects/' + projectId + '/architectures', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
+        headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         body: JSON.stringify({ name: name.trim() }),
       });
       if (!res.ok) {
@@ -206,7 +202,7 @@ function CreateVersionForm({ archId, onCreated, onCancel }: { archId: string; on
     try {
       const res = await fetch('/api/architectures/' + archId + '/versions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
+        headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         body: JSON.stringify({ contentInline: content.trim() }),
       });
       if (!res.ok) {
@@ -262,7 +258,7 @@ Describe the system architecture...
 async function freezeVersion(versionId: string, onDone: () => void) {
   await fetch('/api/architecture-versions/' + versionId + '/freeze', {
     method: 'POST',
-    headers: { 'x-api-key': getApiKey() },
+    credentials: 'same-origin',
   });
   onDone();
 }

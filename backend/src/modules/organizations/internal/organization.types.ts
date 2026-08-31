@@ -59,6 +59,16 @@ export interface MembershipRepository {
   findByUserAndOrganization(userId: string, organizationId: string): Promise<OrganizationMembership | null>;
   /** List all organizations a user belongs to with their roles. */
   listForUser(userId: string): Promise<OrganizationMembership[]>;
+  /**
+   * WORK-074: list all memberships of an organization (the membership
+   * management surface).
+   */
+  listForOrganization(organizationId: string): Promise<OrganizationMembership[]>;
+  /**
+   * WORK-074: remove a user's membership in an organization. Returns whether a
+   * row was removed (false when the user was not a member).
+   */
+  remove(userId: string, organizationId: string): Promise<boolean>;
 }
 
 /**

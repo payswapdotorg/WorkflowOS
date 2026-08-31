@@ -11218,7 +11218,7 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     // The planner evidence lives in the existing Work Item metadata.planner
     // JSONB; no planner-owned table exists.
     const last = migrations[migrations.length - 1];
-    expect(last, 'WORK-040 adds no migration (the last migration is the WORK-062 orchestration substrate ledger 0058 — after the WORK-046 delegation coordination ledger 0057 and the merged WORK-051 migrations 0052–0056: /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0058_/);
+    expect(last, 'WORK-040 adds no migration (the last migration is WORK-074\u2019s identity runtime 0059 \u2014 the WORK-063 RUNTIME activation \u2014 after the WORK-062 orchestration substrate ledger 0058, the WORK-046 delegation coordination ledger 0057, and the merged WORK-051 migrations 0052\u20130056: /architecture-owned assertion storage 0052, /verification orchestration identity 0053, the governed impact declaration 0054, /workflows governed PR intents 0055 + the adoption origin 0056; no planner-owned table)').toMatch(/^0059_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -17860,8 +17860,10 @@ describe('WORK-047 invariants — Agent Intelligence (advisory/ranking only, nev
     const migrations = readdirSync(join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations'))
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    expect(migrations[migrations.length - 1]).toMatch(/^0058_/);
-    expect(migrations.some((m) => m.startsWith('0059'))).toBe(false);
+    // Baseline updated by WORK-074 (the identity runtime 0059 — the WORK-063
+    // RUNTIME activation); WORK-047 still declares no migration of its own.
+    expect(migrations[migrations.length - 1]).toMatch(/^0059_/);
+    expect(migrations.some((m) => m.startsWith('0060'))).toBe(false);
   });
 
   // --- (f) DETERMINISM — the documented constants + the total-order tie-break --
@@ -18427,18 +18429,24 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
 
   it('WORK-049 adds NO backend route (the api routes directory is unchanged by the health UX — frontend-only scope)', () => {
     const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
-    // The exact route set as WORK-048 left it: 32 route files, no additions.
+    // The route set as WORK-048 left it (32 files), since extended to 34 by
+    // WORK-074 (auth + organizations — the identity runtime). WORK-049 adds
+    // NO route file of its own.
     // (health.route.ts is WORK-001/023's PLATFORM liveness/readiness probe —
     // it predates WORK-049 and is NOT a project-health read model.)
     const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
+    // Baseline updated by WORK-074: auth.route.ts (the identity runtime) +
+    // organizations.route.ts (membership management) joined the set; WORK-049
+    // still adds NO route file of its own.
     expect(routeFiles).toEqual([
       'agent-intelligence.route.ts', 'agent-policy.route.ts', 'agent-roles.route.ts', 'agent.route.ts',
-      'architect.route.ts', 'architecture.route.ts', 'audit.route.ts', 'benchmark.route.ts',
+      'architect.route.ts', 'architecture.route.ts', 'audit.route.ts', 'auth.route.ts',
+      'benchmark.route.ts',
       'companion.route.ts', 'delegation.route.ts', 'development-planner.route.ts',
       'execution-policy.route.ts', 'execution-routing.route.ts', 'execution.route.ts',
       'github-provisioning.route.ts', 'github-webhook.route.ts', 'health.route.ts',
       'jobs.route.ts', 'llm.route.ts', 'maintenance.route.ts', 'notification.route.ts',
-      'onboarding.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
+      'onboarding.route.ts', 'organizations.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
       'requirements.route.ts', 'review.route.ts', 'runtime.route.ts', 'specifications.route.ts',
       'verification.route.ts', 'work-items.route.ts', 'workbench.route.ts', 'workflow.route.ts',
     ]);
@@ -18641,10 +18649,11 @@ describe('WORK-050 invariants — Unified Execution UX (consumer, never authorit
 
   it('the backend surface is exactly TWO new read-only GET endpoints in the EXISTING route files (no new route files, GET-only, project-authorized)', () => {
     const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
-    // The route FILE set is unchanged (32 files — WORK-050 adds endpoints to
-    // the existing execution + delegation route files, never new files).
+    // The route FILE set grows only by WORK-074's identity surface (auth +
+    // organizations — 34 files); WORK-050 still adds endpoints to the EXISTING
+    // execution + delegation route files, never new files of its own.
     const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
-    expect(routeFiles.length).toBe(32);
+    expect(routeFiles.length).toBe(34);
     expect(routeFiles).toContain('execution.route.ts');
     expect(routeFiles).toContain('delegation.route.ts');
     expect(routeFiles).toContain('work-items.route.ts');
@@ -18808,8 +18817,10 @@ describe('WORK-064 invariants — Continuous Product Validation (the domain/mode
 
   it('no migration or table creates a validation evidence/journey/run store (NO schema migration is authorized by WORK-064)', () => {
     const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql'));
-    // The migration set is unchanged from the pre-WORK-064 baseline (58):
-    expect(migrationFiles).toHaveLength(58);
+    // The migration set grows only by WORK-074's identity runtime 0059 (the
+    // WORK-063 RUNTIME activation — authorized by its own Work Order);
+    // WORK-064 still declares NO migration of its own:
+    expect(migrationFiles).toHaveLength(59);
     for (const name of migrationFiles) {
       const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
       expect(
@@ -18996,7 +19007,190 @@ describe('WORK-064 invariants — Continuous Product Validation (the domain/mode
   });
 });
 
-// ============================================================================
+// ===========================================================================
+// WORK-074 invariants — the Identity & Access runtime activation
+//
+// WORK-063 is the architecture authority for the identity model; WORK-074 is
+// its RUNTIME. These static checks pin the boundary claims of that runtime:
+//
+//   (a) there is still exactly ONE authorization authority — the machine
+//       principal decision path lives INSIDE the existing
+//       DefaultAuthorizationService (no second engine, no parallel chain);
+//   (b) sessions are server-side (the frontend holds NO session/token
+//       authority — the cookie is the only session carrier and it is
+//       HttpOnly; no localStorage session storage appears anywhere);
+//   (c) the Workbench login surface no longer accepts the demo key: the
+//       LoginPage is the human login (Google/GitHub/email) and contains NO
+//       API-key input; the demo-key provisioner is demoted to
+//       development-only;
+//   (d) the identity layer introduces NO new workflow/execution/verification/
+//       review authority (module-boundary discipline: /auth imports no
+//       business-domain module internals — already enforced globally; here we
+//       pin that the NEW identity files stay inside /auth + /users);
+//   (e) raw credentials never persist: the identity repositories hold
+//       digests/refs only (no SecretStore value is ever written by /auth
+//       domain code — the concrete secret store stays under platform/).
+// ===========================================================================
+describe('WORK-074 invariants — identity & access runtime boundaries', () => {
+  const AUTH_DIR = join(BACKEND_ROOT, 'src', 'modules', 'auth');
+  const USERS_DIR = join(BACKEND_ROOT, 'src', 'modules', 'users');
+  const FRONTEND_SRC = join(BACKEND_ROOT, '..', 'frontend', 'src');
+
+  const walkTs = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const p = join(dir, entry);
+      if (statSync(p).isDirectory()) out.push(...walkTs(p));
+      else if (p.endsWith('.ts') || p.endsWith('.tsx')) out.push(p);
+    }
+    return out;
+  };
+
+  it('the machine-principal authorization path lives ONLY in the existing /auth AuthorizationService', () => {
+    // Exactly one implementation of the machine decision path — the SAME
+    // class that implements the human decision chain (no second engine).
+    const machineImplementations = walkTs(join(BACKEND_ROOT, 'src')).filter((f) => {
+      if (!f.endsWith('.ts') && !f.endsWith('.tsx')) return false;
+      const src = readFileSync(f, 'utf8');
+      return /authorizeForMachinePrincipal\s*\(/.test(src);
+    });
+    const inAuth = machineImplementations.filter((f) => f.includes(join('modules', 'auth')));
+    const inApiOrApp = machineImplementations.filter(
+      (f) => f.includes(`${sep}api${sep}`) || f.endsWith(join('src', 'app.ts')),
+    );
+    // The /auth service implements it; the auth plugin may CALL it (api layer
+    // consumes the declared interface — never decides). No domain module may
+    // declare it.
+    const outside = machineImplementations.filter(
+      (f) => !inAuth.includes(f) && !inApiOrApp.includes(f),
+    );
+    expect(outside).toEqual([]);
+    const service = join(AUTH_DIR, 'internal', 'authorization-service.ts');
+    expect(inAuth).toContain(service);
+    // It is implemented INSIDE DefaultAuthorizationService (same class):
+    const src = readFileSync(service, 'utf8');
+    const classStart = src.indexOf('export class DefaultAuthorizationService');
+    expect(classStart).toBeGreaterThan(-1);
+    expect(src.slice(classStart)).toMatch(/authorizeForMachinePrincipal/);
+  });
+
+  it('the frontend holds NO session-token authority (cookie-only session; no token storage)', () => {
+    for (const f of walkTs(FRONTEND_SRC)) {
+      // Test files may legitimately MENTION 'wfos_session' to assert its
+      // absence — the ban is on product source holding token material.
+      if (f.endsWith('.test.ts') || f.endsWith('.test.tsx')) continue;
+      const src = readFileSync(f, 'utf8');
+      // No session token may be persisted client-side (HttpOnly cookie is the
+      // only session carrier — the browser never holds the token in JS
+      // storage).
+      if (/wfos_session/.test(src)) {
+        // The only permitted mention is the document.cookie cleanup in the
+        // auth client logout (best-effort cookie clear for stale cookies).
+        const normalized = f.split(sep).join('/');
+        expect(normalized.endsWith('/api/client.ts'), `wfos_session mention outside the auth client: ${f}`).toBe(true);
+        expect(src).toMatch(/document\.cookie\s*=\s*['"]wfos_session=/);
+      }
+      // The browser never decides authorization (WORK-022 invariant): no
+      // authorization decision logic in frontend auth surfaces.
+      if (f.endsWith('useAuth.ts') || f.endsWith('LoginPage.tsx')) {
+        expect(src).not.toMatch(/(authorize|permission|role)[A-Za-z]*\s*[:=]\s*(true|false)/);
+      }
+    }
+  });
+
+  it('the customer login surface is the human login — no API-key input remains (demo-key removal)', () => {
+    const loginSrc = readFileSync(join(FRONTEND_SRC, 'pages', 'LoginPage.tsx'), 'utf8');
+    // The LoginPage must offer the WORK-063 human providers and must NOT
+    // offer an API-key field.
+    expect(loginSrc).toMatch(/Google|google/);
+    expect(loginSrc).toMatch(/GitHub|github/);
+    expect(loginSrc).not.toMatch(/api-key|apiKey|API Key|API key/);
+    // The API client no longer reads/writes a stored API key for requests.
+    const clientSrc = readFileSync(join(FRONTEND_SRC, 'api', 'client.ts'), 'utf8');
+    expect(clientSrc).not.toMatch(/localStorage\.setItem\('wfos_api_key'/);
+    // The demo-key bootstrap is explicitly demoted to development-only.
+    const provisioner = readFileSync(join(BACKEND_ROOT, 'provision-key.ts'), 'utf8');
+    expect(provisioner).toMatch(/DEVELOPMENT[- ]ONLY/i);
+  });
+
+  it('the identity runtime files stay inside the frozen /auth and /users boundaries', () => {
+    // New runtime files must live under the EXISTING frozen modules (no new
+    // module directory, no stray identity authority elsewhere).
+    const allowedRoots = [AUTH_DIR, USERS_DIR];
+    for (const name of [
+      'session-service.ts',
+      'password-credential-service.ts',
+      'identity-resolution-service.ts',
+      'machine-identity-service.ts',
+      'oauth-provider.ts',
+      'oauth-state-store.ts',
+      'session-auth-provider.ts',
+    ]) {
+      const hits = walkTs(SRC_ROOT).filter((f) => {
+        const base = f.split(sep).pop()!;
+        return base === name;
+      });
+      expect(hits.length, `${name} must exist`).toBeGreaterThan(0);
+      for (const hit of hits) {
+        expect(
+          allowedRoots.some((root) => hit.startsWith(root)),
+          `${name} must live inside /auth or /users (found ${hit})`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('the identity repositories persist digests/refs only — no raw-secret writes in /auth', () => {
+    // /auth domain code must never call concrete secret-store writes of raw
+    // values into domain tables; the only sanctioned write is via the
+    // SecretStore abstraction (putSecret) and only digests enter tables.
+    for (const f of walkTs(AUTH_DIR)) {
+      const src = readFileSync(f, 'utf8');
+      expect(src, `${f} must not import a concrete secret store`).not.toMatch(
+        /from '@platform\/secrets\/env-secret-store/,
+      );
+    }
+    const machineSrc = readFileSync(join(AUTH_DIR, 'internal', 'machine-identity-service.ts'), 'utf8');
+    expect(machineSrc).toMatch(/sha256|createHash/); // digest-only persistence
+  });
+
+  it('the OAuth callback is BOUND to the initiating browser (login-CSRF remediation — PR #99 review)', () => {
+    // The single-use state alone is NOT enough: the callback must require the
+    // initiating browser's pre-auth transaction binding, checked BEFORE any
+    // provider assertion is accepted, consumed atomically WITH the state.
+    const routeSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'auth.route.ts'), 'utf8');
+    // The start mints/reuses the transaction cookie and the callback reads it.
+    expect(routeSrc).toMatch(/OAUTH_TRANSACTION_COOKIE_NAME/);
+    expect(routeSrc).toMatch(/readCookie\(req\.headers\.cookie,\s*OAUTH_TRANSACTION_COOKIE_NAME\)/);
+    // The consume carries the transaction binding (state + binding spent together).
+    expect(routeSrc).toMatch(/oauthStateStore\.consume\([^)]*transactionId\)/s);
+    // The binding is checked BEFORE the provider assertion exchange happens.
+    const callbackStart = routeSrc.indexOf("/auth/oauth/:provider/callback'");
+    const exchangeIdx = routeSrc.indexOf('exchangeAuthorizationCode', callbackStart);
+    const consumeIdx = routeSrc.indexOf('oauthStateStore.consume', callbackStart);
+    const txCheckIdx = routeSrc.indexOf('if (!transactionId)', callbackStart);
+    expect(txCheckIdx).toBeGreaterThan(-1);
+    expect(consumeIdx).toBeGreaterThan(txCheckIdx);
+    expect(exchangeIdx).toBeGreaterThan(consumeIdx);
+    // The store enforces the binding inside the SAME atomic single-use DELETE,
+    // persisted DIGEST-ONLY (the raw transaction id never sits in a table).
+    const storeSrc = readFileSync(join(AUTH_DIR, 'internal', 'oauth-state-store.ts'), 'utf8');
+    expect(storeSrc).toMatch(/transaction_digest = \$3/);
+    expect(storeSrc).toMatch(/createHash\('sha256'\)\.update\(transactionId\)/);
+    expect(storeSrc.match(/INSERT INTO wfos_oauth_states[\s\S]*?VALUES[\s\S]*?\)/)?.[0]).not.toContain('transactionId,');
+    // The transaction cookie carries the session-cookie discipline:
+    // HttpOnly + SameSite=Lax (+ Secure in production), set by the start.
+    const cookieSrc = readFileSync(join(BACKEND_ROOT, 'src', 'api', 'routes', 'session-cookie.ts'), 'utf8');
+    const txBuilder = cookieSrc.slice(cookieSrc.indexOf('buildOAuthTransactionCookie'));
+    expect(txBuilder).toContain('HttpOnly');
+    expect(txBuilder).toContain('SameSite=Lax');
+    // The binding expires WITH the state it binds: the two TTLs agree.
+    expect(cookieSrc).toMatch(/OAUTH_TRANSACTION_COOKIE_TTL_SECONDS = 600/);
+    expect(storeSrc).toMatch(/DEFAULT_TTL_SECONDS = 600/);
+  });
+});
+
+//  ============================================================================
 // WORK-071 — Local Development Runtime Substrate
 // ============================================================================
 // The dev-only runtime path: a supported local development environment that

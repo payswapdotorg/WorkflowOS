@@ -68,6 +68,15 @@ export interface AppConfig {
   githubWebhookSecretRef?: string;
   /** PRODUCTION READINESS: CORS origin (the Vercel frontend URL). */
   corsOrigin?: string;
+  /**
+   * WORK-074: the public origin of the product (e.g. https://app.example.com).
+   * Used to build the OAuth redirect URIs (the /auth routes) and to decide the
+   * session cookie's Secure attribute. Falls back to the CORS origin, then to
+   * a localhost default for development.
+   */
+  publicUrl?: string;
+  /** WORK-074: session lifetime in seconds (default: 14 days). */
+  sessionTtlSeconds?: number;
 }
 
 const DEFAULT_PORT = 3001;
@@ -165,5 +174,9 @@ export function loadConfig(): AppConfig {
     logLevel: process.env.LOG_LEVEL ?? 'info',
     githubWebhookSecretRef: process.env.WORKFLOWOS_GITHUB_WEBHOOK_SECRET_REF ?? 'WORKFLOWOS_GITHUB_WEBHOOK_SECRET',
     corsOrigin: process.env.CORS_ORIGIN,
+    publicUrl: process.env.WORKFLOWOS_PUBLIC_URL ?? process.env.CORS_ORIGIN,
+    sessionTtlSeconds: process.env.WORKFLOWOS_SESSION_TTL_SECONDS
+      ? Number(process.env.WORKFLOWOS_SESSION_TTL_SECONDS)
+      : undefined,
   };
 }

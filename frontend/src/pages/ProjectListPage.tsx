@@ -41,7 +41,7 @@ export default function ProjectListPage() {
           </div>
           <span className="font-semibold">WorkflowOS</span>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => auth.clearApiKey()}>
+        <Button variant="ghost" size="sm" onClick={() => void auth.logout()}>
           Sign Out
         </Button>
       </header>

@@ -4,10 +4,34 @@ import type {
   AuthorizationDecision,
   OrganizationAuthorizationDecision,
   ProtectedResource,
+  MachinePrincipalContext,
 } from './auth.types.js';
 import type { User } from '@modules/users/index.js';
 import type { MembershipRepository, RolePermissionRepository } from '@modules/organizations/index.js';
 import type { ProjectRepository, ProjectAccessRepository } from '@modules/projects/index.js';
+
+/**
+ * WORK-074: the CLOSED capability → permissions mapping for machine
+ * principals (WORK-063: "authorization decisions for machine principals flow
+ * through the SAME server-side AuthorizationService path (capability →
+ * permission mapping), never a parallel authorization mechanism").
+ *
+ * The mapping is intentionally TOTAL over the closed grantable capability set
+ * and TOTAL NOWHERE ELSE: a capability outside the grantable set (or a scope
+ * planted in a credential that the service account never held) maps to NO
+ * permission and is a typed fail-closed denial. Governance surfaces —
+ * modifying architecture, approving own PR, altering verification evidence,
+ * changing tenant — have NO capability mapping at all (privilege separation,
+ * invariant #7).
+ */
+export const MACHINE_CAPABILITY_TO_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
+  'project.read': ['project.read'],
+  'project.write': ['project.write'],
+  'work-orders.read': ['project.read'],
+  'execution.read': ['project.read'],
+  'branches.create': ['project.write'],
+  'prs.create': ['project.write'],
+};
 
 /**
  * Default backend {@link AuthorizationService} (AUTHZ-AC-01..03).
@@ -187,6 +211,93 @@ export class DefaultAuthorizationService implements AuthorizationService {
       userId: user.id,
       permission,
       organizationId,
+    };
+  }
+
+  /**
+   * WORK-074: the machine-principal decision path INSIDE the same service and
+   * the same chain. Steps (see the interface documentation):
+   *
+   *   1. resolve the resource's owning organization (same as `authorize`);
+   *   2. tenant anchor: the machine principal's organization IS its
+   *      membership — a project owned by any OTHER organization is denied
+   *      with `not-a-member` (AUTHZ-AC-02, unchanged and unweakened; a
+   *      planted cross-tenant row grants nothing because machine principals
+   *      have no project_access rows at all);
+   *   3. capability gate: the route's declared capability must be granted in
+   *      the credential's scopes AND must map to the requested permission in
+   *      the closed mapping — otherwise a typed `capability-not-granted`
+   *      denial. No declared capability (undefined) denies unconditionally:
+   *      machine access requires explicit route opt-in (fail closed).
+   */
+  async authorizeForMachinePrincipal(input: {
+    principal: MachinePrincipalContext;
+    capability?: string;
+    permission: string;
+    resource: ProtectedResource;
+  }): Promise<AuthorizationDecision> {
+    const { principal, capability, permission, resource } = input;
+    const machineUserId = `service-account:${principal.serviceAccountId}`;
+
+    if (resource.kind !== 'project') {
+      return {
+        allowed: false,
+        userId: machineUserId,
+        permission,
+        resource,
+        organizationId: null,
+        deniedReason: 'resource-not-found',
+      };
+    }
+
+    // 1. Resolve the resource's owning organization (same chain as humans).
+    const project = await this.projects.findById(resource.projectId);
+    if (!project) {
+      return {
+        allowed: false,
+        userId: machineUserId,
+        permission,
+        resource,
+        organizationId: null,
+        deniedReason: 'resource-not-found',
+      };
+    }
+
+    // 2. Tenant isolation (AUTHZ-AC-02 for machine principals — unweakened).
+    if (principal.organizationId !== project.organizationId) {
+      return {
+        allowed: false,
+        userId: machineUserId,
+        permission,
+        resource,
+        organizationId: project.organizationId,
+        deniedReason: 'not-a-member',
+      };
+    }
+
+    // 3. Capability gate (fail closed): explicit route capability, granted in
+    //    the credential's scopes, mapped to the requested permission.
+    const capabilityGranted =
+      capability !== undefined &&
+      MACHINE_CAPABILITY_TO_PERMISSIONS[capability]?.includes(permission) === true &&
+      principal.capabilities.includes(capability);
+    if (!capabilityGranted) {
+      return {
+        allowed: false,
+        userId: machineUserId,
+        permission,
+        resource,
+        organizationId: project.organizationId,
+        deniedReason: 'capability-not-granted',
+      };
+    }
+
+    return {
+      allowed: true,
+      userId: machineUserId,
+      permission,
+      resource,
+      organizationId: project.organizationId,
     };
   }
 }

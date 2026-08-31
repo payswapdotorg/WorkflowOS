@@ -24,6 +24,47 @@ export interface AuthenticatedPrincipal {
   readonly label: string;
   /** The auth provider that authenticated this principal (e.g. `apikey`). */
   readonly provider: string;
+  /**
+   * WORK-074: the resolved server-side session when this principal was
+   * authenticated through the session provider (HttpOnly cookie → server-side
+   * wfos_sessions row). Present ONLY for session principals; the raw session
+   * token is NEVER carried here.
+   */
+  readonly session?: SessionContext;
+  /**
+   * WORK-074: present ONLY when the principal is a MACHINE (a service account
+   * authenticated through a scoped API credential). A machine principal is
+   * never a human user: the request pipeline must NOT resolve it to a
+   * wfos_users row. Human principals never carry this field.
+   */
+  readonly machine?: MachinePrincipalContext;
+}
+
+/**
+ * WORK-074: the machine-principal context of a scoped service-account
+ * credential (WORK-063 machine identity). The service identity belongs to an
+ * organization (its tenant anchor) and carries the credential's granted
+ * capability set. Authorization decisions flow through the SAME
+ * AuthorizationService chain (capability → permission mapping) — never a
+ * parallel mechanism.
+ */
+export interface MachinePrincipalContext {
+  readonly serviceAccountId: string;
+  readonly organizationId: string;
+  /** The credential's granted capabilities (scopes). Fail closed: anything not granted is denied. */
+  readonly capabilities: readonly string[];
+  /** Human-readable label (safe to log — never secret material). */
+  readonly label: string;
+}
+
+/**
+ * WORK-074: the session context attached to a session-authenticated principal.
+ * Carries identifiers only — never the token material.
+ */
+export interface SessionContext {
+  readonly sessionId: string;
+  readonly userId: string;
+  readonly expiresAt: Date;
 }
 
 /**
@@ -86,7 +127,15 @@ export interface AuthorizationDecision {
    * project_access row exists (AUTHZ-AC-02).
    */
   readonly organizationId: string | null;
-  readonly deniedReason?: 'not-a-member' | 'no-project-access' | 'missing-permission' | 'resource-not-found';
+  readonly deniedReason?:
+    | 'not-a-member'
+    | 'no-project-access'
+    | 'missing-permission'
+    | 'resource-not-found'
+    // WORK-074 (machine principals): the capability was not granted — or is
+    // outside the closed grantable set. Typed fail-closed denial (WORK-063
+    // invariant #6).
+    | 'capability-not-granted';
 }
 
 /**
@@ -146,6 +195,38 @@ export interface AuthorizationService {
     permission: string;
     organizationId: string;
   }): Promise<OrganizationAuthorizationDecision>;
+
+  /**
+   * WORK-074 (machine identity): decide whether a scoped MACHINE principal may
+   * exercise `capability` — mapping to `permission` — on `resource`.
+   *
+   * This is the SAME authorization authority and the SAME decision chain
+   * (WORK-063: "authorization decisions for machine principals flow through
+   * the SAME server-side AuthorizationService path (capability → permission
+   * mapping), never a parallel authorization mechanism"). The chain for a
+   * machine principal:
+   *
+   *   resource → owning organization → tenant anchor (the service account's
+   *   organization IS its membership) → capability ∈ granted scopes →
+   *   capability maps to the requested permission
+   *
+   * Fail closed (WORK-063 invariant #6): a capability not granted — or not in
+   * the closed grantable capability set — is a typed
+   * `capability-not-granted` denial. Cross-tenant attempts are denied with
+   * `not-a-member` exactly as for humans (AUTHZ-AC-02, unchanged and
+   * unweakened).
+   *
+   * Optional on the interface: only the backend DefaultAuthorizationService
+   * implements it; no other authorization implementation may exist (the
+   * static architecture checks enforce this).
+   */
+  authorizeForMachinePrincipal?(input: {
+    principal: MachinePrincipalContext;
+    /** The route's declared machine capability (undefined → deny). */
+    capability?: string;
+    permission: string;
+    resource: ProtectedResource;
+  }): Promise<AuthorizationDecision>;
 }
 
 /**

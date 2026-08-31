@@ -27,7 +27,9 @@
  *      fabricated "No executions"-style empty states.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
+import { buildIdentityStack, type TestIdentityStack } from '../helpers/test-identity-stack.js';
+import { buildAuthPluginDeps, buildIdentityRouteDeps, buildOrganizationsRouteDeps } from '../helpers/test-identity-server.js';
+import { loginWithServerSession } from '../helpers/browser-session.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost, createLogger, generateExecutionId } from '@platform/index.js';
 import { DefaultWorkflowEngine } from '../../src/modules/workflows/internal/workflow-engine.js';
@@ -51,7 +53,7 @@ import { DefaultVerificationService } from '../../src/modules/verification/inter
 import { DefaultReviewService } from '../../src/modules/reviews/internal/review-service.js';
 import type { FastifyInstance } from 'fastify';
 
-let stack: TestAuthStack;
+let stack: TestIdentityStack;
 let server: FastifyInstance;
 let worker: WorkerHost;
 let queue: InMemoryQueue;
@@ -64,7 +66,8 @@ let wi2Id: string; // WB-E2E-002 — ready (the active item with all the records
 const API_KEY = 'raw-key-workbench-e2e';
 
 test.beforeAll(async () => {
-  stack = await buildAuthStack({ WFOS_TEST_WORKBENCH_KEY: API_KEY });
+  process.env['WFOS_TEST_WORKBENCH_KEY'] = API_KEY;
+  stack = await buildIdentityStack();
 
   const logger = createLogger({ level: 'warn', destination: process.stdout });
   const db = stack.db.client;
@@ -212,7 +215,9 @@ test.beforeAll(async () => {
   server = await buildServer({
     queue,
     logger: stack.db.logger,
-    auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
+    auth: buildAuthPluginDeps(stack),
+    identity: buildIdentityRouteDeps(stack),
+    organizations: buildOrganizationsRouteDeps(stack),
     projects: {
       authorizationService: stack.authorizationService,
       projectRepository: stack.projectRepository,
@@ -296,10 +301,17 @@ test.afterAll(async () => {
 });
 
 async function login(page: Page): Promise<void> {
+  // WORK-074: the demo-key localStorage login is RETIRED from the frontend
+  // (the customer login path is the human login; the API-key path remains
+  // automation-only). The specs seed a REAL server-side session through the
+  // SAME SessionService the /auth routes use and attach the HttpOnly
+  // `wfos_session` cookie — the production transport.
+  const user = await stack.userRepository.upsertByExternalId({
+    externalId: 'workbench-e2e-user-a',
+    displayName: 'User A',
+  });
+  await loginWithServerSession(page, stack.sessionService, user.id);
   await page.goto('/');
-  await page.evaluate((key: string) => {
-    localStorage.setItem('wfos_api_key', key);
-  }, API_KEY);
 }
 
 test('the Workbench overview renders: project identity, attention from the authoritative graph, explicit unavailability for the unwired runtime', async ({ page }) => {

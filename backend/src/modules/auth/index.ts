@@ -22,11 +22,49 @@ export type {
   OrganizationAuthorizationDecision,
   AuthorizationService,
   ApiKeyCredentialRef,
+  MachinePrincipalContext,
+  SessionContext,
 } from './internal/auth.types.js';
 export type {
   ProvisionApiKeyInput,
   ProvisionedApiKey,
 } from './internal/authorization-service.js';
+// WORK-074 identity runtime contracts (types only — concrete implementations
+// are wired by the composition root, never imported across module boundaries).
+export type {
+  SessionRecord,
+  SessionVerification,
+  SessionRefreshResult,
+  CreateSessionInput,
+  CreateSessionResult,
+  SessionService,
+} from './internal/session-service.js';
+export type {
+  PasswordCredentialService,
+  PasswordRegisterInput,
+  PasswordVerifyResult,
+  PasswordCredentialError,
+} from './internal/password-credential-service.js';
+export type {
+  ProviderIdentityAssertion,
+  IdentityResolution,
+  IdentityResolutionService,
+  IdentityResolutionError,
+} from './internal/identity-resolution-service.js';
+export type {
+  ServiceAccount,
+  ServiceAccountKeyView,
+  IssuedKeyMaterial,
+  MachineIdentityService,
+  MachineIdentityError,
+  CreateServiceAccountInput,
+  IssueKeyInput,
+} from './internal/machine-identity-service.js';
+export type {
+  OAuthProviderAdapter,
+  OAuthProviderAssertion,
+} from './internal/oauth-provider.js';
+export type { OAuthStateStore, OAuthStateRecord } from './internal/oauth-state-store.js';
 
 /**
  * Public capabilities exposed by the /auth module to other modules.

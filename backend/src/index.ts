@@ -16,6 +16,7 @@
 import { buildApp } from './app.js';
 import { buildServer } from './api/server.js';
 import { loadConfig } from './config.js';
+import { SessionAuthProvider } from './modules/auth/internal/session-auth-provider.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -41,7 +42,64 @@ async function main(): Promise<void> {
           }
         : {}),
       ...(app.deps.authProvider && app.deps.userRepository
-        ? { auth: { authProvider: app.deps.authProvider, userRepository: app.deps.userRepository } }
+        ? {
+            auth: {
+              authProvider: app.deps.authProvider,
+              userRepository: app.deps.userRepository,
+              // WORK-074: the server-side session path (HttpOnly cookie →
+              // wfos_sessions). Present when a database is configured.
+              ...(app.deps.sessionService
+                ? {
+                    sessionAuthProvider: new SessionAuthProvider(
+                      app.deps.sessionService,
+                      app.deps.userRepository,
+                    ),
+                    sessionCookieName: 'wfos_session',
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      // WORK-074: the identity runtime routes (human login: password + OAuth;
+      // session lifecycle; machine identity management).
+      ...(app.deps.sessionService &&
+      app.deps.passwordCredentialService &&
+      app.deps.identityResolutionService &&
+      app.deps.machineIdentityService &&
+      app.deps.oauthStateStore &&
+      app.deps.authorizationService &&
+      app.deps.auditService
+        ? {
+            identity: {
+              sessionService: app.deps.sessionService,
+              passwordCredentials: app.deps.passwordCredentialService,
+              identityResolution: app.deps.identityResolutionService,
+              oauthProviders: app.deps.oauthProviders ?? [],
+              oauthStateStore: app.deps.oauthStateStore,
+              machineIdentity: app.deps.machineIdentityService,
+              authorizationService: app.deps.authorizationService,
+              membershipRepository: app.deps.membershipRepository!,
+              userRepository: app.deps.userRepository!,
+              audit: app.deps.auditService,
+              publicUrl: config.publicUrl,
+            },
+          }
+        : {}),
+      // WORK-074: organization creation + membership management routes.
+      ...(app.deps.membershipRepository &&
+      app.deps.organizationRepository &&
+      app.deps.userRepository &&
+      app.deps.authorizationService &&
+      app.deps.auditService
+        ? {
+            organizations: {
+              membershipRepository: app.deps.membershipRepository,
+              organizationRepository: app.deps.organizationRepository,
+              userRepository: app.deps.userRepository,
+              authorizationService: app.deps.authorizationService,
+              audit: app.deps.auditService,
+            },
+          }
         : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&

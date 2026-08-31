@@ -1,3 +1,15 @@
+/**
+ * DEVELOPMENT-ONLY bootstrap key provisioner.
+ *
+ * WORK-074 / WORK-063 invariant #9: the demo key is RETIRED from the
+ * customer-facing production login path. This script exists ONLY to seed a
+ * local development database with a demo API key for automation experiments
+ * (run it explicitly with `bun run provision-key.ts`; nothing in the runtime,
+ * the login surface, or CI depends on it). The customer login path is the
+ * human login (Google / GitHub / email) served by the /auth identity routes.
+ *
+ * Never run against a production database.
+ */
 import { createDatabaseClient, createLogger, EnvSecretStore } from './src/platform/index.ts';
 import { PgUserRepository } from './src/modules/users/internal/pg-user-repository.js';
 import { PgOrganizationRepository } from './src/modules/organizations/internal/pg-organization-repository.js';

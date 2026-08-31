@@ -100,7 +100,7 @@ function CreateRequirementForm({ versionId, onCreated }: { versionId: string; on
     setLoading(true);
     try {
       await fetch('/api/architecture-versions/' + versionId + '/requirements', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': localStorage.getItem('wfos_api_key') || '' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         body: JSON.stringify({ requirementId: reqId.trim(), title: title.trim() }),
       });
       onCreated();
@@ -126,7 +126,7 @@ function CreateCriterionForm({ requirementId, onCreated }: { requirementId: stri
     setLoading(true);
     try {
       await fetch('/api/requirements/' + requirementId + '/criteria', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': localStorage.getItem('wfos_api_key') || '' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         body: JSON.stringify({ criterionId: critId.trim(), description: desc.trim() }),
       });
       onCreated();

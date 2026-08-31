@@ -290,6 +290,9 @@ export async function executionRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        // WORK-074: readable by scoped machine principals with the
+        // 'execution.read' capability (the WORK-063 example agent set).
+        machineCapability: 'execution.read',
       });
       const records = await deps.executionRecordRepository.listForWorkItem(workItemId);
       return { executions: records.map(toSafeExecution) };
@@ -307,6 +310,9 @@ export async function executionRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId: record.projectId,
+        // WORK-074: readable by scoped machine principals with the
+        // 'execution.read' capability (the WORK-063 example agent set).
+        machineCapability: 'execution.read',
       });
       return { execution: toSafeExecution(record) };
     });

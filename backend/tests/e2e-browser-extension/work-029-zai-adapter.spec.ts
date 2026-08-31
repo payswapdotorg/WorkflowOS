@@ -26,7 +26,9 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
+import { buildIdentityStack, type TestIdentityStack } from '../helpers/test-identity-stack.js';
+import { buildAuthPluginDeps, buildIdentityRouteDeps, buildOrganizationsRouteDeps } from '../helpers/test-identity-server.js';
+import { loginWithServerSession } from '../helpers/browser-session.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, createLogger } from '@platform/index.js';
 import { CaptureStream } from '../helpers/capture-stream.js';
@@ -67,7 +69,7 @@ const FIXTURE_ORIGIN = `http://127.0.0.1:${FIXTURE_PORT}`;
 const API_KEY = 'raw-key-work029-browser-e2e';
 
 let fixtureServer: Server;
-let stack: TestAuthStack;
+let stack: TestIdentityStack;
 let server: FastifyInstance;
 let workflowEngine: DefaultWorkflowEngine;
 let project: { id: string };
@@ -102,10 +104,8 @@ test.beforeAll(async () => {
   process.env.AGENT_DEFAULT_MODEL = 'test-agent-model';
   process.env.AGENT_API_KEY = 'work029-test-agent-key';
 
-  stack = await buildAuthStack({
-    WFOS_TEST_WORK029_BROWSER_KEY: API_KEY,
-    AGENT_API_KEY: 'work029-test-agent-key',
-  });
+  process.env['WFOS_TEST_WORK029_BROWSER_KEY'] = API_KEY;
+  stack = await buildIdentityStack();
   const org = await stack.organizationRepository.create({ name: 'WORK-029 Browser E2E Org' });
   const user = await stack.userRepository.upsertByExternalId({
     externalId: 'work029-browser-user',
@@ -231,7 +231,9 @@ test.beforeAll(async () => {
     queue,
     logger,
     health: {},
-    auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
+    auth: buildAuthPluginDeps(stack),
+    identity: buildIdentityRouteDeps(stack),
+    organizations: buildOrganizationsRouteDeps(stack),
     workItems: {
       authorizationService: stack.authorizationService,
       architectureRepository: stack.architectureRepository,
@@ -369,8 +371,7 @@ test.describe('WORKFLOWOS — WORK-029 Z.ai adapter fixture E2E', () => {
       }, `${FIXTURE_ORIGIN}/?xss=1`);
 
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto('/');
-      await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
+      await loginBrowser(page);
 
       const wi = await createReadyWorkItem('WORK-ZAI-E2E-001');
       await page.goto(`/work-items/${wi.id}`);
@@ -473,8 +474,7 @@ test.describe('WORKFLOWOS — WORK-029 Z.ai adapter fixture E2E', () => {
       }, `${FIXTURE_ORIGIN}/?wall=login`);
 
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto('/');
-      await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
+      await loginBrowser(page);
 
       const wi = await createReadyWorkItem('WORK-ZAI-WALL-001');
       await page.goto(`/work-items/${wi.id}`);
@@ -517,3 +517,14 @@ test.describe('WORKFLOWOS — WORK-029 Z.ai adapter fixture E2E', () => {
     }
   });
 });
+
+/** WORK-074: seed a REAL server-side session (the retired demo-key localStorage
+ *  login is no longer read by the frontend — the HttpOnly cookie is the
+ *  production transport). */
+async function loginBrowser(page: import('@playwright/test').Page): Promise<void> {
+  const user = await stack.userRepository.upsertByExternalId({
+    externalId: 'work029-browser-user',
+    displayName: 'WORK-029 Browser User',
+  });
+  await loginWithServerSession(page, stack.sessionService, user.id);
+}

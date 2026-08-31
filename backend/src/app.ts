@@ -24,6 +24,20 @@ import {
   DefaultAuthorizationService,
   ApiKeyCredentialProvisioner,
 } from './modules/auth/internal/authorization-service.js';
+// WORK-074: the identity runtime (composition-root wiring — the concrete
+// implementations are constructed ONLY here; other modules consume the
+// declared /auth contracts).
+import { DefaultSessionService } from './modules/auth/internal/session-service.js';
+import { DefaultPasswordCredentialService } from './modules/auth/internal/password-credential-service.js';
+import { DefaultIdentityResolutionService } from './modules/auth/internal/identity-resolution-service.js';
+import { DefaultMachineIdentityService } from './modules/auth/internal/machine-identity-service.js';
+import { PgOAuthStateStore } from './modules/auth/internal/oauth-state-store.js';
+import {
+  GoogleOAuthProviderAdapter,
+  GitHubOAuthProviderAdapter,
+  type OAuthProviderAdapter,
+} from './modules/auth/internal/oauth-provider.js';
+import { PgLinkedIdentityRepository } from './modules/users/internal/pg-linked-identity-repository.js';
 import type { UserRepository } from '@modules/users/index.js';
 import { PgUserRepository } from './modules/users/internal/pg-user-repository.js';
 import type {
@@ -396,6 +410,18 @@ export interface AppDeps {
   apiKeyProvisioner?: ApiKeyCredentialProvisioner;
   /** WORK-002: user repository. Present when a database is configured. */
   userRepository?: UserRepository;
+  /** WORK-074: server-side session service. Present when a database is configured. */
+  sessionService?: DefaultSessionService;
+  /** WORK-074: email/password credential service. Present when a database is configured. */
+  passwordCredentialService?: DefaultPasswordCredentialService;
+  /** WORK-074: identity resolution + linking service. Present when a database is configured. */
+  identityResolutionService?: DefaultIdentityResolutionService;
+  /** WORK-074: scoped machine identity (service accounts + keys). Present when a database is configured. */
+  machineIdentityService?: DefaultMachineIdentityService;
+  /** WORK-074: OAuth CSRF state store. Present when a database is configured. */
+  oauthStateStore?: PgOAuthStateStore;
+  /** WORK-074: the constructed OAuth provider adapters (Google/GitHub when configured). */
+  oauthProviders?: readonly OAuthProviderAdapter[];
   /** WORK-002: organization repository. Present when a database is configured. */
   organizationRepository?: OrganizationRepository;
   /** WORK-002: organization membership repository. Present when a database is configured.
@@ -788,6 +814,14 @@ export async function buildApp(
   let membershipRepo: MembershipRepository | undefined;
   let projectRepository: ProjectRepository | undefined;
   let projectAccessRepo: ProjectAccessRepository | undefined;
+  // WORK-074: the identity runtime (sessions, password provider, identity
+  // resolution, OAuth adapters, OAuth state store, machine identity).
+  let sessionService: DefaultSessionService | undefined;
+  let passwordCredentialService: DefaultPasswordCredentialService | undefined;
+  let identityResolutionService: DefaultIdentityResolutionService | undefined;
+  let machineIdentityService: DefaultMachineIdentityService | undefined;
+  let oauthStateStore: PgOAuthStateStore | undefined;
+  let oauthProviders: OAuthProviderAdapter[] = [];
   let repositoryAssociationRepository: ProjectRepositoryAssociationRepository | undefined;
   let specificationRepository: SpecificationRepository | undefined;
   let specificationVersionRepository: SpecificationVersionRepository | undefined;
@@ -1161,6 +1195,54 @@ export async function buildApp(
       projectAccessRepo,
     );
     apiKeyProvisioner = new ApiKeyCredentialProvisioner(database);
+
+    // -----------------------------------------------------------------------
+    // WORK-074: the identity runtime — server-side sessions, the email/
+    // password provider, deterministic identity resolution + linking, the
+    // OAuth provider adapters (Google/GitHub behind the AuthProvider boundary
+    // — a provider is an adapter, never an authority), the OAuth CSRF state
+    // store, and the scoped machine identity (service accounts + keys).
+    // Everything is wired ONLY when a database is present (identity state is
+    // PostgreSQL-authoritative — WORK-063 invariant #14). Audit coverage for
+    // login/issuance/revocation flows through the EXISTING /audit surface.
+    // -----------------------------------------------------------------------
+    const linkedIdentityRepository = new PgLinkedIdentityRepository(database);
+    sessionService = new DefaultSessionService(database, auditService);
+    passwordCredentialService = new DefaultPasswordCredentialService(
+      database,
+      userRepository,
+      linkedIdentityRepository,
+    );
+    identityResolutionService = new DefaultIdentityResolutionService(
+      userRepository,
+      linkedIdentityRepository,
+    );
+    machineIdentityService = new DefaultMachineIdentityService(database, secretStore, auditService);
+    oauthStateStore = new PgOAuthStateStore(database);
+    oauthProviders = [];
+    if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+      oauthProviders.push(
+        new GoogleOAuthProviderAdapter({
+          clientId: process.env.GOOGLE_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        }),
+      );
+      logger.info('app.identity.google', { configured: true });
+    }
+    if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+      oauthProviders.push(
+        new GitHubOAuthProviderAdapter({
+          clientId: process.env.GITHUB_CLIENT_ID,
+          clientSecret: process.env.GITHUB_CLIENT_SECRET,
+        }),
+      );
+      logger.info('app.identity.github', { configured: true });
+    }
+    if (oauthProviders.length === 0) {
+      logger.warn('app.identity.no_oauth', {
+        reason: 'GOOGLE_CLIENT_ID/SECRET and GITHUB_CLIENT_ID/SECRET not set; OAuth login surfaces provider-not-configured (email/password login remains available)',
+      });
+    }
 
     // -----------------------------------------------------------------------
     // WORK-026 (SUB-F): composition-root wiring for /runtime, /github
@@ -2098,6 +2180,12 @@ export async function buildApp(
       authorizationService,
       apiKeyProvisioner,
       userRepository,
+      sessionService,
+      passwordCredentialService,
+      identityResolutionService,
+      machineIdentityService,
+      oauthStateStore,
+      oauthProviders,
       organizationRepository,
       membershipRepository: membershipRepo,
       projectRepository,

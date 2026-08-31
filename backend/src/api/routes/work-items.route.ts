@@ -96,9 +96,12 @@ export async function workItemsRoutes(
       const { workItemId } = req.params as { workItemId: string };
       const projectId = await resolveProjectForWorkItem(deps, workItemId);
       if (!projectId) return reply.code(404).send({ error: 'not-found' });
+      // WORK-074: readable by scoped machine principals with the
+      // 'work-orders.read' capability (the WORK-063 example agent set).
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        machineCapability: 'work-orders.read',
       });
       const wi = await deps.workItemRepository.findById(workItemId);
       if (!wi) return reply.code(404).send({ error: 'not-found' });
@@ -127,6 +130,7 @@ export async function workItemsRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId: arch.projectId,
+        machineCapability: 'work-orders.read',
       });
       const list = await deps.workItemRepository.findByArchitectureVersion(versionId);
       return { workItems: list };
@@ -211,6 +215,7 @@ export async function workItemsRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        machineCapability: 'work-orders.read',
       });
       const list = await deps.workItemDependencyRepository.listForWorkItem(workItemId);
       return { dependencies: list };
@@ -262,6 +267,7 @@ export async function workItemsRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        machineCapability: 'work-orders.read',
       });
       const list = await deps.pullRequestAssociationRepository.listForWorkItem(workItemId);
       return { prAssociations: list };
@@ -315,6 +321,7 @@ export async function workItemsRoutes(
       await requireProjectAuthorization(req, reply, deps, {
         permission: 'project.read',
         projectId,
+        machineCapability: 'work-orders.read',
       });
       const list = await deps.workOrderRepository.listForWorkItem(workItemId);
       return { workOrders: list };

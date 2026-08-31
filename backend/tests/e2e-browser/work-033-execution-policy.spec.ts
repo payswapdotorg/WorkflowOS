@@ -31,6 +31,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
+import { SessionAuthProvider } from '../../src/modules/auth/internal/session-auth-provider.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost } from '@platform/index.js';
 import { DefaultAuthorizationService } from '../../src/modules/auth/internal/authorization-service.js';
@@ -167,7 +168,15 @@ test.beforeAll(async () => {
 
   server = await buildServer({
     queue, logger,
-    auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
+    auth: {
+      authProvider: stack.authProvider,
+      userRepository: stack.userRepository,
+      // WORK-074: the HttpOnly session-cookie path (the browser E2E specs
+      // authenticate through REAL server-side sessions — the demo-key
+      // localStorage login is retired from the frontend).
+      sessionAuthProvider: new SessionAuthProvider(stack.sessionService, stack.userRepository),
+      sessionCookieName: 'wfos_session',
+    },
     projects: { authorizationService, projectRepository: stack.projectRepository, repositoryAssociationRepository: stack.repositoryAssociationRepository } as never,
     workItems: { authorizationService, workItemRepository: stack.workItemRepository, architectureRepository: stack.architectureRepository, architectureVersionRepository: stack.architectureVersionRepository } as never,
     executionPolicy: {

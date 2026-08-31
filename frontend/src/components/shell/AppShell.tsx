@@ -262,7 +262,9 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { clearApiKey } = useAuth();
+  // WORK-074: sign-out goes through the canonical auth client (server-side
+  // session revocation); the demo-key prefix display is retired.
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { projectId: _pid = "" } = useParams<{ projectId: string }>();
   
@@ -271,7 +273,6 @@ export function AppShell({ children }: AppShellProps) {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = React.useState(false);
-  const apiKeyPrefix = useApiKeyPrefix();
 
   React.useEffect(() => {
     let cancelled = false;
@@ -310,8 +311,8 @@ export function AppShell({ children }: AppShellProps) {
 
   const { items: crumbs } = useBreadcrumbs();
 
-  const handleSignOut = () => {
-    clearApiKey();
+  const handleSignOut = async () => {
+    await logout();
     navigate('/');
   };
 
@@ -392,9 +393,9 @@ export function AppShell({ children }: AppShellProps) {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-56">
-                      <DropdownMenuLabel>API Key</DropdownMenuLabel>
-                      <DropdownMenuItem disabled className="font-mono text-[11px] opacity-70">
-                        {apiKeyPrefix}
+                      <DropdownMenuLabel>Signed in as</DropdownMenuLabel>
+                      <DropdownMenuItem disabled className="text-[11px] opacity-70">
+                        {user?.email ?? user?.displayName ?? 'Session user'}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem asChild>
@@ -445,24 +446,6 @@ export function AppShell({ children }: AppShellProps) {
       </ProjectContext.Provider>
     </ToastHost>
   );
-}
-
-/** Helper — extract the API key prefix for the session menu (kept tiny + local). */
-function useApiKeyPrefix(): string {
-  const [prefix, setPrefix] = React.useState<string>(() => readPrefix());
-  React.useEffect(() => {
-    const handler = () => setPrefix(readPrefix());
-    window.addEventListener('storage', handler);
-    return () => window.removeEventListener('storage', handler);
-  }, []);
-  return prefix;
-}
-
-function readPrefix(): string {
-  const k =
-    typeof localStorage !== 'undefined' ? localStorage.getItem('wfos_api_key') : null;
-  if (!k) return 'no key set';
-  return k.length > 10 ? `${k.slice(0, 6)}…${k.slice(-3)}` : '••••';
 }
 
 export default AppShell;

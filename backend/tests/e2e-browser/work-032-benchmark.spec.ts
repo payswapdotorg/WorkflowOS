@@ -19,7 +19,9 @@
  *   8. Navigate to /benchmarks/trials/:trialId → BenchmarkTrialPage renders detail
  */
 import { test, expect, type Page } from '@playwright/test';
-import { buildAuthStack, type TestAuthStack } from '../helpers/test-auth-stack.js';
+import { buildIdentityStack, type TestIdentityStack } from '../helpers/test-identity-stack.js';
+import { buildAuthPluginDeps, buildIdentityRouteDeps, buildOrganizationsRouteDeps } from '../helpers/test-identity-server.js';
+import { loginWithServerSession } from '../helpers/browser-session.js';
 import { buildServer } from '@api/server.js';
 import { InMemoryQueue, buildHandlerRegistry, WorkerHost } from '@platform/index.js';
 import { DefaultWorkflowEngine } from '../../src/modules/workflows/internal/workflow-engine.js';
@@ -53,7 +55,7 @@ import {
 import { driveExternalCompletions, driveDeliveryLifecycle, awaitExperimentCompleted } from '../integration/benchmark/benchmark-async-helpers.js';
 import type { FastifyInstance } from 'fastify';
 
-let stack: TestAuthStack;
+let stack: TestIdentityStack;
 let server: FastifyInstance;
 let queue: InMemoryQueue;
 let worker: WorkerHost;
@@ -66,7 +68,8 @@ let benchWorkItemId: string;
 const API_KEY = 'raw-key-bench-e2e';
 
 test.beforeAll(async () => {
-  stack = await buildAuthStack({ WFOS_TEST_BENCH_KEY: API_KEY });
+  process.env['WFOS_TEST_BENCH_KEY'] = API_KEY;
+  stack = await buildIdentityStack();
   const db = stack.db.client;
   const logger = stack.db.logger;
 
@@ -209,7 +212,9 @@ test.beforeAll(async () => {
 
   server = await buildServer({
     queue, logger,
-    auth: { authProvider: stack.authProvider, userRepository: stack.userRepository },
+    auth: buildAuthPluginDeps(stack),
+    identity: buildIdentityRouteDeps(stack),
+    organizations: buildOrganizationsRouteDeps(stack),
     projects: { authorizationService, projectRepository: stack.projectRepository, repositoryAssociationRepository: stack.repositoryAssociationRepository } as never,
     workItems: { authorizationService, workItemRepository: stack.workItemRepository, architectureRepository: stack.architectureRepository, architectureVersionRepository: stack.architectureVersionRepository } as never,
     workflow: { authorizationService, workflowEngine, workItemRepository: stack.workItemRepository, architectureRepository: stack.architectureRepository, architectureVersionRepository: stack.architectureVersionRepository } as never,
@@ -248,8 +253,13 @@ async function api(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown)
 }
 
 async function loginAndGo(page: Page, path: string) {
-  await page.goto('http://localhost:5173/');
-  await page.evaluate((key) => localStorage.setItem('wfos_api_key', key), API_KEY);
+  // WORK-074: the demo-key localStorage login is RETIRED from the frontend —
+  // seed a REAL server-side session and attach the HttpOnly cookie.
+  const user = await stack.userRepository.upsertByExternalId({
+    externalId: 'bench-e2e-user',
+    displayName: 'Bench User',
+  });
+  await loginWithServerSession(page, stack.sessionService, user.id);
   await page.goto(`http://localhost:5173${path}`);
 }
 

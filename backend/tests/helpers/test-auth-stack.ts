@@ -28,6 +28,7 @@ import {
   DefaultWorkItemCompletionService,
 } from '../../src/modules/work-items/internal/pg-work-item-repository.js';
 import { ApiKeyAuthProvider } from '../../src/modules/auth/internal/api-key-auth-provider.js';
+import { DefaultSessionService } from '../../src/modules/auth/internal/session-service.js';
 import { DefaultAuthorizationService, ApiKeyCredentialProvisioner } from '../../src/modules/auth/internal/authorization-service.js';
 import { EnvSecretStore, InMemoryObjectStore } from '@platform/index.js';
 import { buildTestDatabase, type TestDatabase } from './test-database.js';
@@ -74,6 +75,10 @@ export interface TestAuthStack {
   /** WORK-038/WORK-041: the project baseline repository (real PG). */
   projectBaselineRepository: PgProjectBaselineRepository;
   authProvider: ApiKeyAuthProvider;
+  /** WORK-074: the server-side session service (the browser E2E specs seed
+   *  real sessions — the HttpOnly cookie is the production transport; the
+   *  retired demo-key localStorage path is NOT used by the frontend anymore). */
+  sessionService: DefaultSessionService;
   authorizationService: DefaultAuthorizationService;
   apiKeyProvisioner: ApiKeyCredentialProvisioner;
   secretStore: EnvSecretStore;
@@ -124,6 +129,7 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
   const ciEvidenceRepository = new PgCiEvidenceIngestionRepository(db.client);
   const projectBaselineRepository = new PgProjectBaselineRepository(db.client);
   const authProvider = new ApiKeyAuthProvider(db.client, secretStore);
+  const sessionService = new DefaultSessionService(db.client);
   const authorizationService = new DefaultAuthorizationService(
     membershipRepository,
     rolePermissionRepository,
@@ -170,6 +176,7 @@ export async function buildAuthStack(setEnvSecrets: Record<string, string> = {})
     ciEvidenceRepository,
     projectBaselineRepository,
     authProvider,
+    sessionService,
     authorizationService,
     apiKeyProvisioner,
     secretStore,

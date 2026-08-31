@@ -45,6 +45,8 @@ import {
   maintenanceRoutes,
   type MaintenanceRouteDeps,
 } from './routes/maintenance.route.js';
+import { authRoutes, type AuthRouteDeps } from './routes/auth.route.js';
+import { organizationsRoutes, type OrganizationsRouteDeps } from './routes/organizations.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -157,6 +159,12 @@ export interface ServerDeps extends JobsRouteDeps {
    *  mutates workflow / verification / review state, NEVER starts execution,
    *  NEVER selects a provider. */
   maintenance?: MaintenanceRouteDeps;
+  /** WORK-074: the identity runtime routes (human login + session lifecycle +
+   *  machine identity management). Registered when auth is enabled. */
+  identity?: AuthRouteDeps;
+  /** WORK-074: organization creation + membership management routes.
+   *  Registered when auth is enabled. */
+  organizations?: OrganizationsRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -190,6 +198,12 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   await healthRoutes(app, deps.health ?? {});
   await jobsRoutes(app, deps);
+  if (deps.auth && deps.identity) {
+    await authRoutes(app, deps.identity);
+  }
+  if (deps.auth && deps.organizations) {
+    await organizationsRoutes(app, deps.organizations);
+  }
   if (deps.auth && deps.projects) {
     await projectsRoutes(app, deps.projects);
   }

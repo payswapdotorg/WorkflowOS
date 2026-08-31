@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import AppShell from './components/shell/AppShell';
@@ -23,9 +24,31 @@ import BenchmarkTrialPage from './pages/BenchmarkTrialPage';
 import ExecutionPreferencesPage from './pages/ExecutionPreferencesPage';
 
 export default function App() {
-  const { hasApiKey } = useAuth();
+  // WORK-074: the auth gate reads the ONE canonical auth-state source. When a
+  // sign-in (or a backend 401) changes the source, this re-renders
+  // synchronously — no manual reload (the WORK-072 state-ownership pattern; the
+  // backend remains the authorization authority: WORK-022 invariant).
+  const { status, refreshSession } = useAuth();
 
-  if (!hasApiKey) {
+  useEffect(() => {
+    // Resolve the session from the backend once at mount (refresh persistence:
+    // after a reload a valid session cookie keeps the protected routes visible).
+    refreshSession();
+  }, [refreshSession]);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div
+          className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent"
+          role="status"
+          aria-label="Loading"
+        />
+      </div>
+    );
+  }
+
+  if (status === 'unauthenticated') {
     return (
       <Routes>
         <Route path="*" element={<LoginPage />} />

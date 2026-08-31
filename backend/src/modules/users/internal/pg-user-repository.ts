@@ -48,6 +48,18 @@ export class PgUserRepository implements UserRepository {
     );
     return mapRow(result.rows[0]!);
   }
+
+  async findByEmail(email: string): Promise<User | null> {
+    if (!email) return null;
+    // Case-insensitive: emails are stored normalized (lowercased) by the /auth
+    // identity runtime; the ILIKE guard also matches legacy mixed-case rows.
+    const result = await this.db.query<UserRow>(
+      'SELECT id, external_id, display_name, email, created_at FROM wfos_users WHERE lower(email) = lower($1) LIMIT 1',
+      [email],
+    );
+    if (result.rows.length === 0) return null;
+    return mapRow(result.rows[0]!);
+  }
 }
 
 interface UserRow {

@@ -51,13 +51,19 @@ export class ApiKeyAuthProvider implements AuthProvider {
     // Resolve the credential reference by matching the presented key's digest.
     const presentedDigest = sha256Hex(rawCredential);
     const result = await this.db.query<CredentialRow>(
-      `SELECT key_id, secret_ref, external_id, label FROM ${API_KEY_TABLE} WHERE key_digest = $1`,
+      `SELECT key_id, secret_ref, external_id, label, scopes, service_account_id, revoked_at
+       FROM ${API_KEY_TABLE} WHERE key_digest = $1`,
       [presentedDigest],
     );
     if (result.rows.length === 0) {
       return { kind: 'unauthenticated', reason: 'invalid-credentials' };
     }
     const row = result.rows[0]!;
+
+    // WORK-074: a revoked key fails closed (never authenticates again).
+    if (row.revoked_at) {
+      return { kind: 'unauthenticated', reason: 'invalid-credentials' };
+    }
 
     // Double-check the raw value against the secret store (defense in depth).
     // This also exercises the SEC-AC-01 path: the raw key is retrieved via
@@ -67,6 +73,34 @@ export class ApiKeyAuthProvider implements AuthProvider {
       return { kind: 'unauthenticated', reason: 'invalid-credentials' };
     }
 
+    // WORK-074: a scoped, service-account-bound key authenticates a MACHINE
+    // principal (WORK-063 machine identity). The machine principal is NEVER a
+    // human user — the request pipeline must not resolve it to wfos_users.
+    if (row.scopes !== null && row.service_account_id) {
+      const account = await this.db.query<{ organization_id: string; name: string }>(
+        'SELECT organization_id, name FROM wfos_service_accounts WHERE id = $1',
+        [row.service_account_id],
+      );
+      if (account.rows.length === 0) {
+        return { kind: 'unauthenticated', reason: 'invalid-credentials' };
+      }
+      const principal: AuthenticatedPrincipal = {
+        externalId: `service-account:${row.service_account_id}`,
+        label: `service-account:${account.rows[0]!.name}`,
+        provider: this.name,
+        machine: {
+          serviceAccountId: row.service_account_id,
+          organizationId: account.rows[0]!.organization_id,
+          capabilities: row.scopes,
+          label: account.rows[0]!.name,
+        },
+      };
+      return { kind: 'principal', principal };
+    }
+
+    // Legacy / unscoped keys: the existing human-principal behavior, unchanged
+    // (WORK-063 invariant #10 — API-key automation keeps working through the
+    // same chain).
     const principal: AuthenticatedPrincipal = {
       externalId: row.external_id,
       label: row.label,
@@ -81,6 +115,9 @@ interface CredentialRow {
   secret_ref: string;
   external_id: string;
   label: string;
+  scopes: string[] | null;
+  service_account_id: string | null;
+  revoked_at: Date | null;
 }
 
 function sha256Hex(value: string): string {
