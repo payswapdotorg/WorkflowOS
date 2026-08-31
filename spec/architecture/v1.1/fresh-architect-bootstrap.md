@@ -111,9 +111,9 @@ validation sub-evolution) approval by the architecture authority.
   superseded identity material lives in `spec/archive/` under distinct
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
-  state. `workOrders[]` records the activated Work Orders (59 records are
-  `complete` and WORK-067 is the ONE `in_flight` record — the post-#104
-  reconciliation: the former parallel WORK-066 is complete + finalized, and
+  state. `workOrders[]` records the activated Work Orders (all 60 records
+  are `complete` — the WORK-067 post-merge finalization: 60/60 recorded work
+  orders complete, NOTHING in flight, 15/15 merged work orders finalized;
   the ADR-0003 coordination on WORK-067's record is durable history).
   PLANNED Work Orders
   (WORK-053..061, WORK-068..070, WORK-072..073) are spec files only — they
@@ -242,12 +242,17 @@ product validation roadmap):
   `backend/src/validation-scheduling/` — the scheduling/trigger decision
   layer consuming the WORK-064 admission authority; the claim-store port
   with the in-memory adapter; NO migration authorized (the durable binding
-  point stays a documented future ACR at the same port). **WORK-067 is `in_flight`**
-  (activated by the architect 2026-09-01 on
-  `feat/WORK-067-signal-regression-correlation`, grown from the same main
+  point stays a documented future ACR at the same port). **WORK-067 is
+  `complete` + FINALIZED** (recorded in program-state with its merge
+  evidence): activated by the architect 2026-09-01 on
+  `feat/WORK-067-signal-regression-correlation` (grown from the same main
   `5f0b058` as the parallel WORK-066 — the ADR-0003 coordination with the
   now-COMPLETE WORK-066 is durable history; rebased onto the post-#102
-  mainline and then onto the post-#104 finalization mainline): the
+  mainline and then onto the post-#104 finalization mainline), merged by the
+  architect as `bde33cc5e9a1b109951be9ec48aaef7e692c33c7` via PR #103
+  (2026-08-31T18:30:23Z, squash-merged at the approved head `0fe9c48` —
+  the tree is identical), and finalized complete per §34.8/ADR-0007 (the
+  WORK-067 post-merge finalization): the
   engineering signal & regression correlation layer (the ADVISORY
   correlation layer, NOT an authority) at `backend/src/engineering-signals/`
   — deterministic signal identities, provenance-preserving occurrences,
@@ -284,12 +289,16 @@ additionally gated on the v1.1/ACR-001 disposition). WORK-066 (ACR-002)
 was ACTIVATED 2026-09-01, MERGED by the architect as `0a506b1` via PR
 #102, and FINALIZED §34.8/ADR-0007 by PR #104 (complete). WORK-067
 (Engineering Signal & Regression Correlation)
-was likewise ACTIVATED 2026-09-01 and is the ONE item IN FLIGHT on
-`feat/WORK-067-signal-regression-correlation` (grown from the same main
-`5f0b058` — the ADR-0003 coordination with the now-complete WORK-066 is
-durable history; rebased onto the post-#102 mainline and then onto the
-post-#104 finalization mainline; its hard
-edges WORK-064/015/040/041 are all complete, the WORK-056 edge is soft).
+was likewise ACTIVATED 2026-09-01, MERGED by the architect as `bde33cc`
+via PR #103 on 2026-08-31T18:30:23Z (squash-merged at the approved head
+`0fe9c48` — the post-#104 reconciliation head; the ADR-0003 coordination
+with the now-complete WORK-066 is durable history), and FINALIZED
+§34.8/ADR-0007 by the WORK-067 post-merge finalization (complete — 60/60
+recorded work orders, NOTHING in flight). The ACR-002 frontier is the
+wave-10 pair: WORK-068 (Feedback → Governed Work Items — its hard WORK-067
+edge is SATISFIED) and WORK-069 (Progressive Release & Runtime Validation
+— its hard edges were already complete), BOTH dependency-eligible, PLANNED,
+NOT activated, NOT started; WORK-070 (wave 11) remains blocked on WORK-069.
 The two dogfooding-gate enablersissued by the 2026-08-30 customer dogfooding experiment's governed follow-up —
 WORK-071 (Local Development Runtime Substrate) and WORK-074 (Identity & Access
 Runtime Activation — the "WORK-063-RUNTIME" of the experiment's design) — were
@@ -297,10 +306,10 @@ ACTIVATED by the architect and are COMPLETE (WORK-071 merged 8604c8a via
 PR #96; WORK-074 merged cdedd0ca via PR #99, finalized §34.8/ADR-0007).
 WORK-072 (Authentication State Synchronization; no hard deps) and
 WORK-073 (Create Project Organization Selection; no hard deps) are the two
-frontend product-defect fixes (PLANNED, NOT activated, NOT started). The ONE
-live in-flight record is WORK-067 (the rebased branch — the former parallel
-WORK-066 is complete + finalized by PR #104; the ADR-0003 coordination on
-WORK-067's record is durable history).
+frontend product-defect fixes (PLANNED, NOT activated, NOT started). NOTHING
+is in flight (WORK-067 is complete + finalized by the WORK-067 post-merge
+finalization; the ADR-0003 coordination on WORK-067's record is durable
+history).
 Dogfooding was ATTEMPTED on 2026-08-30
 and STOPPED at onboarding
 (see `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`);
@@ -475,10 +484,13 @@ finalization does NOT start it); item 4 is now ALSO SATISFIED (WORK-065 is
 COMPLETE — the browser-validation capability exists), and the scheduling
 decision layer that would drive continuous validation is likewise on main
 (WORK-066 is COMPLETE — merged `0a506b1` via PR #102, finalized
-§34.8/ADR-0007 by PR #104), but the continuous-validation
+§34.8/ADR-0007 by PR #104), and the signal correlation layer that turns
+observations into advisory Engineering Signals is likewise on main
+(WORK-067 is COMPLETE — merged `bde33cc` via PR #103, finalized
+§34.8/ADR-0007 by the WORK-067 post-merge finalization), but the
+continuous-validation
 Work Orders that DRIVE the closed loop (WORK-068..070) remain PLANNED, NOT
-activated (WORK-067, the signal correlation layer, is the ONE item IN
-FLIGHT on the rebased branch — the capabilities exist but still do NOT
+activated (the capabilities exist but still do NOT
 start the run), andthe run is NOT claimed to have been performed.
 
 **The dogfooding experiment was ATTEMPTED on 2026-08-30 and STOPPED at
@@ -545,8 +557,10 @@ into an ungoverned code change.
 The 2026-08-30 customer dogfooding experiment (see
 `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`)
 produced empirical findings that became governed Work Orders — through the
-EXISTING authority, NOT through the not-yet-implemented WORK-067/068 signal
-pipeline. The flow that actually operated:
+EXISTING authority, NOT through the not-yet-implemented WORK-068 feedback
+converter (WORK-067's advisory signal correlation layer is COMPLETE on
+main; WORK-068, the converter that turns its signals into governed Work
+Items, is PLANNED and NOT activated). The flow that actually operated:
 
 ```text
 dogfooding evidence (the evidence artifact — provenance preserved)
@@ -557,7 +571,7 @@ governed classification (each finding classified: PRODUCT BUG /
     ↓
 governed Work Order (through the EXISTING architect-issued Work Order
     authority: spec/work-orders/WORK-NNN.md — the same authority the
-    WORK-067/068 pipeline will eventually feed)
+    future WORK-068 feedback converter will eventually feed)
     ↓
 the existing governance lifecycle (planned → architect-activated →
     implemented → verified → reviewed → merged)
@@ -573,9 +587,10 @@ provenance correction is working). The
 blocked-by-prerequisite findings (F-6, F-7) recorded NO Work Order (they are
 unblocked indirectly by the dogfooding gate). This is the invariant operating
 in practice: no finding was silently discarded, converted into a false healthy
-state, or directly converted into an ungoverned code change. When WORK-067/068
-land, the same flow will be automated (the signal pipeline + the feedback
-converter), but the authority is the same: the EXISTING /work-items authority
+state, or directly converted into an ungoverned code change. When WORK-068
+lands (consuming the COMPLETE WORK-067 advisory signals), the same flow will
+be automated (the feedback converter), but the authority is the same: the
+EXISTING /work-items authority
 governs the change; the architect governs the review.
 
 ## 14. How to resume after losing all conversation context

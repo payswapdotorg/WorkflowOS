@@ -66,7 +66,7 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(58); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a) + WORK-074 (cdedd0ca) + WORK-065 (5de5e83)
+    expect(complete.length).toBeGreaterThanOrEqual(60); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a) + WORK-074 (cdedd0ca) + WORK-065 (5de5e83) + WORK-066 (0a506b1) + WORK-067 (bde33cc)
     // WORK-064 (Continuous Product Validation — the domain/model authority)
     // was ACTIVATED by the architect on 2026-08-30, implemented on branch
     // feat/work-064-continuous-validation (PR #86), MERGED by the architect
@@ -91,15 +91,19 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // 5f0b058), MERGED by the architect as 0a506b1 via PR #102
     // (2026-08-31T16:37:09Z, squash-merged at the approved head 493ae59 —
     // the merge tree identical) and recorded complete per §34.8/ADR-0007
-    // by the WORK-066 post-merge finalization (PR #104): 59/59 complete.
-    // WORK-067 (Engineering Signal & Regression Correlation — the ADVISORY
+    // by the WORK-066 post-merge finalization (PR #104). WORK-067
+    // (Engineering Signal & Regression Correlation — the ADVISORY
     // correlation layer) was ACTIVATED 2026-09-01 on branch
     // feat/WORK-067-signal-regression-correlation (grown from the SAME
     // main 5f0b058 as the parallel WORK-066; rebased onto the post-#102
     // mainline and then onto the post-#104 finalization mainline — the
     // ADR-0003 coordination with the now-COMPLETE WORK-066 is durable
-    // history): the ONE live in-flight record (59 complete + WORK-067).
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-067']);
+    // history), MERGED by the architect as bde33cc via PR #103
+    // (2026-08-31T18:30:23Z, squash-merged at the approved head 0fe9c48 —
+    // the merge tree identical), and FINALIZED complete per §34.8/ADR-0007
+    // by the WORK-067 post-merge finalization: 60/60 complete, NOTHING in
+    // flight, 15/15 merged-finalization gaps closed.
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -134,7 +138,12 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w074?.mergedAs).toEqual({ pr: 99, mergeCommit: 'cdedd0ca3c72821d289d8d9d683f9902ddca480f' });
     const w065 = complete.find((w) => w.id === 'WORK-065');
     expect(w065?.mergedAs).toEqual({ pr: 97, mergeCommit: '5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916' });
-    // No in-flight item exists (the WORK-065 post-merge finalization closed
+    const w066 = complete.find((w) => w.id === 'WORK-066');
+    expect(w066?.mergedAs).toEqual({ pr: 102, mergeCommit: '0a506b10e5526151929366bb11197230334b620c' });
+    const w067 = complete.find((w) => w.id === 'WORK-067');
+    expect(w067?.mergedAs).toEqual({ pr: 103, mergeCommit: 'bde33cc5e9a1b109951be9ec48aaef7e692c33c7' });
+    expect(w067?.head).toBe('0fe9c48');
+    // No in-flight item exists (the WORK-067 post-merge finalization closed
     // the last in-flight record), so the in-flight merge-evidence rule holds
     // vacuously — the live records ALL carry truthful merge evidence.
     for (const w of inFlight) {
@@ -155,21 +164,21 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // MERGED by the architect as 0a506b1 via PR #102 (2026-08-31,
     // squash-merged at the approved head 493ae59) and recorded complete per
     // §34.8/ADR-0007 by the WORK-066 post-merge finalization (PR #104).
-    // WORK-067 (Engineering Signal & Regression Correlation) is ACTIVATED
-    // and IN FLIGHT on feat/WORK-067-signal-regression-correlation (this
-    // branch's own record — the next ACR-002 sequence head activated on the
-    // complete WORK-064 + WORK-015 + WORK-040 + WORK-041, the WORK-056 edge
-    // soft; WORK-068..070 remain future-generation items not recorded in
-    // program-state — the architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-067']);
+    // WORK-067 (Engineering Signal & Regression Correlation) was MERGED by
+    // the architect as bde33cc via PR #103 (2026-08-31T18:30:23Z,
+    // squash-merged at the approved head 0fe9c48 — the post-#104
+    // reconciliation head) and recorded complete per §34.8/ADR-0007 by the
+    // WORK-067 post-merge finalization — NOTHING is in flight and NO
+    // program-state pending record exists (WORK-068..070/072/073 remain
+    // future-generation items not recorded in program-state — the
+    // architect's authorization is required; the frontier pair is tracked
+    // in dependency-state futureGenerationEligibility).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
-    // no live conflict partners exist — the ONLY in-flight-eligible surface
-    // partners (WORK-046/WORK-052/WORK-064/WORK-071/WORK-074/WORK-065 on the
-    // shared static-architecture suite) are ALL complete durable history
-    // (WORK-065 was merged as 5de5e83/PR #97 before this finalization), so
-    // the flag discipline holds vacuously (the false case is proven by
+    // no in-flight items exist at all (the post-finalization truth), so the
+    // flag discipline holds vacuously (the false case is proven by
     // mutation in the parallel suite).
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
@@ -193,11 +202,13 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(governing.decisions.filter((d) => d.kind === 'adr').length).toBeGreaterThanOrEqual(7);
 
     // Q7 — how do I resume interrupted implementation? (NOTHING recorded is
-    // resumable: WORK-046..WORK-050 and WORK-052 are all MERGED — their
-    // handoffs were removed by the post-merge finalization, and merged work
-    // is NOT resumable. The in-flight WORK-071 records NO active handoff
-    // either — its delivery is the live implementation PR itself, not an
-    // interrupted handoff. The positive resumption path is covered by the
+    // resumable: WORK-046..WORK-050, WORK-052, and — since the WORK-067
+    // post-merge finalization — WORK-067 are all MERGED — their handoffs were
+    // removed by the post-merge finalizations, and merged work is NOT
+    // resumable. The WORK-067 pre-merge activation handoff (the post-#104
+    // reconciliation handoff) actually EXISTED and was REMOVED by the
+    // finalization; resumption must now fail closed. The positive resumption
+    // path is covered by the
     // fixture-based tests below; the real state pins the
     // merged-not-resumable + no-vacuous-handoff rules.)
     expect(() => fresh.resumeImplementation('WORK-052')).toThrow(NoResumableStateError);
@@ -207,6 +218,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(() => fresh.resumeImplementation('WORK-049')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-050')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-071')).toThrow(NoResumableStateError);
+    expect(() => fresh.resumeImplementation('WORK-066')).toThrow(NoResumableStateError);
+    expect(() => fresh.resumeImplementation('WORK-067')).toThrow(NoResumableStateError);
+    // The activeHandoffs array is EMPTY (the finalization removed the
+    // WORK-067 handoff — merged work is not resumable).
+    expect(realProgram.resumption.activeHandoffs).toEqual([]);
   });
 
   it('W052-AC01 — the governance:status CLI entry answers from the repository alone (the script exists and constructs the service)', async () => {
@@ -484,8 +500,10 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // discrimination rebuilds the pre-merge state).
       // WORK-066 (complete-and-merged in the live record since the WORK-066
       // post-merge finalization — merged 0a506b1 via PR #102 — but depending
-      // on WORK-064 + WORK-065) and WORK-067 (IN FLIGHT in the live record,
-      // depending on the complete WORK-064/015/040/041) are likewise
+      // on WORK-064 + WORK-065) and WORK-067 (complete-and-merged in the live
+      // record since the WORK-067 post-merge finalization — merged bde33cc
+      // via PR #103 — but depending on the complete WORK-064/015/040/041)
+      // are likewise
       // stripped: the fixture
       // reconstructs WORK-064 as in_flight, and a record over
       // the reconstructed dependency would require fixture coordination

@@ -9,8 +9,14 @@ Activation requires the architect's authorization and is recorded in
 `spec/development-state/program-state.json` (this change records none).
 
 Dependencies: WORK-067 (Engineering Signal & Regression Correlation — the
-advisory signal source), WORK-069 (Progressive Release & Runtime Validation —
-the release/runtime evidence source). Existing authority consumed: the
+advisory signal source. That dependency edge is now SATISFIED — WORK-067 is
+COMPLETE (merged by the architect as `bde33cc` via PR #103 on
+2026-08-31T18:30:23Z, squash-merged at the approved head `0fe9c48` — the
+tree identical — and finalized per §34.8/ADR-0007 by the WORK-067
+post-merge finalization; the ADVISORY correlation layer is on main at
+backend/src/engineering-signals/)), WORK-069 (Progressive Release & Runtime
+Validation — the release/runtime evidence source; NOT started — WORK-070
+remains BLOCKED on this edge). Existing authority consumed: the
 architecture checkpoint framework (WORK-051 — complete; the existing
 checkpoint substrate this Work Order feeds). Soft relationships: WORK-055
 (Quality Attributes and Architecture Fitness — planned; the quality-attribute

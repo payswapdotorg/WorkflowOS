@@ -51,11 +51,28 @@ class PgTestSchemaSignalRepository implements EngineeringSignalRepository {
   constructor(private readonly client: DatabaseClient) {}
 
   async save(signal: EngineeringSignal): Promise<EngineeringSignal> {
+    // Bare ON CONFLICT DO NOTHING — NO arbiter target — is load-bearing here:
+    // the save's tuple conflicts on BOTH unique indexes under the true
+    // two-actor same-logical-identity interleaving (the PK signal_id AND the
+    // identity_fingerprint UNIQUE). An arbiter-restricted ON CONFLICT
+    // (signal_id) absorbs only the PK conflict; when the loser's insert
+    // resolves the fingerprint index entry first (the winner's entry
+    // committed while the loser waited), PostgreSQL raises 23505 on the
+    // NON-arbiter index — the spurious duplicate-key race observed on CI
+    // (reproduced locally under stress: same (signal_id, fingerprint)
+    // concurrent inserts). With the bare form, ANY unique conflict means
+    // the winner exists: the insert is absorbed (0 rows), the follow-up
+    // SELECT-by-id + the fingerprint-equality check + the union merge
+    // decide the semantics — the DATABASE constraint still decides the
+    // winner (exactly the fixture's documented contract), and the typed
+    // SIGNAL_IDENTITY_CONFLICT discrimination below is preserved verbatim
+    // (the forged same-id/different-fingerprint save is absorbed by the PK
+    // conflict, then REJECTED by the fingerprint-equality check).
     const inserted = await this.client.query<{ signal_id: string }>(
       `INSERT INTO wfos_test_engineering_signals
          (signal_id, identity_fingerprint, tenant_id, project_id, environment_id, logical_failure_key, occurrences_json, correlation_json, regression_json, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (signal_id) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING signal_id`,
       [
         signal.signalId,

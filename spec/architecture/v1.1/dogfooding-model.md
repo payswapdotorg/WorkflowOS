@@ -183,8 +183,10 @@ evidence:
 - the planning/execution/verification/review loop works end-to-end;
 - the GitHub/Vercel integration works;
 - the deployment works;
-- the browser validation works (once WORK-064..070 are implemented);
-- the feedback→Work Item loop works (once WORK-067/068 are implemented).
+- the browser validation works (once WORK-064..070 are implemented —
+  WORK-064/065/066/067 are COMPLETE; WORK-068..070 remain);
+- the feedback→Work Item loop works (once WORK-068 is implemented — the
+  WORK-067 advisory signal correlation layer is COMPLETE on main).
 
 A release that does NOT pass the dogfood run is not honestly complete.
 The dogfood run is the canonical acceptance journey.
@@ -263,9 +265,11 @@ decision layer, is COMPLETE — merged `0a506b1` via PR #102 on
 2026-08-31T16:37:09Z and finalized §34.8/ADR-0007 by the WORK-066
 post-merge finalization PR #104, the decision layer is on main at
 `backend/src/validation-scheduling/` — and WORK-067, the signal correlation
-layer, is IN FLIGHT on the rebased branch
-`feat/WORK-067-signal-regression-correlation` (the ADR-0003 coordination
-with the now-complete WORK-066 is durable history) — the capabilities come
+layer, is likewise COMPLETE — merged `bde33cc` via PR #103 on
+2026-08-31T18:30:23Z (squash-merged at the approved head `0fe9c48`, the
+tree identical) and finalized §34.8/ADR-0007 by the WORK-067 post-merge
+finalization; the ADVISORY correlation layer is on main at
+`backend/src/engineering-signals/` — the capabilities come
 closer but still do NOT start the run: the experiment itself
 requires the architect's authorization).
 

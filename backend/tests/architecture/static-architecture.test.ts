@@ -17014,11 +17014,11 @@ describe('WORK-052 invariants — Development Governance and Self-Hosting Contro
     expect(audit.mergedWorkOrderIds).toContain('WORK-052');
     // The finalized truth: complete + mergedAs = the ACTUAL merge commit + the
     // actual merged head + NO active handoff (merged work is not resumable).
-    // WORK-071 (PR #96, merged as 8604c8a) is in_flight pending its post-merge
-    // finalization (the architect's §34.8/ADR-0007 step) — a pre-existing gap
-    // unrelated to WORK-052. Every FINALIZED work order audits clean.
-    const finalizedGaps = audit.gaps.filter((g: string) => !g.includes('WORK-071'));
-    expect(finalizedGaps).toEqual([]);
+    // Every merged work order audits clean — NOTHING is in flight since the
+    // WORK-067 post-merge finalization (the stale WORK-071-era exemption
+    // filter was removed by that finalization: gaps must be EXACTLY empty,
+    // with no per-id carve-outs that could mask a future red window).
+    expect(audit.gaps).toEqual([]);
     const w052 = program.workOrders.find((w) => w.id === 'WORK-052')!;
     expect(w052.status).toBe('complete');
     expect(w052.mergedAs).toEqual({ pr: 62, mergeCommit: '47615c236ec0e194e112efd3d2ef0f432c4bf210' });

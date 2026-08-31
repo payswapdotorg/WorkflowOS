@@ -9,7 +9,16 @@ requires the architect's authorization and is recorded in
 `spec/development-state/program-state.json` (this change records none).
 
 Dependencies: WORK-067 (Engineering Signal & Regression Correlation — the
-advisory signal source this Work Order converts into governed work). Existing
+advisory signal source this Work Order converts into governed work). That
+dependency edge is now SATISFIED — WORK-067 is COMPLETE (implemented on
+branch feat/WORK-067-signal-regression-correlation, merged by the
+architect as `bde33cc` via PR #103 on 2026-08-31T18:30:23Z, squash-merged
+at the approved head `0fe9c48` — the post-#104 reconciliation head, the
+tree identical — and finalized per §34.8/ADR-0007 by the WORK-067
+post-merge finalization; the ADVISORY correlation layer is on main at
+backend/src/engineering-signals/). WORK-068 is therefore
+DEPENDENCY-ELIGIBLE and remains PLANNED, NOT activated, NOT started — the
+architect's authorization is required. Existing
 authority consumed: `/work-items` (the ONE Work Item authority, established
 in v1.0; this Work Order feeds it, never duplicates it).
 

@@ -154,9 +154,11 @@ boundary.
 
 WORK-056 (Engineering Signals and Feedback Intake — planned) is the
 v1.1 evolution Work Order that establishes the signal TAXONOMY and
-INTAKE. WORK-067 (Engineering Signal & Regression Correlation —
-planned) is the CORRELATION/REGRESSION-DETECTION LAYER that consumes
-WORK-056's intake.
+INTAKE. WORK-067 (Engineering Signal & Regression Correlation — COMPLETE:
+merged `bde33cc` via PR #103, finalized §34.8/ADR-0007) is the
+CORRELATION/REGRESSION-DETECTION LAYER that consumes
+WORK-056's intake (until WORK-056 lands, the TEMPORARY intake seam in
+§9 types raw observations directly with the same provenance discipline).
 
 The validation-originated signals (from WORK-064's failure evidence)
 enter the same signal intake. They are NOT a parallel signal store.
@@ -167,8 +169,11 @@ with the same provenance discipline.
 ## 8. The runtime evidence mapping (NOT implemented in this task)
 
 The runtime evidence mapping (raw observation → validation result →
-formal verification evidence) will be implemented under WORK-064 and
-WORK-067 when they are activated. Until then:
+formal verification evidence) was implemented under WORK-064 (COMPLETE —
+the authority's evidence mapping on main) while WORK-067 (COMPLETE — the
+ADVISORY signal correlation layer) deliberately does NOT map into formal
+verification evidence: its signals are advisory only. The remaining gap
+is governed future work (the WORK-068 feedback converter and beyond). Until then:
 
 - the existing `/verification` authority governs (no validation-originated
   evidence is mapped);
@@ -179,13 +184,16 @@ WORK-067 when they are activated. Until then:
 This task does NOT implement the runtime evidence mapping. It persists
 the model.
 
-## 9. The implemented Engineering Signal correlation model (WORK-067 — activated 2026-09-01)
+## 9. The implemented Engineering Signal correlation model (WORK-067 — COMPLETE + FINALIZED)
 
 WORK-067 (Engineering Signal & Regression Correlation) was activated by
-the architect on 2026-09-01 and implemented at
+the architect on 2026-09-01, implemented at
 `backend/src/engineering-signals/` (the application-layer pattern — NOT an
-18th frozen module; branch `feat/WORK-067-signal-regression-correlation`,
-awaiting architect review/merge). This section persists the implemented
+18th frozen module; branch `feat/WORK-067-signal-regression-correlation`),
+MERGED by the architect as `bde33cc` via PR #103 on 2026-08-31T18:30:23Z
+(squash-merged at the approved head `0fe9c48` — the tree identical), and
+FINALIZED §34.8/ADR-0007 by the WORK-067 post-merge finalization. This
+section persists the implemented
 model — the runtime form of §5–§7's design-time contract.
 
 ### The signal record (the provenance-preserving derived artifact)

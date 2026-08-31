@@ -332,10 +332,10 @@ Exact edges:
 - WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007; the runtime identity layer remains future architect-gated work) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
 - WORK-065 ← WORK-064 (complete — merged as c351451 via PR #86, finalized §34.8/ADR-0007) → WORK-065 is COMPLETE (merged as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 via PR #97 on 2026-08-31 and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism is on main at backend/src/browser-validation/)
 - WORK-066 ← WORK-064 (complete), WORK-065 (complete), (soft: WORK-058) → WORK-066 is COMPLETE (merged as 0a506b10e5526151929366bb11197230334b620c via PR #102 on 2026-08-31T16:37:09Z and finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization; the scheduling/trigger decision layer is on main at backend/src/validation-scheduling/)
-- WORK-067 ← WORK-064 (complete), WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056) → WORK-067 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-068 ← WORK-067
+- WORK-067 ← WORK-064 (complete), WORK-015 (complete), WORK-040 (complete), WORK-041 (complete), (soft: WORK-056) → WORK-067 is COMPLETE (merged as bde33cc5e9a1b109951be9ec48aaef7e692c33c7 via PR #103 on 2026-08-31T18:30:23Z — the approved head 0fe9c48, tree identical — and finalized §34.8/ADR-0007 by the WORK-067 post-merge finalization; the ADVISORY correlation layer is on main at backend/src/engineering-signals/)
+- WORK-068 ← WORK-067 (complete — merged as bde33cc via PR #103, finalized §34.8/ADR-0007) → WORK-068 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-069 ← WORK-064 (complete), WORK-066 (complete — merged as 0a506b1 via PR #102, finalized §34.8/ADR-0007), WORK-019 (complete), WORK-026 (complete), WORK-020 (complete), (soft: WORK-059) → WORK-069 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-070 ← WORK-067, WORK-069, WORK-051 (complete), (soft: WORK-055, WORK-060)
+- WORK-070 ← WORK-067 (complete — merged as bde33cc via PR #103, finalized §34.8/ADR-0007), WORK-069, WORK-051 (complete), (soft: WORK-055, WORK-060)
 
 The `VALIDATE` stage (between RELEASE and OBSERVE in the v1.1 control loop)
 is the deliberate act of exercising meaningful user workflows against a real

@@ -1,16 +1,23 @@
 # WORK-067 — Engineering Signal & Regression Correlation
 
-Status: IN FLIGHT — activated by the architect on 2026-09-01
-(the implementation instruction; the branch
-`feat/WORK-067-signal-regression-correlation` was created from the actual
-`origin/main` at `5f0b058` — the WORK-065 post-merge finalization — the
-same base main as the parallel WORK-066 branch/PR #102, with
-the ADR-0003 coordination declared in the program-state activation
-record; WORK-066 has since been MERGED as `0a506b1` via PR #102 and
-FINALIZED §34.8/ADR-0007 by PR #104 — the coordination is durable
-history). The activation record is appended below (the architect's review
-+ merge remain the completion gate; the §34.8/ADR-0007 post-merge
-finalization follows the merge).
+Status: COMPLETE — merged by the architect as
+`bde33cc5e9a1b109951be9ec48aaef7e692c33c7` via PR #103 on 2026-08-31
+(squash-merged at the approved head
+`0fe9c481e80d435a18552bbec4c70c9f93e265b2` on 2026-08-31T18:30:23Z; single
+parent `69f2edf` — the WORK-066 post-merge finalization mainline (PR #104);
+the merge tree is IDENTICAL — `git diff 0fe9c48 bde33cc` is empty) and
+finalized per §34.8/ADR-0007 (see the post-merge finalization record
+appended below; the activation, implementation, and reconciliation history
+below is preserved, not rewritten). The completion is recorded in
+`spec/development-state/program-state.json` (status `complete`, `pr` 103,
+`head` `0fe9c48`, `mergedAs`
+{pr: 103, mergeCommit: bde33cc5…}; branch
+`feat/WORK-067-signal-regression-correlation` preserved as the historical
+record of how it merged). The implementation delivered the
+engineering-signal correlation domain at
+`backend/src/engineering-signals/` (the application-layer pattern — NOT an
+18th frozen module): the ADVISORY correlation layer consuming the WORK-064
+validation authority's completed-run outcomes.
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap). This Work Order establishes the engineering signal
@@ -398,3 +405,72 @@ finalization's own governance changes were taken from MAIN (the canonical
 base truth), and WORK-067 remains the ONLY additional active
 implementation. The architect's review + merge remain the completion
 gate.
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-31)
+
+The architect merged PR #103 as `bde33cc5e9a1b109951be9ec48aaef7e692c33c7`
+(squash merge; single parent `69f2edf` — the WORK-066 post-merge
+finalization mainline (PR #104); merged 2026-08-31T18:30:23Z). The merged
+tree is IDENTICAL to the approved head `0fe9c48`
+(`git diff 0fe9c48 bde33cc` is empty; both trees `4fd2a46`) — the
+post-#104 reconciliation head the architect reviewed: grown from the
+`5f0b058` base, rebased onto the post-#102 mainline `0a506b1` when the
+architect merged WORK-066 mid-delivery, and REBASED AGAIN onto the
+post-#104 finalization mainline `69f2edf` when the WORK-066 finalization
+landed (the WORK-065 PR #97 post-#100 reconciliation precedent). The
+finalization — a data-only change on branch
+`governance/WORK-067-post-merge-finalization` — records in the canonical
+state: `status = complete`, `mergedAs = {pr: 103, mergeCommit:
+bde33cc5e9a1b109951be9ec48aaef7e692c33c7}`, the implementation head
+recorded as `0fe9c48` (the WORK-064/WORK-065/WORK-066 finalization head
+convention), the pre-merge activation handoff REMOVED (it actually existed
+— the post-#104 reconciliation handoff in `resumption.activeHandoffs`;
+merged work is not resumable), and this work-order document's status
+updated truthfully with this evidence APPENDED (history preserved, not
+rewritten).
+
+The merged-finalization audit binds WORK-067 ↔ PR #103 ↔ merge commit
+`bde33cc` on the real first-parent history: the merge subject follows the
+`type(work-NNN): … (#PR)` conventional-commit scope squash convention
+(`feat(work-067): Engineering Signal & Regression Correlation (the
+ADVISORY correlation layer, not an authority) (#103)`) — the FOURTH
+merge-evidence shape, recognized since the WORK-064 finalization (NO
+detector change needed). The pre-finalization red window was exactly the
+WORK-067 gap the protocol exists to surface — reproduced from the ACTUAL
+first-parent history, never manufactured in a fixture: the audit reported
+`workOrders[WORK-067]: MERGED (bde33cc5e) but the canonical status is
+"in_flight"` (14/15 finalized; `governance:status` exited non-zero with the
+GAP line verbatim; the six merged-finalization integration tests and the
+static-architecture real-repository invariant were RED on the merged main
+exactly as the protocol prescribes); this finalization closes it
+(governance:status reports 15/15 finalized, gaps []). The audit validates
+the full provenance identity: `mergedAs.pr` must equal the declared PR
+(103) and `mergedAs.mergeCommit` must match the ACTUAL merge evidence.
+State-only finalization subjects (the `chore(governance): …` convention
+this finalization itself follows) remain structurally excluded from merge
+evidence — a finalization commit can never be mistaken for the architect's
+implementation merge.
+
+The dependency frontier was recomputed: WORK-067 is complete (60/60
+recorded work orders, nothing in flight), and the ACR-002 frontier is now
+wave 10: WORK-068 (Feedback to Governed Work Items) is
+DEPENDENCY-ELIGIBLE (its hard WORK-067 edge is SATISFIED by the bde33cc
+merge) and remains PLANNED, NOT activated, NOT started; WORK-069
+(Progressive Release Staging) is likewise DEPENDENCY-ELIGIBLE (its hard
+edges WORK-064/WORK-066/WORK-019/WORK-026/WORK-020 all complete) and NOT
+activated; the architect's authorization is required for both.
+WORK-070 remains blocked (WORK-069 not started); WORK-072/073 remain
+planned. Dogfooding: the gate's two enabler edges (WORK-074 complete +
+WORK-071 complete) were already SATISFIED and remain so — the first full
+authenticated/local dogfooding experiment is PERMITTED and NOT started
+(WORK-067's completion adds the correlation CAPABILITY; it does NOT claim
+the experiment was performed, and this finalization does NOT run it).
+
+Revalidation on the finalization head (the §34.8 battery): the
+engineering-signals domain suite (84 tests), the real-PG two-actor
+concurrency proofs (6 tests on real PostgreSQL via
+`WORKFLOWOS_DATABASE_URL` — independent connections, database-constraint
+dedup), the static-architecture suite (the 23 WORK-067 invariant block
+plus the full 858-test battery), the WORK-064/065/066 neighbor regressions,
+the governance suites, the full backend regression, typecheck, and lint —
+see the finalization PR body for the exact counts on the exact head.

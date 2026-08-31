@@ -177,9 +177,12 @@ merged as `5de5e83` via PR #97 on 2026-08-31 and finalized §34.8/ADR-0007
 by the WORK-065 post-merge finalization; WORK-066 is likewise COMPLETE —
 merged as `0a506b1` via PR #102 on 2026-08-31T16:37:09Z (squash-merged at
 the approved head `493ae59`, the tree identical) and finalized §34.8/ADR-0007
-by the WORK-066 post-merge finalization; abandoning any MERGED delivery
-would be a governed revert of the merge, not of this package alone. The four
-remaining Work Orders WORK-067..070 are still spec files only, NOT
+by the WORK-066 post-merge finalization; WORK-067 is likewise COMPLETE —
+merged as `bde33cc` via PR #103 on 2026-08-31T18:30:23Z (squash-merged at
+the approved head `0fe9c48`, the tree identical) and finalized §34.8/ADR-0007
+by the WORK-067 post-merge finalization; abandoning any MERGED delivery
+would be a governed revert of the merge, not of this package alone. The three
+remaining Work Orders WORK-068..070 are still spec files only, NOT
 activated.)
 
 ## Approval rule

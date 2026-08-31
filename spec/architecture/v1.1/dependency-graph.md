@@ -72,10 +72,10 @@ v1.1 continuous product validation sub-evolution (ACR-002) edges:
 - WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 — the approved head 524c3f4, tree identical — and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
 - WORK-065 ← WORK-064 (complete) → WORK-065 is COMPLETE (merged as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 via PR #97 on 2026-08-31 — the approved head c06a3e3 (the post-#100 reconciliation head), tree identical — and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism is on main at backend/src/browser-validation/)
 - WORK-066 ← WORK-064 (complete), WORK-065 (complete), WORK-058 (soft — adaptive assurance engine, planned) → WORK-066 is COMPLETE (merged as 0a506b10e5526151929366bb11197230334b620c via PR #102 on 2026-08-31T16:37:09Z — the approved head 493ae59, tree identical — and finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization PR #104; the scheduling/trigger decision layer is on main at backend/src/validation-scheduling/; the fixed-mapping assurance selection ships in this Work Order and delegates to WORK-058 when it lands)
-- WORK-067 ← WORK-064 (complete), WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned) → WORK-067 is IN FLIGHT (ACTIVATED 2026-09-01 on branch feat/WORK-067-signal-regression-correlation, grown from the SAME main 5f0b058 as the parallel WORK-066 — the ADR-0003 coordination with the now-complete WORK-066 is durable history; rebased onto the post-#102 mainline and then onto the post-#104 finalization mainline; the ADVISORY correlation layer at backend/src/engineering-signals/)
-- WORK-068 ← WORK-067
+- WORK-067 ← WORK-064 (complete), WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned) → WORK-067 is COMPLETE (merged as bde33cc5e9a1b109951be9ec48aaef7e692c33c7 via PR #103 on 2026-08-31T18:30:23Z — the approved head 0fe9c48 (the post-#104 reconciliation head), tree identical — and finalized §34.8/ADR-0007 by the WORK-067 post-merge finalization; the ADVISORY correlation layer is on main at backend/src/engineering-signals/; the TEMPORARY WORK-056 intake seam ships in this Work Order and delegates to WORK-056 when it lands)
+- WORK-068 ← WORK-067 (complete — merged as bde33cc via PR #103, finalized §34.8/ADR-0007) → WORK-068 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-069 ← WORK-064 (complete), WORK-066 (complete — merged as 0a506b1 via PR #102, finalized §34.8/ADR-0007), WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned) → WORK-069 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-070 ← WORK-067, WORK-069, WORK-051 (complete — architecture checkpoint framework), WORK-055 (soft — quality-attribute model, planned), WORK-060 (soft — ACR feedback loop, planned)
+- WORK-070 ← WORK-067 (complete — merged as bde33cc via PR #103, finalized §34.8/ADR-0007), WORK-069, WORK-051 (complete — architecture checkpoint framework), WORK-055 (soft — quality-attribute model, planned), WORK-060 (soft — ACR feedback loop, planned)
 
 WORK-062 (Durable Multi-Agent Orchestration Substrate) was added by the
 2026-08-30 governance correction — the execution-substrate architecture
@@ -161,18 +161,24 @@ the scheduling/trigger decision layer is on main at `backend/src/validation-sche
 in-memory adapter — NO migration authorized; the durable binding point stays a
 documented future ACR at the same port). WORK-067 (Engineering Signal &
 Regression Correlation — the ADVISORY correlation layer at
-`backend/src/engineering-signals/`) is the ONE item IN FLIGHT, ACTIVATED
-2026-09-01 on branch `feat/WORK-067-signal-regression-correlation` (grown from
+`backend/src/engineering-signals/`) is likewise COMPLETE: ACTIVATED 2026-09-01 on
+branch `feat/WORK-067-signal-regression-correlation` (grown from
 the SAME main `5f0b058` as the parallel WORK-066 — the ADR-0003 coordination
 with the now-complete WORK-066 is durable history; MID-DELIVERY the architect
 merged PR #102 and the WORK-067 branch was rebased onto the post-#102 mainline;
 the WORK-066 finalization PR #104 then landed and the branch was rebased again
-onto the post-#104 mainline): deterministic tenant/project/environment-scoped
+onto the post-#104 mainline), merged as `bde33cc` via PR #103 on
+2026-08-31T18:30:23Z (the approved head `0fe9c48`, tree identical) and
+finalized §34.8/ADR-0007 by the WORK-067 post-merge finalization:
+deterministic tenant/project/environment-scoped
 signal identities, provenance-preserving occurrences, the TEMPORARY WORK-056
 intake seam, RECORDED-release-identity-only correlation, the ADVISORY
-regression assessment, the in-memory repository port. WORK-068..070 are PLANNED
-and NOT activated; WORK-069's hard WORK-066 edge is SATISFIED
-(dependency-eligible). The architect's
+regression assessment, the in-memory repository port (NO migration authorized;
+the durable binding point stays a documented future ACR at the same port).
+WORK-068..070 are PLANNED
+and NOT activated — the ACR-002 frontier is the wave-10 pair: WORK-068
+(its hard WORK-067 edge is SATISFIED) and WORK-069 (its hard WORK-066 edge is
+SATISFIED, dependency-eligible). The architect's
 authorization is required to activate any of them (recorded in
 `program-state.json`).
 Each carries parallel-execution metadata
@@ -210,9 +216,14 @@ Parallelization is permitted only where dependencies are complete and protected-
 > finalized §34.8/ADR-0007 by the WORK-066 post-merge finalization — the
 > scheduling/trigger decision layer consuming the complete WORK-064 + WORK-065
 > edges; its WORK-058 edge stays soft: the fixed-mapping selection ships now
-> and delegates when WORK-058 lands. WORK-067 is now the next ACR-002 sequence
-> head — DEPENDENCY-ELIGIBLE (on the complete WORK-064) and NOT activated, NOT
-> started (the eligibility is recorded honestly
+> and delegates when WORK-058 lands. WORK-067 is likewise COMPLETE: ACTIVATED
+> 2026-09-01, merged as `bde33cc` via PR #103 on 2026-08-31T18:30:23Z (the
+> approved head `0fe9c48` — the post-#104 reconciliation head, tree identical)
+> and finalized §34.8/ADR-0007 by the WORK-067 post-merge finalization. The
+> ACR-002 frontier is now the wave-10 pair — WORK-068 (DEPENDENCY-ELIGIBLE on
+> the complete WORK-067) and WORK-069 (DEPENDENCY-ELIGIBLE on the complete
+> WORK-064 + WORK-066) — BOTH NOT activated, NOT started (the eligibility is
+> recorded honestly
 > in `dependency-state.json` → `futureGenerationEligibility`).
 
 # ── v1.1 customer dogfooding follow-up (2026-08-30) ──
