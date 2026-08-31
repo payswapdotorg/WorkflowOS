@@ -185,25 +185,25 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     const a052 = report.assessments.find((a) => a.workOrderId === 'WORK-052')!;
     expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
-    // Evaluating the merged pair as candidates surfaces the ONE live
-    // in-flight conflict partner: WORK-065 (Synthetic Browser Validation
-    // Agent — activated 2026-08-30, this branch) shares the
-    // static-architecture suite surface with WORK-046 and WORK-052 — the
-    // SAME durable-history surface pattern WORK-064/WORK-071/WORK-074
-    // each shared while they were in flight. WORK-064 (merged c351451 via
-    // PR #86, finalized §34.8/ADR-0007), WORK-050 (merged 8f27cc7),
-    // WORK-062 (merged f0855d2 via PR #82, finalized complete per
-    // §34.8/ADR-0007), WORK-071 (merged 8604c8a5 via PR #96), and WORK-074
-    // (merged cdedd0ca via PR #99, finalized §34.8/ADR-0007 by PR #100)
-    // are NOT live partners — merged items are durable history. The
-    // frontier is the authoritative live view: the ONLY in-flight item is
-    // WORK-065 (its sharedIntegrationSurfaces declare the
-    // static-architecture suite, so the surface flag discipline holds for
-    // the live pair).
-    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-065']);
-    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-065']);
+    // Evaluating the merged pair as candidates surfaces the live in-flight
+    // conflict partners: NONE — WORK-065 (Synthetic Browser Validation
+    // Agent), the last live in-flight partner on the shared
+    // static-architecture suite surface with WORK-046 and WORK-052, was
+    // MERGED by the architect as 5de5e83 via PR #97 (2026-08-31,
+    // squash-merged at the approved head c06a3e3) and finalized complete per
+    // §34.8/ADR-0007 by the WORK-065 post-merge finalization — merged items
+    // are durable history, and merged work never conflicts with live work.
+    // WORK-064 (merged c351451 via PR #86, finalized §34.8/ADR-0007),
+    // WORK-050 (merged 8f27cc7), WORK-062 (merged f0855d2 via PR #82,
+    // finalized complete per §34.8/ADR-0007), WORK-071 (merged 8604c8a5
+    // via PR #96), and WORK-074 (merged cdedd0ca via PR #99, finalized
+    // §34.8/ADR-0007 by PR #100) are likewise NOT live partners — merged
+    // items are durable history. The frontier is the authoritative live
+    // view: NOTHING is in flight.
+    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
+    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-065']);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -447,14 +447,18 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     // MERGED by the architect as cdedd0ca via PR #99 (2026-08-31,
     // squash-merged at the approved head 25512f4) and is recorded complete
     // per §34.8/ADR-0007 by the WORK-074 post-merge finalization (PR #100,
-    // merged as 1e279a2) — 57/57 recorded work orders complete. The ONE
-    // in-flight item is WORK-065 (Synthetic Browser Validation Agent — this
-    // branch, PR #97; dependency WORK-064 complete). Nothing is blocked
-    // (WORK-053..061 and WORK-066..070 are future-generation items not yet
-    // recorded in program-state; WORK-067 is dependency-eligible on the
-    // complete WORK-064 but NOT activated).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-065']);
+    // merged as 1e279a2) — and WORK-065 (Synthetic Browser Validation
+    // Agent) was likewise MERGED by the architect as 5de5e83 via PR #97
+    // (2026-08-31, squash-merged at the approved head c06a3e3) and is
+    // recorded complete per §34.8/ADR-0007 by the WORK-065 post-merge
+    // finalization — 58/58 recorded work orders complete. NOTHING is in
+    // flight. Nothing is blocked
+    // (WORK-053..061 and WORK-066..070 are future-generation items not
+    // recorded in program-state; WORK-066 is dependency-eligible on the
+    // complete WORK-064 + WORK-065 but NOT activated; WORK-067 is
+    // dependency-eligible on the complete WORK-064 and NOT activated).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.blocked).toEqual([]);
-    expect(frontier.complete.length).toBeGreaterThanOrEqual(57);
+    expect(frontier.complete.length).toBeGreaterThanOrEqual(58);
   });
 });

@@ -37,7 +37,7 @@ WORK-063 (Identity & Access — COMPLETE: merged 8dac9c4 via PR #81, spec-only, 
 WORK-064 (Continuous Product Validation — COMPLETE: merged c351451 via PR #86, finalized §34.8/ADR-0007)
     │
     ↓
-WORK-065 (Synthetic Browser Validation Agent)
+WORK-065 (Synthetic Browser Validation Agent — COMPLETE: merged 5de5e83 via PR #97, finalized §34.8/ADR-0007)
     │
     ↓
 WORK-066 (Validation Scheduling & Change Triggers)  ← soft: WORK-058
@@ -70,8 +70,8 @@ Exact edges:
 v1.1 continuous product validation sub-evolution (ACR-002) edges:
 
 - WORK-064 ← WORK-048 (complete), WORK-050 (complete), WORK-063 (complete — merged as 8dac9c4 via PR #81, spec-only, finalized §34.8/ADR-0007) → WORK-064 is COMPLETE (merged as c351451 via PR #86 on 2026-08-30 — the approved head 524c3f4, tree identical — and finalized §34.8/ADR-0007; the domain/model authority is on main at backend/src/continuous-validation/)
-- WORK-065 ← WORK-064 (complete) → WORK-065 is DEPENDENCY-ELIGIBLE and NOT activated
-- WORK-066 ← WORK-064 (complete), WORK-065, WORK-058 (soft — adaptive assurance engine, planned)
+- WORK-065 ← WORK-064 (complete) → WORK-065 is COMPLETE (merged as 5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916 via PR #97 on 2026-08-31 — the approved head c06a3e3 (the post-#100 reconciliation head), tree identical — and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism is on main at backend/src/browser-validation/)
+- WORK-066 ← WORK-064 (complete), WORK-065 (complete), WORK-058 (soft — adaptive assurance engine, planned) → WORK-066 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-067 ← WORK-064 (complete), WORK-015 (complete — existing verification), WORK-040 (complete — continuous planning), WORK-041 (complete — maintenance), WORK-056 (soft — signal intake, planned) → WORK-067 is DEPENDENCY-ELIGIBLE and NOT activated
 - WORK-068 ← WORK-067
 - WORK-069 ← WORK-064 (complete), WORK-066, WORK-019 (complete — deployment governance), WORK-026 (complete — runtime), WORK-020 (complete — audit), WORK-059 (soft — operational/release governance, planned)
@@ -149,9 +149,14 @@ future work; journeys requiring authentication stay governed by the Work
 Order's PRE_MERGE/FORBIDDEN rules until that implementation lands under its
 own authorization.)
 
-WORK-065..070 are PLANNED and NOT activated. WORK-065 and WORK-067 are now
-DEPENDENCY-ELIGIBLE (both depend only on the complete WORK-064;
-parallel-eligible — different protected surfaces). The architect's
+WORK-065 is COMPLETE (ACTIVATED 2026-08-30, merged as `5de5e83` via PR #97 on
+2026-08-31 — the approved head `c06a3e3`, tree identical — and finalized
+§34.8/ADR-0007 by the WORK-065 post-merge finalization; the execution mechanism
+is on main at `backend/src/browser-validation/`). WORK-066..070 are PLANNED and
+NOT activated. WORK-066 and WORK-067 are now DEPENDENCY-ELIGIBLE (WORK-066's
+hard dependencies WORK-064 + WORK-065 are both complete, its WORK-058 edge is
+soft; WORK-067 depends only on the complete WORK-064 — parallel-eligible,
+different protected surfaces). The architect's
 authorization is required to activate any of them (recorded in
 `program-state.json`).
 Each carries parallel-execution metadata
@@ -180,9 +185,13 @@ Parallelization is permitted only where dependencies are complete and protected-
 > §34.8/ADR-0007 on 2026-08-30) — and WORK-064 itself is now COMPLETE too:
 > ACTIVATED 2026-08-30, merged as `c351451` via PR #86 (the approved head
 > `524c3f4`, tree identical) and finalized §34.8/ADR-0007 on 2026-08-30.
-> WORK-065 and WORK-067 are DEPENDENCY-ELIGIBLE (both depend only on WORK-064)
-> and remain NOT activated, NOT started (the eligibility is recorded honestly
-> in `dependency-state.json` → `futureGenerationEligibility`).
+> WORK-065 is likewise COMPLETE: ACTIVATED 2026-08-30, merged as `5de5e83` via
+> PR #97 on 2026-08-31 (the approved head `c06a3e3` — the post-#100
+> reconciliation head, tree identical) and finalized §34.8/ADR-0007 by the
+> WORK-065 post-merge finalization. WORK-066 and WORK-067 are DEPENDENCY-ELIGIBLE
+> (WORK-066 on the complete WORK-064 + WORK-065, its WORK-058 edge soft; WORK-067
+> on the complete WORK-064) and remain NOT activated, NOT started (the eligibility
+> is recorded honestly in `dependency-state.json` → `futureGenerationEligibility`).
 
 # ── v1.1 customer dogfooding follow-up (2026-08-30) ──
 #    (NEW in the 2026-08-30 dogfooding experiment's governed follow-up;

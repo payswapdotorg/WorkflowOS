@@ -66,7 +66,7 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // Q3 — which are complete / in flight / blocked?
     const complete = fresh.listWorkOrders({ status: 'complete' });
     const inFlight = fresh.listWorkOrders({ status: 'in_flight' });
-    expect(complete.length).toBeGreaterThanOrEqual(57); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a) + WORK-074 (cdedd0ca)
+    expect(complete.length).toBeGreaterThanOrEqual(58); // WORK-001..045 + WORK-051 (f2c996c) + WORK-052 (47615c2) + WORK-046 (1f2bef9) + WORK-047 (e2b665c) + WORK-048 (5c48257) + WORK-049 (07ac9cc) + WORK-050 (8f27cc7) + WORK-062 (f0855d2) + WORK-063 (8dac9c4, spec-only) + WORK-064 (c351451) + WORK-071 (8604c8a) + WORK-074 (cdedd0ca) + WORK-065 (5de5e83)
     // WORK-064 (Continuous Product Validation — the domain/model authority)
     // was ACTIVATED by the architect on 2026-08-30, implemented on branch
     // feat/work-064-continuous-validation (PR #86), MERGED by the architect
@@ -79,13 +79,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // was MERGED by the architect as cdedd0ca via PR #99 (2026-08-31,
     // squash-merged at the approved head 25512f4) and is recorded complete
     // per §34.8/ADR-0007 by the WORK-074 post-merge finalization (PR #100,
-    // merged as 1e279a2). The ONE in-flight record is WORK-065 (Synthetic
-    // Browser Validation Agent — the execution mechanism, NOT an authority):
-    // ACTIVATED by the architect on 2026-08-30 (the implementation
-    // instruction after the WORK-064 finalization) and IN FLIGHT on branch
-    // feat/work-065-browser-validation-agent (PR #97) — this reconciliation
-    // onto the post-#100 mainline carries exactly that one in-flight record.
-    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-065']);
+    // merged as 1e279a2). WORK-065 (Synthetic Browser Validation Agent — the
+    // execution mechanism, NOT an authority) was ACTIVATED by the architect
+    // on 2026-08-30, MERGED by the architect as 5de5e83 via PR #97
+    // (2026-08-31, squash-merged at the approved head c06a3e3 — the
+    // post-#100 reconciliation head, the merge tree identical) and is
+    // recorded complete per §34.8/ADR-0007 by the WORK-065 post-merge
+    // finalization: NOTHING is in flight (58/58 complete).
+    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -118,6 +119,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(w071?.mergedAs).toEqual({ pr: 96, mergeCommit: '8604c8a5286b7533caf907c25fcd4dfdeeb662eb' });
     const w074 = complete.find((w) => w.id === 'WORK-074');
     expect(w074?.mergedAs).toEqual({ pr: 99, mergeCommit: 'cdedd0ca3c72821d289d8d9d683f9902ddca480f' });
+    const w065 = complete.find((w) => w.id === 'WORK-065');
+    expect(w065?.mergedAs).toEqual({ pr: 97, mergeCommit: '5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916' });
+    // No in-flight item exists (the WORK-065 post-merge finalization closed
+    // the last in-flight record), so the in-flight merge-evidence rule holds
+    // vacuously — the live records ALL carry truthful merge evidence.
     for (const w of inFlight) {
       expect(w.mergedAs, `${w.id} (in_flight) must NOT carry merge evidence`).toBeUndefined();
     }
@@ -129,21 +135,24 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // MERGED as 8604c8a5 via PR #96 and recorded complete in the PR #99
     // reconciliation. WORK-074 was MERGED as cdedd0ca via PR #99 (2026-08-31,
     // squash-merged at the approved head 25512f4) and recorded complete per
-    // §34.8/ADR-0007 by the WORK-074 post-merge finalization — NOTHING is in
-    // flight; WORK-053..061 and WORK-065..070 are future-generation items not
-    // yet recorded in program-state (WORK-065 and WORK-067 are
-    // dependency-eligible on the complete WORK-064 — NOT activated, the
-    // architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-065']);
+    // §34.8/ADR-0007 by the WORK-074 post-merge finalization. WORK-065 was
+    // MERGED by the architect as 5de5e83 via PR #97 (2026-08-31,
+    // squash-merged at the approved head c06a3e3) and recorded complete per
+    // §34.8/ADR-0007 by the WORK-065 post-merge finalization — NOTHING is in
+    // flight; WORK-053..061 and WORK-066..070 are future-generation items not
+    // recorded in program-state (WORK-066 is dependency-eligible on the
+    // complete WORK-064 + WORK-065, and WORK-067 on the complete WORK-064 —
+    // NOT activated, the architect's authorization is required).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
-    // WORK-074's only live conflict partners would be other IN-FLIGHT items
-    // — there are none (its shared static-architecture suite surface
-    // partners WORK-046/WORK-052/WORK-064/WORK-071 are complete durable
-    // history — WORK-071 was merged as 8604c8a5/PR #96 before this
-    // reconciliation), so the flag discipline holds (the false case is
-    // proven by mutation in the parallel suite).
+    // no live conflict partners exist — the ONLY in-flight-eligible surface
+    // partners (WORK-046/WORK-052/WORK-064/WORK-071/WORK-074/WORK-065 on the
+    // shared static-architecture suite) are ALL complete durable history
+    // (WORK-065 was merged as 5de5e83/PR #97 before this finalization), so
+    // the flag discipline holds vacuously (the false case is proven by
+    // mutation in the parallel suite).
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
       expect(item.conflicts.every((c) => c.coordinated), `${item.id}: every conflict mutually coordinated`).toBe(true);
@@ -441,16 +450,20 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     const dir = mkdtempSync(join(tmpdir(), 'wfos-gov-claims-only-'));
     try {
       const program: ProgramState = structuredClone(realProgram);
-      // WORK-065 is in flight in the real program-state and is NOT part of
-      // this claims-only discrimination (WORK-050/062/064). Strip it: WORK-065
-      // depends on WORK-064 (which the discrimination reconstructs as
-      // in_flight — would require a coordination record covering WORK-064).
-      // WORK-071 and WORK-074 are complete-and-merged in the real
-      // program-state; their live records carry merge evidence and are NOT
-      // reconstructed — they survive the fixture rebuild untouched. The
-      // discrimination reconstructs exactly the three intended started items
-      // (WORK-050/062/064 — all three are complete-and-merged in the live
-      // record, so the discrimination rebuilds the pre-merge state).
+      // WORK-065 is complete-and-merged in the real program-state and is NOT
+      // part of this claims-only discrimination (WORK-050/062/064). Strip
+      // it: WORK-065 depends on WORK-064 (which the discrimination
+      // reconstructs as in_flight — a complete record with an in-flight
+      // dependency would disagree with the fixture's rebuilt pre-merge
+      // state and require a coordination record covering WORK-064).
+      // WORK-071, WORK-074, and (since the WORK-065 post-merge finalization)
+      // WORK-065 are complete-and-merged in the real program-state; their
+      // live records carry merge evidence and are NOT reconstructed — they
+      // would survive the fixture rebuild untouched except for the
+      // dependency-chain disagreement above. The discrimination reconstructs
+      // exactly the three intended started items (WORK-050/062/064 — all
+      // three are complete-and-merged in the live record, so the
+      // discrimination rebuilds the pre-merge state).
       program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065');
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
       w050.status = 'in_flight';

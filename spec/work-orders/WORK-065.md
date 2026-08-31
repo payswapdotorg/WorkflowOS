@@ -1,13 +1,32 @@
 # WORK-065 — Synthetic Browser Validation Agent
 
-Status: in_flight — activated by the architect (the implementation
-instruction) on 2026-08-30. The activation is recorded in
-`spec/development-state/program-state.json` (status `in_flight`, branch
-`feat/work-065-browser-validation-agent`, dependencies `["WORK-064"]`).
-The browser agent contract is persisted in
-`spec/architecture/v1.1/validation-model.md` §9 (the agent section,
-expanded by this change). NOT merged; NOT verified — the architect's
-review and the merge gate remain the only completion event (§34.8/ADR-0007).
+Status: COMPLETE — merged by the architect as
+`5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916` via PR #97 on 2026-08-31
+(squash-merged at the approved head `c06a3e3` — the post-#100
+reconciliation head; the merge tree is IDENTICAL — both trees `8b6469c8`)
+and finalized per §34.8/ADR-0007 (see the post-merge finalization record
+appended below; the activation, implementation, reconciliation, and
+review-correction history below is preserved, not rewritten). The
+completion is recorded in `spec/development-state/program-state.json`
+(status `complete`, `pr` 97, `head` `c06a3e3`, `mergedAs`
+{pr: 97, mergeCommit: 5de5e83…}; branch
+`feat/work-065-browser-validation-agent` and the coordination record
+preserved as the historical record of how it merged). The implementation
+delivered the synthetic browser validation agent at
+`backend/src/browser-validation/` (the application-layer pattern — NOT an
+18th frozen module): the execution contract
+(navigate/observe/evidence-capture/effect-policy enforcement) that
+CONSUMES the WORK-064 domain authority and the existing BrowserDriver
+port (WORK-036 — no second browser automation framework), the
+JOURNEY-OWNED navigation-safety declaration
+(`ValidationJourney.readonlySafeNavigationTargets` — the fourth architect
+review correction: a READ_ONLY navigation is admitted only when the
+authoritative journey itself declares the target safe; a forged
+executor/caller declaration is rejected before run admission — no run
+persisted, the BrowserDriver never called), and the Playwright adapter's
+pre-goto URL defense (non-http(s) schemes and embedded userinfo rejected
+before `page.goto()`). The browser agent contract is persisted in
+`spec/architecture/v1.1/validation-model.md` §9.
 
 Issued by: the research-driven v1.1 evolution (the continuous product
 validation roadmap — the closed-loop software engineering control system
@@ -258,3 +277,56 @@ STOP and raise an Architecture Change Request if implementation requires:
 - Typecheck and lint clean; the full repository regression suite clean.
 - PR contains only WORK-065 scope; independent Architect Review approves;
   WORK-065 is marked VERIFIED before WORK-066 becomes eligible on it.
+
+## Post-merge finalization record (§34.8/ADR-0007 — appended 2026-08-31)
+
+The architect merged PR #97 as `5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916`
+(squash merge; single parent `1e279a2` — the WORK-074 post-merge
+finalization mainline; merged 2026-08-31T12:01:14Z). The merged tree is
+IDENTICAL to the approved head `c06a3e3`
+(`git diff c06a3e3 5de5e83` is empty; both trees are `8b6469c8`) — the
+post-#100 reconciliation head that carries the journey-owned
+navigation-safety declaration (the fourth architect review correction:
+`ValidationJourney.readonlySafeNavigationTargets`), the removal of the
+out-of-scope WORK-042 relay-deflake change (the cross-mode-handoff
+regression test restored to main truth), the recomputed governance state
+onto the WORK-074 finalization, and the 11/11 green CI. The finalization —
+a data-only change on branch
+`governance/WORK-065-post-merge-finalization` — records in the canonical
+state: `status = complete`, `mergedAs = {pr: 97, mergeCommit:
+5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916}`, the implementation head
+recorded as `c06a3e3`, no active handoff (none was ever recorded —
+`resumption.activeHandoffs` was empty before and after; merged work is not
+resumable), and this work-order document's status updated truthfully with
+this evidence APPENDED (history preserved, not rewritten).
+
+The merged-finalization audit binds WORK-065 ↔ PR #97 ↔ merge commit
+`5de5e83` on the real first-parent history: the merge subject follows the
+`type(work-NNN): … (#PR)` conventional-commit scope squash convention
+(`feat(work-065): Synthetic Browser Validation Agent (the execution
+mechanism, not authority) (#97)`) — the FOURTH merge-evidence shape,
+recognized since the WORK-064 finalization (NO detector change needed).
+The pre-finalization red window was exactly the WORK-065 gap the protocol
+exists to surface: the audit reported `workOrders[WORK-065]: MERGED
+(5de5e83ac) but the canonical status is "in_flight"` (12/13 finalized);
+this finalization closes it (governance:status reports 13/13 finalized,
+gaps []). The audit validates the full provenance identity: `mergedAs.pr`
+must equal the declared PR (97) and `mergedAs.mergeCommit` must match the
+ACTUAL merge evidence. State-only finalization subjects (the
+`chore(governance): …` convention this finalization itself follows) remain
+structurally excluded from merge evidence — a finalization commit can
+never be mistaken for the architect's implementation merge.
+
+The dependency frontier was recomputed: WORK-065 is complete (58/58
+recorded work orders, nothing in flight), and WORK-066 (Validation
+Scheduling & Change Triggers) is now DEPENDENCY-ELIGIBLE (its hard
+dependencies WORK-064 + WORK-065 are BOTH complete; its WORK-058 edge is
+soft) — it remains PLANNED, NOT activated, NOT started; the architect's
+authorization is required. WORK-067 remains dependency-eligible on the
+complete WORK-064 (different protected surfaces) and NOT activated;
+WORK-068/069/070/072/073 remain planned. Dogfooding: the gate's two
+enabler edges (WORK-074 complete + WORK-071 complete) were already
+SATISFIED and remain so — the first full authenticated/local dogfooding
+experiment is PERMITTED and NOT started (WORK-065's completion adds the
+synthetic-browser validation CAPABILITY; it does NOT claim the experiment
+was performed, and this finalization does NOT run it).

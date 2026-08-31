@@ -238,7 +238,10 @@ The first official dogfood run is gated on:
    the browser-validation portion of the dogfood run);
 4. WORK-065 (Synthetic Browser Validation Agent) is implemented and
    merged (the execution mechanism exists) — for the browser-validation
-   portion;
+   portion — SATISFIED: COMPLETE (merged as `5de5e83` via PR #97 on 2026-08-31
+   and finalized §34.8/ADR-0007 by the WORK-065 post-merge finalization; the
+   execution mechanism is on main at `backend/src/browser-validation/`, with
+   the journey-owned navigation-safety declaration);
 5. the existing v1.0 authorities are operational (the dogfood run
    exercises the real authorities, not mocks).
 
@@ -246,13 +249,17 @@ Until these are in place, the dogfood run is staged: the customer
 journeys that do not require authentication (public read paths) can run
 in PRE_MERGE; the authenticated journeys were FORBIDDEN until WORK-074
 landed (the runtime identity layer specified by WORK-063 was UNIMPLEMENTED
-without it). **Live state (2026-08-31, the WORK-074 post-merge
-finalization):** gate items 1 and 2 are SATISFIED (WORK-074 merged `cdedd0ca`
+without it). **Live state (2026-08-31, the WORK-074 post-merge finalization,
+updated by the WORK-065 post-merge finalization):** gate items 1 and 2 are
+SATISFIED (WORK-074 merged `cdedd0ca`
 via PR #99 and finalized §34.8/ADR-0007; WORK-071 merged `8604c8a` via
 PR #96) — the first full authenticated/local dogfooding experiment is
 PERMITTED and NOT started (the architect's authorization governs the run;
-the browser-validation portion remains gated on item 4 — WORK-065..070,
-PLANNED, NOT activated).
+item 4 is now ALSO SATISFIED — WORK-065 is COMPLETE and the
+browser-validation CAPABILITY exists — but that does NOT start the run: the
+scheduling/feedback/release Work Orders that drive continuous validation
+(WORK-066..070) remain PLANNED, NOT activated, and the experiment itself
+requires the architect's authorization).
 
 The repository records that this is the canonical acceptance journey
 for WorkflowOS-as-a-product. A fresh Architect LLM resuming the program

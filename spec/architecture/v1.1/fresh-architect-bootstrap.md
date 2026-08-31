@@ -112,8 +112,8 @@ validation sub-evolution) approval by the architecture authority.
   identities (e.g., `UW-053..059` for the retired upload wave).
 - `spec/development-state/program-state.json` — the canonical program
   state. `workOrders[]` records the activated Work Orders (complete,
-  in_flight). PLANNED Work Orders (WORK-053..061, WORK-065..070,
-  WORK-071..074) are spec files only — they are NOT in `program-state.json`
+  in_flight). PLANNED Work Orders (WORK-053..061, WORK-066..070,
+  WORK-072..074) are spec files only — they are NOT in `program-state.json`
   until the architect activates them.
 - `spec/development-state/dependency-state.json` — the canonical
   dependency mapping. `futureGeneration` maps each planned Work Order
@@ -228,8 +228,17 @@ product validation roadmap):
   c3514512cb5bcf7694f551d1f1bac9b1ee2d3c3b; the domain/model authority is on
   main at `backend/src/continuous-validation/`).
 - WORK-053..061 are `planned` (spec files only; NOT in program-state).
-- WORK-065..070 are `planned` (spec files only; NOT in program-state;
-  new in this package).
+- WORK-066..070 are `planned` (spec files only; NOT in program-state;
+  new in this package). **WORK-065 is `complete`** (recorded in
+  program-state with its merge evidence): the synthetic browser validation
+  agent (the execution mechanism for ValidationJourneys, NOT an authority)
+  was ACTIVATED 2026-08-30, merged by the architect as
+  `5de5e83ac9a3ce2c1613a7b8b83045d0ab1d8916` via PR #97 (2026-08-31,
+  squash-merged at the approved head `c06a3e3` — the post-#100
+  reconciliation head; the tree is identical), and finalized complete per
+  §34.8/ADR-0007 (the WORK-065 post-merge finalization); the execution
+  mechanism is on main at `backend/src/browser-validation/` with the
+  journey-owned navigation-safety declaration.
 - WORK-072 and WORK-073 are `planned` (spec files only; NOT in
   program-state; new in the 2026-08-30 customer dogfooding experiment's
   governed follow-up — see
@@ -250,11 +259,12 @@ The frontier's `plannedNext` holds TWO dependency-eligible heads across two
 tracks, both PLANNED and NOT activated: WORK-053 (ACR-001;
 dependency-eligible on WORK-046+WORK-051+WORK-052, all complete; remains
 PLANNED — the architect's 2026-08-29 verdict says "Do not activate WORK-053
-yet", additionally gated on the v1.1/ACR-001 disposition) and WORK-065
-(ACR-002; dependency-eligible now that its only dependency WORK-064 is
-complete; remains PLANNED, NOT activated, NOT started — the architect's
-authorization is required; WORK-067 is equally eligible — different protected
-surfaces — and equally NOT activated). The two dogfooding-gate enablers
+yet", additionally gated on the v1.1/ACR-001 disposition) and WORK-066
+(ACR-002; dependency-eligible now that its hard dependencies WORK-064 and
+WORK-065 are BOTH complete — its WORK-058 edge is soft; remains PLANNED, NOT
+activated, NOT started — the architect's authorization is required;
+WORK-067 is equally eligible on the complete WORK-064 alone — different
+protected surfaces — and equally NOT activated). The two dogfooding-gate enablers
 issued by the 2026-08-30 customer dogfooding experiment's governed follow-up —
 WORK-071 (Local Development Runtime Substrate) and WORK-074 (Identity & Access
 Runtime Activation — the "WORK-063-RUNTIME" of the experiment's design) — were
@@ -418,7 +428,11 @@ first official dogfood run begins only after:
    SATISFIED: COMPLETE (merged as `c351451` via PR #86 and finalized
    §34.8/ADR-0007 on 2026-08-30; the domain/model authority is on main);
 4. WORK-065 (Synthetic Browser Validation Agent) is implemented and
-   merged;
+   merged — SATISFIED: COMPLETE (merged as `5de5e83` via PR #97 on
+   2026-08-31 and finalized §34.8/ADR-0007 by the WORK-065 post-merge
+   finalization; the execution mechanism — with the journey-owned
+   navigation-safety declaration — is on main at
+   `backend/src/browser-validation/`);
 5. the existing v1.0 authorities are operational.
 
 Until these are in place, the dogfood run is staged: the customer
@@ -429,8 +443,10 @@ and WORK-071's local-runtime path is on main (`8604c8a` via PR #96): the
 authentication + local-runtime preconditions of this gate are SATISFIED — the
 first full authenticated/local dogfooding experiment is PERMITTED and NOT
 started.** The run itself is the architect's non-delegable decision (this
-finalization does NOT start it); the browser-validation portion of the
-journey remains gated on WORK-065..070 (PLANNED, NOT activated).
+finalization does NOT start it); item 4 is now ALSO SATISFIED (WORK-065 is
+COMPLETE — the browser-validation capability exists), but the continuous-validation
+Work Orders that DRIVE it (WORK-066..070) remain PLANNED, NOT activated, and
+the run is NOT claimed to have been performed.
 
 **The dogfooding experiment was ATTEMPTED on 2026-08-30 and STOPPED at
 onboarding** (the runtime does not yet provide the required production
