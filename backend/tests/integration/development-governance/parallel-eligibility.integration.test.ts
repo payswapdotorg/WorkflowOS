@@ -185,27 +185,29 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     const a052 = report.assessments.find((a) => a.workOrderId === 'WORK-052')!;
     expect(a046.dependencyEligible).toBe(true);
     expect(a052.dependencyEligible).toBe(true);
-    // Evaluating the merged pair as candidates surfaces NO live in-flight
-    // conflict partner: WORK-066 (Validation Scheduling &
-    // Change Triggers — activated 2026-09-01, branch
-    // feat/WORK-066-validation-scheduling) shared the static-architecture
-    // suite surface with WORK-046 and WORK-052 while in flight — the SAME
-    // durable-history surface pattern WORK-064/WORK-065/WORK-071/WORK-074
-    // each shared while in flight — and was MERGED as 0a506b1 via PR #102
-    // (2026-08-31, squash-merged at the approved head 493ae59, the merge
-    // tree identical) and finalized by the WORK-066 post-merge finalization
-    // (WORK-065 was the prior live partner, merged as 5de5e83 via PR #97
-    // and finalized by the WORK-065 post-merge finalization; WORK-064
-    // merged c351451 via PR #86, WORK-050 merged 8f27cc7, WORK-062 merged
-    // f0855d2 via PR #82, WORK-071 merged 8604c8a5 via PR #96, and WORK-074
-    // merged cdedd0ca via PR #99 — all merged items are durable history).
-    // The frontier is the authoritative live view: NOTHING is in flight
-    // (59/59 complete), so no live conflict partner exists for either
-    // merged candidate — the surface flag discipline holds vacuously.
-    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
-    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual([]);
+    // Evaluating the merged pair as candidates surfaces the ONE live
+    // in-flight conflict partner: WORK-067 (Engineering Signal &
+    // Regression Correlation — activated 2026-09-01 on
+    // feat/WORK-067-signal-regression-correlation, the ADR-0003
+    // coordination partner of the former parallel WORK-066, grown from the
+    // SAME main 5f0b058; this branch is rebased onto the post-#102 AND
+    // post-#104 mainlines) shares the static-architecture suite surface
+    // with WORK-046 and WORK-052 — the SAME durable-history surface
+    // pattern WORK-064/065/066/071/074 each shared while in flight
+    // (WORK-066 was the prior live partner, merged as 0a506b1 via PR #102
+    // and finalized by the WORK-066 post-merge finalization PR #104;
+    // WORK-065 merged as 5de5e83 via PR #97 and finalized by the WORK-065
+    // post-merge finalization; WORK-064 merged c351451 via PR #86, WORK-050
+    // merged 8f27cc7, WORK-062 merged f0855d2 via PR #82, WORK-071 merged
+    // 8604c8a5 via PR #96, and WORK-074 merged cdedd0ca via PR #99 — all
+    // merged items are durable history). The frontier is the authoritative
+    // live view: the ONE in-flight item is WORK-067 (it declares the
+    // static-architecture suite in sharedIntegrationSurfaces, so the
+    // surface flag discipline holds for the live pair).
+    expect(a046.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-067']);
+    expect(a052.conflictsWith.map((c) => c.workOrderId)).toEqual(['WORK-067']);
     const frontier = realService.getFrontier();
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-067']);
   });
 
   it('W052-AC03 / PR #62 round 1 BLOCKER 2 — the frontier reports TRUTHFUL coordination (an UNDECLARED in-flight conflict is coordinated: false, never a silent pass)', () => {
@@ -432,7 +434,7 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
 
   // --- the real frontier (W052-AC03 applied to the live program) -----------------
 
-  it('W052-AC03 — the REAL frontier: 57 recorded items complete (WORK-074 — the identity & access runtime — COMPLETE since the cdedd0ca/PR #99 merge); NOTHING is in flight; nothing is dependency-eligible among the recorded items; nothing is blocked', () => {
+  it('W052-AC03 — the REAL frontier: 58 recorded items complete (WORK-074/WORK-071/WORK-065 all COMPLETE since their merges); WORK-067 is the ONE in-flight item; nothing is blocked', () => {
     const frontier = realService.getFrontier();
     expect(frontier.dependencyEligible).toEqual([]);
     // WORK-064 (Continuous Product Validation — the domain/model authority)
@@ -457,14 +459,15 @@ describe('WORK-052 — parallel eligibility, conflicts, and assurance selection'
     // Change Triggers) was likewise MERGED by the architect as 0a506b1 via
     // PR #102 (2026-08-31, squash-merged at the approved head 493ae59) and
     // is recorded complete per §34.8/ADR-0007 by the WORK-066 post-merge
-    // finalization — 59/59 recorded work orders complete. NOTHING is in
-    // flight. Nothing is blocked
-    // (WORK-053..061 and WORK-067..070 are future-generation items not
-    // recorded in program-state; WORK-067 is the next ACR-002 sequence
-    // head — dependency-eligible on the complete WORK-064 + WORK-015 +
-    // WORK-040 + WORK-041 — and WORK-069 now that its WORK-066 edge is
-    // satisfied; both NOT activated).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    // finalization (PR #104) — 59/59 recorded work orders complete. The
+    // record is 59 complete + ONE in-flight item: WORK-067 (activated
+    // 2026-09-01 on feat/WORK-067-signal-regression-correlation — the
+    // ADR-0003 coordination partner of the former parallel WORK-066, now
+    // durable history; this branch is rebased onto the post-#104 mainline).
+    // Nothing is blocked
+    // (WORK-053..061 and WORK-068..070 are future-generation items not
+    // recorded in program-state; WORK-069's WORK-066 edge is satisfied).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-067']);
     expect(frontier.blocked).toEqual([]);
     expect(frontier.complete.length).toBeGreaterThanOrEqual(59);
   });

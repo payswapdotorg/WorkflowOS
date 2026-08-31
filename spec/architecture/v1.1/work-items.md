@@ -17,8 +17,8 @@ These are the planned v1.1 evolution Work Orders. They supplement the frozen v1.
 | WORK-061 | Self-Hosting Conformance and Continuous Governance | WORK-057, WORK-058, WORK-059, WORK-060, WORK-047, WORK-050, WORK-062, WORK-063 |
 | WORK-064 | Continuous Product Validation — the ValidationJourney/EffectPolicy domain model | WORK-048, WORK-050, WORK-063 (all complete — WORK-064 COMPLETE: merged `c351451` via PR #86, finalized §34.8/ADR-0007) |
 | WORK-065 | Synthetic Browser Validation Agent — the execution mechanism for ValidationJourneys | WORK-064 (complete — WORK-065 COMPLETE: merged `5de5e83` via PR #97, finalized §34.8/ADR-0007) |
-| WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065 (both complete — WORK-066 COMPLETE: merged `0a506b1` via PR #102, finalized §34.8/ADR-0007), (soft: WORK-058) |
-| WORK-067 | Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood | WORK-064, WORK-015, WORK-040, WORK-041, (soft: WORK-056) |
+| WORK-066 | Validation Scheduling & Change Triggers — PRE_MERGE/POST_RELEASE/CONTINUOUS, assurance-aware | WORK-064, WORK-065 (both complete — WORK-066 COMPLETE: merged `0a506b1` via PR #102, finalized §34.8/ADR-0007 by PR #104), (soft: WORK-058) |
+| WORK-067 | Engineering Signal & Regression Correlation — dedup, release-correlation, regression-likelihood | WORK-064, WORK-015, WORK-040, WORK-041 (all complete), (soft: WORK-056) — WORK-067 IN FLIGHT: activated 2026-09-01 on branch `feat/WORK-067-signal-regression-correlation` (from main `5f0b058`); the advisory correlation layer at `backend/src/engineering-signals/`; the ADR-0003 coordination partner of the now-COMPLETE WORK-066 (durable history; the branch is rebased onto the post-#104 mainline) |
 | WORK-068 | Feedback → Governed Work Items — convert signals through the EXISTING /work-items authority | WORK-067 |
 | WORK-069 | Progressive Release & Runtime Validation — canary/partial rollout with governed continue/halt/recover | WORK-064, WORK-066 (both complete — the hard WORK-066 edge is SATISFIED), WORK-019, WORK-026, WORK-020, (soft: WORK-059) |
 | WORK-070 | Continuous Architecture Fitness — closed-loop synthesis → architecture risk → ACR | WORK-067, WORK-069, WORK-051, (soft: WORK-055, WORK-060) |
@@ -99,18 +99,19 @@ All items remain architect-governed and require a Work Order file, declared surf
 > `0a506b1` on 2026-08-31T16:37:09Z (squash-merged at the approved head `493ae59` — the
 > branch was created from the post-#101 mainline `5f0b058` and never diverged; the merge
 > tree is identical — verified with an empty `git diff 493ae59..0a506b1`) and finalized
-> §34.8/ADR-0007 (the WORK-066 post-merge finalization) — the scheduling/trigger decision
+> §34.8/ADR-0007 (the WORK-066 post-merge finalization PR #104) — the scheduling/trigger decision
 > layer is on main at `backend/src/validation-scheduling/` (consuming the WORK-064 admission
 > authority: the closed trigger vocabulary, the fixed assurance-aware selection, the
 > deterministic identities + injected clock, the claim-store port with the in-memory
 > adapter — NO migration authorized; the durable binding point stays a documented future
-> ACR at the same port). WORK-067 is now the next ACR-002 sequence head — DEPENDENCY-ELIGIBLE
-> (its hard edges WORK-064 + WORK-015 + WORK-040 + WORK-041 all complete) and NOT activated,
-> NOT started; WORK-069's hard WORK-066 edge is SATISFIED (dependency-eligible, NOT
-> activated; recorded honestly in `dependency-state.json` → `futureGenerationEligibility`).
-> The four remaining Work Orders (WORK-067..070) are PLANNED
-> and NOT activated. Each carries parallel-execution metadata
-> (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
+> ACR at the same port). WORK-067 (Engineering Signal & Regression Correlation) is the ONE
+> work order IN FLIGHT: ACTIVATED by the architect on
+> 2026-09-01 on branch `feat/WORK-067-signal-regression-correlation` (grown from the
+> same `5f0b058` as the parallel WORK-066 — the ADR-0003 coordination with the
+> now-COMPLETE WORK-066 is durable history; REBASED onto the
+> post-#102 mainline and then onto the post-#104 finalization mainline): the ADVISORY
+> correlation layer at `backend/src/engineering-signals/`. The three remaining Work Orders (WORK-068..070)
+> are PLANNED and> (`parallelEligibility`, `parallelConflicts`, `protectedSurfaces`) — see
 > [`parallel-execution-metadata.md`](parallel-execution-metadata.md).
 >
 > **WORK-071..074 note (2026-08-30 customer dogfooding experiment's governed follow-up,
@@ -148,9 +149,8 @@ All items remain architect-governed and require a Work Order file, declared surf
 > was activated or in flight; NO runtime implementation rode it —
 > governance/persistence only.)
 >
-> **Live state (the 2026-08-31 WORK-066 post-merge finalization — updated from the
-> 2026-09-01 WORK-066 activation snapshot):**
-> WORK-071 is COMPLETE (merged `8604c8a` via PR #96), WORK-074 is COMPLETE
+> **Live state (the 2026-09-01 WORK-067 post-#104 reconciliation — updated from the
+> 2026-08-31 WORK-066 post-merge finalization snapshot):**> WORK-071 is COMPLETE (merged `8604c8a` via PR #96), WORK-074 is COMPLETE
 > (merged `cdedd0ca` via PR #99 — the runtime identity layer is on main: human
 > login, server-side sessions, scoped machine identity, the Workbench off the
 > demo key), WORK-065 is COMPLETE (merged `5de5e83` via PR #97, finalized
@@ -158,15 +158,21 @@ All items remain architect-governed and require a Work Order file, declared surf
 > mechanism for ValidationJourneys, is on main at `backend/src/browser-validation/`
 > with the journey-owned navigation-safety declaration), and WORK-066 is COMPLETE
 > (merged `0a506b1` via PR #102 on 2026-08-31T16:37:09Z, finalized §34.8/ADR-0007
-> by the WORK-066 post-merge finalization — the validation scheduler, the
+> by the WORK-066 post-merge finalization PR #104 — the validation scheduler, the
 > scheduling/trigger decision layer, is on main at `backend/src/validation-scheduling/`);
-> the program is 59/59 recorded work orders complete with NOTHING in flight.
+> the program record is 59/59 recorded work orders complete with the ONE in-flight
+> record: WORK-067
+> (Engineering Signal & Regression Correlation — the ADVISORY correlation layer
+> at `backend/src/engineering-signals/`) IN FLIGHT on
+> `feat/WORK-067-signal-regression-correlation` (activated 2026-09-01, from the
+> same main `5f0b058` — the ADR-0003 coordination with the now-COMPLETE WORK-066
+> is durable history; REBASED onto the post-#102 mainline and then onto the
+> post-#104 finalization mainline).
 > WORK-072 and WORK-073 remain PLANNED, NOT activated, NOT started. The
 > dogfooding gate's two enabler edges (WORK-074 + WORK-071) are SATISFIED — the
 > first full authenticated/local dogfooding experiment is PERMITTED and NOT
 > started (the architect's authorization governs the run; WORK-065's and
 > WORK-066's completions add the validation-execution and scheduling capabilities,
-> they do NOT claim the experiment was performed). WORK-063 remains
-> complete = the architecture/specification identity (spec-only, `8dac9c4`);
+> they do NOT claim the experiment was performed). WORK-063 remains> complete = the architecture/specification identity (spec-only, `8dac9c4`);
 > WORK-074 is complete = the runtime implementation — the two identities are NOT
 > collapsed.

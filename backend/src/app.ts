@@ -385,6 +385,23 @@ import {
   InMemoryScheduledTriggerClaimStore,
 } from './validation-scheduling/index.js';
 import type { ValidationScheduler } from './validation-scheduling/index.js';
+// WORK-067: the engineering signal & regression correlation layer — the
+// ADVISORY correlation domain over heterogeneous observations (the primary
+// validation-originated source consumed through the WORK-064 service's
+// public findRun boundary). It owns deduplication, release correlation
+// (RECORDED release identities only — never invented; no release authority
+// exists yet), and the advisory likely-regression assessment. It owns NO
+// verification/workflow/work-item/architecture authority, NO code mutation,
+// NO signal intake taxonomy (WORK-056's future scope — the normalization
+// seam here is the documented TEMPORARY compatibility boundary), and NO
+// scheduling/execution (WORK-066/WORK-065). The signal repository is the
+// in-memory port adapter (NO schema migration is authorized; the durable
+// binding point is documented at the port).
+import {
+  DefaultEngineeringSignalService,
+  InMemoryEngineeringSignalRepository,
+} from './engineering-signals/index.js';
+import type { EngineeringSignalService } from './engineering-signals/index.js';
 // WORK-047: the application-layer agent-intelligence domain (advisory/ranking
 // only — consumes the WORK-044 routing result + the WORK-045 role catalog +
 // read-only historical evidence from the EXISTING stores via their public
@@ -544,6 +561,12 @@ export interface AppDeps {
    *  consumers: the governed runtime drive surfaces (job handlers, the
    *  dogfooding experiment). */
   validationScheduler?: ValidationScheduler;
+  /** WORK-067: the engineering signal correlation service (the ADVISORY
+   *  correlation layer — dedup + release correlation + regression
+   *  assessment). Present when DB configured. Consumes the WORK-064 service
+   *  (the validation-originated source). Future consumers: WORK-068
+   *  (governed Work Item conversion), WORK-070 (architecture fitness). */
+  engineeringSignalService?: EngineeringSignalService;
   /** WORK-016: review service. Present when DB configured. */
   reviewService?: ReviewService;
   /** WORK-015: CI evidence ingestion service. Present when DB configured. */
@@ -900,6 +923,8 @@ export async function buildApp(
   let browserValidationAgent: BrowserValidationAgent | undefined;
   // WORK-066: the validation scheduler (the decision layer).
   let validationScheduler: ValidationScheduler | undefined;
+  // WORK-067: the engineering signal correlation service (the advisory layer).
+  let engineeringSignalService: EngineeringSignalService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
   let webhookProcessingService: WebhookProcessingService | undefined;
@@ -1181,6 +1206,21 @@ export async function buildApp(
     validationScheduler = new DefaultValidationScheduler({
       continuousValidationService: continuousValidationService!,
       claimStore: new InMemoryScheduledTriggerClaimStore(),
+      logger,
+      now: () => new Date(),
+    });
+    // WORK-067: the engineering signal correlation service — the ADVISORY
+    // correlation layer composed over the WORK-064 authority (the
+    // validation-originated source, consumed through its public findRun
+    // boundary) and the in-memory signal-repository port (the documented
+    // non-durable boundary — NO migration is authorized by WORK-067; the
+    // durable binding point is the future ACR at the same port). The clock
+    // is INJECTED (deterministic decisions; no implicit global time in the
+    // domain path). Signals stay ADVISORY: no verification, workflow,
+    // work-item, or architecture mutation anywhere in the domain.
+    engineeringSignalService = new DefaultEngineeringSignalService({
+      signalRepository: new InMemoryEngineeringSignalRepository(),
+      continuousValidationService: continuousValidationService!,
       logger,
       now: () => new Date(),
     });
@@ -2296,6 +2336,7 @@ export async function buildApp(
       continuousValidationService,
       browserValidationAgent,
       validationScheduler,
+      engineeringSignalService,
       reviewService,
       ciEvidenceIngestionService,
       webhookProcessingService,

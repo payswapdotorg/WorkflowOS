@@ -258,12 +258,15 @@ PERMITTED and NOT started (the architect's authorization governs the run;
 item 4 is now ALSO SATISFIED — WORK-065 is COMPLETE and the
 browser-validation CAPABILITY exists — but that does NOT start the run: the
 scheduling/feedback/release Work Orders that drive continuous validation
-(WORK-067..070 remain PLANNED, NOT activated; WORK-066, the scheduling
+(WORK-068..070 remain PLANNED, NOT activated; WORK-066, the scheduling
 decision layer, is COMPLETE — merged `0a506b1` via PR #102 on
 2026-08-31T16:37:09Z and finalized §34.8/ADR-0007 by the WORK-066
-post-merge finalization, the decision layer is on main at
-`backend/src/validation-scheduling/` — the capability exists but still
-does NOT start the run: the experiment itself
+post-merge finalization PR #104, the decision layer is on main at
+`backend/src/validation-scheduling/` — and WORK-067, the signal correlation
+layer, is IN FLIGHT on the rebased branch
+`feat/WORK-067-signal-regression-correlation` (the ADR-0003 coordination
+with the now-complete WORK-066 is durable history) — the capabilities come
+closer but still do NOT start the run: the experiment itself
 requires the architect's authorization).
 
 The repository records that this is the canonical acceptance journey

@@ -91,9 +91,15 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // 5f0b058), MERGED by the architect as 0a506b1 via PR #102
     // (2026-08-31T16:37:09Z, squash-merged at the approved head 493ae59 —
     // the merge tree identical) and recorded complete per §34.8/ADR-0007
-    // by the WORK-066 post-merge finalization: 59/59 complete, NOTHING in
-    // flight.
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    // by the WORK-066 post-merge finalization (PR #104): 59/59 complete.
+    // WORK-067 (Engineering Signal & Regression Correlation — the ADVISORY
+    // correlation layer) was ACTIVATED 2026-09-01 on branch
+    // feat/WORK-067-signal-regression-correlation (grown from the SAME
+    // main 5f0b058 as the parallel WORK-066; rebased onto the post-#102
+    // mainline and then onto the post-#104 finalization mainline — the
+    // ADR-0003 coordination with the now-COMPLETE WORK-066 is durable
+    // history): the ONE live in-flight record (59 complete + WORK-067).
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-067']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -148,13 +154,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // §34.8/ADR-0007 by the WORK-065 post-merge finalization. WORK-066 was
     // MERGED by the architect as 0a506b1 via PR #102 (2026-08-31,
     // squash-merged at the approved head 493ae59) and recorded complete per
-    // §34.8/ADR-0007 by the WORK-066 post-merge finalization — NOTHING is in
-    // flight; WORK-053..061 and WORK-067..070 are future-generation items not
-    // recorded in program-state (WORK-067 is the next ACR-002 sequence head —
-    // dependency-eligible on the complete WORK-064 + WORK-015 + WORK-040 +
-    // WORK-041, and WORK-069 now that its WORK-066 edge is satisfied —
-    // NOT activated, the architect's authorization is required).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    // §34.8/ADR-0007 by the WORK-066 post-merge finalization (PR #104).
+    // WORK-067 (Engineering Signal & Regression Correlation) is ACTIVATED
+    // and IN FLIGHT on feat/WORK-067-signal-regression-correlation (this
+    // branch's own record — the next ACR-002 sequence head activated on the
+    // complete WORK-064 + WORK-015 + WORK-040 + WORK-041, the WORK-056 edge
+    // soft; WORK-068..070 remain future-generation items not recorded in
+    // program-state — the architect's authorization is required).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-067']);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
@@ -477,11 +484,17 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // discrimination rebuilds the pre-merge state).
       // WORK-066 (complete-and-merged in the live record since the WORK-066
       // post-merge finalization — merged 0a506b1 via PR #102 — but depending
-      // on WORK-064 + WORK-065) is likewise stripped: the fixture
+      // on WORK-064 + WORK-065) and WORK-067 (IN FLIGHT in the live record,
+      // depending on the complete WORK-064/015/040/041) are likewise
+      // stripped: the fixture
       // reconstructs WORK-064 as in_flight, and a record over
       // the reconstructed dependency would require fixture coordination
       // bookkeeping irrelevant to this discrimination.
-      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066');
+      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066' && w.id !== 'WORK-067');
+      // …and the WORK-067 activation handoff is stripped with it (the
+      // fixture reconstructs the pre-activation baseline; a handoff
+      // referencing a stripped work order would be invalid fixture state).
+      program.resumption.activeHandoffs = [];
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
       w050.status = 'in_flight';
       delete (w050 as { mergedAs?: unknown }).mergedAs;

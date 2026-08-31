@@ -58,6 +58,12 @@ export default defineConfig({
       // two-actor concurrency proofs live under tests/integration/
       // validation-scheduling/ and gate on WORKFLOWOS_DATABASE_URL).
       'tests/validation-scheduling/**/*.test.ts',
+      // WORK-067: the engineering signal correlation suite (the advisory
+      // correlation/dedup/regression layer — pure domain + composition tests;
+      // the real-PG two-actor concurrency proofs live under
+      // tests/integration/engineering-signals/ and gate on
+      // WORKFLOWOS_DATABASE_URL).
+      'tests/engineering-signals/**/*.test.ts',
     ],
     testTimeout: 15000,
     hookTimeout: 15000,

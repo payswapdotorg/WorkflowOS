@@ -20151,3 +20151,409 @@ describe('WORK-066 invariants — Validation Scheduling & Change Triggers (the d
     }
   });
 });
+// ============================================================================
+// WORK-067 — Engineering Signal & Regression Correlation (the advisory
+// correlation layer — the 20 static architecture invariants)
+// ============================================================================
+
+describe('WORK-067 invariants — Engineering Signal & Regression Correlation (the correlation layer, not an authority)', () => {
+  const ES_DIR = join(BACKEND_ROOT, 'src', 'engineering-signals');
+  const ES_INTERNAL = join(ES_DIR, 'internal');
+  const ES_TYPES = join(ES_DIR, 'types.ts');
+  const ES_BARREL = join(ES_DIR, 'index.ts');
+  const ES_IDENTITY = join(ES_INTERNAL, 'signal-identity.ts');
+  const ES_NORMALIZATION = join(ES_INTERNAL, 'observation-normalization.ts');
+  const ES_REPOSITORY = join(ES_INTERNAL, 'in-memory-signal-repository.ts');
+  const ES_CORRELATION = join(ES_INTERNAL, 'release-correlation.ts');
+  const ES_REGRESSION = join(ES_INTERNAL, 'regression-assessment.ts');
+  const ES_ADAPTER = join(ES_INTERNAL, 'validation-source-adapter.ts');
+  const ES_SERVICE = join(ES_INTERNAL, 'engineering-signal-service.ts');
+  const ES_INTERNAL_INDEX = join(ES_INTERNAL, 'index.ts');
+  const MIGRATIONS_DIR = join(BACKEND_ROOT, 'src', 'platform', 'postgres', 'migrations');
+  const APP_TS = join(BACKEND_ROOT, 'src', 'app.ts');
+
+  function stripCodeComments(src: string): string {
+    return src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  function readEsFiles(): { path: string; src: string }[] {
+    if (!existsSync(ES_DIR)) return [];
+    const out: { path: string; src: string }[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          out.push({ path: full, src: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(ES_DIR);
+    return out;
+  }
+
+  // --- (a) the domain exists + is NOT a frozen module -----------------------
+
+  it('the engineering-signals domain exists at src/engineering-signals/ (index.ts + types.ts + internal/) and is NOT an 18th frozen module', () => {
+    expect(existsSync(ES_DIR), 'src/engineering-signals/ must exist').toBe(true);
+    expect(existsSync(ES_BARREL), 'src/engineering-signals/index.ts must exist').toBe(true);
+    expect(existsSync(ES_TYPES), 'src/engineering-signals/types.ts must exist').toBe(true);
+    expect(existsSync(ES_INTERNAL), 'src/engineering-signals/internal/ must exist').toBe(true);
+    for (const file of [ES_IDENTITY, ES_NORMALIZATION, ES_REPOSITORY, ES_CORRELATION, ES_REGRESSION, ES_ADAPTER, ES_SERVICE, ES_INTERNAL_INDEX]) {
+      expect(existsSync(file), `${relative(BACKEND_ROOT, file)} must exist`).toBe(true);
+    }
+    expect(existsSync(join(MODULES_DIR, 'engineering-signals'))).toBe(false);
+    expect(FROZEN_MODULE_NAMES, 'engineering-signals must not be a frozen module').not.toContain('/engineering-signals');
+    expect(FROZEN_MODULE_NAMES, 'the frozen module set is unchanged (17)').toHaveLength(17);
+  });
+
+  // --- (b) the domain imports ONLY the allowed surfaces ----------------------
+
+  it('the domain imports only allowed surfaces: @platform/*, the WORK-064 continuous-validation barrel/types, node:* — never a module internal/, never workflows/verification/work-items/architecture/github, never the browser or scheduling domains', () => {
+    const files = readEsFiles();
+    expect(files.length).toBeGreaterThan(0);
+    for (const { path, src } of files) {
+      const stripped = stripCodeComments(src);
+      const importLines = stripped.match(/from\s+'[^']+'/g) ?? [];
+      for (const importLine of importLines) {
+        const target = importLine.replace(/^from\s+'/, '').replace(/'$/, '');
+        if (target.startsWith('.')) continue; // intra-domain relative imports
+        expect(
+          target.startsWith('@platform/') ||
+            target.startsWith('../../continuous-validation/index.js') ||
+            target.startsWith('../../continuous-validation/types.js') ||
+            target.startsWith('node:'),
+          `${relative(BACKEND_ROOT, path)} imports forbidden surface '${target}' (allowed: @platform/*, the WORK-064 continuous-validation barrel/types, node:*)`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  // --- invariant 1: only WORK-067 owns signal correlation --------------------
+
+  it('INVARIANT 1 — only WORK-067 owns signal correlation: the correlation/assessment engine lives ONLY in src/engineering-signals/ (no other src surface derives release correlations or regression likelihoods)', () => {
+    const barrel = readFileSync(ES_BARREL, 'utf8');
+    expect(barrel).toMatch(/correlateSignalToReleases/);
+    expect(barrel).toMatch(/assessRegression/);
+    expect(barrel).toMatch(/DefaultEngineeringSignalService/);
+    // No other src/ directory declares a signal-correlation surface:
+    const correlationSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (full === ES_DIR) continue; // the owner
+          walk(full);
+        } else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/class\s+\w*EngineeringSignalService\b|interface\s+EngineeringSignalService\b|correlateSignalToReleases|assessRegression|deriveSignalIdentity/.test(src)) {
+            correlationSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(correlationSurfaces, `signal-correlation surfaces must exist ONLY in engineering-signals (found elsewhere: ${correlationSurfaces.join(', ')})`).toEqual([]);
+  });
+
+  // --- invariant 2: NOT the signal intake permanently (the TEMPORARY seam) ----
+
+  it('INVARIANT 2 — the intake seam is TEMPORARY: the normalization boundary is documented as the WORK-056 compatibility seam (delegated when WORK-056 lands), and NO signal TAXONOMY authority exists here', () => {
+    const types = readFileSync(ES_TYPES, 'utf8');
+    // The seam declaration (the boundary contract):
+    expect(types).toMatch(/TEMPORARY compatibility seam/);
+    expect(types).toMatch(/WORK-056/);
+    // NOT a taxonomy: the domain declares no signal taxonomy/intake authority surface:
+    const taxonomyDeclarations = stripCodeComments(types).match(/SignalTaxonomy|SignalIntakeAuthority|FeedbackIntakeService/g) ?? [];
+    expect(taxonomyDeclarations).toEqual([]);
+  });
+
+  // --- invariant 3: no second verification authority ---------------------------
+
+  it('INVARIANT 3 — no second verification authority: no /verification import, no evidence construction, no verdict semantics in the domain', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the verification authority`).not.toMatch(/@modules\/verification/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not attach or create evidence`).not.toMatch(/attachEvidence|attachCiEvidence|createEvidenceRow|ValidationEvidenceReference/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not construct verification runs`).not.toMatch(/createRun\(|VerificationRun\b/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not declare evidence verdicts`).not.toMatch(/EvidenceResult|'pass'\s*\|\s*'fail'/);
+    }
+  });
+
+  // --- invariant 4: no second workflow authority --------------------------------
+
+  it('INVARIANT 4 — no second workflow authority: no /workflows or /github import, no Work Item transitions, no PR creation/merge, no workflow semantics', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the workflow authority`).not.toMatch(/@modules\/workflows/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the github authority`).not.toMatch(/@modules\/github/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not transition workflow state`).not.toMatch(/transitionWorkItem|createWorkItem|createPullRequest|mergePullRequest|approveReview/);
+    }
+  });
+
+  // --- invariant 5: the domain cannot mutate code -------------------------------
+
+  it('INVARIANT 5 — no code mutation: no fs writes, no child_process/exec, no dynamic code evaluation', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not write the filesystem`).not.toMatch(/writeFile|appendFile|rmSync|unlink/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not spawn processes`).not.toMatch(/child_process|execSync|spawn/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not evaluate dynamic code`).not.toMatch(/new Function|eval\(/);
+    }
+  });
+
+  // --- invariant 6: no governed Work Item creation ------------------------------
+
+  it('INVARIANT 6 — no Work Item creation: no /work-items import, no work-item proposal/construction (WORK-068 owns the governed conversion)', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the work-items authority`).not.toMatch(/@modules\/work-items/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not create work items`).not.toMatch(/createWorkItem|WorkItemProposal|workItemRepository/);
+    }
+  });
+
+  // --- invariant 7: no validation scheduling -------------------------------------
+
+  it('INVARIANT 7 — no validation scheduling: no validation-scheduling import, no scheduling vocabulary, no cadence/trigger semantics (WORK-066 owns scheduling)', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the validation-scheduling domain`).not.toMatch(/validation-scheduling/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not own scheduling semantics`).not.toMatch(/PROFILE_MODE_POLICY_ALLOWANCE|scheduleValidationTrigger|deriveSchedulingIdentity|ScheduledTriggerClaimStore/);
+    }
+  });
+
+  // --- invariant 8: no browser execution ------------------------------------------
+
+  it('INVARIANT 8 — no browser execution: NO import from the browser domain, no Playwright, no BrowserDriver, no navigation-safety classification (WORK-065 owns execution)', () => {
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import the browser-validation domain`).not.toMatch(/browser-validation/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not import Playwright`).not.toMatch(/playwright/i);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not touch a BrowserDriver`).not.toMatch(/BrowserDriver|browser-tool-executor/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not classify navigation safety`).not.toMatch(/readonlySafeNavigationTargets|classifyNavigationTarget/);
+    }
+  });
+
+  // --- invariant 9: Engineering Signals preserve provenance -----------------------
+
+  it('INVARIANT 9 — provenance is structural: every occurrence CARRIES the raw observation reference + the raw payload (the type model requires them; the normalization rejects a missing payload)', () => {
+    const types = readFileSync(ES_TYPES, 'utf8');
+    // The occurrence record structurally preserves the reference + payload:
+    expect(types).toMatch(/readonly observationRef: SignalObservationReference;/);
+    expect(types).toMatch(/readonly raw: unknown;/);
+    expect(types).toMatch(/readonly convergenceReason: string;/);
+    // The normalization REJECTS a missing payload (no free-floating signal):
+    const normalization = readFileSync(ES_NORMALIZATION, 'utf8');
+    expect(normalization).toMatch(/SIGNAL_RAW_PAYLOAD_REQUIRED/);
+    expect(normalization).toMatch(/free-floating signal/);
+    // The reference validation (the provenance anchor):
+    expect(normalization).toMatch(/SIGNAL_OBSERVATION_REF_INVALID/);
+  });
+
+  // --- invariant 10: the dedup identity is deterministic ---------------------------
+
+  it('INVARIANT 10 — the dedup identity is deterministic: sha256 over canonical fields; no Math.random, no crypto.randomUUID, no Date.now in the domain decision path', () => {
+    const identity = stripCodeComments(readFileSync(ES_IDENTITY, 'utf8'));
+    expect(identity).toMatch(/createHash\('sha256'\)/);
+    // The deterministic ordering helper:
+    expect(identity).toMatch(/compareOccurrences/);
+    // No randomness, no implicit clock ANYWHERE in the domain:
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not use randomness`).not.toMatch(/Math\.random|randomUUID/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not read the wall clock (the clock is injected)`).not.toMatch(/Date\.now\(\)|new Date\(\)/);
+    }
+  });
+
+  // --- invariant 11: tenant/project participate in the identity --------------------
+
+  it('INVARIANT 11 — tenant/project/environment identity participates in deduplication: the identity derivation requires + hashes all scope dimensions', () => {
+    const identity = readFileSync(ES_IDENTITY, 'utf8');
+    expect(identity).toMatch(/SIGNAL_TENANT_REQUIRED/);
+    expect(identity).toMatch(/SIGNAL_PROJECT_REQUIRED/);
+    expect(identity).toMatch(/SIGNAL_ENVIRONMENT_REQUIRED/);
+    expect(identity).toMatch(/tenantId,\s*\n\s*projectId,\s*\n\s*environmentId,\s*\n\s*logicalFailureKey,/);
+  });
+
+  // --- invariant 12: release correlation consumes the RECORDED boundary ------------
+
+  it('INVARIANT 12 — release correlation consumes RECORDED release identities: contexts arrive through the explicit input (recordedVia); NO release identity is derived from headSha/previewUrl/branch/timestamps', () => {
+    const types = readFileSync(ES_TYPES, 'utf8');
+    expect(types).toMatch(/recordedVia: 'validation-run-release-ref' \| 'caller-declared';/);
+    const correlation = stripCodeComments(readFileSync(ES_CORRELATION, 'utf8'));
+    // The context validation REQUIRES the recorded reference + boundary:
+    expect(correlation).toMatch(/SIGNAL_RELEASE_REF_REQUIRED/);
+    expect(correlation).toMatch(/SIGNAL_RELEASED_AT_INVALID/);
+    expect(correlation).toMatch(/never invents a release identity/);
+    // NO inference from commit/URL/branch anywhere in the domain:
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not infer release identity from deployment/CI fields`).not.toMatch(/headSha.*release|previewUrl.*release|branch.*release.*infer/i);
+    }
+  });
+
+  // --- invariant 13: missing release authority fails closed --------------------------
+
+  it('INVARIANT 13 — missing release authority fails closed: empty contexts → the explicit unavailable assessment (NULL likelyRegression — never a false healthy)', () => {
+    const regression = readFileSync(ES_REGRESSION, 'utf8');
+    expect(regression).toMatch(/no release context was supplied/);
+    expect(regression).toMatch(/no release authority exists yet/);
+    // The unavailable assessment is NULL (the type model pins it):
+    const types = readFileSync(ES_TYPES, 'utf8');
+    expect(types).toMatch(/readonly likelyRegression: boolean \| null;/);
+    // …and the unavailable path never fabricates a false:
+    expect(stripCodeComments(readFileSync(ES_REGRESSION, 'utf8'))).toMatch(/likelyRegression: null/);
+  });
+
+  // --- invariant 14: regression identification is advisory ---------------------------
+
+  it('INVARIANT 14 — regression identification is ADVISORY: the assessment reason carries the explicit advisory disclaimer; the domain exposes no verdict/mutation surface', () => {
+    const regression = readFileSync(ES_REGRESSION, 'utf8');
+    expect(regression).toMatch(/not a verification verdict, not a Work Item, not a workflow transition/);
+    expect(regression).toMatch(/ADVISORY/);
+    // The service surface is ingest/correlate/read ONLY (no mutation verbs):
+    const service = stripCodeComments(readFileSync(ES_SERVICE, 'utf8'));
+    for (const verb of ['transition', 'createWorkItem', 'approve', 'merge', 'attachEvidence', 'writeFile']) {
+      expect(service, `the service must not expose a '${verb}' mutation surface`).not.toMatch(new RegExp(`\\b${verb}\\w*\\s*\\(`));
+    }
+  });
+
+  // --- invariant 15: no validation failure becomes silently healthy -------------------
+
+  it('INVARIANT 15 — no silent healthy: the WORK-064 adapter maps EVERY failure outcome to observations; healthy maps to NONE (the honest no-signal case); the unavailable assessment is NULL, not false', () => {
+    const adapter = readFileSync(ES_ADAPTER, 'utf8');
+    // The documented severity mapping covers the three failure outcome kinds:
+    expect(adapter).toMatch(/validation_failure: 'high'/);
+    expect(adapter).toMatch(/effect_policy_violation: 'critical'/);
+    expect(adapter).toMatch(/environment_error: 'medium'/);
+    // The healthy path produces NO observations (documented honest case):
+    expect(adapter).toMatch(/healthy run records NO failure signal/);
+    // The typed outcome-kind validation (fail closed on foreign kinds):
+    expect(adapter).toMatch(/SIGNAL_SOURCE_UNKNOWN/);
+  });
+
+  // --- invariant 16: no second signal intake authority --------------------------------
+
+  it('INVARIANT 16 — no second signal intake authority: no other src surface declares a raw-observation intake or EngineeringSignal model (WORK-056 owns the future taxonomy; the seam is engineering-signals-local)', () => {
+    const intakeSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (full === ES_DIR) continue; // the seam owner
+          walk(full);
+        } else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/RawObservationInput|EngineeringSignal\b|ingestObservation/.test(src)) {
+            intakeSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(intakeSurfaces, `signal-intake surfaces must exist ONLY in engineering-signals (found elsewhere: ${intakeSurfaces.join(', ')})`).toEqual([]);
+  });
+
+  // --- invariant 17: no second evidence/verification authority (src-wide) ---------------
+
+  it('INVARIANT 17 — no second evidence/verification authority appears anywhere in src/ (the frozen /verification module remains the ONE evidence authority)', () => {
+    // The evidence vocabulary lives ONLY in /verification (+ its consumed WORK-064 mapping):
+    const evidenceSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/mapValidationOutcomeToVerification|outcomeToEvidenceResult/.test(src)) {
+            evidenceSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    // Only the WORK-064 evidence mapping (the existing consumed adapter + its service composition + the barrel re-export):
+    expect(evidenceSurfaces.sort()).toEqual([
+      'continuous-validation/index.ts',
+      'continuous-validation/internal/continuous-validation-service.ts',
+      'continuous-validation/internal/evidence-mapping.ts',
+    ]);
+  });
+
+  // --- invariant 18: no new browser automation framework --------------------------------
+
+  it('INVARIANT 18 — no new browser automation framework: Playwright appears ONLY at the existing WORK-065 driver boundary', () => {
+    const playwrightSurfaces: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full);
+        else if (entry.endsWith('.ts')) {
+          const src = stripCodeComments(readFileSync(full, 'utf8'));
+          if (/from\s+'playwright|require\('playwright|import\('playwright/.test(src)) {
+            playwrightSurfaces.push(relative(SRC_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(playwrightSurfaces.sort()).toEqual(['browser-validation/internal/playwright-browser-driver.ts']);
+  });
+
+  // --- invariant 19: no unauthorized migration ---------------------------------------------
+
+  it('INVARIANT 19 — NO unauthorized migration: the migration set is unchanged (the WORK-067 parallel-execution metadata declares migrations: [] — the in-memory port precedent)', () => {
+    const migrations = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql'));
+    expect(migrations).toHaveLength(59);
+    // …and the domain declares no migration of its own:
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not declare a schema migration`).not.toMatch(/CREATE TABLE|ALTER TABLE|0060_|0061_/);
+    }
+  });
+
+  // --- invariant 20: the WORK-064/065/066 boundaries are CONSUMED, not duplicated ----------
+
+  it('INVARIANT 20 — the WORK-064 boundary is consumed (the adapter reads the public ValidationRun record through the barrel) and never re-implemented: no admission, no finalization, no health evaluation, no effect-policy matrix here', () => {
+    const adapter = readFileSync(ES_ADAPTER, 'utf8');
+    expect(adapter).toMatch(/from '\.\.\/\.\.\/continuous-validation\/types\.js'/);
+    // The service consumes the authority's public method when the
+    // dependency is bound (findRun — the authority's public read boundary):
+    const service = readFileSync(ES_SERVICE, 'utf8');
+    expect(service).toMatch(/findRun\(input\.runId\)/);
+    expect(service).toMatch(/from '\.\.\/\.\.\/continuous-validation\/index\.js'/);
+    // …and the domain never re-implements the WORK-064 stack:
+    for (const { path, src } of readEsFiles()) {
+      const stripped = stripCodeComments(src);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement the effect-policy matrix`).not.toMatch(/admitEffectPolicy/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement identity binding`).not.toMatch(/bindTestIdentity/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement run admission`).not.toMatch(/function\s+admitValidationRun/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement finalization`).not.toMatch(/function\s+finalizeValidationRun/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-implement outcome evaluation`).not.toMatch(/function\s+evaluateObservation/);
+      expect(stripped, `${relative(BACKEND_ROOT, path)} must not re-declare the validation vocabularies`).not.toMatch(/export const VALIDATION_TRIGGERS|export const VALIDATION_MODES|export const VALIDATION_OUTCOME_KINDS/);
+    }
+  });
+
+  // --- composition pin: buildApp wires the service on AppDeps ------------------------------
+
+  it('the app.ts composition pins: the service + the in-memory repository + the WORK-064 authority + the injected clock', () => {
+    const appTs = readFileSync(APP_TS, 'utf8');
+    expect(appTs).toMatch(/engineeringSignalService = new DefaultEngineeringSignalService\(/);
+    expect(appTs).toMatch(/signalRepository: new InMemoryEngineeringSignalRepository\(\)/);
+    expect(appTs).toMatch(/continuousValidationService: continuousValidationService!/);
+    expect(appTs).toMatch(/now: \(\) => new Date\(\)/);
+    expect(appTs).toMatch(/engineeringSignalService\?: EngineeringSignalService;/);
+    // …and NO autonomous runtime drive: the domain exposes no routes/job
+    // handlers/queue consumers of its own (the future governed consumers
+    // wire the drive surfaces):
+    const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
+    for (const entry of readdirSync(routesDir)) {
+      expect(entry, 'no engineering-signals route surface exists').not.toMatch(/signal/i);
+    }
+  });
+});

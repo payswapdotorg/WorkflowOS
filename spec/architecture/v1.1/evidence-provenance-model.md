@@ -178,3 +178,101 @@ WORK-067 when they are activated. Until then:
 
 This task does NOT implement the runtime evidence mapping. It persists
 the model.
+
+## 9. The implemented Engineering Signal correlation model (WORK-067 — activated 2026-09-01)
+
+WORK-067 (Engineering Signal & Regression Correlation) was activated by
+the architect on 2026-09-01 and implemented at
+`backend/src/engineering-signals/` (the application-layer pattern — NOT an
+18th frozen module; branch `feat/WORK-067-signal-regression-correlation`,
+awaiting architect review/merge). This section persists the implemented
+model — the runtime form of §5–§7's design-time contract.
+
+### The signal record (the provenance-preserving derived artifact)
+
+An `EngineeringSignal` is the DERIVED artifact class §4 anticipated. Its
+identity is a deterministic `sha256` over **tenant + project +
+environment + the logical failure classification** — the same logical
+failure observed multiple times (across runs, across sources) converges
+on ONE identity; a different tenant, project, environment, or failure
+NEVER collapses onto it. The signal carries an append-only occurrence
+history: every occurrence preserves its **raw observation reference (the
+opaque authority locator) AND the raw payload verbatim** plus the
+convergence reasoning. A signal without provenance is impossible (the
+normalization rejects missing references/payloads — no free-floating
+signals).
+
+The chain §3 anticipated is realized:
+
+```text
+formal verification evidence (in /verification)
+    ↑ mapped from (WORK-064's evidence mapping — unchanged)
+validation result (a ValidationRun's typed outcome)
+    ↑ consumed by (WORK-067's validation-source adapter: findRun + the
+      public record type — every failure becomes an occurrence)
+Engineering Signal occurrence (preserving run → journey → step →
+    environment → observedAt + the raw failure record)
+    ↑ converged by (the deterministic signal identity)
+Engineering Signal (deduplicated, release-correlated, regression-assessed)
+    ↑ ADVISORY — consumed by the FUTURE governed converters
+governed Work Item (WORK-068, through the EXISTING /work-items authority)
+```
+
+### The intake seam (TEMPORARY — the WORK-056 boundary)
+
+Until WORK-056 (Engineering Signals and Feedback Intake) lands, the
+normalization boundary is `RawObservationInput` — the documented
+TEMPORARY compatibility seam: the caller supplies the scope
+(tenant/project/environment), the logical failure classification, the
+severity (the repository's existing critical/high/medium/low vocabulary —
+the WORK-041 maintenance precedent), the RECORDED observation time, the
+raw observation reference, and the raw payload. When WORK-056 lands, the
+taxonomy/intake is DELEGATED to it and this seam retires into a consumed
+boundary. The closed source vocabulary covers the Work Order's
+heterogeneous kinds (validation, ci, runtime, telemetry, security,
+user-feedback, deployment); references are PRESERVED, never
+dereferenced.
+
+### Release correlation (RECORDED identities only — the architectural gap)
+
+Repository truth (re-verified at implementation): **NO release authority
+exists** (no `wfos_releases`, no release service; the v1.1 roadmap binds
+the release authority to WORK-069's future territory). The ONLY recorded
+release references today are the WORK-064 POST_RELEASE runs' `releaseRef`
+— consumed as the occurrence-level causal binding. WORK-067 therefore
+correlates signals ONLY to caller-supplied `ReleaseCorrelationContext`s
+(RECORDED reference + boundary time + declared provenance
+`validation-run-release-ref | caller-declared`) — a release identity is
+NEVER invented from a timestamp, a commit, a deployment URL, or a branch
+name. The causal discipline: a signal causally bound to release A is
+REJECTED for release B (`causal-binding-mismatch` — the wrong-release
+discrimination); unbound signals correlate only via the explicitly
+recorded caller-declared basis WITH post-release-window time overlap.
+When NO release context exists, release correlation is explicitly
+`unavailable` (fail-closed) — the documented architectural gap until the
+release authority lands.
+
+### The regression assessment (ADVISORY)
+
+Per correlated release, the assessment splits the occurrence timeline at
+the boundary (before = `observedAt < releasedAt`; after = `>=` — the
+release is live from its boundary): absent-before + present-after →
+`likely_regression`; present-before-and-after → NOT a regression merely
+because a release happened; severity escalation (the LAST pre-release and
+FIRST post-release occurrences, deterministic ordering, the repository's
+severity ordering) → regression-relevant — a DECREASE is never promoted.
+`likelyRegression` is `true`/`false` when assessed and **`null` when
+unavailable** — a failure signal NEVER becomes silently healthy (the §5
+invariant carried forward). The assessment is ADVISORY data: it is not a
+verification verdict, not a Work Item, not a workflow transition — the
+governed conversion is WORK-068's (through the EXISTING `/work-items`
+authority).
+
+### Persistence (the port boundary)
+
+The `EngineeringSignalRepository` PORT binds the in-memory adapter (this
+Work Order authorizes NO schema migration — the WORK-064/066 port
+precedent). The durable binding point is the documented future ACR at the
+same port; the PostgreSQL keyed-uniqueness contract (the DATABASE
+constraint decides the winner under true two-actor concurrency) is proven
+by the real-PG two-actor integration suite against a test-schema table.

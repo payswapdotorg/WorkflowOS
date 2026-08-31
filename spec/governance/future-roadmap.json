@@ -12,7 +12,6 @@
     "WORK-059",
     "WORK-060",
     "WORK-061",
-    "WORK-067",
     "WORK-068",
     "WORK-069",
     "WORK-070",
@@ -65,9 +64,7 @@
     },
     {
       "wave": 8,
-      "items": [
-        "WORK-067"
-      ]
+      "items": []
     },
     {
       "wave": 9,
@@ -98,7 +95,7 @@
       ]
     }
   ],
-  "rule": "Parallel waves are planning hints only; actual execution eligibility is derived from authoritative Work Order status, dependencies, protected-surface coordination, and current main revision. No Work Order starts without the architect's authorization (activation is recorded in program-state.json). WORK-053 is dependency-eligible and remains PLANNED \u2014 the architect's 2026-08-29 verdict says 'Do not activate WORK-053 yet'. WORK-066 (Validation Scheduling & Change Triggers) was ACTIVATED by the architect on 2026-09-01, MERGED as 0a506b1 via PR #102 on 2026-08-31T16:37:09Z (squash-merged at the approved head 493ae59, the merge tree identical), and FINALIZED \u00a734.8/ADR-0007 by the WORK-066 post-merge finalization \u2014 complete, removed from the future-generation sequence and wave 9; WORK-067 is now the next ACR-002 head (dependency-eligible, NOT activated); WORK-069's hard WORK-066 edge is satisfied (dependency-eligible, NOT activated).",
+  "rule": "Parallel waves are planning hints only; actual execution eligibility is derived from authoritative Work Order status, dependencies, protected-surface coordination, and current main revision. No Work Order starts without the architect's authorization (activation is recorded in program-state.json). WORK-053 is dependency-eligible and remains PLANNED — the architect's 2026-08-29 verdict says 'Do not activate WORK-053 yet'. WORK-066 (Validation Scheduling & Change Triggers) was ACTIVATED by the architect on 2026-09-01, MERGED as 0a506b1 via PR #102 on 2026-08-31T16:37:09Z (squash-merged at the approved head 493ae59, the merge tree identical), and FINALIZED §34.8/ADR-0007 by the WORK-066 post-merge finalization (PR #104) — complete, removed from the future-generation sequence and wave 9. WORK-067 (Engineering Signal & Regression Correlation) was ACTIVATED by the architect on 2026-09-01 and is the ONE item IN FLIGHT on feat/WORK-067-signal-regression-correlation (PR #103, grown from the SAME main 5f0b058 as the parallel WORK-066 — removed from the future-generation sequence and wave 8; its hard edges WORK-064/015/040/041 are complete and its WORK-056 edge is soft; the ADR-0003 coordination with the former parallel WORK-066 is durable history — MID-DELIVERY the architect MERGED WORK-066 (PR #102 to 0a506b1) and the branch was rebased onto the post-#102 mainline; the WORK-066 finalization (PR #104 to 69f2edf) then landed and the branch was rebased AGAIN onto the post-#104 mainline: the shared app.ts/static-architecture/vitest/governance surfaces carry WORK-067's additions beside the merged WORK-066 ones). WORK-069's hard WORK-066 edge is satisfied (dependency-eligible, NOT activated). WORK-068 (Feedback to Governed Work Items) becomes eligible when WORK-067 lands.",
   "retiredUploadWave": {
     "note": "The architect's direct-to-main upload wave (2026-08-28T18:24..18:40Z) declared a parallel 'v2.0' roadmap that re-used the WORK-053..059 identifiers with different scopes. By the architect's 2026-08-29 PR #74 review verdict, the architect-issued GitHub issue track (this sequence) is the ONE canonical track; the upload-wave artifacts are RETIRED under distinct UW-053..UW-059 identities in spec/archive/upload-wave-2026-08-28/ (explicitly non-authoritative historical material; machine-readable retirement record: spec/archive/upload-wave-2026-08-28/index.json).",
     "retiredIdentities": [
