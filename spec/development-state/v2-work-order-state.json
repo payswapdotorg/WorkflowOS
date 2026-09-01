@@ -11,7 +11,7 @@
   "waves": [
     {"id":"W0","items":["V2-001"],"status":"COMPLETE"},
     {"id":"W1","items":["V2-002","V2-003","V2-004"],"status":"READY_AFTER_W0","mode":"parallel-no-rebase"},
-    {"id":"W2","items":["V2-005","V2-006","V2-007"],"status":"PLANNED","mode":"parallel-where-surfaces-allow","integrationAfter":["V2-005","V2-007"],"notes":"V2-007 may consume the V2-005 contract but never its unmerged implementation."},
+    {"id":"W2","items":["V2-005","V2-006","V2-007"],"status":"PLANNED","mode":"parallel-where-surfaces-allow","integrationAfter":["V2-005","V2-007"],"notes":"V2-006 and V2-007 may proceed without V2-005 implementation; any full-run composition is deferred to integration gates."},
     {"id":"W3","items":["V2-008"],"status":"PLANNED"},
     {"id":"W4","items":["V2-009","V2-010","V2-011"],"status":"PLANNED","mode":"parallel-no-rebase"},
     {"id":"W5","items":["V2-012"],"status":"PLANNED"},
@@ -24,7 +24,7 @@
     "V2-004":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"Node, Capability, placement and host-conformance contracts","dogfooding":{"required":true,"experiment":"same workflow across two supported host/capability classes"}},
     "V2-005":{"status":"PLANNED","wave":"W2","dependencies":{"V2-002":"implementation","V2-003":"contract","V2-004":"contract"},"changeSurface":"run lifecycle and evidence persistence","dogfooding":{"required":true,"experiment":"real run pause/resume/evidence reconstruction"}},
     "V2-006":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"contract","V2-004":"contract"},"changeSurface":"teaching sessions, learner progress and teaching evidence","dogfooding":{"required":true,"experiment":"install workflow and teach a real operator"}},
-    "V2-007":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"implementation","V2-005":"contract"},"changeSurface":"compiler core and compiled artifact provenance","dogfooding":{"required":true,"experiment":"compile and execute real authored workflow"}},
+    "V2-007":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"implementation"},"changeSurface":"compiler core and compiled artifact provenance","dogfooding":{"required":true,"experiment":"compile a real authored workflow and validate compiled semantics with a conformance/execution harness"}},
     "V2-008":{"status":"PLANNED","wave":"W3","dependencies":{"V2-004":"implementation","V2-005":"implementation","V2-007":"implementation"},"changeSurface":"computer-agent runtime and browser/desktop/mobile adapters","dogfooding":{"required":true,"experiment":"real computer task with failure and human takeover"}},
     "V2-009":{"status":"PLANNED","wave":"W4","dependencies":{"V2-005":"implementation","V2-008":"implementation"},"changeSurface":"events, schedules, placement and trigger delivery","dogfooding":{"required":true,"experiment":"controlled schedule + device/application event"}},
     "V2-010":{"status":"PLANNED","wave":"W4","dependencies":{"V2-006":"implementation","V2-008":"contract"},"changeSurface":"reverse teaching","dogfooding":{"required":true,"experiment":"workflow-install → teach-human → execute"}},
@@ -53,6 +53,6 @@
     "v1Boundary": "V2 cannot silently replace or mutate frozen v1.0 authorities"
   },
   "nextEligible": ["V2-002","V2-003","V2-004"],
-  "nextAction": "Activate W1 from the current main; V2-002, V2-003 and V2-004 may start independently from the same main SHA and must not use one another's unmerged branches.",
+  "nextAction": "Activate W1 from the actual current main; V2-002, V2-003 and V2-004 start independently from the same main SHA and must not use one another's unmerged branches.",
   "updatedAt": "2026-09-01"
 }
