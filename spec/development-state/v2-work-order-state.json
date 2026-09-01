@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "2.3",
+  "schemaVersion": "2.4",
   "architectureGeneration": "WorkflowOS-2.0",
   "status": "PROPOSED",
   "governingArchitecture": "v1.0",
@@ -15,31 +15,31 @@
   "activeWave": null,
   "waves": [
     {"id":"W0","items":["V2-001"],"status":"COMPLETE"},
-    {"id":"W1","items":["V2-002","V2-003","V2-004"],"status":"READY_AFTER_W0","mode":"parallel-no-rebase"},
-    {"id":"W2","items":["V2-005","V2-006","V2-007"],"status":"PLANNED","mode":"parallel-no-rebase","notes":"V2-005 consumes V2-002 implementation plus V2-003/V2-004 contracts; V2-006 consumes V2-003/V2-004 contracts; V2-007 consumes V2-003 implementation. No sibling implementation dependency exists."},
-    {"id":"W3","items":["V2-008"],"status":"PLANNED","mode":"sequential"},
-    {"id":"W4","items":["V2-009","V2-010","V2-011"],"status":"PLANNED","mode":"parallel-no-rebase"},
-    {"id":"W5","items":["V2-012"],"status":"PLANNED","mode":"sequential"},
-    {"id":"W6","items":["V2-013"],"status":"PLANNED","mode":"sequential"}
+    {"id":"W1","items":["V2-002","V2-003","V2-004"],"status":"READY_AFTER_W0","mode":"parallel-no-rebase","dogfooding":"required-per-item"},
+    {"id":"W2","items":["V2-005","V2-006","V2-007"],"status":"PLANNED","mode":"parallel-no-rebase","dogfooding":"required-per-item"},
+    {"id":"W3","items":["V2-008"],"status":"PLANNED","mode":"sequential","requiresIntegrationGates":["IG-001","IG-002"],"dogfooding":"required"},
+    {"id":"W4","items":["V2-009","V2-010","V2-011"],"status":"PLANNED","mode":"parallel-no-rebase","dogfooding":"required-per-item"},
+    {"id":"W5","items":["V2-012"],"status":"PLANNED","mode":"sequential","dogfooding":"required"},
+    {"id":"W6","items":["V2-013"],"status":"PLANNED","mode":"sequential","dogfooding":"required"}
   ],
   "workOrders": {
-    "V2-001":{"status":"COMPLETE","dependencies":{},"dependencyType":{},"dogfooding":{"required":true,"mode":"non-user-facing-conformance","status":"CONFORMANCE_REQUIRED"}},
-    "V2-002":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"workflow repository, workflow version, fork/install/version persistence","dogfooding":{"required":true,"experiment":"create/edit/version/fork/install/execute real workflow"}},
-    "V2-003":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"WorkflowIR schema, serializer, validator, semantic digest","dogfooding":{"required":true,"experiment":"real workflow IR round-trip and semantic equivalence"}},
-    "V2-004":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"Node, Capability, placement and host-conformance contracts","dogfooding":{"required":true,"experiment":"same workflow across two supported host/capability classes"}},
-    "V2-005":{"status":"PLANNED","wave":"W2","dependencies":{"V2-002":"implementation","V2-003":"contract","V2-004":"contract"},"changeSurface":"run lifecycle and evidence persistence","dogfooding":{"required":true,"experiment":"real run pause/resume/evidence reconstruction"}},
-    "V2-006":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"contract","V2-004":"contract"},"changeSurface":"teaching sessions, learner progress and teaching evidence","dogfooding":{"required":true,"experiment":"install workflow and teach a real operator"}},
-    "V2-007":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"implementation"},"changeSurface":"compiler core and compiled artifact provenance","dogfooding":{"required":true,"experiment":"compile a real authored workflow and validate compiled semantics with conformance/execution harness"}},
-    "V2-008":{"status":"PLANNED","wave":"W3","dependencies":{"V2-004":"implementation","V2-005":"implementation","V2-007":"implementation"},"changeSurface":"computer-agent runtime and browser/desktop/mobile adapters","dogfooding":{"required":true,"experiment":"real computer task with failure and human takeover"}},
-    "V2-009":{"status":"PLANNED","wave":"W4","dependencies":{"V2-005":"implementation","V2-008":"implementation"},"changeSurface":"events, schedules, placement and trigger delivery","dogfooding":{"required":true,"experiment":"controlled schedule + device/application event"}},
-    "V2-010":{"status":"PLANNED","wave":"W4","dependencies":{"V2-006":"implementation","V2-008":"contract"},"changeSurface":"reverse teaching","dogfooding":{"required":true,"experiment":"workflow-install → teach-human → execute"}},
-    "V2-011":{"status":"PLANNED","wave":"W4","dependencies":{"V2-003":"contract","V2-005":"implementation","V2-008":"implementation"},"changeSurface":"optimization analysis and version proposals","dogfooding":{"required":true,"experiment":"baseline vs optimized real task"}},
-    "V2-012":{"status":"PLANNED","wave":"W5","dependencies":{"V2-002":"implementation","V2-005":"implementation","V2-006":"implementation","V2-011":"implementation"},"changeSurface":"collaboration, forking, publishing, install, entitlement and economics","dogfooding":{"required":true,"experiment":"fork/modify/publish/install safe transaction"}},
-    "V2-013":{"status":"PLANNED","wave":"W6","dependencies":{"V2-008":"implementation","V2-009":"implementation","V2-012":"implementation"},"changeSurface":"first-party WorkflowOS workflow library and self-hosting","dogfooding":{"required":true,"experiment":"WorkflowOS installs and executes its own development workflow"}}
+    "V2-001":{"status":"COMPLETE","dependencies":{},"dependencyType":{},"changeSurface":"universal protocol contract","verification":"protocol conformance","dogfooding":{"required":true,"classification":"NON_USER_FACING_INFRASTRUCTURE","mode":"equivalent-conformance","evidence":"spec/architecture/v2/dogfooding-evidence/V2-001-conformance.md","status":"RECORDED"}},
+    "V2-002":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"workflow repository, workflow version, fork/install/version persistence","verification":"repository/versioning regression battery","dogfooding":{"required":true,"experiment":"create/edit/version/fork/install/execute real workflow"}},
+    "V2-003":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"WorkflowIR schema, serializer, validator, semantic digest","verification":"IR schema and semantic round-trip regression battery","dogfooding":{"required":true,"experiment":"real workflow IR round-trip and semantic equivalence"}},
+    "V2-004":{"status":"PLANNED","wave":"W1","dependencies":{"V2-001":"contract"},"changeSurface":"Node, Capability, placement and host-conformance contracts","verification":"node/capability/placement conformance battery","dogfooding":{"required":true,"experiment":"same workflow across two supported host/capability classes"}},
+    "V2-005":{"status":"PLANNED","wave":"W2","dependencies":{"V2-002":"implementation","V2-003":"contract","V2-004":"contract"},"changeSurface":"run lifecycle and evidence persistence","verification":"run state, evidence and concurrency regression battery","dogfooding":{"required":true,"experiment":"real run pause/resume/evidence reconstruction"}},
+    "V2-006":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"contract","V2-004":"contract"},"changeSurface":"teaching sessions, learner progress and teaching evidence","verification":"teaching session and learner-state regression battery","dogfooding":{"required":true,"experiment":"install workflow and teach a real operator"}},
+    "V2-007":{"status":"PLANNED","wave":"W2","dependencies":{"V2-003":"implementation"},"changeSurface":"compiler core and compiled artifact provenance","verification":"deterministic compiler and semantic-equivalence battery","dogfooding":{"required":true,"experiment":"compile a real authored workflow and validate compiled semantics"}},
+    "V2-008":{"status":"PLANNED","wave":"W3","dependencies":{"V2-004":"implementation","V2-005":"implementation","V2-007":"implementation"},"requiredIntegrationGates":["IG-001","IG-002"],"changeSurface":"computer-agent runtime and browser/desktop/mobile adapters","verification":"computer-agent safety, recovery and conformance battery","dogfooding":{"required":true,"experiment":"real computer task with failure and human takeover"}},
+    "V2-009":{"status":"PLANNED","wave":"W4","dependencies":{"V2-005":"implementation","V2-008":"implementation"},"changeSurface":"events, schedules, placement and trigger delivery","verification":"schedule/event/placement concurrency battery","dogfooding":{"required":true,"experiment":"controlled schedule + device/application event"}},
+    "V2-010":{"status":"PLANNED","wave":"W4","dependencies":{"V2-006":"implementation","V2-008":"contract"},"changeSurface":"reverse teaching","verification":"reverse-teaching fidelity and safety battery","dogfooding":{"required":true,"experiment":"workflow-install → teach-human → execute"}},
+    "V2-011":{"status":"PLANNED","wave":"W4","dependencies":{"V2-003":"contract","V2-005":"implementation","V2-008":"implementation"},"changeSurface":"optimization analysis and version proposals","verification":"optimization semantic-equivalence and comparison battery","dogfooding":{"required":true,"experiment":"baseline vs optimized real task"}},
+    "V2-012":{"status":"PLANNED","wave":"W5","dependencies":{"V2-002":"implementation","V2-005":"implementation","V2-006":"implementation","V2-011":"implementation"},"changeSurface":"collaboration, forking, publishing, install, entitlement and economics","verification":"permission, provenance, entitlement and transaction battery","dogfooding":{"required":true,"experiment":"fork/modify/publish/install safe transaction"}},
+    "V2-013":{"status":"PLANNED","wave":"W6","dependencies":{"V2-008":"implementation","V2-009":"implementation","V2-012":"implementation"},"changeSurface":"first-party WorkflowOS workflow library and self-hosting","verification":"self-hosting authority-boundary battery","dogfooding":{"required":true,"experiment":"WorkflowOS installs and executes its own development workflow"}}
   },
   "integrationGates": [
-    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"purpose":"repository and IR round-trip","dogfooding":true},
-    {"id":"IG-002","workOrder":"spec/architecture/v2/work-orders/IG-002.md","after":["V2-003","V2-004"],"purpose":"IR capability/placement compatibility","dogfooding":true},
+    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"before":["V2-005?"],"purpose":"repository and IR round-trip","dogfooding":true},
+    {"id":"IG-002","workOrder":"spec/architecture/v2/work-orders/IG-002.md","after":["V2-003","V2-004"],"before":["V2-008"],"purpose":"IR capability/placement compatibility","dogfooding":true},
     {"id":"IG-003","workOrder":"spec/architecture/v2/work-orders/IG-003.md","after":["V2-005","V2-007","V2-008"],"purpose":"compiled workflow execution with runs/evidence","dogfooding":true},
     {"id":"IG-004","workOrder":"spec/architecture/v2/work-orders/IG-004.md","after":["V2-009","V2-010","V2-011"],"purpose":"event-driven, taught and optimized versions compose","dogfooding":true},
     {"id":"IG-005","workOrder":"spec/architecture/v2/work-orders/IG-005.md","after":["V2-012","V2-013"],"purpose":"ecosystem and self-hosting composition","dogfooding":true}
@@ -49,9 +49,10 @@
     "parallel": "parallel-no-rebase means same base main SHA, disjoint authoritative surfaces, no unmerged implementation dependencies, independently mergeable",
     "contractDependencies": "consume merged/frozen contracts only; never consume an unmerged sibling branch",
     "implementationDependencies": "must be COMPLETE before activation",
-    "integrationGates": "combine already merged capabilities; always use a dedicated gate Work Order",
+    "integrationGates": "combine already merged capabilities; use dedicated gate Work Orders",
+    "integrationPrerequisites": "a high-risk execution Work Order cannot activate until the integration gates explicitly listed in its state record are COMPLETE",
     "completion": "implementation + deterministic verification + required dogfooding/conformance evidence + sole architect merge + actual merge evidence",
-    "dogfooding": "mandatory after every feature boundary and every integration gate",
+    "dogfooding": "mandatory after every feature boundary and every integration gate; equivalent conformance is allowed only for explicitly classified non-user-facing infrastructure",
     "quality": "parallelism never reduces tests, real-system proofs, security checks, or dogfooding",
     "recovery": "resume from GitHub state, lastVerifiedSha and nextAction; never conversation memory",
     "scope": "unrelated findings require corrective Work Orders; no drive-by fixes",
@@ -61,9 +62,10 @@
     "antiDrift": "frozen V2 concepts may only change through a governed V2 architecture change",
     "noRebaseTax": "a parallel sibling cannot require a future rebase onto another sibling; integration happens after merge via a dedicated gate",
     "roadmapLock": "V2-CTRL-002 overrides informal roadmap wording if inconsistent",
-    "integrationWorkOrder": "every listed IG-* gate must have a repository-resident Work Order before activation"
+    "integrationWorkOrder": "every listed IG-* gate must have a repository-resident Work Order before activation",
+    "dogfoodingEvidence": "a Work Order marked COMPLETE must reference a persisted dogfooding/conformance evidence artifact"
   },
   "nextEligible": ["V2-002","V2-003","V2-004"],
-  "nextAction": "Activate W1. Start V2-002, V2-003 and V2-004 independently from the same exact main SHA. Each agent reads the constitution, control plane, conformance checklist, roadmap lock and its Work Order before coding.",
+  "nextAction": "Activate W1. Start V2-002, V2-003 and V2-004 independently from the same exact main SHA. Each agent reads the constitution, control plane, conformance checklist, roadmap lock, dogfooding protocol and its Work Order before coding.",
   "updatedAt": "2026-09-01"
 }
