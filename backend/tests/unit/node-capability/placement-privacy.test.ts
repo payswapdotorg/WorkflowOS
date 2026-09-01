@@ -204,7 +204,7 @@ describe('V2-004 placement / locality / privacy constraints', () => {
     const evaluation = findEvaluation(result, cloud.nodeId);
     expect(evaluation.capabilityEligible).toBe(false);
     expect(evaluation.placementEligible).toBe(false);
-    expect(reasonCodes(evaluation).sort()).toEqual(
+    expect([...reasonCodes(evaluation)].sort()).toEqual(
       ['CAPABILITY_NOT_ADVERTISED', 'PLACEMENT_LOCALITY_VIOLATION', 'PRIVACY_LOCAL_ONLY_VIOLATION', 'HUMAN_APPROVAL_NOT_SUPPORTED'].sort(),
     );
     expect(evaluation.eligible).toBe(false);

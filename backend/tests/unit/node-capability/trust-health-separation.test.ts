@@ -93,7 +93,7 @@ describe('V2-004 trust/health dimension separation', () => {
     // No explicit health minimum was required, but the default floor
     // (`degraded`) still excludes a node that declared itself unhealthy —
     // AND the liveness lease has also lapsed: both health reasons surface.
-    expect(reasonCodes(evaluation).sort()).toEqual(['HEARTBEAT_STALE', 'HEALTH_BELOW_MINIMUM']);
+    expect([...reasonCodes(evaluation)].sort()).toEqual(['HEALTH_BELOW_MINIMUM', 'HEARTBEAT_STALE'].sort());
     expect(evaluation.healthEligible).toBe(false);
   });
 

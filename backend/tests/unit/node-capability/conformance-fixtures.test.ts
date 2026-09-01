@@ -92,6 +92,9 @@ function runFixture(fixture: HostConformanceFixture): Map<string, NodeEligibilit
   const clock = fixedClock(T0);
   const service: NodeCapabilityService = new DefaultNodeCapabilityService({
     clock: clock.clock,
+    ...(fixture.supportedProtocolVersions !== undefined
+      ? { supportedProtocolVersions: fixture.supportedProtocolVersions }
+      : {}),
   });
   const evaluationTime = T0 + Math.max(...fixture.advertisements.map((a) => a.heartbeatAgeMs));
   const byRegistrationTime = [...fixture.advertisements].sort(

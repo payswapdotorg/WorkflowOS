@@ -58,18 +58,18 @@ export function buildService(options?: {
   const clock = options?.clock ?? fixedClock();
   const deps: DefaultNodeCapabilityServiceDeps = {
     clock: clock.clock,
+    ...(options?.keyStore !== undefined ? { keyStore: options.keyStore } : {}),
+    ...(options?.nodeStore !== undefined ? { nodeStore: options.nodeStore } : {}),
+    ...(options?.supportedProtocolVersions !== undefined
+      ? { supportedProtocolVersions: options.supportedProtocolVersions }
+      : {}),
+    ...(options?.heartbeatLeaseTtlMs !== undefined
+      ? { heartbeatLeaseTtlMs: options.heartbeatLeaseTtlMs }
+      : {}),
+    ...(options?.registrationChallengeTtlMs !== undefined
+      ? { registrationChallengeTtlMs: options.registrationChallengeTtlMs }
+      : {}),
   };
-  if (options?.keyStore !== undefined) deps.keyStore = options.keyStore;
-  if (options?.nodeStore !== undefined) deps.nodeStore = options.nodeStore;
-  if (options?.supportedProtocolVersions !== undefined) {
-    deps.supportedProtocolVersions = options.supportedProtocolVersions;
-  }
-  if (options?.heartbeatLeaseTtlMs !== undefined) {
-    deps.heartbeatLeaseTtlMs = options.heartbeatLeaseTtlMs;
-  }
-  if (options?.registrationChallengeTtlMs !== undefined) {
-    deps.registrationChallengeTtlMs = options.registrationChallengeTtlMs;
-  }
   const service = new DefaultNodeCapabilityService(deps);
   return { service, clock };
 }

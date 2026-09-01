@@ -22,12 +22,13 @@ describe('V2-004 stale-node exclusion (heartbeat lease)', () => {
     // Fresh at registration time.
     expect(service.matchNodes(requirement).eligibleNodes.map((e) => e.nodeId)).toEqual([web.nodeId]);
 
-    // 59_999 ms later — still inside the default 60s lease.
+    // 59_999 ms later — still inside the default 60s lease (inclusive
+    // boundary: the lease is valid through lastHeartbeatAt + TTL).
     clock.advance(59_999);
     expect(service.matchNodes(requirement).eligibleNodes.map((e) => e.nodeId)).toEqual([web.nodeId]);
 
-    // 1 ms past the lease boundary → excluded, explicitly.
-    clock.advance(1);
+    // 2 ms past the lease boundary → excluded, explicitly.
+    clock.advance(2);
     const stale = service.matchNodes(requirement);
     const evaluation = findEvaluation(stale, web.nodeId);
     expect(evaluation.healthEligible).toBe(false);

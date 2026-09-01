@@ -95,7 +95,12 @@ describe('V2-004 module boundary (execution-truth and platform-SDK discipline)',
           continue;
         }
         const resolved = join(dirname(file), specifier);
-        const candidates = [resolved, `${resolved}.ts`, join(resolved, 'index.ts')];
+        const candidates = [
+          resolved,
+          `${resolved}.ts`,
+          resolved.replace(/\.js$/, '.ts'),
+          join(resolved, 'index.ts'),
+        ];
         const inside = candidates.some((c) => existsSync(c) && c.startsWith(MODULE_DIR));
         if (!inside) {
           violations.push(`${relative(MODULE_DIR, file)} imports outside the module: "${specifier}"`);
