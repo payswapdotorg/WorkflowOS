@@ -1,8 +1,9 @@
 # WorkflowOS 2.0 — V2-001 Universal Workflow Protocol Design
 
-**Status:** Proposed architecture for V2-001  
+**Status:** Proposed architecture for V2-001; implementation-authorized through `spec/architecture/v2/V2-CTRL-000-implementation-authorization.md`  
 **Date:** 2026-09-01  
-**Governing architecture:** v1.0 remains frozen and authoritative. This document proposes the next architecture generation; it does not modify v1.0.
+**Governing architecture:** v1.0 remains frozen and authoritative. This document proposes the next architecture generation; it does not modify v1.0.  
+**Canonical protocol registry:** `spec/architecture/v2/V2-CTRL-003-protocol-registry.md` + `V2-CTRL-003-protocol-registry.json`
 
 ## Purpose
 
@@ -46,6 +47,8 @@ The protocol must not assume browser, desktop, phone, or cloud. Surfaces may dif
 
 Workflows declare required capabilities and execution constraints. Nodes advertise capabilities. Eligibility combines capability matching with authorization and execution policy. Workflow semantics never directly depend on platform SDKs.
 
+Canonical capability identifiers are governed by `V2-CTRL-003`; implementations must reuse those identifiers rather than invent aliases.
+
 ### 3. Explicit placement
 
 Placement is represented as policy: required, preferred, allowed fallback, locality/privacy constraints, and human-approval requirements. A workflow can therefore be local, device-bound, cloud-bound, or portable without changing its identity.
@@ -82,13 +85,15 @@ An execution host participating in the protocol. It advertises identity, platfor
 
 ### Capability
 
-A stable, namespaced, versionable operation a node can perform. Examples include `browser.navigate`, `browser.click`, `filesystem.read`, `filesystem.write`, `spreadsheet.edit`, `phone.answer_call`, `phone.contacts.search`, `messaging.send`, `microphone.capture`, and `screen.observe`.
+A stable, namespaced, versionable operation a node can perform. Canonical examples are defined in `V2-CTRL-003`, including `browser.navigate`, `filesystem.read`, `phone.call.answer`, `phone.call.end`, `messaging.send`, `contacts.search`, `speech.synthesis`, `social.post.observe`, and `social.post.publish`.
 
 Capability advertisement does not grant authorization.
 
 ### Trigger
 
 The reason a run was requested: manual, schedule, external event, workflow completion, or device/application event. V2-001 defines the protocol shape; trigger implementations are later work.
+
+Canonical event identifiers are governed by `V2-CTRL-003`.
 
 ### Deployment
 
@@ -117,7 +122,7 @@ The initial transport uses a versioned envelope that can be carried over HTTP, W
 }
 ```
 
-The semantic requirements are: versioned, correlated, causally traceable, and attributable to an authenticated participant. Exact serialization and authentication mechanisms are later work.
+The semantic requirements are: versioned, correlated, causally traceable, and attributable to an authenticated participant. Exact serialization and authentication mechanisms are later Work Order concerns, but all implementations must conform to the canonical registry and protocol fixtures.
 
 ## Command/event separation
 
@@ -139,15 +144,15 @@ Pause/resume is protocol-level. A paused run retains its pinned WorkflowVersion,
 
 Identity, capability, authorization, execution policy, and secret reference are distinct. A node must authenticate to the protocol. Capability possession never bypasses authorization. Secrets are delivered only through controlled opaque references.
 
+## Cross-surface requirement
+
+Web, desktop, iOS, Android, and cloud runners implement the same protocol semantics. Allowed differences are UI, local sensors/device capabilities, local execution availability, platform authentication primitives, and lifecycle behavior. Workflow meaning, version identity, run model, capability vocabulary, evidence semantics, and authorization remain equivalent.
+
 ## V1 compatibility boundary
 
 V1 remains authoritative for the existing WorkflowOS development/governance system. V2 may reuse mature V1 infrastructure only through explicit adapters and without changing V1 semantics.
 
 V2 must not rewrite the frozen v1.0 architecture, v1.0 workflow state machine, PostgreSQL authority rules, or existing execution/verification authority boundaries. Existing software-engineering workflows become V2 workflow content rather than a second execution engine.
-
-## Cross-surface requirement
-
-Web, desktop, iOS, Android, and cloud runners implement the same protocol semantics. Allowed differences are UI, local sensors/device capabilities, local execution availability, platform authentication primitives, and lifecycle behavior. Workflow meaning, version identity, run model, capability vocabulary, evidence semantics, and authorization remain equivalent.
 
 ## Conformance requirements
 
@@ -164,13 +169,16 @@ The implementation must provide shared conformance fixtures for:
 9. pause/resume idempotency;
 10. authorization vs capability separation;
 11. secret-reference non-leakage;
-12. cross-client interoperability.
+12. cross-client interoperability;
+13. canonical protocol registry conformance (no alternate aliases for existing identifiers).
 
 ## Acceptance criteria
 
-V2-001 is complete only when the protocol vocabulary is repository-resident and frozen; Workflow, WorkflowVersion, Deployment, Node, Capability, Trigger, and Run are defined; commands and events are separated; messages are versioned and correlated; execution is pinned to an immutable version; capability requirements are platform-independent; placement constraints are representable; evidence distinguishes intent/observation/verification/confirmation; pause/resume is explicit; all supported surfaces are protocol-equivalent; V1 compatibility boundaries are explicit; and conformance tests are defined before client-specific implementations begin.
+V2-001 is complete only when the protocol vocabulary is repository-resident and frozen; Workflow, WorkflowVersion, Deployment, Node, Capability, Trigger, and Run are defined; commands and events are separated; messages are versioned and correlated; execution is pinned to an immutable version; capability requirements are platform-independent; placement constraints are representable; evidence distinguishes intent/observation/verification/confirmation; pause/resume is explicit; all supported surfaces are protocol-equivalent; V1 compatibility boundaries are explicit; the canonical registry is referenced; and conformance tests are defined before client-specific implementations begin.
 
 ## Subsequent work
+
+The canonical execution order is the optimized wave graph, not the following historical list order. Fresh agents must use `spec/development-state/v2-work-order-state.json` and `V2-CTRL-002-roadmap-lock.md` for activation order.
 
 - V2-002 Workflow Repository + Immutable Versioning
 - V2-003 Workflow IR
