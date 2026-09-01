@@ -3,6 +3,7 @@
   "architectureGeneration": "WorkflowOS-2.0",
   "status": "PROPOSED",
   "governingArchitecture": "v1.0",
+  "transitionPolicy": "spec/architecture/v2/v1-transition.md",
   "controlPlane": "spec/architecture/v2/execution-control-plane.md",
   "roadmap": "spec/architecture/v2/optimized-roadmap.md",
   "dogfoodingProtocol": "spec/architecture/v2/dogfooding-protocol.md",
@@ -50,7 +51,8 @@
     "quality": "parallelism must never reduce tests, real-system proofs, security checks, or dogfooding",
     "recovery": "resume from exact repository state and recorded nextAction, never conversation memory",
     "scope": "unrelated findings require separate corrective Work Orders; no drive-by fixes",
-    "v1Boundary": "V2 cannot silently replace or mutate frozen v1.0 authorities"
+    "v1Boundary": "remaining V1 work is deferred unless the transition policy records a concrete V2 dependency, V1 compatibility/security requirement, or explicit architect reactivation",
+    "v2Priority": "V2 is the forward product roadmap; deferred V1 work is not an implicit prerequisite"
   },
   "nextEligible": ["V2-002","V2-003","V2-004"],
   "nextAction": "Activate W1 from the actual current main; V2-002, V2-003 and V2-004 start independently from the same main SHA and must not use one another's unmerged branches.",
