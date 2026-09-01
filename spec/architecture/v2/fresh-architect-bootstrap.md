@@ -4,18 +4,25 @@ This file is the shortest safe recovery path for a new LLM architect or implemen
 
 ## Read in this order
 
-1. `spec/architecture/v2/architecture-constitution.md`
-2. `spec/architecture/v2/execution-control-plane.md`
-3. `spec/architecture/v2/V2-CTRL-001-conformance-checklist.md`
-4. `spec/architecture/v2/dogfooding-protocol.md`
-5. `spec/architecture/v2/v1-transition.md`
-6. `spec/architecture/v2/optimized-roadmap.md`
-7. `spec/development-state/v2-work-order-state.json`
-8. the assigned Work Order in `spec/architecture/v2/work-orders/`
-9. `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`
-10. `spec/architecture/v2/workflow-teaching-and-marketplace.md`
-11. `spec/architecture/v2/mobile-device-runtime.md`
-12. relevant existing V1 public contracts before reusing any V1 capability
+1. `spec/architecture/v2/V2-CTRL-000-implementation-authorization.md`
+2. `spec/architecture/v2/architecture-constitution.md`
+3. `spec/architecture/v2/V2-CTRL-003-protocol-registry.md` and `V2-CTRL-003-protocol-registry.json`
+4. `spec/architecture/v2/execution-control-plane.md`
+5. `spec/architecture/v2/V2-CTRL-001-conformance-checklist.md`
+6. `spec/architecture/v2/dogfooding-protocol.md`
+7. `spec/architecture/v2/v1-transition.md`
+8. `spec/architecture/v2/optimized-roadmap.md` and `V2-CTRL-002-roadmap-lock.md`
+9. `spec/development-state/v2-work-order-state.json`
+10. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
+11. `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`
+12. `spec/architecture/v2/workflow-teaching-and-marketplace.md`
+13. `spec/architecture/v2/workflow-marketplace-economics.md` when commercial access is relevant
+14. `spec/architecture/v2/mobile-device-runtime.md` when device/mobile/cross-device behavior is relevant
+15. relevant existing V1 public contracts before reusing any V1 capability
+
+## Status interpretation
+
+V2 is **APPROVED FOR IMPLEMENTATION** but remains a **PROPOSED architecture generation** until a formal V2 architecture version is frozen through the repository governance process. This means implementation is authorized while V2 design changes remain subject to the constitution and governed architecture-change process.
 
 ## Product definition
 
@@ -44,6 +51,8 @@ The WorkflowIR is the semantic source of truth. Raw demonstrations, screenshots/
 ## Universal protocol
 
 Web, desktop, iOS, Android and cloud implement one protocol. Platform-specific UX and capabilities may differ. Workflow semantics, identity, versioning, run/evidence rules and authorization semantics must not differ.
+
+Protocol-visible names are governed by `V2-CTRL-003`. Agents must not invent aliases for existing semantic operations.
 
 Nodes advertise capabilities. Capability possession is never authorization.
 
@@ -75,7 +84,7 @@ V1 remains frozen and authoritative for V1 behavior. Remaining V1 roadmap items 
 
 ## Implementation control
 
-The machine-readable state file is authoritative for V2 progress. A fresh agent must use it to identify the next eligible Work Order/wave, dependency type, change surface, dogfooding requirement and resume action.
+The machine-readable state file is authoritative for V2 progress. A fresh agent must use it to identify the next eligible Work Order/wave, dependency type, change surface, dogfooding requirement, integration-gate status, and next action.
 
 Parallel means independently mergeable:
 
@@ -89,8 +98,8 @@ Parallel means independently mergeable:
 ## Mechanical loop
 
 ```text
-read state + Work Order
-→ verify dependencies
+read authorization + constitution + registry + state + Work Order
+→ verify dependencies and stable base
 → activate
 → create branch from stable main
 → write deterministic failing tests
@@ -101,6 +110,8 @@ read state + Work Order
 → PR
 → sole architect review/merge
 → post-merge state finalization
+→ run any newly eligible integration gate
+→ cross-feature dogfood
 → next eligible wave
 ```
 
@@ -110,6 +121,7 @@ Stop and raise a governed architecture change when implementation would:
 
 - redefine a frozen V2 concept;
 - create a second workflow protocol/engine;
+- create a protocol-name alias that conflicts with the canonical registry;
 - make a platform-specific semantic fork;
 - turn an assertion into evidence;
 - make a non-durable adapter claim durable behavior;
@@ -117,7 +129,9 @@ Stop and raise a governed architecture change when implementation would:
 - mutate an immutable workflow version silently;
 - hide a missing platform capability;
 - revive deferred V1 without an allowed reason;
-- remove or weaken a required dogfooding or discrimination test to make progress.
+- remove or weaken a required dogfooding or discrimination test to make progress;
+- require an unmerged sibling implementation as a dependency;
+- activate an integration gate before every listed input is actually COMPLETE.
 
 ## Current execution pointer
 
