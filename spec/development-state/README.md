@@ -1,83 +1,71 @@
 # Repository Development State — Authority Declaration
 
-`spec/development-state/` is the **canonical machine-readable development-governance
-state of the WorkflowOS repository** (WORK-052, Issue #61 §2). It exists so that a
-fresh architect or implementation agent with zero conversational history can determine
-what architecture version governs, which Work Orders exist and their statuses, what can
-run in parallel, which checkpoints apply at which assurance depth, which decisions
-constrain the work, and how to resume interrupted implementation.
+`spec/development-state/` is the canonical repository-resident development-governance state of WorkflowOS. It exists so that a fresh architect or implementation agent with zero conversational history can determine what architecture governs, which Work Orders exist, what can run in parallel, which checkpoints apply, and how interrupted work resumes.
 
-## Artifacts and their authority
+For V2 governance-state semantics, read `spec/architecture/v2/V2-ACR-002-governance-control-plane-refinement.md` together with `spec/architecture/v2/execution-control-plane.md`.
 
-| Artifact | Authority | Changed by |
+## Authority classes
+
+The directory distinguishes authoritative facts, operational implementation state, and derived projections.
+
+| Artifact | Authority | Role |
 |---|---|---|
-| `governance-model.json` | The governance MODEL: the Engineering Control Loop, assurance profiles + deterministic selection rules + requirement matrix, the governed checkpoint contracts (architecture fitness functions), the self-hosting boundary, the authority map. | Architect only — through a Work Order (GitHub Issue → `spec/work-orders/`) + PR review. Schema evolution is versioned; never edited in place silently. |
-| `program-state.json` | The PROGRAM STATE: the governing architecture version record, one record per Work Order (status, dependencies, declared change surfaces, branch/PR bindings, merge evidence, handoff/resumption records, checkpoint outcomes), and the decisions index. | Implementers per the parallel protocol (one branch per Work Item; updated as work progresses); the architect merges. Statuses are evidence-backed (`complete` requires merge evidence). |
-| `dependency-state.json` | Derived dependency eligibility and conflict state. It can be regenerated from authoritative Work Order/program state and the canonical dependency graph. | Derived by governance tooling; never an independent authority. |
-| `frontier-state.json` | Derived current implementation frontier and live PR/base reconciliation. | Derived by governance tooling; stale/conflicting state fails closed. |
-| `checkpoint-state.json` | Derived checkpoint requirement/result summary. Actual verification evidence remains owned by `/verification`. | Derived by governance tooling and checkpoint orchestration. |
+| `governance-model.json` | Governance MODEL | Architect-owned control-loop, assurance, checkpoint and boundary rules. |
+| `program-state.json` | Program/operational state | Work Order status and resume information; must agree with authoritative Git merge facts. |
+| `dependency-state.json` | Derived projection | Dependency eligibility and conflict projection. Never an independent authority. |
+| `frontier-state.json` | Derived projection | Current eligible frontier and live PR/base reconciliation. Never an independent authority. |
+| `checkpoint-state.json` | Derived projection | Checkpoint requirement/result summary. Verification evidence remains authoritative in `/verification`. |
+| V2 navigation fields such as `nextEligible` / `nextAction` | Derived projection | Convenience for agents; stale values must never override the underlying graph, Git history, or Work Order scope. |
 
-**Who may write what:** the governance model changes only through architect-issued Work
-Orders; the program state is maintained by the implementing agent of each Work Order
-within its declared surfaces and becomes canonical when the architect merges the PR.
-Nothing in this directory is a runtime tenant artifact: PostgreSQL (via the existing
-modules) remains the authority for tenant project state; the runtime `/architecture`
-module remains the per-project ADR/authority; this directory is the self-hosting plane.
+The single authoritative dependency graph is the Work Order dependency graph. Roadmap locks constrain concurrency/composition but do not create a competing dependency graph.
 
-## v1.1 evolution artifacts
+## Completion authority
 
-The next architecture generation is proposed, not silently activated:
+The Architect's actual Git merge is the sole completion event.
 
-- `spec/architecture/v1.1/` — additive architecture and lock package, including the [reconciliation record](../architecture/v1.1/reconciliation-record.md) (2026-08-29 pass 1: the verified repository truth and the corrected derived state; pass 2: the architect verdict resolving the upload-wave identity collision — §8; and the GitHub enforcement gaps).
-- `spec/architecture-change-requests/ACR-001-v1-1-adaptive-engineering-control-system.md` — durable architecture evolution proposal.
+`mergedAs` is a durable identity binding to the actual PR and merge commit. A complete record without matching Git evidence is invalid. An in-flight record with authoritative merge evidence is invalid until reconciled.
+
+Post-merge reconciliation is bookkeeping: it may be automated or run deterministically from repository Git evidence, but it never approves a merge, expands scope, lowers assurance, or creates a new authority.
+
+A short red reconciliation window is intentional. Governance status must fail closed while Git proves a merge that canonical state has not yet recorded.
+
+## Who may write what
+
+`governance-model.json` changes only through an architect-governed Work Order/architecture-change path.
+
+Operational program state is updated by implementation work within declared surfaces and becomes canonical when accepted through the repository's merge process.
+
+Derived projections are regenerated by governance tooling. They are never independently edited to make an ineligible or incomplete state appear valid.
+
+Nothing in this directory is runtime tenant state. PostgreSQL remains authoritative for tenant runtime state; `/architecture` remains authoritative for project architecture/ADR state.
+
+## V1.1 evolution artifacts
+
+The next architecture generation remains proposed, not silently activated:
+
+- `spec/architecture/v1.1/` — additive architecture and lock package.
+- `spec/architecture-change-requests/ACR-001-v1-1-adaptive-engineering-control-system.md` — durable architecture-evolution proposal.
 - `spec/governance/` — persistent architect, worker, assurance and checkpoint contracts.
-- `spec/governance/future-roadmap.json` — planned v1.1 Work Order sequence and parallelization hints.
+- `spec/governance/future-roadmap.json` — planned v1.1 Work Order sequence.
 
-An ACR is required before a new ArchitectureVersion becomes governing.
+An approved Architecture Change Request is required before a new ArchitectureVersion becomes governing.
 
 ## Consumption
 
-- `backend/src/development-governance/` loads and validates both artifacts FAIL-CLOSED
-  (schema, vocabularies, DAG acyclicity, evidence-backed statuses, boundary integrity
-  against code-pinned core prohibitions, assurance-matrix integrity, enforcement
-  references) and answers the control-plane queries.
-- `bun run governance:status` (in `backend/`) prints the control-plane summary from a
-  fresh checkout.
-- The `governance-manifest` detector (7th detector in the WORK-051 closed registry)
-  evaluates this state at any exact revision through the architecture-checkpoint
-  substrate (`docs/adr/ADR-0006-governance-manifest-detector.md`).
-- The post-merge finalization audit (`§34.8`; ADR-0007) binds this state to the
-  repository's git merge history: `governance:status` reports every gap (a merged
-  Work Order not yet `complete` with matching `mergedAs`).
+The development-governance implementation validates the canonical facts and projections fail-closed and answers control-plane queries. `governance:status` reports dependency/frontier/checkpoint inconsistencies and merged-but-unreconciled work.
 
-## Validation invariants (enforced by the loader — fail closed)
+The `governance-manifest` detector evaluates this state at an exact revision through the architecture-checkpoint substrate.
 
-1. Schema version match (both artifacts); unknown fields rejected.
-2. Closed vocabularies: statuses, assurance profiles, surface flags, feedback origins,
-   checkpoint kinds, proof classes.
-3. The work-order dependency DAG is acyclic and references known Work Orders only.
-4. `complete` records carry merge evidence (`pr` + `mergeCommit`); `in_flight` records
-   carry a branch (and a PR number once opened) and NO merge evidence — the explicit
-   merge-vs-checkpoint rule: the architect's merge is the ONLY completion event, and
-   checkpoint outcomes are implementer claims recorded only on started (`in_flight` /
-   `complete`) items; they never substitute the merge (code-pinned, PR #62 round 1).
-5. Coordination records are MUTUAL and COVERING: a coordination reference between two
-   in-flight work orders appears on BOTH records (one-sided declarations are invalid
-   state), an in-flight start over incomplete dependencies coordinates with THOSE
-   dependencies, and references point at started (in-flight) or merged (complete) work
-   orders only (PR #62 round 1).
-6. The self-hosting boundary contains the code-pinned core prohibitions (ADR-0004).
-7. Each assurance profile's requirements dominate the WORK-051 impact/checkpoint matrix
-   at the corresponding impact level (ADR-0002) — assurance adds depth, never subtracts.
-8. Every checkpoint contract's enforcement references exist in the repository.
-9. The post-merge finalization protocol is explicit, code-pinned machine-readable
-   state (trigger `architect-merge`; the obligation names `mergedAs`, handoff
-   removal, and the data-only constraint; the enforcement references the
-   merged-finalization invariant; the constraints add no authority, no workflow
-   state, no automation — §34.8, ADR-0007).
-10. v1.1 derived artifacts cannot supersede v1.0 authorities and cannot activate v1.1
-    without an approved Architecture Change Request.
+## Required invariants
 
-A repository whose development state violates any invariant is NOT a valid governed
-state: the control plane refuses to serve it, and the `governance-manifest` checkpoint
-detector fails closed.
+1. Schema versions and closed vocabularies are valid.
+2. The authoritative Work Order dependency graph is acyclic and references known Work Orders only.
+3. Completion evidence is bound to the actual Architect merge identity.
+4. In-flight work records an exact base SHA and cannot coexist with authoritative merge evidence without a reconciliation gap being reported.
+5. Derived dependency/frontier/checkpoint/navigation projections cannot authorize or redefine work.
+6. The governance boundary preserves code-pinned prohibitions and assurance dominance.
+7. Checkpoint enforcement references remain present.
+8. V2 derived artifacts cannot supersede frozen V1 authority or activate a proposed V2 architecture version.
+9. Post-merge reconciliation records authoritative Git facts only; it is not a second approval authority.
+
+A repository whose governance state violates any invariant is not a valid governed state: the control plane refuses to treat it as valid and the governance-manifest checkpoint fails closed.
