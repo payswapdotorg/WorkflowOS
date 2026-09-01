@@ -33,7 +33,7 @@
  *       installations are therefore pinned but not yet executed (recorded
  *       honestly as a scope observation, not a failure).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildAuthStack, type TestAuthStack } from '../../helpers/test-auth-stack.js';
 import {
   DefaultWorkflowRepositoryService,
@@ -112,6 +112,20 @@ describe('V2-002 — workflow repository + immutable versioning (semantics over 
     ownerAId = ownerA.id;
     memberA2Id = memberA2.id;
     userBId = userB.id;
+  });
+
+  beforeEach(async () => {
+    // TEST ISOLATION (harness-only, never a runtime path): the regression
+    // matrix below reuses the canonical (org, slug) 'invoice-bot' and its
+    // assertions are written against PER-TEST fresh repository state (each
+    // regression must be provable on its own, not on residue of the previous
+    // one — e.g. R5(private) must see a PRIVATE workflow even though a LATER
+    // regression publishes it). TRUNCATE is the sanctioned maintenance reset:
+    // the immutability triggers guard runtime UPDATE/DELETE (R6) and do not
+    // fire on TRUNCATE; identity/org/user tables are untouched.
+    await stack.db.client.exec(
+      'TRUNCATE wfos_v2_workflow_installations, wfos_v2_workflow_versions, wfos_v2_workflows CASCADE',
+    );
   });
 
   afterAll(async () => {

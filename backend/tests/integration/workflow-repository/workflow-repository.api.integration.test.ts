@@ -108,6 +108,7 @@ describe('V2-002 — workflow repository API (real routes, real PG)', () => {
     stack = await buildAuthStack({
       WFOS_TEST_KEY_A: 'raw-key-v2-002-a',
       WFOS_TEST_KEY_B: 'raw-key-v2-002-b',
+      WFOS_TEST_KEY_MEMBER: 'raw-key-v2-002-member',
     });
 
     const orgA = await stack.organizationRepository.create({ name: 'V2-002 API Org A' });
@@ -418,7 +419,7 @@ describe('V2-002 — workflow repository API (real routes, real PG)', () => {
     };
     const versionUrl = `/workflow-repository/workflows/${workflow.id}/versions/${v1.id}`;
 
-    for (const method of ['PUT', 'PATCH', 'DELETE']) {
+    for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
       const res = await server.inject({
         method,
         url: versionUrl,
@@ -482,7 +483,7 @@ describe('V2-002 — workflow repository API (real routes, real PG)', () => {
     });
     await stack.membershipRepository.assign({ userId: memberUser.id, organizationId: orgAId, roleId: 'member' });
     await stack.apiKeyProvisioner.provision({
-      keyId: 'v2-002-key-member', secretRef: 'WFOS_TEST_KEY_A', externalId: 'v2-002-api-member-a', label: 'M', rawKey: 'raw-key-v2-002-member',
+      keyId: 'v2-002-key-member', secretRef: 'WFOS_TEST_KEY_MEMBER', externalId: 'v2-002-api-member-a', label: 'M', rawKey: 'raw-key-v2-002-member',
     });
     const rawKeyMember = 'raw-key-v2-002-member';
 

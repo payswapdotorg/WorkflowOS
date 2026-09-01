@@ -47,6 +47,10 @@ import {
 } from './routes/maintenance.route.js';
 import { authRoutes, type AuthRouteDeps } from './routes/auth.route.js';
 import { organizationsRoutes, type OrganizationsRouteDeps } from './routes/organizations.route.js';
+import {
+  workflowRepositoryRoutes,
+  type WorkflowRepositoryRouteDeps,
+} from './routes/workflow-repository.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -165,6 +169,12 @@ export interface ServerDeps extends JobsRouteDeps {
   /** WORK-074: organization creation + membership management routes.
    *  Registered when auth is enabled. */
   organizations?: OrganizationsRouteDeps;
+  /** V2-002 (W1): Workflow Repository routes — the Git-like durable
+   *  repository HTTP surface (workflows, immutable versions, forks,
+   *  installations/pins). Backend-authorized; repository visibility is
+   *  decided by the injected WorkflowRepositoryService. Registered when
+   *  auth is enabled. */
+  workflowRepository?: WorkflowRepositoryRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -293,6 +303,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.maintenance) {
     await maintenanceRoutes(app, deps.maintenance);
+  }
+  if (deps.auth && deps.workflowRepository) {
+    await workflowRepositoryRoutes(app, deps.workflowRepository);
   }
   return app;
 }
