@@ -20,9 +20,15 @@ import type {
 /** Secret material that must NEVER be able to appear in serialized IR. */
 export const SECRET_MATERIAL_CANARY = 'ghp_live_DEADBEEF_never_serialize_me';
 
-/** Structural deep clone (fixtures are JSON data). */
-export function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+/**
+ * Recursively strips `readonly` so fixtures can be structurally mutated to
+ * build deliberately-invalid documents (the battery's negative cases).
+ */
+type DeepMutable<T> = T extends readonly (infer U)[] ? DeepMutable<U>[] : T extends object ? { -readonly [K in keyof T]: DeepMutable<T[K]> } : T;
+
+/** Structural deep clone (fixtures are JSON data), returned fully mutable. */
+export function clone<T>(value: T): DeepMutable<T> {
+  return JSON.parse(JSON.stringify(value)) as DeepMutable<T>;
 }
 
 const issueObjectType = {
@@ -254,7 +260,7 @@ export function buildTriageDocumentAltOrder(): WorkflowIrDocument {
     draftSummary,
     fetchIssue,
   ].map(clone);
-  const edges = [
+  const edges: ControlEdge[] = [
     { from: 'review_gate', to: 'log_rejection', on: { outcome: 'rejected' } },
     { from: 'review_gate', to: 'sync_backlog', on: { outcome: 'approved' } },
     { from: 'review_gate', to: 'notify_channel', on: { outcome: 'approved' } },
@@ -344,17 +350,20 @@ export function buildMinimalDocument(): WorkflowIrDocument {
   };
 }
 
-/** Replace a node in a cloned document by id. */
+/** Replace a node in a cloned document by id (pure reconstruction). */
 export function withNode(
   document: WorkflowIrDocument,
   nodeId: string,
   patch: Partial<WorkflowNode>,
 ): WorkflowIrDocument {
-  const next = clone(document);
-  const index = next.ir.nodes.findIndex((node) => node.id === nodeId);
-  if (index < 0) throw new Error(`fixture node not found: ${nodeId}`);
-  next.ir.nodes[index] = { ...next.ir.nodes[index], ...patch } as WorkflowNode;
-  return next;
+  let found = false;
+  const nodes = document.ir.nodes.map((node) => {
+    if (node.id !== nodeId) return node;
+    found = true;
+    return { ...node, ...patch } as WorkflowNode;
+  });
+  if (!found) throw new Error(`fixture node not found: ${nodeId}`);
+  return { ...document, ir: { ...document.ir, nodes } };
 }
 
 /** Patch the workflow-level failure policy of a node in a cloned document. */
@@ -366,41 +375,33 @@ export function withNodeFailurePolicy(
   return withNode(document, nodeId, { failurePolicy });
 }
 
-/** Set the workflow IR in a cloned document. */
+/** Set the workflow IR in a cloned document (pure reconstruction). */
 export function withIr(
   document: WorkflowIrDocument,
   irPatch: Partial<WorkflowIrDocument['ir']>,
 ): WorkflowIrDocument {
-  const next = clone(document);
-  next.ir = { ...next.ir, ...irPatch };
-  return next;
+  return { ...document, ir: { ...document.ir, ...irPatch } };
 }
 
-/** Set the presentation block in a cloned document. */
+/** Set the presentation block in a cloned document (pure reconstruction). */
 export function withPresentation(
   document: WorkflowIrDocument,
   presentation: PresentationMetadata | undefined,
 ): WorkflowIrDocument {
-  const next = clone(document);
-  next.presentation = presentation;
-  return next;
+  return { ...document, presentation };
 }
 
-/** Set the compatibility metadata in a cloned document. */
+/** Set the compatibility metadata in a cloned document (pure reconstruction). */
 export function withCompatibility(
   document: WorkflowIrDocument,
   compatibility: WorkflowIrDocument['compatibility'],
 ): WorkflowIrDocument {
-  const next = clone(document);
-  next.compatibility = compatibility;
-  return next;
+  return { ...document, compatibility };
 }
 
-/** Append a control edge in a cloned document. */
+/** Append a control edge in a cloned document (pure reconstruction). */
 export function withEdge(document: WorkflowIrDocument, edge: ControlEdge): WorkflowIrDocument {
-  const next = clone(document);
-  next.ir.edges = [...next.ir.edges, edge];
-  return next;
+  return { ...document, ir: { ...document.ir, edges: [...document.ir.edges, edge] } };
 }
 
 /** Replace the input bindings of a node in a cloned document. */

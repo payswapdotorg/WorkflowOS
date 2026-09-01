@@ -17,6 +17,7 @@ import {
   withNodeOutputs,
   withPresentation,
 } from './helpers.js';
+import type { VersionAffectingCompatibility } from '../../../src/workflow-ir/index.js';
 
 /**
  * V2-003 — the deterministic WorkflowVersion semantic digest battery.
@@ -237,12 +238,13 @@ describe('V2-003 — the digest includes EXACTLY the declared version-affecting 
   it('changing the declared compatibility metadata changes the digest', () => {
     const base = buildMinimalDocument();
     const baseDigest = computeWorkflowVersionSemanticDigest(base).digest;
-    for (const compatibility of [
+    const variants: VersionAffectingCompatibility[] = [
       { compatibilityLevel: 'compatible', inputSurfaceChange: 'none', outputSurfaceChange: 'none' },
       { compatibilityLevel: 'equivalent', inputSurfaceChange: 'additive', outputSurfaceChange: 'none' },
       { compatibilityLevel: 'equivalent', inputSurfaceChange: 'none', outputSurfaceChange: 'additive' },
       { compatibilityLevel: 'incompatible', inputSurfaceChange: 'breaking', outputSurfaceChange: 'none' },
-    ]) {
+    ];
+    for (const compatibility of variants) {
       const mutated = withCompatibility(base, compatibility);
       expect(computeWorkflowVersionSemanticDigest(mutated).digest).not.toBe(baseDigest);
     }

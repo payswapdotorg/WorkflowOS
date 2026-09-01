@@ -5,7 +5,11 @@ import {
   negotiateWorkflowVersionUpdate,
   semanticallyEqual,
 } from '../../../src/workflow-ir/index.js';
-import type { WorkflowSurfaceSnapshot } from '../../../src/workflow-ir/index.js';
+import type {
+  PortDeclaration,
+  WorkflowOutputBinding,
+  WorkflowSurfaceSnapshot,
+} from '../../../src/workflow-ir/index.js';
 import {
   buildMinimalDocument,
   buildTriageDocument,
@@ -50,12 +54,8 @@ const incompatibleBreaking = {
 } as const;
 
 function surface(
-  inputs: ReadonlyArray<{ name: string; type: { kind: 'string' | 'number' }; optional?: boolean }>,
-  outputs: ReadonlyArray<{
-    name: string;
-    type: { kind: 'string' | 'number' };
-    from: { kind: 'node_output'; node: string; output: string };
-  }>,
+  inputs: readonly PortDeclaration[],
+  outputs: readonly WorkflowOutputBinding[],
   compatibility: WorkflowSurfaceSnapshot['compatibility'],
 ): WorkflowSurfaceSnapshot {
   return { inputs: clone(inputs), outputs: clone(outputs), compatibility };

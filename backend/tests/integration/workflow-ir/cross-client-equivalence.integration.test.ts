@@ -151,7 +151,7 @@ const builderDocument = (() => {
     { from: 'fetch_issue', to: 'draft_summary', on: 'success' },
   ];
 
-  return createWorkflowIrBuilder()
+  const base = createWorkflowIrBuilder()
     .withCompatibility({ compatibilityLevel: 'equivalent', inputSurfaceChange: 'none', outputSurfaceChange: 'none' })
     .withProvenance({ origin: 'authored' })
     .withDefaultPlacement('any_supported_node')
@@ -183,13 +183,9 @@ const builderDocument = (() => {
     .addNode(notifyChannel)
     .addNode(reviewGate)
     .addNode(draftSummary)
-    .addNode(fetchIssue)
-    .addEdge(edges[0])
-    .addEdge(edges[1])
-    .addEdge(edges[2])
-    .addEdge(edges[3])
-    .addEdge(edges[4])
-    .build();
+    .addNode(fetchIssue);
+
+  return edges.reduce((builder, edge) => builder.addEdge(edge), base).build();
 })();
 
 describe('V2-003 — cross-client semantic equivalence (integration)', () => {

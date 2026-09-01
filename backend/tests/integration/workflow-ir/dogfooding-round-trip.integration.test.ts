@@ -8,6 +8,7 @@ import {
   validateWorkflowIrDocument,
   WORKFLOW_IR_REGISTRY_VOCABULARY,
 } from '../../../src/workflow-ir/index.js';
+import type { WorkflowIrDocument } from '../../../src/workflow-ir/index.js';
 import {
   buildTriageDocument,
   buildTriageDocumentAltOrder,
@@ -171,7 +172,7 @@ describe('V2-003 dogfooding — round-trip of the real triage workflow', () => {
   });
 
   it('the digest is stable across a pure re-validation loop (no drift from repeated inspection)', () => {
-    let current = clone(authored);
+    let current: WorkflowIrDocument = clone(authored);
     let digest = computeWorkflowVersionSemanticDigest(current).digest;
     for (let i = 0; i < 5; i += 1) {
       const parsed = parseWorkflowIrDocument(serializeWorkflowIrDocument(current));

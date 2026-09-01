@@ -99,8 +99,8 @@ describe('V2-003 — the full round-trip preserves executable meaning', () => {
       }
       const outcomeEdges = parsed.document.ir.edges.filter((edge) => edge.from === 'review_gate');
       expect(outcomeEdges).toHaveLength(3);
-      expect(outcomeEdges.filter((e) => e.on === 'approved').length).toBe(2);
-      expect(outcomeEdges.filter((e) => e.on === 'rejected').length).toBe(1);
+      expect(outcomeEdges.filter((e) => typeof e.on === 'object' && e.on.outcome === 'approved').length).toBe(2);
+      expect(outcomeEdges.filter((e) => typeof e.on === 'object' && e.on.outcome === 'rejected').length).toBe(1);
     }
   });
 

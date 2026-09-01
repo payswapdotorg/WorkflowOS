@@ -146,7 +146,10 @@ describe('V2-003 — serialized IR emits only the opaque reference (grep-level p
     // any secret_ref binding object carries exactly kind+ref, never a
     // material-shaped key
     expect(serialized).not.toMatch(/"kind":"secret_ref","(?!ref")[a-zA-Z]+"/);
-    expect(serialized).not.toMatch(/"(value|material|token|password|secretValue|apiKey|clientSecret)"/);
+    // note: '"value"' is the legitimate literal-binding key; the SECRET type
+    // can never be satisfied by a literal (structurally rejected above), so
+    // material-shaped keys must never appear anywhere:
+    expect(serialized).not.toMatch(/"(material|password|secretValue|apiKey|clientSecret|accessToken|refreshToken|privateKey|token)"/);
   });
 
   it('round-trips the secret reference losslessly as an opaque handle only', () => {

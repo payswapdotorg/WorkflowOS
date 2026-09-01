@@ -63,7 +63,9 @@ describe('V2-003 — unsupported IR schema versions are rejected', () => {
 describe('V2-003 — duplicate identifiers are rejected', () => {
   it('duplicate node ids are rejected', () => {
     const doc = clone(buildMinimalDocument());
-    doc.ir.nodes = [...doc.ir.nodes, clone(doc.ir.nodes[0])];
+    const first = doc.ir.nodes[0];
+    if (first === undefined) throw new Error('fixture node missing');
+    doc.ir.nodes = [...doc.ir.nodes, first];
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
     expect(issueCodes(result)).toContain('IR_NODE_ID_DUPLICATE');
@@ -71,7 +73,9 @@ describe('V2-003 — duplicate identifiers are rejected', () => {
 
   it('duplicate workflow input names are rejected', () => {
     const doc = clone(buildMinimalDocument());
-    doc.ir.inputs = [...doc.ir.inputs, clone(doc.ir.inputs[0])];
+    const first = doc.ir.inputs[0];
+    if (first === undefined) throw new Error('fixture input missing');
+    doc.ir.inputs = [...doc.ir.inputs, first];
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
     expect(issueCodes(result)).toContain('IR_PORT_NAME_DUPLICATE');
@@ -108,7 +112,28 @@ describe('V2-003 — duplicate identifiers are rejected', () => {
   });
 
   it('duplicate control edges (same from/to/trigger) are rejected', () => {
-    const doc = withEdge(buildMinimalDocument(), { from: 'observe', to: 'observe', on: 'failure' });
+    const doc = clone(buildMinimalDocument());
+    const first = doc.ir.nodes[0];
+    if (first === undefined) throw new Error('fixture node missing');
+    doc.ir.nodes[0] = { ...first, failurePolicy: { strategy: 'failover' } };
+    doc.ir.nodes = [
+      ...doc.ir.nodes,
+      {
+        id: 'record',
+        executionClass: 'deterministic_api',
+        spec: { class: 'deterministic_api', capability: 'filesystem.write' },
+        capabilityRequirements: ['filesystem.write'],
+        placement: 'device_local',
+        inputs: [],
+        outputs: [],
+        failurePolicy: { strategy: 'fail_workflow' },
+      },
+    ];
+    doc.ir.edges = [
+      { from: 'observe', to: 'record', on: 'success' },
+      { from: 'observe', to: 'record', on: 'success' },
+      { from: 'observe', to: 'record', on: 'failure' },
+    ];
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
     expect(issueCodes(result)).toContain('IR_EDGE_DUPLICATE');
@@ -194,8 +219,9 @@ describe('V2-003 — ambiguous control semantics are rejected', () => {
 
   it('an unreachable node is rejected (dead steps are ambiguous meaning)', () => {
     const doc = clone(buildMinimalDocument());
-    const orphan = clone(doc.ir.nodes[0]);
-    orphan.id = 'orphan';
+    const first = doc.ir.nodes[0];
+    if (first === undefined) throw new Error('fixture node missing');
+    const orphan: typeof first = { ...first, id: 'orphan' };
     doc.ir.nodes = [...doc.ir.nodes, orphan];
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
@@ -246,7 +272,7 @@ describe('V2-003 — ambiguous control semantics are rejected', () => {
   it('a human approval node with an uncovered outcome is rejected', () => {
     const doc = clone(buildTriageDocument());
     doc.ir.edges = doc.ir.edges.filter(
-      (edge) => !(edge.from === 'review_gate' && edge.on === 'rejected'),
+      (edge) => !(edge.from === 'review_gate' && typeof edge.on === 'object' && edge.on.outcome === 'rejected'),
     );
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
@@ -317,7 +343,7 @@ describe('V2-003 — non-canonical vocabularies are rejected', () => {
 
   it("completion evidence 'claim' can never establish completion (constitution §7)", () => {
     const doc = withNode(buildMinimalDocument(), 'observe', {
-      completionEvidence: 'claim',
+      completionEvidence: 'claim' as never,
     });
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
@@ -326,7 +352,7 @@ describe('V2-003 — non-canonical vocabularies are rejected', () => {
 
   it("completion evidence 'intent' can never establish completion", () => {
     const doc = withNode(buildMinimalDocument(), 'observe', {
-      completionEvidence: 'intent',
+      completionEvidence: 'intent' as never,
     });
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
@@ -370,7 +396,7 @@ describe('V2-003 — strict shape checking rejects unknown/malformed fields', ()
 
   it('an unknown top-level document field is rejected', () => {
     const doc = clone(buildMinimalDocument());
-    (doc as Record<string, unknown>).deploymentPlacement = 'us-east-1';
+    (doc as unknown as Record<string, unknown>).deploymentPlacement = 'us-east-1';
     const result = validateWorkflowIrDocument(doc);
     expect(result.ok).toBe(false);
     expect(issueCodes(result)).toContain('IR_FIELD_UNEXPECTED');
@@ -421,8 +447,10 @@ describe('V2-003 — the IR domain identifier is exported for discrimination', (
 function withNodeFailurePolicyAndEdges(doc: import('../../../src/workflow-ir/index.js').WorkflowIrDocument) {
   const next = clone(doc);
   const index = next.ir.nodes.findIndex((node) => node.id === 'fetch_issue');
+  const target = next.ir.nodes[index];
+  if (target === undefined) throw new Error('fixture node not found: fetch_issue');
   next.ir.nodes[index] = {
-    ...next.ir.nodes[index],
+    ...target,
     failurePolicy: { strategy: 'failover' },
   };
   next.ir.edges.push({ from: 'fetch_issue', to: 'log_rejection', on: 'failure' });

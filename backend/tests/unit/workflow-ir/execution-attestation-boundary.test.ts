@@ -38,11 +38,18 @@ function walkTsFiles(dir: string): string[] {
 const ATTESTATION_CONCEPT_PATTERN =
   /ExecutionStatement|ExecutionDigest|ExecutionAttestation|execution[-_]?statement|execution[-_]?digest|execution[-_]?attestation|attestation|attester|proof[-_]?graph|workflowos\/execution/i;
 
+/** Strip comments so boundary NOTES (which say "NOT here, V2-014 owns it") don't count as concepts — only CODE identifiers do. */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+}
+
 describe('V2-003 — no execution-attestation concepts in the module source', () => {
-  it('src/workflow-ir/**.ts mentions no attestation/statement/digest-of-execution concept', () => {
+  it('src/workflow-ir/**.ts declares no attestation/statement/digest-of-execution concept in code', () => {
     const violations: string[] = [];
     for (const file of walkTsFiles(MODULE_ROOT)) {
-      const source = readFileSync(file, 'utf8');
+      const source = stripComments(readFileSync(file, 'utf8'));
       const matches = source.match(ATTESTATION_CONCEPT_PATTERN);
       if (matches) {
         violations.push(`${relative(MODULE_ROOT, file)}: ${matches.join(', ')}`);
