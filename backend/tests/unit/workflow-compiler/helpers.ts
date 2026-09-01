@@ -134,12 +134,20 @@ export function withWorkflowOutputs(
   return withIr(document, { outputs });
 }
 
-/** Replace the workflow inputs in a cloned document. */
+/** Replace the workflow inputs in a cloned document (pure reconstruction). */
 export function withWorkflowInputs(
   document: WorkflowIrDocument,
   inputs: PortDeclaration[],
 ): WorkflowIrDocument {
   return withIr(document, { inputs });
+}
+
+/** Replace the compatibility metadata in a cloned document (pure reconstruction). */
+export function withCompatibility(
+  document: WorkflowIrDocument,
+  compatibility: WorkflowIrDocument['compatibility'],
+): WorkflowIrDocument {
+  return { ...document, compatibility };
 }
 
 // ----------------------------------------------------------------------------
@@ -258,4 +266,27 @@ export function buildGeneratedSourceDocument(): WorkflowIrDocument {
     origin: 'compiled',
     sourceRefs: ['model-session:v0-neutral-planner:run-42'],
   });
+}
+
+/**
+ * IR-INVALID (scratch-probe case 5, re-verified 2026-09-01): a human approval
+ * node with a failover policy but no on_failure edge — the merged V2-003
+ * validator itself rejects this (IR_FAILURE_POLICY_EDGE_REQUIRED), so the
+ * compiler's fail-closed re-validation layer rejects it with a
+ * policy-classified diagnostic. Human approval/decision nodes cannot carry
+ * failure edges, so failover is structurally unrepresentable for them.
+ */
+export function buildHumanFailoverDocument(): WorkflowIrDocument {
+  return withNodeFailurePolicy(buildTriageDocument(), 'review_gate', { strategy: 'failover' });
+}
+
+/**
+ * IR-VALID but capability-incoherent: the deterministic step invokes
+ * `messaging.send` while declaring `messaging.observe` as its capability
+ * requirement — the compiler rejects steps whose invoked capability was
+ * never declared for matching (execution must never invoke an undeclared
+ * capability; constitution §5).
+ */
+export function buildUndeclaredInvokedCapabilityDocument(): WorkflowIrDocument {
+  return withNodeCapabilityRequirements(buildTriageDocument(), 'notify_channel', ['messaging.observe']);
 }

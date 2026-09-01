@@ -15,6 +15,7 @@ import {
   buildUnreachableNodeDocument,
   buildUnsupportedSchemaVersionDocument,
   buildWrongObjectTypeDocument,
+  buildHumanFailoverDocument,
   withDefaultPlacement,
   withNodePlacement,
   withNodeCapabilityRequirements,
@@ -198,6 +199,23 @@ describe('V2-007 — policy violation (failure-policy/step semantics the compile
     );
     const result = compileWorkflow(document);
     expect(result.ok).toBe(true);
+  });
+
+  it('scratch-probe case 5 (human + failover) is IR-INVALID and rejected at the fail-closed re-validation layer', () => {
+    // Re-verified 2026-09-01: the merged V2-003 validator itself rejects a
+    // human approval node with a failover policy and no on_failure edge
+    // (IR_FAILURE_POLICY_EDGE_REQUIRED). The compiler re-validates its input
+    // (it RELIES on the IR's guarantees) and classifies the rejection as a
+    // policy violation with the underlying IR issue attached.
+    const document = buildHumanFailoverDocument();
+    expect(validateWorkflowIrDocument(document).ok).toBe(false);
+    const result = compileWorkflow(document);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const violation = result.diagnostics.find((d) => d.code === 'WORKFLOW_COMPILER_POLICY_VIOLATION');
+      expect(violation).toBeDefined();
+      expect(violation?.irIssue?.code).toBe('IR_FAILURE_POLICY_EDGE_REQUIRED');
+    }
   });
 });
 

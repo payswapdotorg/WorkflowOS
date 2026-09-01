@@ -31,8 +31,11 @@ import {
 
 const AUTHORED = buildTriageDocument();
 
-function okCompile(document: Parameters<typeof compileWorkflow>[0]) {
-  const result = compileWorkflow(document);
+function okCompile(
+  document: Parameters<typeof compileWorkflow>[0],
+  options?: Parameters<typeof compileWorkflow>[1],
+) {
+  const result = compileWorkflow(document, options);
   if (!result.ok) {
     throw new Error(`fixture must compile: ${result.diagnostics.map((d) => d.message).join('; ')}`);
   }

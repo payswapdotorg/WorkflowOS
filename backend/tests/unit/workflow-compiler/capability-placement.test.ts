@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { compileWorkflow } from '../../../src/workflow-compiler/index.js';
-import { WORKFLOW_IR_REGISTRY_VOCABULARY } from '../../../src/workflow-ir/index.js';
+import { WORKFLOW_IR_REGISTRY_VOCABULARY, validateWorkflowIrDocument } from '../../../src/workflow-ir/index.js';
 import type { WorkflowIrDocument } from '../../../src/workflow-ir/index.js';
 import {
   buildTriageDocument,
   buildTriageDocumentAltOrder,
+  buildUndeclaredInvokedCapabilityDocument,
   withNode,
   withNodeCapabilityRequirements,
   withNodePlacement,
@@ -193,23 +194,69 @@ describe('V2-007 — deterministic plan order and control semantics (inspectable
   });
 });
 
-describe('V2-007 — cyclic control (loops) compile faithfully (the IR does not forbid cycles)', () => {
-  it('a cyclic control graph compiles with the back edge represented in successors', () => {
-    const cyclic = withEdge(AUTHORED, { from: 'log_rejection', to: 'draft_summary', on: 'success' });
-    const result = compileWorkflow(cyclic);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const log = result.artifact.plan.units.find((unit) => unit.unit === 'log_rejection');
-      expect(log?.onSuccess).toEqual(['draft_summary']);
-      // every node still appears exactly once (the plan is a graph, not a trace)
-      expect(result.artifact.plan.units.length).toBe(6);
+describe('V2-007 — cyclic control is IR-valid but compiler-v1-unrepresentable (rejected)', () => {
+  // The interrupted dispatch's fixture probe (re-verified 2026-09-01) proved
+  // the merged V2-003 validator ACCEPTS cyclic control graphs (there is no
+  // acyclicity rule in the IR). This compiler (v1) compiles ACYCLIC
+  // executable plans only: a cyclic source is an IR-valid-but-compiler-
+  // unrepresentable document and MUST be rejected with a typed GRAPH_INVALID
+  // diagnostic — never silently unrolled, truncated, or guessed forward.
+  // Loop semantics require a governed later compiler version.
+  const backEdge = { from: 'log_rejection', to: 'draft_summary', on: 'success' } as const;
+
+  it('a cyclic control graph is IR-VALID (the compiler layer is load-bearing)', () => {
+    expect(validateWorkflowIrDocument(withEdge(AUTHORED, backEdge)).ok).toBe(true);
+  });
+
+  it('a cyclic control graph is rejected with a GRAPH_INVALID diagnostic naming the cycle', () => {
+    const result = compileWorkflow(withEdge(AUTHORED, backEdge));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const graph = result.diagnostics.find((d) => d.code === 'WORKFLOW_COMPILER_GRAPH_INVALID');
+      expect(graph).toBeDefined();
+      expect(graph?.message).toContain('draft_summary');
+      expect(graph?.message).toContain('log_rejection');
+      expect('artifact' in result).toBe(false);
     }
   });
 
-  it('cyclic compilation is deterministic', () => {
-    const cyclic = withEdge(AUTHORED, { from: 'log_rejection', to: 'draft_summary', on: 'success' });
+  it('the cyclic rejection is deterministic (identical diagnostics, identical order)', () => {
+    const cyclic = withEdge(AUTHORED, backEdge);
     const first = compileWorkflow(cyclic);
     const second = compileWorkflow(cyclic);
     expect(first).toEqual(second);
+  });
+
+  it('a different cycle (back edge into the approval gate) is equally rejected', () => {
+    const cyclic = withEdge(AUTHORED, { from: 'sync_backlog', to: 'review_gate', on: 'success' });
+    expect(validateWorkflowIrDocument(cyclic).ok).toBe(true);
+    const result = compileWorkflow(cyclic);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some((d) => d.code === 'WORKFLOW_COMPILER_GRAPH_INVALID')).toBe(true);
+    }
+  });
+});
+
+describe('V2-007 — invoked capabilities are declared for matching (pre-execution coherence)', () => {
+  it('a deterministic step whose invoked capability is NOT declared in its requirements is rejected', () => {
+    // notify_channel invokes `messaging.send` but declares only
+    // `messaging.observe` — execution must never invoke an undeclared
+    // capability (constitution §5: no silent substitution/emulation).
+    const document = buildUndeclaredInvokedCapabilityDocument();
+    expect(validateWorkflowIrDocument(document).ok).toBe(true);
+    const result = compileWorkflow(document);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const capability = result.diagnostics.find((d) => d.code === 'WORKFLOW_COMPILER_CAPABILITY_UNSUPPORTED');
+      expect(capability).toBeDefined();
+      expect(capability?.path).toContain('notify_channel');
+      expect(capability?.message).toContain('messaging.send');
+    }
+  });
+
+  it('the declared-invoked-capability rejection is deterministic', () => {
+    const document = buildUndeclaredInvokedCapabilityDocument();
+    expect(compileWorkflow(document)).toEqual(compileWorkflow(document));
   });
 });

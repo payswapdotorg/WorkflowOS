@@ -55,12 +55,34 @@ function stripComments(source: string): string {
 const ATTESTATION_CONCEPT_PATTERN =
   /ExecutionStatement|ExecutionDigest|ExecutionAttestation|execution[-_]?statement|execution[-_]?digest|execution[-_]?attestation|attestation|attester|proof[-_]?graph|workflowos\/execution/i;
 
+/**
+ * Teaching (V2-006), run/evidence persistence (V2-005) and deployment
+ * (V2-002) concepts are sibling domains — the compiler implements NONE of
+ * them. `completionEvidence` is a V2-003 WorkflowIR concept (the source
+ * IR's declared disclosure of what establishes step completion) and is
+ * intentionally NOT part of this pattern.
+ */
+const TEACHING_RUN_PERSISTENCE_CONCEPT_PATTERN =
+  /TeachingSession|teaching|lesson|learner|instructor|curriculum|WorkflowRun|runId|runAttempt|workflowRun|executionRecord|executionPersistence|WorkflowDeployment|deploymentRecord/i;
+
 describe('V2-007 — no execution-attestation concepts in the compiler module source', () => {
   it('src/workflow-compiler/**.ts declares no attestation/statement-of-execution concept in code', () => {
     const violations: string[] = [];
     for (const file of walkTsFiles(MODULE_ROOT)) {
       const source = stripComments(readFileSync(file, 'utf8'));
       const matches = source.match(ATTESTATION_CONCEPT_PATTERN);
+      if (matches) {
+        violations.push(`${relative(MODULE_ROOT, file)}: ${matches.join(', ')}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('src/workflow-compiler/**.ts declares no teaching/run/evidence-persistence concept in code', () => {
+    const violations: string[] = [];
+    for (const file of walkTsFiles(MODULE_ROOT)) {
+      const source = stripComments(readFileSync(file, 'utf8'));
+      const matches = source.match(TEACHING_RUN_PERSISTENCE_CONCEPT_PATTERN);
       if (matches) {
         violations.push(`${relative(MODULE_ROOT, file)}: ${matches.join(', ')}`);
       }

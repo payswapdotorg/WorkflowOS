@@ -201,8 +201,9 @@ describe('V2-007 — ANY source semantic change → different source digest AND 
   for (const mutation of mutations) {
     it(`${mutation.name} → different source digest and different compiled artifact`, () => {
       const base = okArtifact(AUTHORED);
-      const mutated = okArtifact(mutation.mutate(clone(AUTHORED)));
-      expect(computeWorkflowVersionSemanticDigest(mutated as WorkflowIrDocument).digest).not.toBe(
+      const mutatedDocument = mutation.mutate(clone(AUTHORED));
+      const mutated = okArtifact(mutatedDocument);
+      expect(computeWorkflowVersionSemanticDigest(mutatedDocument).digest).not.toBe(
         computeWorkflowVersionSemanticDigest(AUTHORED).digest,
       );
       expect(mutated.provenance.source.semanticDigest).not.toBe(base.provenance.source.semanticDigest);
@@ -210,7 +211,7 @@ describe('V2-007 — ANY source semantic change → different source digest AND 
       expect(computeCompiledWorkflowDigest(mutated).digest).not.toBe(
         computeCompiledWorkflowDigest(base).digest,
       );
-      expect(verifySourceVersionBinding(base, mutation.mutate(clone(AUTHORED)))).toBe(false);
+      expect(verifySourceVersionBinding(base, mutatedDocument)).toBe(false);
     });
   }
 });
