@@ -166,3 +166,80 @@ When WORK-069 lands, the POST_RELEASE mode is extended with the
 canary-bound continue/halt/recover loop. Until then, POST_RELEASE is
 defined in this document as the immediate-post-release validation
 without the progressive-rollout binding.
+
+## 8. The progressive release loop (implemented under WORK-069 — in flight)
+
+The canary-bound continue/halt/recover loop this document's §7 anticipated
+is implemented under WORK-069 (Progressive Release & Runtime Validation),
+activated by the architect on 2026-08-31 and IN FLIGHT on branch
+`feat/WORK-069-progressive-release` (the activation record and the full
+binding model are in `spec/work-orders/WORK-069.md`): the feedback binding
+layer at `backend/src/progressive-release/` — the application-layer
+pattern, NOT an 18th frozen module — that binds this document's POST_RELEASE
+mode to the progressive rollout.
+
+The loop, as governed by the Work Order and implemented:
+
+```text
+release (the EXISTING /workflows + /github + /runtime authorities — distributed, consumed, never replaced)
+    ↓
+canary / partial rollout (the existing deployment surface — the stage is DECLARED to the decision layer, never advanced by it)
+    ↓
+synthetic validation (WORK-064, scheduled by WORK-066 at POST_RELEASE/RELEASE — the decision layer binds the COMPLETED run through findRun)
+    ↓
+runtime observation (the existing /runtime deployment authority — consumed through the read-only RuntimeObservationReader port)
+    ↓
+continue / halt / recover (the PURE deterministic policy — a governed derivation, never an autonomous agent decision)
+    ↓
+    ├─ continue → the existing release authority proceeds with the rollout
+    ├─ halt → the failure evidence becomes an Engineering Signal (WORK-067) → WORK-068 → the existing /work-items authority
+    └─ recover → the EXISTING rollback authority (consumed through its port; unbound today = the typed fail-closed outcome, never a silent continue)
+```
+
+The decision layer's fail-closed ruling (the §5 semantics, enforced):
+missing or unusable validation evidence, a missing or ambiguous runtime
+observation, a cross-scope binding mismatch, or an inconsistent recorded
+rollout state is a TYPED HALT — never a continue, never a synthesized
+healthy state. A RECOVER is derived only for the contained-rollback cases
+(an effect-policy violation at any stage; a validation failure or an
+unhealthy runtime while still contained at the canary); at the exposed
+stages (partial/full) the same failures are HALTS (stop the rollout, feed
+the governed chain — do not auto-rollback).
+
+The decision identity is deterministic (tenant, project, release, stage,
+validation run, runtime-observation event): a duplicate delivery converges
+on the recorded decision and re-executes nothing; a different scope is an
+independent decision. Every decision record carries the full provenance
+(which release, environment, stage, validation run, runtime observation,
+policy version, decision, and why) and emits one `/audit` forensic event
+(WORK-020).
+
+The consequence durability protocol (the PR #108 architect-review
+correction + the 2026-09-01 re-review claim correction): the decision
+record is the only idempotency boundary for the governed consequences,
+so it is RESERVED (insert-only, through the repository port's `reserve`,
+persisted to the composed boundary) BEFORE any governed consequence
+executes — the halt/recover consequences (signal emission, the rollback
+invocation) run only for the reservation owner, then the
+`completeDecision` transition records their real outcomes; a `continue`
+reserves atomically final (it carries no governed consequences). Within
+the composed boundary, a crash or a concurrent delivery can therefore
+never re-execute a non-idempotent consequence for an identity that is
+already reserved: the re-delivery that finds a reserved-but-unresolved
+(pending) reservation fails closed with the typed
+`PR_DECISION_CONSEQUENCES_PENDING` — never a re-execution, never a clean
+duplicate. The protocol's strength is the composed adapter's: the
+production composition binds the in-memory adapter (`migrations: []` —
+the 064/066/067 precedent), whose reservation is PROCESS-LOCAL —
+cross-process consequence idempotency is NOT claimed by that
+composition; it is the DURABLE-adapter contract of the same port (the
+keyed-uniqueness + pending-tombstone semantics proven under real
+PostgreSQL, including the process-loss and two-independent-instance
+cases) and the future ACR's productionization, which must precede any
+drive-surface activation that delivers decisions from more than one
+process.
+
+When WORK-059 (Operational and Release Governance) lands, the release
+mechanics are delegated to it at the same public ports — WORK-069's
+binding model (the decision, the evidence gates, the consequence chain)
+is unchanged by that delegation.

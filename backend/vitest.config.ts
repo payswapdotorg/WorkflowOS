@@ -64,6 +64,12 @@ export default defineConfig({
       // tests/integration/engineering-signals/ and gate on
       // WORKFLOWOS_DATABASE_URL).
       'tests/engineering-signals/**/*.test.ts',
+      // WORK-069: the progressive release decision suite (the feedback
+      // binding layer — pure domain + composition tests; the real-PG
+      // two-actor concurrency proofs live under
+      // tests/integration/progressive-release/ and gate on
+      // WORKFLOWOS_DATABASE_URL).
+      'tests/progressive-release/**/*.test.ts',
     ],
     testTimeout: 15000,
     hookTimeout: 15000,

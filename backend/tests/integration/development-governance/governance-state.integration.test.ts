@@ -101,9 +101,19 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // history), MERGED by the architect as bde33cc via PR #103
     // (2026-08-31T18:30:23Z, squash-merged at the approved head 0fe9c48 —
     // the merge tree identical), and FINALIZED complete per §34.8/ADR-0007
-    // by the WORK-067 post-merge finalization: 60/60 complete, NOTHING in
-    // flight, 15/15 merged-finalization gaps closed.
-    expect(inFlight.map((w) => w.id).sort()).toEqual([]);
+    // by the WORK-067 post-merge finalization: 60/60 complete, 15/15
+    // merged-finalization gaps closed. WORK-069 (Progressive Release &
+    // Runtime Validation — the feedback binding layer) was then ACTIVATED
+    // by the architect on 2026-08-31 (the implementation instruction; every
+    // hard edge verified complete on main) — the ONE in-flight
+    // implementation on THIS branch's canonical view: feat/WORK-069-
+    // progressive-release (grown from 26e2ada, the 2026-08-31 dogfooding-
+    // evidence merge): 61 recorded work orders = 60 complete + 1 in flight.
+    // The parallel WORK-068 (the ADR-0003 wave-10 partner, PR #107 OPEN
+    // from the same base) is in flight on ITS branch, not on this one —
+    // each branch's canonical view records its own activation; the
+    // architect reconciles the shared surfaces at merge time.
+    expect(inFlight.map((w) => w.id).sort()).toEqual(['WORK-069']);
     // Every completed item carries merge evidence (the truthful record).
     for (const w of complete) {
       expect(w.mergedAs?.pr, `${w.id} must record its merge PR`).toBeGreaterThan(0);
@@ -168,18 +178,25 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     // the architect as bde33cc via PR #103 (2026-08-31T18:30:23Z,
     // squash-merged at the approved head 0fe9c48 — the post-#104
     // reconciliation head) and recorded complete per §34.8/ADR-0007 by the
-    // WORK-067 post-merge finalization — NOTHING is in flight and NO
-    // program-state pending record exists (WORK-068..070/072/073 remain
-    // future-generation items not recorded in program-state — the
-    // architect's authorization is required; the frontier pair is tracked
-    // in dependency-state futureGenerationEligibility).
-    expect(frontier.inFlight.map((w) => w.id)).toEqual([]);
+    // WORK-067 post-merge finalization — and then WORK-069 was ACTIVATED
+    // (2026-08-31, the architect's implementation instruction): the ONE
+    // in-flight record on THIS branch's canonical view (WORK-069, NOT
+    // merged, NOT complete — the architect's review + merge are the
+    // completion gate). WORK-068 (the parallel wave-10 partner, PR #107
+    // OPEN) is in flight on its own branch's canonical view, not on this
+    // one. WORK-070/072/073 remain future-generation items not recorded in
+    // program-state (the architect's authorization is required; the
+    // eligibility is tracked in dependency-state futureGenerationEligibility).
+    expect(frontier.inFlight.map((w) => w.id)).toEqual(['WORK-069']);
     expect(frontier.dependencyEligible).toEqual([]);
     expect(frontier.blocked).toEqual([]);
     // The frontier's item-level coordination flag discipline is TRUTHFUL:
-    // no in-flight items exist at all (the post-finalization truth), so the
-    // flag discipline holds vacuously (the false case is proven by
-    // mutation in the parallel suite).
+    // the ONE in-flight item (WORK-069) has NO live conflicts in THIS
+    // branch's canonical view (the parallel WORK-068 is an open PR from
+    // the same base, not an in-flight record here — the declared
+    // coordination lives in dependency-state knownConflicts), so the flag
+    // discipline holds (the false case is proven by mutation in the
+    // parallel suite).
     for (const item of frontier.inFlight) {
       expect(item.incompleteDependencies).toEqual([]);
       expect(item.conflicts.every((c) => c.coordinated), `${item.id}: every conflict mutually coordinated`).toBe(true);
@@ -201,15 +218,17 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(governing.decisions.map((d) => d.id)).toContain('ADR-0007');
     expect(governing.decisions.filter((d) => d.kind === 'adr').length).toBeGreaterThanOrEqual(7);
 
-    // Q7 — how do I resume interrupted implementation? (NOTHING recorded is
-    // resumable: WORK-046..WORK-050, WORK-052, and — since the WORK-067
-    // post-merge finalization — WORK-067 are all MERGED — their handoffs were
-    // removed by the post-merge finalizations, and merged work is NOT
-    // resumable. The WORK-067 pre-merge activation handoff (the post-#104
-    // reconciliation handoff) actually EXISTED and was REMOVED by the
-    // finalization; resumption must now fail closed. The positive resumption
-    // path is covered by the
-    // fixture-based tests below; the real state pins the
+    // Q7 — how do I resume interrupted implementation? (WORK-069 is the ONE
+    // resumable record on THIS branch — its activation handoff is LIVE: the
+    // implementation is complete on feat/WORK-069-progressive-release and
+    // the handoff records the remaining battery/PR steps. WORK-046..WORK-050,
+    // WORK-052, and — since the WORK-067 post-merge finalization — WORK-067
+    // are all MERGED — their handoffs were removed by the post-merge
+    // finalizations, and merged work is NOT resumable. The WORK-067
+    // pre-merge activation handoff (the post-#104 reconciliation handoff)
+    // actually EXISTED and was REMOVED by the finalization; resumption must
+    // fail closed for all merged work. The positive resumption path is
+    // covered by the fixture-based tests below; the real state pins the
     // merged-not-resumable + no-vacuous-handoff rules.)
     expect(() => fresh.resumeImplementation('WORK-052')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-047')).toThrow(NoResumableStateError);
@@ -220,9 +239,11 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
     expect(() => fresh.resumeImplementation('WORK-071')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-066')).toThrow(NoResumableStateError);
     expect(() => fresh.resumeImplementation('WORK-067')).toThrow(NoResumableStateError);
-    // The activeHandoffs array is EMPTY (the finalization removed the
-    // WORK-067 handoff — merged work is not resumable).
-    expect(realProgram.resumption.activeHandoffs).toEqual([]);
+    // The activeHandoffs array carries EXACTLY the live WORK-069 activation
+    // handoff (the merged WORK-067 handoff was removed by the finalization
+    // — merged work is not resumable; the in-flight WORK-069 handoff is the
+    // resumable state).
+    expect(realProgram.resumption.activeHandoffs.map((h) => h.workOrderId)).toEqual(['WORK-069']);
   });
 
   it('W052-AC01 — the governance:status CLI entry answers from the repository alone (the script exists and constructs the service)', async () => {
@@ -507,9 +528,13 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // stripped: the fixture
       // reconstructs WORK-064 as in_flight, and a record over
       // the reconstructed dependency would require fixture coordination
-      // bookkeeping irrelevant to this discrimination.
-      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066' && w.id !== 'WORK-067');
-      // …and the WORK-067 activation handoff is stripped with it (the
+      // bookkeeping irrelevant to this discrimination. WORK-069 (in_flight
+      // since its 2026-08-31 activation, depending on the stripped
+      // WORK-066) is stripped with them — the fixture reconstructs the
+      // pre-WORK-069-activation baseline (a record over a stripped
+      // dependency is invalid fixture state).
+      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066' && w.id !== 'WORK-067' && w.id !== 'WORK-069');
+      // …and the WORK-067/WORK-069 activation handoffs are stripped with it (the
       // fixture reconstructs the pre-activation baseline; a handoff
       // referencing a stripped work order would be invalid fixture state).
       program.resumption.activeHandoffs = [];

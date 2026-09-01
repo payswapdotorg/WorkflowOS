@@ -63,7 +63,10 @@ describe('WORK-067 — module composition', () => {
     expect(appTs).toMatch(/engineeringSignalService\?: EngineeringSignalService;/);
     // The composition: the WORK-064 service + the in-memory repository + the injected clock:
     expect(appTs).toMatch(/engineeringSignalService = new DefaultEngineeringSignalService\(\{\s*\n\s*signalRepository: new InMemoryEngineeringSignalRepository\(\),\s*\n\s*continuousValidationService: continuousValidationService!,/);
-    // The deps return:
-    expect(appTs).toMatch(/\n\s*engineeringSignalService,\s*\n\s*reviewService,/);
+    // The deps return (evolved with the WORK-069 activation: the
+    // progressive-release decision service is composed immediately after
+    // the engineering-signal service it consumes — the WORK-069
+    // feedback-binding layer):
+    expect(appTs).toMatch(/\n\s*engineeringSignalService,\s*\n\s*progressiveReleaseService,\s*\n\s*reviewService,/);
   });
 });
