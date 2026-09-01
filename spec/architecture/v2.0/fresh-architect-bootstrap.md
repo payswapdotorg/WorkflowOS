@@ -8,18 +8,20 @@ Read these files in order:
 
 1. `spec/architecture/v2.0/README.md`
 2. `spec/architecture/v2.0/architecture.md`
-3. `spec/architecture/v2.0/research-rationale.md`
-4. `spec/architecture/v1.1/fresh-architect-bootstrap.md`
-5. the current `spec/development-state/program-state.json`
-6. the current `spec/development-state/dependency-state.json`
-7. the current `spec/development-state/frontier-state.json`
-8. the relevant v1.x Work Orders and implementation code before proposing any compatibility reuse
+3. `spec/architecture/v2.0/workflow-teaching-and-marketplace.md`
+4. `spec/architecture/v2.0/workflow-marketplace-economics.md`
+5. `spec/architecture/v2.0/research-rationale.md`
+6. `spec/architecture/v1.1/fresh-architect-bootstrap.md`
+7. the current `spec/development-state/program-state.json`
+8. the current `spec/development-state/dependency-state.json`
+9. the current `spec/development-state/frontier-state.json`
+10. the relevant v1.x Work Orders and implementation code before proposing any compatibility reuse
 
 ## Architectural position
 
 WorkflowOS 2.0 is a new architecture generation. Do not reinterpret v1.0 as v2.0 and do not perform an uncontrolled rewrite.
 
-The top-level artifact is a versioned **Workflow**, not a Work Item, Agent Run, prompt, skill file, or GUI recording.
+The top-level artifact is a versioned **Workflow**, not a Work Item, Agent Run, prompt, skill file, GUI recording, lesson, or marketplace listing.
 
 The canonical object chain is:
 
@@ -55,6 +57,22 @@ hybrid
 ```
 
 Authoring is itself resumable. Teaching traces are durable provenance. The compiler converts traces into semantic Workflow IR while preserving uncertainty and asking human questions where needed.
+
+## Bidirectional workflow learning
+
+WorkflowOS supports both directions of knowledge transfer:
+
+```text
+Person → WorkflowOS
+  teach by text / voice / demonstration
+
+WorkflowOS → Person
+  explain / demonstrate / coach / practice
+```
+
+An installed workflow can be used as an executable automation or as a teacher. Teaching is derived from the exact Workflow Version; it does not introduce a second executable representation.
+
+A user can therefore discover a workflow by asking what they want to accomplish, install it, and choose `teach me`, `run it`, or `practice` without already knowing how to search the repository.
 
 ## Execution model
 
@@ -110,29 +128,13 @@ threshold crossing
 workflow completion/failure
 ```
 
-Threshold triggers must use crossing semantics to avoid repeated execution while a metric remains above a threshold.
+Threshold triggers must use crossing semantics to avoid repeated execution while a metric remains above threshold.
 
 Scheduling belongs to deployments/triggers, not the semantic core of a Workflow Version.
 
-## Security model
+## Versioning and repository model
 
-Every workflow/deployment has an explicit policy ceiling covering capabilities, data scopes, devices, locality, side-effect level, credentials and approval requirements.
-
-Secrets are referenced through secure bindings, never embedded in Workflow source or teaching traces.
-
-No provider silently falls back to an incompatible provider.
-
-## Versioning
-
-Workflow Versions are immutable.
-
-Optimization, edits and demonstrations produce candidate new versions. Existing versions remain reproducible forever subject to their declared dependencies.
-
-Execution provenance always identifies the exact Workflow Version and Deployment.
-
-## Collaboration
-
-A Workflow Repository behaves like a software repository:
+Workflow Versions are immutable. Workflow repositories support:
 
 ```text
 fork
@@ -146,7 +148,37 @@ update
 rollback
 ```
 
-Workflow dependencies use explicit version constraints and input/output contracts.
+Optimization, edits and demonstrations produce candidate new versions. Existing versions remain reproducible according to their declared dependencies.
+
+## Marketplace and creator economics
+
+A published workflow may be free or paid.
+
+Supported commercial models include:
+
+```text
+free
+one-time purchase
+maintenance subscription
+```
+
+Commercial entitlement is separate from runtime authority.
+
+A creator can publish a new version or compatible maintenance update, but cannot silently mutate a buyer's installed immutable version or expand its permissions.
+
+Payment, pricing, popularity, ratings and marketplace status never grant additional capabilities.
+
+See `workflow-teaching-and-marketplace.md` and `workflow-marketplace-economics.md` for the normative rules.
+
+## Security model
+
+Every workflow/deployment has an explicit policy ceiling covering capabilities, data scopes, devices, locality, side-effect level, credentials and approval requirements.
+
+Secrets are referenced through secure bindings, never embedded in Workflow source, teaching traces, marketplace metadata, or lessons.
+
+No provider silently falls back to an incompatible provider.
+
+Reverse teaching is subject to the viewer's authorization, workflow visibility, license, and data-access restrictions.
 
 ## Optimization
 
@@ -203,9 +235,9 @@ software/build-product
     deployment
 ```
 
-## Implementation order
+## Initial implementation order
 
-The first implementation Work Orders should establish the contracts before rich UI:
+The first implementation Work Orders should establish contracts before rich UI:
 
 ```text
 V2-001 Universal Workflow Protocol
@@ -213,9 +245,16 @@ V2-002 Workflow Repository + immutable Version
 V2-003 Workflow IR
 V2-004 Node + Capability protocol
 V2-005 Workflow Run + Evidence
+V2-006 Workflow Authoring / Teaching Trace
+V2-007 Workflow Compiler
+V2-008 Reverse Teaching / Learn-from-Workflow
+V2-009 Workflow Marketplace + Entitlements
+V2-010 Scheduling + Event Triggers
+V2-011 Local/Device/Cloud Execution
+V2-012 Optimization + Version Proposal Engine
 ```
 
-Only after those are stable should the project build the multimodal authoring and execution surfaces.
+The ordering is intentionally contract-first. Marketplace and reverse teaching depend on stable workflow identity, versions, IR and evidence; rich web/desktop/mobile UX follows the protocol rather than defining it.
 
 ## Non-negotiable rule
 
