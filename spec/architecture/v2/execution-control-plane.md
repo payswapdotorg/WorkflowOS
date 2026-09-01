@@ -5,7 +5,7 @@
 
 ## Purpose
 
-This document makes V2 implementation mechanical. Every V2 feature is represented by a Work Order, a machine-readable state record, explicit dependency edges, a bounded acceptance contract, and a dogfooding gate. Implementation agents must be able to resume from GitHub without conversational history.
+This control plane makes V2 implementation mechanical while maximizing safe parallelism. Every V2 feature is represented by a Work Order, machine-readable state, explicit dependencies, declared change surfaces, acceptance evidence, and dogfooding.
 
 ## Work-order lifecycle
 
@@ -13,119 +13,136 @@ This document makes V2 implementation mechanical. Every V2 feature is represente
 PLANNED
   ↓ activate
 IN_FLIGHT
-  ↓ implementation + verification
+  ↓ implementation + verification + dogfooding
 READY_FOR_MERGE
-  ↓ sole architect review/merge
+  ↓ sole architect merge
 COMPLETE
 ```
 
-Failure/rework paths:
+Failure/rework:
 
 ```text
 IN_FLIGHT → BLOCKED → IN_FLIGHT
 READY_FOR_MERGE → IN_FLIGHT
 ```
 
-`COMPLETE` requires the actual Git merge evidence. Tests, CI, or a PR approval never substitute for merge evidence.
+`COMPLETE` requires the actual Git merge evidence. Tests, CI, approval, or a PR do not substitute for merge evidence.
 
-## Activation rule
+## Dependency types
 
-Only one V2 Work Order may be `IN_FLIGHT` unless the state explicitly declares a conflict-free parallel wave. The activation record must identify:
+Every dependency is explicitly one of:
+
+- `contract` — the dependency consumes a frozen interface/schema/protocol, not its implementation.
+- `implementation` — the dependency genuinely requires merged implementation behavior.
+- `integration` — the dependency is an integration gate combining independently merged capabilities.
+
+**Parallelization rule:** `contract` dependencies MAY be developed in parallel from the same merged base. `implementation` dependencies require the dependency to be merged first. `integration` Work Orders combine already-merged capabilities.
+
+## No-rebase parallelism rule
+
+A parallel Work Order MUST NOT use another parallel Work Order's unmerged branch, commit, or PR as its base.
+
+Parallel Work Orders start from the same stable `main` SHA and own disjoint declared change surfaces. They may depend on each other's **contracts** only if those contracts are already merged or independently frozen in the architecture package.
+
+If two Work Orders touch the same file, schema object, public interface, migration, or authoritative state record, they are not a no-rebase parallel pair unless their scopes are explicitly split so that each branch can merge without editing the other's unmerged lines.
+
+When parallel branches converge, an integration Work Order starts from current `main`; sibling implementation branches are never rebased onto one another.
+
+## Activation record
+
+Each `IN_FLIGHT` Work Order records:
 
 - exact base SHA;
 - Work Order ID;
 - branch;
-- dependencies and their observed state;
-- declared change surfaces;
+- dependency type for every dependency;
+- declared file/schema/API change surfaces;
 - acceptance tests;
-- dogfooding experiment/gate;
+- real integration evidence required;
+- feature dogfooding experiment;
+- expected integration gates;
 - known exclusions.
 
 ## Mechanical execution loop
 
-Every Work Order follows this exact loop:
-
 1. Read current `main` and the Work Order from GitHub.
-2. Verify dependency and state invariants.
-3. Create a fresh branch from the recorded current `main`.
-4. Write the smallest failing deterministic tests for the acceptance contract.
-5. Implement the minimum change preserving V2 protocol boundaries.
-6. Run local verification.
-7. Run the required real integration verification where the Work Order calls for it.
-8. Run the feature's dogfooding experiment immediately after the feature becomes executable.
-9. Record empirical findings separately from normative architecture state.
-10. Fix only findings owned by the Work Order; create/follow a new Work Order for unrelated findings.
-11. Update the Work Order evidence record and state.
-12. Open a PR.
-13. The sole architect reviews the PR and may request changes or merge it.
-14. After merge, finalize state against the real merge SHA and activate the next eligible Work Order.
+2. Verify dependencies and whether they are `contract`, `implementation`, or `integration` dependencies.
+3. If eligible for a parallel wave, create the branch from the **same exact base SHA** as its siblings.
+4. Add deterministic failing tests for the Work Order's contract.
+5. Implement the smallest change preserving frozen authority boundaries.
+6. Run local/unit/integration verification.
+7. Run required real-system proofs.
+8. Run the required feature-boundary dogfooding experiment as soon as the feature is executable.
+9. Persist empirical findings separately from normative architecture.
+10. Fix only findings owned by this Work Order; create a corrective Work Order for unrelated findings.
+11. Mark the Work Order ready and open its PR.
+12. Sole architect reviews and merges it.
+13. After merge, finalize state against the real merge SHA.
+14. Activate the next eligible wave; never create a rebase dependency merely to combine sibling work.
+15. After a wave lands, run any declared integration Work Order and its cross-feature dogfooding experiment.
 
 ## Dogfooding rule
 
-A feature is not considered validated merely because its unit/integration tests pass. Each feature gets a smallest-real-use experiment immediately after its implementation boundary becomes usable.
+Tests prove software correctness; dogfooding proves integrated product usefulness. Every user-facing or execution-facing feature requires a smallest-real-use experiment before completion. Non-user-facing infrastructure must define an equivalent operational/conformance experiment.
 
-Dogfooding must test the actual product path, not a synthetic substitute. Results are empirical evidence and never silently become architecture decisions. A failed experiment creates a targeted corrective Work Order or blocks activation of dependent work when the failure affects the feature's contract.
+A dogfooding failure is preserved as evidence. Contract-relevant failures block dependents; non-contract failures create targeted follow-up work without forcing unrelated branches to rebase.
 
-Examples:
+## State-machine invariants
 
-- Workflow Repository → create, edit, version, fork, install and execute a real workflow through the repository UI/API.
-- Workflow IR → author one real workflow and round-trip it through the IR.
-- Node/Capability → execute the same workflow against at least two host classes where supported.
-- Runs/Evidence → inspect a real run and reconstruct what happened from evidence.
-- Teaching → teach a real operator from a workflow and measure task completion.
-- Compiler → compile a real authored workflow and execute the compiled artifact.
-- Computer Agent → automate one useful computer task end to end.
-- Scheduling/Events → run one scheduled/event-triggered workflow in a controlled environment.
-- Reverse Teaching → install a real workflow and use it to teach a human.
-- Optimization → compare baseline and optimized workflow versions on the same task.
-- Collaboration/Marketplace → fork, modify, publish/install and transact a real workflow in a safe test context.
-- Self-hosting → install and run a WorkflowOS development workflow using WorkflowOS itself.
-
-## State machine invariants
-
-1. Every Work Order has exactly one stable ID and one canonical specification file.
-2. Every dependency is another known Work Order.
+1. Every Work Order has exactly one stable ID and canonical specification.
+2. Every dependency names a known Work Order.
 3. The dependency graph is acyclic.
-4. A Work Order cannot activate until all hard dependencies are `COMPLETE`.
-5. Soft dependencies may be incomplete only when the Work Order explicitly declares the compatibility seam.
-6. `IN_FLIGHT` requires a branch and exact base SHA.
-7. `READY_FOR_MERGE` requires a PR and complete local/CI evidence.
-8. `COMPLETE` requires PR + approved head + actual merge commit.
-9. Dogfooding evidence is required before declaring a feature `COMPLETE`, unless the Work Order explicitly classifies the feature as non-user-facing infrastructure and defines an equivalent operational experiment.
-10. A dogfooding failure cannot be erased by editing the result; corrective history is append-only.
-11. A later Work Order cannot redefine a frozen V2 concept without an explicit architecture-change record.
-12. V2 state cannot supersede the frozen v1.0 state.
+4. Hard `implementation` dependencies must be COMPLETE before activation.
+5. `contract` dependencies require only a frozen/merged contract.
+6. `integration` dependencies are satisfied only by prior merged capabilities.
+7. No parallel Work Order depends on an unmerged sibling implementation.
+8. No parallel Work Order shares an unresolved authoritative change surface with a sibling.
+9. `IN_FLIGHT` requires branch + exact base SHA.
+10. `READY_FOR_MERGE` requires deterministic verification + required dogfooding evidence.
+11. `COMPLETE` requires PR + approved head + actual merge commit.
+12. Dogfooding evidence is mandatory at feature boundaries.
+13. Empirical failures cannot be erased by rewriting observations.
+14. A V2 Work Order cannot silently redefine a frozen V2 contract.
+15. V2 state never supersedes frozen v1.0 authority.
 
 ## Evidence classes
 
-- **IMPLEMENTATION:** repository code/config/spec change.
-- **VERIFICATION:** deterministic tests, integration tests, CI, browser/device/cloud evidence.
-- **DOGFOODING:** real-user or real-product-path experiment.
-- **ARCHITECTURE:** normative decisions approved by the sole architect.
-- **OBSERVATION:** empirical finding not yet converted into a normative decision.
+- `IMPLEMENTATION`
+- `VERIFICATION`
+- `DOGFOODING`
+- `ARCHITECTURE`
+- `OBSERVATION`
 
-No evidence class may impersonate another.
-
-## Recovery / resume
-
-An interrupted implementation is resumed from the repository state, not from memory. The state record must identify the last verified commit, current branch, completed tasks, failed tests, dogfooding status, and next mechanical step. Agents must not infer completion from stale prose.
+Evidence classes are distinct and cannot impersonate one another.
 
 ## Lean review model
 
-There is one architect/reviewer. No external review role is required. Review ceremony scales with risk:
+There is one architect/reviewer. Review intensity follows risk:
 
-- small Work Order: focused diff + targeted tests + dogfooding;
-- architectural boundary: full contract review + discriminating regression;
-- cross-process/security/data-loss risk: real integration proof.
+- low risk: focused diff + targeted tests + feature dogfood;
+- contract boundary: contract review + discrimination tests + dogfood;
+- security/data-loss/cross-process: real-system concurrency/failure proof + integration dogfood;
+- integration Work Order: merged-artifact compatibility proof + end-to-end dogfood.
 
-The implementation agent must never merge its own PR merely because CI is green; the sole architect performs the merge gate.
+No external architect/reviewer is required.
 
-## V2 work-order namespace
+## Recovery / resume
 
-V2 product work is numbered `V2-001` onward. Development-control artifacts use the `V2-CTRL-*` namespace and are not product capabilities.
+Interrupted work resumes from GitHub state, not conversation memory. A Work Order record must contain last verified SHA, branch, activation evidence, current status, outstanding failures/findings, dogfooding status, and next mechanical action.
 
-The canonical sequence is:
+## Canonical parallel wave protocol
 
-`V2-001 → V2-002 → V2-003 → V2-004 → V2-005 → V2-006 → V2-007 → V2-008 → V2-009 → V2-010 → V2-011 → V2-012 → V2-013`.
+A wave is a set of Work Orders that:
 
-Where two work items can be safely developed in parallel, the state file must explicitly record the wave and conflict surface. Default behavior is sequential.
+1. start from one common merged `main` SHA;
+2. have no unmerged implementation dependencies on each other;
+3. have disjoint change surfaces;
+4. have individually complete verification and dogfooding;
+5. can merge independently in any order;
+6. are followed by an optional integration Work Order if interaction itself needs verification.
+
+The default is **parallel when safe**, not sequential when merely convenient.
+
+## Current V2 namespace
+
+V2 product work uses `V2-*`. Development-control artifacts use `V2-CTRL-*`.
