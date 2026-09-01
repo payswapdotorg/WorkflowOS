@@ -1,20 +1,25 @@
 {
-  "schemaVersion": "2.4",
+  "schemaVersion": "2.5",
   "architectureGeneration": "WorkflowOS-2.0",
-  "status": "PROPOSED",
+  "architectureStatus": "PROPOSED",
+  "implementationAuthorization": "APPROVED",
   "governingArchitecture": "v1.0",
   "transitionPolicy": "spec/architecture/v2/v1-transition.md",
+  "implementationAuthorizationRecord": "spec/architecture/v2/V2-CTRL-000-implementation-authorization.md",
   "constitution": "spec/architecture/v2/architecture-constitution.md",
+  "protocolRegistry": "spec/architecture/v2/V2-CTRL-003-protocol-registry.md",
+  "protocolRegistryMachine": "spec/architecture/v2/V2-CTRL-003-protocol-registry.json",
   "controlPlane": "spec/architecture/v2/execution-control-plane.md",
   "conformanceChecklist": "spec/architecture/v2/V2-CTRL-001-conformance-checklist.md",
   "roadmap": "spec/architecture/v2/optimized-roadmap.md",
   "roadmapLock": "spec/architecture/v2/V2-CTRL-002-roadmap-lock.md",
   "dogfoodingProtocol": "spec/architecture/v2/dogfooding-protocol.md",
+  "marketplaceEconomics": "spec/architecture/v2/workflow-marketplace-economics.md",
   "freshAgentBootstrap": "spec/architecture/v2/fresh-architect-bootstrap.md",
   "completed": ["V2-001"],
   "activeWave": null,
   "waves": [
-    {"id":"W0","items":["V2-001"],"status":"COMPLETE"},
+    {"id":"W0","items":["V2-001"],"status":"COMPLETE","dogfooding":"recorded"},
     {"id":"W1","items":["V2-002","V2-003","V2-004"],"status":"READY_AFTER_W0","mode":"parallel-no-rebase","dogfooding":"required-per-item"},
     {"id":"W2","items":["V2-005","V2-006","V2-007"],"status":"PLANNED","mode":"parallel-no-rebase","dogfooding":"required-per-item"},
     {"id":"W3","items":["V2-008"],"status":"PLANNED","mode":"sequential","requiresIntegrationGates":["IG-001","IG-002"],"dogfooding":"required"},
@@ -38,18 +43,18 @@
     "V2-013":{"status":"PLANNED","wave":"W6","dependencies":{"V2-008":"implementation","V2-009":"implementation","V2-012":"implementation"},"changeSurface":"first-party WorkflowOS workflow library and self-hosting","verification":"self-hosting authority-boundary battery","dogfooding":{"required":true,"experiment":"WorkflowOS installs and executes its own development workflow"}}
   },
   "integrationGates": [
-    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"purpose":"repository and IR round-trip","dogfooding":true},
-    {"id":"IG-002","workOrder":"spec/architecture/v2/work-orders/IG-002.md","after":["V2-003","V2-004"],"before":["V2-008"],"purpose":"IR capability/placement compatibility","dogfooding":true},
-    {"id":"IG-003","workOrder":"spec/architecture/v2/work-orders/IG-003.md","after":["V2-005","V2-007","V2-008"],"purpose":"compiled workflow execution with runs/evidence","dogfooding":true},
-    {"id":"IG-004","workOrder":"spec/architecture/v2/work-orders/IG-004.md","after":["V2-009","V2-010","V2-011"],"purpose":"event-driven, taught and optimized versions compose","dogfooding":true},
-    {"id":"IG-005","workOrder":"spec/architecture/v2/work-orders/IG-005.md","after":["V2-012","V2-013"],"purpose":"ecosystem and self-hosting composition","dogfooding":true}
+    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"purpose":"repository and IR round-trip","dogfooding":true,"status":"BLOCKED_UNTIL_INPUTS_COMPLETE"},
+    {"id":"IG-002","workOrder":"spec/architecture/v2/work-orders/IG-002.md","after":["V2-003","V2-004"],"before":["V2-008"],"purpose":"IR capability/placement compatibility","dogfooding":true,"status":"BLOCKED_UNTIL_INPUTS_COMPLETE"},
+    {"id":"IG-003","workOrder":"spec/architecture/v2/work-orders/IG-003.md","after":["V2-005","V2-007","V2-008"],"purpose":"compiled workflow execution with runs/evidence","dogfooding":true,"status":"LOCKED_UNTIL_INPUTS_COMPLETE"},
+    {"id":"IG-004","workOrder":"spec/architecture/v2/work-orders/IG-004.md","after":["V2-009","V2-010","V2-011"],"purpose":"event-driven, taught and optimized versions compose","dogfooding":true,"status":"LOCKED_UNTIL_INPUTS_COMPLETE"},
+    {"id":"IG-005","workOrder":"spec/architecture/v2/work-orders/IG-005.md","after":["V2-012","V2-013"],"purpose":"ecosystem and self-hosting composition","dogfooding":true,"status":"LOCKED_UNTIL_INPUTS_COMPLETE"}
   ],
   "rules": {
     "activation": "only items in the next eligible wave may activate",
     "parallel": "parallel-no-rebase means same base main SHA, disjoint authoritative surfaces, no unmerged implementation dependencies, independently mergeable",
     "contractDependencies": "consume merged/frozen contracts only; never consume an unmerged sibling branch",
     "implementationDependencies": "must be COMPLETE before activation",
-    "integrationGates": "combine already merged capabilities; use dedicated gate Work Orders",
+    "integrationGates": "combine already merged capabilities; use dedicated gate Work Orders with their own machine state",
     "integrationPrerequisites": "a high-risk execution Work Order cannot activate until the integration gates explicitly listed in its state record are COMPLETE",
     "completion": "implementation + deterministic verification + required dogfooding/conformance evidence + sole architect merge + actual merge evidence",
     "dogfooding": "mandatory after every feature boundary and every integration gate; equivalent conformance is allowed only for explicitly classified non-user-facing infrastructure",
@@ -62,10 +67,13 @@
     "antiDrift": "frozen V2 concepts may only change through a governed V2 architecture change",
     "noRebaseTax": "a parallel sibling cannot require a future rebase onto another sibling; integration happens after merge via a dedicated gate",
     "roadmapLock": "V2-CTRL-002 overrides informal roadmap wording if inconsistent",
-    "integrationWorkOrder": "every listed IG-* gate must have a repository-resident Work Order before activation",
-    "dogfoodingEvidence": "a Work Order marked COMPLETE must reference a persisted dogfooding/conformance evidence artifact"
+    "integrationWorkOrder": "every listed IG-* gate must have a repository-resident Work Order and machine-state entry before activation",
+    "dogfoodingEvidence": "a Work Order marked COMPLETE must reference persisted dogfooding or equivalent conformance evidence",
+    "protocolRegistry": "all protocol-visible capabilities, events, execution classes, placement identifiers and canonical digest rules come from V2-CTRL-003",
+    "authorization": "capability advertisement, marketplace entitlement, node trust and execution authorization are distinct dimensions",
+    "implementationAuthorization": "V2 is approved for implementation; proposed status means the generation remains governed by the constitution until formally version-frozen"
   },
   "nextEligible": ["V2-002","V2-003","V2-004"],
-  "nextAction": "Activate W1. Start V2-002, V2-003 and V2-004 independently from the same exact main SHA. Each agent reads the constitution, control plane, conformance checklist, roadmap lock, dogfooding protocol and its Work Order before coding.",
+  "nextAction": "Activate W1. Start V2-002, V2-003 and V2-004 independently from the same exact main SHA. Each agent reads V2-CTRL-000 through V2-CTRL-003, the constitution, control plane, dogfooding protocol and its Work Order before coding.",
   "updatedAt": "2026-09-01"
 }
