@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { verifyAttestation } from '../../../src/execution-attestation/index.js';
 import {
   ATTESTER_A,
+  ATTESTER_B,
   buildTriageStatement,
   defaultVerifyPolicy,
   signTriageAttestation,

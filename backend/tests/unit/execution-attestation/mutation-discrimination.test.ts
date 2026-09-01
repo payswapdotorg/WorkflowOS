@@ -1,14 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { sign as ed25519Sign } from 'node:crypto';
 import { signingPreimageJson } from '../../../src/execution-attestation/internal/envelope.js';
-import { digestOfStatementObject } from '../../../src/execution-attestation/internal/statement.js';
-import {
-  InMemoryReplayRegistry,
-  runVerificationPipeline,
-  verifyAttestation,
-  computeExecutionDigest,
-  VERIFICATION_CHECKS,
-} from '../../../src/execution-attestation/internal/verify.js';
+import { computeExecutionDigest, digestOfStatementObject } from '../../../src/execution-attestation/internal/statement.js';
+import { InMemoryReplayRegistry } from '../../../src/execution-attestation/internal/attestation-ledger.js';
+import { runVerificationPipeline, verifyAttestation, VERIFICATION_CHECKS } from '../../../src/execution-attestation/internal/verify.js';
 import type { AttestationVerification, ExecutionAttestation } from '../../../src/execution-attestation/index.js';
 import {
   ATTESTER_A,
@@ -20,6 +15,14 @@ import {
   defaultVerifyPolicy,
   signTriageAttestation,
 } from './helpers.js';
+
+/** An adversarial envelope cast: these objects deliberately violate the
+ * envelope/statement types (foreign object types, corrupted fields) — the
+ * verification pipeline must reject them at runtime; the casts exist only so
+ * the adversarial construction compiles. */
+function asEnvelope(value: unknown): ExecutionAttestation {
+  return value as ExecutionAttestation;
+}
 
 /**
  * V2-014 — mutation/discrimination evidence (work order "Required
@@ -81,13 +84,13 @@ describe('V2-014 mutation evidence 0 — the production pipeline is the full che
 describe('V2-014 mutation evidence 1 — remove the envelope-domain check (cross-protocol substitution)', () => {
   it('MUTATED: a foreign-objectType envelope with a VALID signature VERIFIES — the cross-protocol test FAILS', () => {
     const valid = signTriageAttestation();
-    const foreign = resign({ ...valid, objectType: 'workflowos/workflow-ir/v1' });
+    const foreign = resign(asEnvelope({ ...valid, objectType: 'workflowos/workflow-ir/v1' }));
     expect(mutatedVerifies(foreign, defaultVerifyPolicy(), 'envelope-domain')).toBe(true);
   });
 
   it('RESTORED: the same envelope is rejected with the typed domain-mismatch failure', () => {
     const valid = signTriageAttestation();
-    const foreign = resign({ ...valid, objectType: 'workflowos/workflow-ir/v1' });
+    const foreign = resign(asEnvelope({ ...valid, objectType: 'workflowos/workflow-ir/v1' }));
     const result = verifyAttestation(foreign, defaultVerifyPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -99,23 +102,23 @@ describe('V2-014 mutation evidence 1 — remove the envelope-domain check (cross
 describe('V2-014 mutation evidence 2 — remove the statement-domain check (cross-object substitution)', () => {
   it('MUTATED: an envelope carrying a foreign-typed inner statement VERIFIES — the substitution test FAILS', () => {
     const valid = signTriageAttestation();
-    const foreignStatement = { ...valid.statement, objectType: 'workflowos/execution-attestation/v1' } as typeof valid.statement;
-    const foreign = resign({
+    const foreignStatement = { ...valid.statement, objectType: 'workflowos/execution-attestation/v1' } as unknown as typeof valid.statement;
+    const foreign = resign(asEnvelope({
       ...valid,
       statement: foreignStatement,
       executionDigest: { ...valid.executionDigest, digest: digestOfStatementObject(foreignStatement) },
-    });
+    }));
     expect(mutatedVerifies(foreign, defaultVerifyPolicy(), 'statement-domain')).toBe(true);
   });
 
   it('RESTORED: the same envelope is rejected with the typed domain-mismatch failure', () => {
     const valid = signTriageAttestation();
-    const foreignStatement = { ...valid.statement, objectType: 'workflowos/execution-attestation/v1' } as typeof valid.statement;
-    const foreign = resign({
+    const foreignStatement = { ...valid.statement, objectType: 'workflowos/execution-attestation/v1' } as unknown as typeof valid.statement;
+    const foreign = resign(asEnvelope({
       ...valid,
       statement: foreignStatement,
       executionDigest: { ...valid.executionDigest, digest: digestOfStatementObject(foreignStatement) },
-    });
+    }));
     const result = verifyAttestation(foreign, defaultVerifyPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -127,19 +130,19 @@ describe('V2-014 mutation evidence 2 — remove the statement-domain check (cros
 describe('V2-014 mutation evidence 3 — remove the digest-match check (envelope/statement consistency)', () => {
   it('MUTATED: a VALIDLY-SIGNED envelope whose digest does not match its statement VERIFIES — the digest-integrity test FAILS', () => {
     const valid = signTriageAttestation();
-    const mismatched = resign({
+    const mismatched = resign(asEnvelope({
       ...valid,
       executionDigest: { ...valid.executionDigest, digest: computeExecutionDigest(buildTriageStatement({ attemptId: 9 })).digest },
-    });
+    }));
     expect(mutatedVerifies(mismatched, defaultVerifyPolicy(), 'digest-match')).toBe(true);
   });
 
   it('RESTORED: the same envelope is rejected with the typed digest-mismatch failure', () => {
     const valid = signTriageAttestation();
-    const mismatched = resign({
+    const mismatched = resign(asEnvelope({
       ...valid,
       executionDigest: { ...valid.executionDigest, digest: computeExecutionDigest(buildTriageStatement({ attemptId: 9 })).digest },
-    });
+    }));
     const result = verifyAttestation(mismatched, defaultVerifyPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -151,13 +154,13 @@ describe('V2-014 mutation evidence 3 — remove the digest-match check (envelope
 describe('V2-014 mutation evidence 4 — remove the attester-key-id check (identity/key consistency)', () => {
   it('MUTATED: an envelope whose attesterKeyId is not derived from its embedded key VERIFIES — the key-identity test FAILS', () => {
     const valid = signTriageAttestation();
-    const forged = resign({ ...valid, attesterKeyId: `wfeak_${'0'.repeat(32)}` });
+    const forged = resign(asEnvelope({ ...valid, attesterKeyId: `wfeak_${'0'.repeat(32)}` }));
     expect(mutatedVerifies(forged, defaultVerifyPolicy({ attesterKeyIds: undefined }), 'attester-key-id')).toBe(true);
   });
 
   it('RESTORED: the same envelope is rejected with the typed key-id mismatch failure', () => {
     const valid = signTriageAttestation();
-    const forged = resign({ ...valid, attesterKeyId: `wfeak_${'0'.repeat(32)}` });
+    const forged = resign(asEnvelope({ ...valid, attesterKeyId: `wfeak_${'0'.repeat(32)}` }));
     const result = verifyAttestation(forged, defaultVerifyPolicy({ attesterKeyIds: undefined }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -171,22 +174,22 @@ describe('V2-014 mutation evidence 5 — remove the signature check (real Ed2551
     const valid = signTriageAttestation();
     const tamperedStatement = buildTriageStatement({ action: 'EXFILTRATE the credentials somewhere else' });
     // digest is recomputed to stay consistent; the SIGNATURE stays the OLD one:
-    const tampered = {
+    const tampered = asEnvelope({
       ...valid,
       statement: tamperedStatement,
       executionDigest: computeExecutionDigest(tamperedStatement),
-    };
+    });
     expect(mutatedVerifies(tampered, defaultVerifyPolicy(), 'signature')).toBe(true);
   });
 
   it('RESTORED: the same tampered envelope is rejected with the typed signature failure', () => {
     const valid = signTriageAttestation();
     const tamperedStatement = buildTriageStatement({ action: 'EXFILTRATE the credentials somewhere else' });
-    const tampered = {
+    const tampered = asEnvelope({
       ...valid,
       statement: tamperedStatement,
       executionDigest: computeExecutionDigest(tamperedStatement),
-    };
+    });
     const result = verifyAttestation(tampered, defaultVerifyPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -318,13 +321,13 @@ describe('V2-014 mutation evidence 12 — remove the assurance-sufficiency check
 describe('V2-014 mutation evidence 13 — remove the assurance-evidence check (evidence representability)', () => {
   it('MUTATED: a forged tee_attested envelope WITHOUT evidence VERIFIES — the evidence test FAILS', () => {
     const valid = signTriageAttestation();
-    const forged = resign({ ...valid, assurance: 'tee_attested', assuranceEvidence: undefined });
+    const forged = resign(asEnvelope({ ...valid, assurance: 'tee_attested', assuranceEvidence: undefined }));
     expect(mutatedVerifies(forged, defaultVerifyPolicy(), 'assurance-evidence')).toBe(true);
   });
 
   it('RESTORED: the same envelope is rejected with the typed missing-evidence failure', () => {
     const valid = signTriageAttestation();
-    const forged = resign({ ...valid, assurance: 'tee_attested', assuranceEvidence: undefined });
+    const forged = resign(asEnvelope({ ...valid, assurance: 'tee_attested', assuranceEvidence: undefined }));
     const result = verifyAttestation(forged, defaultVerifyPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -337,11 +340,11 @@ describe('V2-014 mutation evidence 14 — remove the envelope-shape check (struc
   it('MUTATED: a type-corrupted envelope (attemptId as string) VERIFIES — the malformed-envelope test FAILS', () => {
     const valid = signTriageAttestation();
     const corruptedStatement = { ...valid.statement, attemptId: '1' } as unknown as typeof valid.statement;
-    const corrupted = resign({
+    const corrupted = resign(asEnvelope({
       ...valid,
       statement: corruptedStatement,
       executionDigest: { ...valid.executionDigest, digest: digestOfStatementObject(corruptedStatement) },
-    });
+    }));
     const policy = defaultVerifyPolicy({ bindings: { attemptId: undefined } });
     expect(mutatedVerifies(corrupted, policy, 'envelope-shape')).toBe(true);
   });
@@ -349,11 +352,11 @@ describe('V2-014 mutation evidence 14 — remove the envelope-shape check (struc
   it('RESTORED: the same envelope is rejected with the typed malformed-envelope failure', () => {
     const valid = signTriageAttestation();
     const corruptedStatement = { ...valid.statement, attemptId: '1' } as unknown as typeof valid.statement;
-    const corrupted = resign({
+    const corrupted = resign(asEnvelope({
       ...valid,
       statement: corruptedStatement,
       executionDigest: { ...valid.executionDigest, digest: digestOfStatementObject(corruptedStatement) },
-    });
+    }));
     const policy = defaultVerifyPolicy({ bindings: { attemptId: undefined } });
     const result = verifyAttestation(corrupted, policy);
     expect(result.ok).toBe(false);

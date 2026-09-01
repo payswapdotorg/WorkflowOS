@@ -19,10 +19,9 @@ import {
   serializeAttestation,
   verifyAttestation,
 } from '../../../src/execution-attestation/index.js';
-import { buildTriageDocument, buildTriageDocumentAltOrder } from '../workflow-ir/helpers.js';
+import { buildTriageDocument, buildTriageDocumentAltOrder } from '../../unit/workflow-ir/helpers.js';
 import {
   ATTESTATION_ISSUED_AT,
-  ATTESTER_A,
   EXECUTED_AT,
   NONCE,
   STATEMENT_EPOCH,
@@ -31,7 +30,7 @@ import {
   buildTriageStatement,
   defaultVerifyPolicy,
   signTriageAttestation,
-} from '../unit/execution-attestation/helpers.js';
+} from '../../unit/execution-attestation/helpers.js';
 
 /**
  * V2-014 (integration) — REAL cross-module composition with the merged W1
@@ -76,14 +75,23 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
     inputCommitments: [executionValueCommitment(serializeWorkflowIrDocument(triage))],
   });
 
-  const policy = defaultVerifyPolicy({
-    bindings: {
-      workflowId,
-      workflowVersionId,
-      workflowVersionSemanticDigest: semantic.digest,
-      nodeId,
-    },
-  });
+  /**
+   * A FRESH verification policy per call: each successful verification
+   * consumes the single-use nonce in the policy's replay registry, so
+   * every test that expects a successful verification (except the replay
+   * test, which shares one policy WITHIN itself) must verify against fresh
+   * freshness state — otherwise later tests would fail as replays of the
+   * first one.
+   */
+  const freshPolicy = () =>
+    defaultVerifyPolicy({
+      bindings: {
+        workflowId,
+        workflowVersionId,
+        workflowVersionSemanticDigest: semantic.digest,
+        nodeId,
+      },
+    });
 
   it('binds the REAL V2-003 semantic digest (the alt-order authoring path converges on it)', () => {
     expect(semantic.digest).toBe(computeWorkflowVersionSemanticDigest(buildTriageDocumentAltOrder()).digest);
@@ -110,7 +118,7 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
 
   it('signs the composed statement with real Ed25519 and verifies it through the public path', () => {
     const attestation = signTriageAttestation({ statement });
-    const result = verifyAttestation(attestation, policy);
+    const result = verifyAttestation(attestation, freshPolicy());
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (result.ok) {
       expect(result.fact.statement.workflowVersionSemanticDigest).toBe(semantic.digest);
@@ -124,7 +132,7 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
     const parsed = parseAttestation(serializeAttestation(attestation));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      const result = verifyAttestation(parsed.attestation, policy);
+      const result = verifyAttestation(parsed.attestation, freshPolicy());
       expect(result.ok).toBe(true);
     }
   });
@@ -146,7 +154,7 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
       nodeId,
     });
     const attestation = signTriageAttestation({ statement: otherStatement });
-    const result = verifyAttestation(attestation, policy);
+    const result = verifyAttestation(attestation, freshPolicy());
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failure.code).toBe('ATTESTATION_BINDING_MISMATCH');
@@ -170,7 +178,7 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
     expect(issued.eventType).toBe('execution.attestation.issued');
     expect(issued.executionDigest).toBe(attestation.executionDigest.digest);
 
-    const result = verifyAttestation(attestation, policy);
+    const result = verifyAttestation(attestation, freshPolicy());
     expect(result.ok).toBe(true);
     if (result.ok) {
       const verified = attestationVerifiedEvent(result.fact, VERIFY_NOW);
@@ -188,9 +196,10 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
 
   it('rejects replay of the composed attestation after single-use nonce consumption (valid signature)', () => {
     const attestation = signTriageAttestation({ statement });
-    const first = verifyAttestation(attestation, policy);
+    const replayPolicy = freshPolicy();
+    const first = verifyAttestation(attestation, replayPolicy);
     expect(first.ok).toBe(true);
-    const second = verifyAttestation(attestation, policy);
+    const second = verifyAttestation(attestation, replayPolicy);
     expect(second.ok).toBe(false);
     if (!second.ok) {
       expect(second.failure.code).toBe('ATTESTATION_REPLAYED');
@@ -210,7 +219,7 @@ describe('V2-014 composition — a real WorkflowVersion becomes a real attested 
   });
 
   it('keeps the fixture freshness material exact (injected clock, epoch, nonce)', () => {
-    const result = verifyAttestation(signTriageAttestation({ statement }), policy);
+    const result = verifyAttestation(signTriageAttestation({ statement }), freshPolicy());
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.fact.verifiedAt).toBe(VERIFY_NOW);

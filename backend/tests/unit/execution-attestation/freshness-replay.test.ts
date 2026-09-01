@@ -6,7 +6,6 @@ import {
 } from '../../../src/execution-attestation/index.js';
 import {
   LATE_NOW,
-  NEWER_EPOCH,
   STATEMENT_EPOCH,
   VERIFY_NOW,
   buildTriageStatement,
@@ -149,8 +148,11 @@ describe('V2-014 freshness policy is mandatory (structural fail-closed)', () => 
 
   it('accepts a policy that binds the nonce expectation OR the replay registry (either freshness anchor suffices)', () => {
     const attestation = signTriageAttestation();
-    const withRegistryOnly = defaultVerifyPolicy();
-    (withRegistryOnly.freshness as Record<string, unknown>)['expectedNonce'] = undefined;
+    const base = defaultVerifyPolicy();
+    const withRegistryOnly: typeof base = {
+      ...base,
+      freshness: { ...base.freshness, expectedNonce: undefined },
+    };
     expect(verifyAttestation(attestation, withRegistryOnly).ok).toBe(true);
   });
 });

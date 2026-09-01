@@ -35,7 +35,11 @@ describe('V2-014 one-way commitment of sensitive values', () => {
     const bytes = new Uint8Array([104, 101, 108, 108, 111]);
     expect(executionValueCommitment(bytes)).toMatch(/^[0-9a-f]{64}$/);
     expect(executionValueCommitment(bytes)).toBe(executionValueCommitment(new Uint8Array([104, 101, 108, 108, 111])));
-    expect(executionValueCommitment(bytes)).not.toBe(executionValueCommitment('hello'));
+    // identical byte content commits identically regardless of the input path
+    // (string UTF-8 bytes === the same Uint8Array):
+    expect(executionValueCommitment(bytes)).toBe(executionValueCommitment('hello'));
+    // different byte content commits differently:
+    expect(executionValueCommitment(bytes)).not.toBe(executionValueCommitment('hello!'));
   });
 
   it('commits arbitrary byte content the same way regardless of encoding path', () => {

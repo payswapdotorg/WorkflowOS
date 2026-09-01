@@ -56,12 +56,12 @@ export const LATE_NOW = '2026-09-01T12:06:00.000Z';
  */
 export const TRIAGE_SEMANTIC_DIGEST = '571a0788c4eea5f1491c1a3931b54c1f8efdeec72faac91638d259cc0b408c37';
 
-export const INPUT_COMMITMENT_SUMMARY = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
-export const OUTPUT_COMMITMENT_MESSAGE = '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae';
-export const OBSERVATION_COMMITMENT = '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d0826a2f4000000000';
-export const AUTHORIZATION_CONTEXT_DIGEST = '4b227777d4dd1fc61c6f884f48641d02b4d121144be6c29a2f8c8000000000';
-export const PLACEMENT_POLICY_DIGEST = 'ef2d127de37b942baad1000000000000000000000000000000000000000000000';
-export const CAUSAL_PARENT_DIGEST = 'd7a8fbb307d7809469ca9abcb0080000000000000000000000000000000000000';
+export const INPUT_COMMITMENT_SUMMARY = '911c7e2937a7ebb6267c3a37d97891b6537a65c4614bf20bbe0601a2d0b024bd';
+export const OUTPUT_COMMITMENT_MESSAGE = '75e7a62b8d67c523d606bc30f6f6db33196491972443a82a7d69ba2bffa39124';
+export const OBSERVATION_COMMITMENT = '37c6609997a4a7b01569185b47620d2ecc1ed63c232cb0fe84b0ad42b1df9f83';
+export const AUTHORIZATION_CONTEXT_DIGEST = '9683cca88094bc5b0def214d6d3367a04897c95af3b055dd8c9ae0914e7be3ed';
+export const PLACEMENT_POLICY_DIGEST = 'bf20edd3ebe9c44822ba85ede1f88a6a28e89685935b828543e8863a172deebe';
+export const CAUSAL_PARENT_DIGEST = 'f9bf1037a1e738739d20a489223b9f53e9a892ac99cc5228880f02b51e424c6f';
 
 // ---------------------------------------------------------------------------
 // Real Ed25519 attester key material (generated once per test process)
@@ -215,7 +215,7 @@ export function defaultVerifyPolicy(
       maxAgeMs: overrides.maxAgeMs ?? 300000,
       replayRegistry: overrides.replayRegistry ?? new InMemoryReplayRegistry(),
     },
-    attesterKeyIds: overrides.attesterKeyIds ?? [ATTESTER_A.keyId],
-    requiredAssurance: overrides.requiredAssurance ?? 'software_signed',
+    attesterKeyIds: 'attesterKeyIds' in overrides ? overrides.attesterKeyIds : [ATTESTER_A.keyId],
+    requiredAssurance: 'requiredAssurance' in overrides ? overrides.requiredAssurance : 'software_signed',
   };
 }
