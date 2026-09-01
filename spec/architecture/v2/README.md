@@ -4,6 +4,12 @@
 
 WorkflowOS 2.0 is a computer-workflow operating system. Its primary durable artifact is a versioned Workflow that can be authored from text, voice, demonstrations, or hybrids; deployed to capable web/desktop/mobile/cloud nodes; executed under explicit policy; scheduled or event-triggered; optimized through new versions; collaboratively forked/merged; sold or subscribed to; and used in reverse to teach people.
 
+## V1 → V2 transition
+
+The forward product roadmap is now V2. Remaining V1 roadmap items are **deferred by default** and may resume only for a concrete V2 dependency, compatibility/security requirement, or explicit architect reactivation. This transition is normative and persisted at `spec/architecture/v2/v1-transition.md`.
+
+Fresh agents must not infer that deferred V1 items remain prerequisites for V2. Existing V1 authorities remain intact and are consumed only through explicit boundaries.
+
 ## V2 architecture sequence
 
 The product sequence remains:
@@ -40,6 +46,7 @@ The V2 roadmap is paired with repository-resident machine-readable state and exe
 - `spec/architecture/v2/execution-control-plane.md` — lifecycle, activation, dependency typing, no-rebase rules, evidence, recovery/resume and lean review protocol.
 - `spec/architecture/v2/dogfooding-protocol.md` — mandatory feature-boundary and integration-boundary real-product experiments.
 - `spec/architecture/v2/optimized-roadmap.md` — human-readable optimized roadmap and parallelization rationale.
+- `spec/architecture/v2/v1-transition.md` — normative V1 deferral and V2-forward execution policy.
 - `spec/architecture/v2/work-orders/` — one executable contract per V2 product work item.
 
 A fresh implementation agent must be able to determine the next eligible item or wave, its dependency type, exact change-surface boundary, required verification, and required dogfooding experiment without reading conversation history.
@@ -62,4 +69,4 @@ Tests validate correctness; dogfooding validates the integrated product. Every u
 
 V2 does not silently replace frozen v1.0 authorities. Reuse occurs through explicit adapters and preserved authority boundaries. A fresh agent must not infer permission to redesign V1 merely because a V2 feature would be easier that way.
 
-See `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`, `spec/architecture/v2/execution-control-plane.md`, `spec/architecture/v2/optimized-roadmap.md`, and `spec/development-state/v2-work-order-state.json`.
+See `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`, `spec/architecture/v2/execution-control-plane.md`, `spec/architecture/v2/optimized-roadmap.md`, `spec/architecture/v2/v1-transition.md`, and `spec/development-state/v2-work-order-state.json`.
