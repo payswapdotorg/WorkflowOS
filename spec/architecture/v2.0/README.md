@@ -4,9 +4,9 @@ WorkflowOS 2.0 is a new architecture generation built **on top of selected prove
 
 ## Core thesis
 
-> WorkflowOS turns the way people work with computers into reusable, executable, versioned workflows.
+> WorkflowOS turns the way people work with computers into reusable, executable, versioned workflows — and lets those workflows teach people as well as automate work.
 
-A workflow can be taught through text, voice, demonstration, or any combination of the three. The resulting workflow is a first-class software artifact that can be versioned, edited, tested, forked, shared, installed, scheduled, deployed, and executed across web, desktop, mobile, and cloud surfaces.
+A workflow can be taught through text, voice, demonstration, or any combination of the three. The resulting workflow is a first-class software artifact that can be versioned, edited, tested, forked, shared, installed, scheduled, deployed, executed, verified, optimized, taught, and monetized across web, desktop, mobile, and cloud surfaces.
 
 ## Primary artifacts
 
@@ -17,13 +17,15 @@ The v2.0 architecture centers on four immutable concepts:
 3. **Workflow Deployment** — where and under which capabilities/policies a version is installed.
 4. **Workflow Run** — one execution of one version on one deployment/context.
 
+Teaching representations, lessons, marketplace listings, and commercial entitlements are derived/distribution artifacts; they do not replace the canonical workflow/version model.
+
 The primary executable representation is the **Workflow IR**. LLMs and computer agents compile/execute against the IR; they do not replace it.
 
 ## Universal protocol
 
 Web, desktop, iOS, Android, and cloud runners implement the same WorkflowOS protocol. They differ in available capabilities, permissions, placement, and UX—not workflow semantics.
 
-Devices are first-class execution nodes. Nodes advertise capabilities. Workflows request capabilities. The runtime resolves workflow requirements against eligible nodes and execution placements.
+Devices are first-class execution nodes. Nodes advertise capabilities. Workflows request capabilities. The runtime resolves requirements against eligible nodes and execution placements.
 
 ## Authoring modalities
 
@@ -35,6 +37,39 @@ Workflow creation supports four equivalent input modes:
 - **Hybrid** — mix any of the above and pause/resume authoring at any point.
 
 Raw demonstrations are retained as provenance; the semantic workflow is compiled into the IR.
+
+## Bidirectional teaching
+
+WorkflowOS is intentionally bidirectional:
+
+```text
+Person
+  ↓
+Teach WorkflowOS
+  ↓
+Workflow Version
+  ↓
+Teach Person / Automate Person's Task
+```
+
+An installed workflow can be used either to execute an operation or to teach a person how to perform it themselves. The same artifact can support explanation, guided walkthroughs, practice, or direct execution without creating a second executable representation.
+
+See `workflow-teaching-and-marketplace.md` for the normative reverse-teaching model.
+
+## Creator marketplace
+
+Workflow repositories can be published and installed through a marketplace-like distribution layer.
+
+Creators may offer:
+
+- free workflows;
+- one-time purchases;
+- maintenance subscriptions;
+- paid support or hosted execution as future commercial extensions.
+
+Commercial entitlements are explicitly separated from execution authority. Payment, popularity, ratings, or publication status can never expand a workflow's runtime capabilities or permissions.
+
+See `workflow-marketplace-economics.md` for the entitlement and creator-economics contract.
 
 ## Execution model
 
@@ -78,11 +113,13 @@ WorkflowOS 2.0 preserves the strongest v1.x kernel principles:
 - immutable versioning;
 - human approval for consequential actions;
 - no silent provider fallback;
-- no silent workflow mutation by optimization.
+- no silent workflow mutation by optimization;
+- no privilege inheritance from marketplace status;
+- commercial access separated from runtime authority.
 
 ## Research rationale
 
-The architecture is informed by current computer-use, mobile-agent, process-mining, and learning-from-demonstration research. See `research-rationale.md` for the research record and design implications.
+The architecture is informed by current computer-use, mobile-agent, process-mining, learning-from-demonstration, and workflow/agent runtime research. See `research-rationale.md` for the research record and design implications.
 
 ## Status
 
