@@ -1,6 +1,6 @@
 # WORK-069 — Progressive Release & Runtime Validation
 
-Status: IN FLIGHT — activated by the architect on 2026-08-31 (the WORK-069
+Status: COMPLETE + FINALIZED — activated by the architect on 2026-08-31 (the WORK-069
 implementation instruction; every hard edge verified complete on main:
 WORK-064 `c351451` via PR #86, WORK-066 `0a506b1` via PR #102 + the PR #104
 finalization, and the existing WORK-019/026/020 authorities) and implemented
@@ -507,3 +507,8 @@ that delivers decisions from more than one process (the production
 composition today wires NO route surface and an UNBOUND rollback
 authority — there is no production delivery path for the decisions
 yet).
+
+
+## Post-merge finalization (2026-09-01 — §34.8 / ADR-0007)
+
+PR #108 was merged as `62475bea2366e9377fe2fc42b57f58c639296974` from approved head `8ab2d6410d582642487f389ffd0ba010d729b559`. Canonical state is now `complete` with `mergedAs {pr: 108, mergeCommit: 62475bea2366e9377fe2fc42b57f58c639296974}`. The active handoff is removed because merged work is not resumable. The canonical mainline at finalization is `2097827f03bc7581b321c9b20f3dff653a4fb12a`. This governance update introduces no runtime code, migration, or WORK-070 implementation.
