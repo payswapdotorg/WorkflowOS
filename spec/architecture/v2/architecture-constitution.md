@@ -1,7 +1,8 @@
 # WorkflowOS 2.0 — Architecture Constitution
 
-**Status:** PROPOSED / canonical V2 anti-drift constitution
-**Precedence:** This document governs interpretation of all V2 Work Orders while V2 remains proposed. Once V2 is formally approved, the approved V2 architecture version supersedes this proposal according to the repository governance process.
+**Status:** PROPOSED / implementation-authorized V2 constitution  
+**Precedence:** This document governs interpretation of all V2 Work Orders while V2 remains proposed. Implementation is authorized by `V2-CTRL-000`; formal V2 freezing remains a separate governed architecture-version decision.
+**Canonical protocol registry:** `V2-CTRL-003-protocol-registry.md` + `V2-CTRL-003-protocol-registry.json`
 
 ## 1. Product thesis
 
@@ -64,7 +65,7 @@ Those artifacts can provide provenance, compilation inputs, evidence, or derived
 
 ## 4. Universal protocol
 
-Web, desktop, iOS, Android and cloud use exactly one WorkflowOS protocol for semantic operations.
+Web, desktop, iOS, Android and cloud use exactly one WorkflowOS protocol for semantic operations. Canonical protocol identifiers are governed by `V2-CTRL-003`; this constitution does not permit parallel aliases.
 
 Allowed platform differences:
 
@@ -192,6 +193,8 @@ Supported categories may include:
 - social threshold event;
 - workflow lifecycle event.
 
+Canonical event identifiers are governed by `V2-CTRL-003`.
+
 Every event-triggered execution has stable event/trigger correlation and must be idempotent against duplicate delivery.
 
 ## 12. Locality and cross-device execution
@@ -205,9 +208,9 @@ Workflow and step placement can require:
 - `cloud_required`;
 - `any_supported_node`.
 
-Locality is a correctness constraint, not merely a performance hint.
+Canonical placement identifiers are governed by `V2-CTRL-003`.
 
-Example: an incoming phone call workflow may require local phone execution, while a later summarization step may run in the cloud if policy allows.
+Locality is a correctness constraint, not merely a performance hint.
 
 ## 13. Mobile semantics
 
@@ -245,7 +248,7 @@ Supported first-class commercial models:
 
 A maintenance subscription may provide access to compatible updates/support according to explicit terms. Update adoption remains controlled by the customer's installation/deployment policy.
 
-Payment processors remain outside WorkflowIR and workflow authority contracts.
+Payment processors remain outside WorkflowIR and workflow authority contracts. Detailed economics are governed by `workflow-marketplace-economics.md`.
 
 ## 16. Security and privacy
 
@@ -293,7 +296,8 @@ No implementation may:
 - use cloud execution when workflow locality forbids it;
 - turn model assertions into side-effect evidence;
 - bypass the V2 protocol for self-hosting;
-- revive deferred V1 work without a recorded dependency/security/reactivation reason.
+- revive deferred V1 work without a recorded dependency/security/reactivation reason;
+- invent protocol-visible aliases for canonical registry identifiers.
 
 ## 20. Required implementation discipline
 
