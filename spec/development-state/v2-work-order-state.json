@@ -38,7 +38,7 @@
     "V2-013":{"status":"PLANNED","wave":"W6","dependencies":{"V2-008":"implementation","V2-009":"implementation","V2-012":"implementation"},"changeSurface":"first-party WorkflowOS workflow library and self-hosting","verification":"self-hosting authority-boundary battery","dogfooding":{"required":true,"experiment":"WorkflowOS installs and executes its own development workflow"}}
   },
   "integrationGates": [
-    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"before":["V2-005?"],"purpose":"repository and IR round-trip","dogfooding":true},
+    {"id":"IG-001","workOrder":"spec/architecture/v2/work-orders/IG-001.md","after":["V2-002","V2-003"],"purpose":"repository and IR round-trip","dogfooding":true},
     {"id":"IG-002","workOrder":"spec/architecture/v2/work-orders/IG-002.md","after":["V2-003","V2-004"],"before":["V2-008"],"purpose":"IR capability/placement compatibility","dogfooding":true},
     {"id":"IG-003","workOrder":"spec/architecture/v2/work-orders/IG-003.md","after":["V2-005","V2-007","V2-008"],"purpose":"compiled workflow execution with runs/evidence","dogfooding":true},
     {"id":"IG-004","workOrder":"spec/architecture/v2/work-orders/IG-004.md","after":["V2-009","V2-010","V2-011"],"purpose":"event-driven, taught and optimized versions compose","dogfooding":true},
