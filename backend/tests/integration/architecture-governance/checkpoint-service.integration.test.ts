@@ -1111,7 +1111,11 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // schema (wfos_linked_identities, wfos_sessions,
           // wfos_password_credentials, wfos_service_accounts, the
           // wfos_api_key_credentials scopes extension, wfos_oauth_states).
-          expectedLastMigrationNumber: 59,
+          // V2-002 (the workflow repository — W1): 0060 is the
+          // workflow/version/installation repository schema (wfos_workflows,
+          // wfos_workflow_versions, wfos_workflow_installations and the
+          // immutability triggers).
+          expectedLastMigrationNumber: 60,
         },
       },
     ]);
