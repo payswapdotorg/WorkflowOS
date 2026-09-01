@@ -218,7 +218,7 @@ describe('WORK-069 — the halt/recover signal flow (the WORK-067 authority cons
     expect(events[0]!.metadata).toMatchObject({ rollbackInvoked: null, signalsEmitted: 0 });
   });
 
-  it('the signal channel fails closed when the WORK-067 authority is unbound (a halt NEVER silently no-ops) — and the failed consequence leaves a DURABLE pending reservation the re-delivery fails closed on (the PR #108 protocol)', async () => {
+  it('the signal channel fails closed when the WORK-067 authority is unbound (a halt NEVER silently no-ops) — and the failed consequence leaves a PERSISTED pending reservation the re-delivery fails closed on (the PR #108 protocol)', async () => {
     const stack = buildDecisionStack();
     await completedPostReleaseRun(stack.continuousValidationService, {
       runId: 'run-failed-1',
@@ -233,7 +233,7 @@ describe('WORK-069 — the halt/recover signal flow (the WORK-067 authority cons
     ).rejects.toThrowError(/\[PR_SIGNAL_AUTHORITY_UNBOUND\]/);
     // The consequence authority failed AFTER the reservation (the exact
     // crash-window the PR #108 correction covers): the decision record is
-    // DURABLE and PENDING — the re-delivery fails closed with the typed
+    // PERSISTED and PENDING — the re-delivery fails closed with the typed
     // pending tombstone (it does NOT re-attempt the consequences and does
     // NOT report a clean duplicate):
     const history = await stack.decisionRepository.listForRollout('tenant-1', 'project-1', 'release-2026.09.01');

@@ -215,17 +215,29 @@ policy version, decision, and why) and emits one `/audit` forensic event
 (WORK-020).
 
 The consequence durability protocol (the PR #108 architect-review
-correction): the decision record is the only durable idempotency boundary,
-so it is RESERVED (insert-only, through the repository port's `reserve`)
-BEFORE any governed consequence executes — the halt/recover consequences
-(signal emission, the rollback invocation) run only for the reservation
-owner, then the `completeDecision` transition records their real outcomes;
-a `continue` reserves atomically final (it carries no governed
-consequences). A crash or a concurrent delivery can therefore never
-re-execute a non-idempotent consequence for an identity that is already
-durable: the re-delivery that finds a durable-but-unresolved (pending)
-reservation fails closed with the typed `PR_DECISION_CONSEQUENCES_PENDING`
-— never a re-execution, never a clean duplicate.
+correction + the 2026-09-01 re-review claim correction): the decision
+record is the only idempotency boundary for the governed consequences,
+so it is RESERVED (insert-only, through the repository port's `reserve`,
+persisted to the composed boundary) BEFORE any governed consequence
+executes — the halt/recover consequences (signal emission, the rollback
+invocation) run only for the reservation owner, then the
+`completeDecision` transition records their real outcomes; a `continue`
+reserves atomically final (it carries no governed consequences). Within
+the composed boundary, a crash or a concurrent delivery can therefore
+never re-execute a non-idempotent consequence for an identity that is
+already reserved: the re-delivery that finds a reserved-but-unresolved
+(pending) reservation fails closed with the typed
+`PR_DECISION_CONSEQUENCES_PENDING` — never a re-execution, never a clean
+duplicate. The protocol's strength is the composed adapter's: the
+production composition binds the in-memory adapter (`migrations: []` —
+the 064/066/067 precedent), whose reservation is PROCESS-LOCAL —
+cross-process consequence idempotency is NOT claimed by that
+composition; it is the DURABLE-adapter contract of the same port (the
+keyed-uniqueness + pending-tombstone semantics proven under real
+PostgreSQL, including the process-loss and two-independent-instance
+cases) and the future ACR's productionization, which must precede any
+drive-surface activation that delivers decisions from more than one
+process.
 
 When WORK-059 (Operational and Release Governance) lands, the release
 mechanics are delegated to it at the same public ports — WORK-069's

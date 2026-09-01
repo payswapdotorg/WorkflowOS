@@ -6,11 +6,23 @@
  * future ACR at the same PORT, and the PostgreSQL keyed-uniqueness
  * contract is proven by the real-PG two-actor integration suite.
  *
+ * THE HONEST BOUNDARY (the 2026-09-01 architect re-review, comment
+ * 5486874072): this adapter's reservation is PROCESS-LOCAL (a Map's
+ * lifetime). Within one process it guards duplicate delivery (the insert
+ * race converges to one owner) and completion failure (the pending
+ * tombstone fails closed). It does NOT survive process loss, and TWO
+ * separate adapter instances (two processes) do NOT share the claim —
+ * CROSS-PROCESS consequence idempotency is therefore NOT claimed by the
+ * composition that binds this adapter (the domain suite pins this
+ * acknowledged limit as a discrimination proof; the durable binding point
+ * is the future ACR at the port, which must precede any drive-surface
+ * activation that delivers decisions from more than one process).
+ *
  * Semantics (the port contract, mirrored by the PG fixture):
  *   - `reserve` INSERTS (insert-only — no ungated single-shot save): the
  *     caller that reserves OWNS the governed consequence execution for the
  *     decision identity (the PR #108 architect-review correction: the
- *     record must be durable BEFORE any consequence executes). A reserve
+ *     record must be persisted BEFORE any consequence executes). A reserve
  *     whose decisionId exists with the SAME identity fingerprint CONVERGES
  *     (the stored record decides; the concurrent loser executes nothing);
  *   - a reserve whose decisionId exists with a DIFFERENT identity

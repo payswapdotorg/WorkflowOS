@@ -11,20 +11,33 @@ import { describe, it, expect } from 'vitest';
  *      consequence is at-most-once per decision identity — both the
  *      insert-race window AND the in-flight window);
  *   3. a CRASH between the consequence execution and the completion
- *      persistence → the record is ALREADY durable (the reservation
+ *      persistence → the record is ALREADY persisted (the reservation
  *      preceded the consequences); the re-delivery fails CLOSED with the
  *      typed PR_DECISION_CONSEQUENCES_PENDING and re-executes NOTHING;
  *   4. the PRE-EXISTING duplicate-delivery guarantee is PRESERVED (a
  *      completed decision re-delivered returns the recorded record
  *      verbatim; no consequence is re-executed).
  *
- * The protocol under proof: RESERVE (the durable insert-only claim) →
- * EXECUTE (the reservation owner only) → COMPLETE (the pending →
- * executed transition with the real outcomes). The pre-correction
- * implementation executed the halt/recover consequences BEFORE the
- * decision record was persisted — a crash or a concurrent delivery
- * could repeat the signal emission and, once the rollback authority is
- * bound, repeat the rollback for the same decision identity.
+ * The protocol under proof: RESERVE (the insert-only idempotency claim,
+ * persisted to the composed boundary) → EXECUTE (the reservation owner
+ * only) → COMPLETE (the pending → executed transition with the real
+ * outcomes). The pre-correction implementation executed the halt/recover
+ * consequences BEFORE the decision record was persisted — a crash or a
+ * concurrent delivery could repeat the signal emission and, once the
+ * rollback authority is bound, repeat the rollback for the same decision
+ * identity.
+ *
+ * THESE ARE THE IN-BOUNDARY (single-process) PROOFS: every case below
+ * races deliveries inside ONE repository instance — the boundary the
+ * PRODUCTION composition actually provides (the in-memory adapter;
+ * `migrations: []`). The 2026-09-01 architect re-review (comment
+ * 5486874072) established the honest split: cross-process/process-loss
+ * idempotency is NOT claimed for that composition — it is the DURABLE
+ * ADAPTER CONTRACT of the port (proven under real PostgreSQL by the
+ * integration suite) and the future ACR's productionization. The final
+ * test in this file pins that acknowledged limit as a discrimination
+ * proof: two SEPARATE in-memory repository instances (two processes) do
+ * NOT share the reservation.
  */
 import {
   buildDecisionStack,
@@ -81,7 +94,7 @@ class StaleReadDecisionRepository implements ProgressiveReleaseDecisionRepositor
  * The CRASHING-COMPLETION repository: `reserve` and the reads delegate to
  * the REAL adapter, but `completeDecision` THROWS — the process died
  * between the consequence execution and the completion write. The
- * reservation already happened, so the record IS durable (the exact
+ * reservation already happened, so the record IS persisted (the exact
  * ordering the correction establishes).
  */
 class CrashingCompletionRepository implements ProgressiveReleaseDecisionRepository {
@@ -287,7 +300,7 @@ describe('WORK-069 — the consequence durability protocol (the PR #108 architec
       validationRunId: 'run-failed-inflight',
     });
     // The first delivery runs into the gated rollback invocation and
-    // PARKS there — the reservation is durable and PENDING, the rollback
+    // PARKS there — the reservation is persisted and PENDING, the rollback
     // invocation is in flight:
     const first = service.decideProgressiveRelease({ ...request });
     await rollback.gateEntered;
@@ -298,7 +311,7 @@ describe('WORK-069 — the consequence durability protocol (the PR #108 architec
       (reason: unknown) => ({ status: 'rejected' as const, reason }),
     );
     // The re-delivery does NOT return a clean duplicate and does NOT
-    // re-execute anything — it fails closed on the durable PENDING
+    // re-execute anything — it fails closed on the persisted PENDING
     // reservation:
     if (second.status !== 'rejected') {
       throw new Error('the in-flight re-delivery must fail closed, not duplicate');
@@ -321,11 +334,11 @@ describe('WORK-069 — the consequence durability protocol (the PR #108 architec
     expect(history).toHaveLength(1);
   });
 
-  it('REQUIRED CASE 3 — a CRASH between the consequence execution and the completion persistence: the record is ALREADY durable (pending); the re-delivery fails CLOSED and re-executes NOTHING', async () => {
+  it('REQUIRED CASE 3 — a CRASH between the consequence execution and the completion persistence: the record is ALREADY persisted (pending); the re-delivery fails CLOSED and re-executes NOTHING', async () => {
     // The pre-correction defect this case pins: the crash window between
     // "the consequences executed" and "the record persisted". Under the
     // correction the RESERVATION preceded the consequences, so the crash
-    // leaves a durable PENDING record — the re-delivery can see it and
+    // leaves a persisted PENDING record — the re-delivery can see it and
     // therefore can NEVER re-execute the consequences.
     const rollback = new RecordingRollbackAuthority(invokedRollback);
     const stack = buildDecisionStack({ rollbackAuthority: rollback });
@@ -355,7 +368,7 @@ describe('WORK-069 — the consequence durability protocol (the PR #108 architec
     await expect(crashingService.decideProgressiveRelease({ ...request })).rejects.toThrowError(
       /simulated crash/,
     );
-    // …but the decision record IS ALREADY DURABLE — the reservation
+    // …but the decision record IS ALREADY PERSISTED — the reservation
     // preceded the consequences (the exact ordering the correction
     // establishes; the pre-correction implementation left NO record):
     const history = await stack.decisionRepository.listForRollout('tenant-1', 'project-1', 'release-crash');
@@ -451,6 +464,63 @@ describe('WORK-069 — the consequence durability protocol (the PR #108 architec
     expect((await stack.engineeringSignalService.listSignalsForProject('project-1')).length).toBe(0);
     expect(
       stack.auditWriter.events.filter((e) => e.eventType === 'PROGRESSIVE_RELEASE_DECISION'),
+    ).toHaveLength(1);
+  });
+
+  it('THE ACKNOWLEDGED COMPOSITION LIMIT (the 2026-09-01 architect re-review, comment 5486874072) — two SEPARATE in-memory repository instances (two processes under the PRODUCTION composition) do NOT share the reservation: both deliveries decide and both consequences execute — the honestly-claimed PROCESS-LOCAL boundary (NOT a guarantee; the durable binding point is the future ACR)', async () => {
+    // A DISCRIMINATION proof of the boundary itself, in the mutation-proof
+    // tradition: it pins what the production composition (buildApp wires
+    // InMemoryProgressiveReleaseDecisionRepository — `migrations: []`, the
+    // 064/066/067 precedent) actually provides, so the claim can never
+    // outrun the composition. A restart (or a second process) loses the
+    // reservation; the same logical delivery re-runs. When the future ACR
+    // binds a DURABLE adapter of the same port, this test MUST be
+    // rewritten to the cross-process convergence proof (the real-PG
+    // integration suite already proves that contract — CASES 1-4).
+    const rollback = new RecordingRollbackAuthority(invokedRollback);
+    // TWO independent stacks — two repository instances (two "processes").
+    // ONLY the non-idempotent consequence counter is shared (the
+    // observable side effects both processes would produce):
+    const stackA = buildDecisionStack({ rollbackAuthority: rollback });
+    const stackB = buildDecisionStack({ rollbackAuthority: rollback });
+    for (const stack of [stackA, stackB]) {
+      await completedPostReleaseRun(stack.continuousValidationService, {
+        runId: 'run-failed-two-processes',
+        releaseRef: 'release-two-processes',
+        outcome: 'validation_failure',
+      });
+    }
+    const request = decisionRequestFixture({
+      releaseRef: 'release-two-processes',
+      rolloutStage: 'canary',
+      validationRunId: 'run-failed-two-processes',
+    });
+    const [a, b] = await Promise.all([
+      stackA.service.decideProgressiveRelease({ ...request }),
+      stackB.service.decideProgressiveRelease({ ...request }),
+    ]);
+    // BOTH deliveries decide (neither sees the other's reservation — the
+    // acknowledged limit of the process-local boundary; this is NOT the
+    // exactly-once guarantee, which belongs to the durable adapter class):
+    expect(a.outcome).toBe('decided');
+    expect(b.outcome).toBe('decided');
+    expect(a.decision.decisionId).toBe(b.decision.decisionId);
+    // …and the NON-IDEMPOTENT consequence executed TWICE (once per
+    // "process") — exactly what this composition does NOT claim to
+    // prevent; the same scenario over the durable PG adapter converges to
+    // ONE invocation (the real-PG CASE 2 proof):
+    expect(rollback.invocations).toHaveLength(2);
+    // Each process recorded its own decision + its own audit event (the
+    // histories are separate — there is no cross-instance record):
+    const historyA = await stackA.decisionRepository.listForRollout('tenant-1', 'project-1', 'release-two-processes');
+    const historyB = await stackB.decisionRepository.listForRollout('tenant-1', 'project-1', 'release-two-processes');
+    expect(historyA).toHaveLength(1);
+    expect(historyB).toHaveLength(1);
+    expect(
+      stackA.auditWriter.events.filter((e) => e.eventType === 'PROGRESSIVE_RELEASE_DECISION'),
+    ).toHaveLength(1);
+    expect(
+      stackB.auditWriter.events.filter((e) => e.eventType === 'PROGRESSIVE_RELEASE_DECISION'),
     ).toHaveLength(1);
   });
 });

@@ -1418,10 +1418,15 @@ export async function buildApp(
     // no rollback authority exists today — the documented future binding
     // point; a RECOVER decision records the typed unbound outcome, never a
     // silent continue). The decision repository is the in-memory adapter
-    // (NO migration authorized; the durable binding point is a future ACR at
-    // the port). The clock is INJECTED (deterministic decisions). NO HTTP
-    // route is wired here (the Work Order authorizes the decision service,
-    // not a drive surface — the future governed consumers wire those). ---
+    // (NO migration authorized; the reservation is PROCESS-LOCAL —
+    // duplicate delivery and completion failure are guarded within one
+    // process; CROSS-PROCESS consequence idempotency is NOT claimed by
+    // this composition — the durable binding point is a future ACR at
+    // the port and must precede any drive-surface activation that
+    // delivers decisions from more than one process). The clock is
+    // INJECTED (deterministic decisions). NO HTTP route is wired here
+    // (the Work Order authorizes the decision service, not a drive
+    // surface — the future governed consumers wire those). ---
     progressiveReleaseService = new DefaultProgressiveReleaseService({
       continuousValidationService: continuousValidationService!,
       engineeringSignalService: engineeringSignalService!,

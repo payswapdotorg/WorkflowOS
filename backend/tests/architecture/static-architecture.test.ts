@@ -20862,7 +20862,7 @@ describe('WORK-069 invariants — Progressive Release & Runtime Validation (the 
 
   // --- invariant 11: the reserve-first consequence durability protocol ----
 
-  it('INVARIANT 11 — the reserve-first consequence durability protocol (the PR #108 architect-review correction): the decision record is durable BEFORE any governed consequence executes, the pending tombstone fails closed, and the completion transition exists at the port (no ungated single-shot save)', () => {
+  it('INVARIANT 11 — the reserve-first consequence durability protocol (the PR #108 architect-review correction + the 2026-09-01 re-review claim correction): the decision record is PERSISTED through the composed boundary BEFORE any governed consequence executes, the pending tombstone fails closed, the completion transition exists at the port (no ungated single-shot save), and the composition\'s PROCESS-LOCAL boundary is honestly declared (cross-process idempotency is NOT claimed by the in-memory composition)', () => {
     const types = readFileSync(PR_TYPES, 'utf8');
     // The phase vocabulary + the typed pending error live in the contract:
     expect(types).toMatch(/PROGRESSIVE_CONSEQUENCE_PHASES\s*=/);
@@ -20900,11 +20900,23 @@ describe('WORK-069 invariants — Progressive Release & Runtime Validation (the 
     expect(repository).not.toMatch(/\bsave\s*\(/);
     expect(repository).toMatch(/reserve\s*\(/);
     expect(repository).toMatch(/completeDecision\s*\(/);
+    // …and THE HONEST BOUNDARY (the 2026-09-01 architect re-review,
+    // comment 5486874072): the claim strength is pinned to the composed
+    // adapter — the port contract + the in-memory adapter document the
+    // cross-process non-claim (the durable binding point is the future
+    // ACR, which must precede any drive-surface activation):
+    const portDoc = readFileSync(PR_TYPES, 'utf8');
+    expect(portDoc, 'the port contract carries THE HONEST BOUNDARY STATEMENT').toMatch(/THE HONEST BOUNDARY STATEMENT \(the 2026-09-01 architect re-review/);
+    expect(portDoc, 'the port contract states the cross-process non-claim').toMatch(/consequence idempotency is NOT claimed by that composition/);
+    expect(portDoc, 'the port contract pins the durable binding point ahead of drive-surface activation').toMatch(/The durable binding point MUST/);
+    const repositoryDoc = readFileSync(PR_REPOSITORY, 'utf8');
+    expect(repositoryDoc, 'the in-memory adapter documents the process-local reservation').toMatch(/reservation is PROCESS-LOCAL/);
+    expect(repositoryDoc, 'the in-memory adapter states the cross-process non-claim').toMatch(/consequence idempotency is therefore NOT claimed/);
   });
 
   // --- composition pin: buildApp wires the service on AppDeps ------------------
 
-  it('the app.ts composition pins: the service + the in-memory repository + the consumed authorities + the UNBOUND rollback port + NO route surface', () => {
+  it('the app.ts composition pins: the service + the in-memory repository + the consumed authorities + the UNBOUND rollback port + NO route surface + the HONEST process-local boundary declaration', () => {
     const appTs = readFileSync(APP_TS, 'utf8');
     expect(appTs).toMatch(/progressiveReleaseService = new DefaultProgressiveReleaseService\(/);
     expect(appTs).toMatch(/decisionRepository: new InMemoryProgressiveReleaseDecisionRepository\(\)/);
@@ -20914,6 +20926,14 @@ describe('WORK-069 invariants — Progressive Release & Runtime Validation (the 
     expect(appTs).toMatch(/rollbackAuthority: undefined/);
     expect(appTs).toMatch(/progressiveReleaseService\?: ProgressiveReleaseService;/);
     expect(appTs).toMatch(/now: \(\) => new Date\(\)/);
+    // The 2026-09-01 re-review claim correction, pinned at the composition
+    // root: the in-memory adapter's reservation is PROCESS-LOCAL, the
+    // cross-process guarantee is NOT claimed, and the durable binding
+    // point (the future ACR) must precede any drive-surface activation —
+    // the claim can never again outrun the composed boundary:
+    expect(appTs, 'app.ts declares the process-local reservation boundary').toMatch(/the reservation is PROCESS-LOCAL/);
+    expect(appTs, 'app.ts declares the cross-process non-claim').toMatch(/CROSS-PROCESS consequence idempotency is NOT claimed by/);
+    expect(appTs, 'app.ts pins the durable binding point ahead of drive-surface activation').toMatch(/must precede any drive-surface activation/);
     // …and NO autonomous runtime drive: the domain exposes no routes/job
     // handlers/queue consumers of its own (the future governed consumers
     // wire the drive surfaces):

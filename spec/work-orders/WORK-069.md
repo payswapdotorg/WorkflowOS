@@ -323,32 +323,57 @@ not a drive surface; the future governed consumers wire those).
   the identity fingerprint UNIQUE — the DATABASE constraint, not an
   application race, decides the reservation winner) is proven under real
   PostgreSQL by the two-actor integration suite; the durable binding
-  point is a future ACR at the same port.
+  point is a future ACR at the same port. **The honest boundary (the
+  2026-09-01 re-review claim correction):** the protocol's strength is
+  the composed adapter's — the production in-memory adapter's
+  reservation is PROCESS-LOCAL (duplicate delivery and completion
+  failure are guarded within one process), and CROSS-PROCESS
+  consequence idempotency (process-loss survival, two processes racing)
+  is NOT claimed by that composition; it is the DURABLE-adapter contract
+  of the same port (proven by the real-PG suite) and exactly what the
+  future ACR productionizes. The durable binding point MUST precede any
+  future drive-surface activation that delivers decisions from more
+  than one process (the static-architecture suite pins this declaration
+  at the composition root and at the port).
 - **Idempotency and independence (§13):** the deterministic decision
   identity (tenant + project + release + stage + validation run + runtime
   observation event) — a duplicate delivery returns the recorded decision
   and re-executes NOTHING (no duplicate halt action, no duplicate signal,
-  no duplicate rollback, no duplicate audit event); the same identity
+  no duplicate rollback, no duplicate audit event) **within the
+  persistence boundary the composed adapter provides** (the scope
+  established by the persistence ruling above); the same identity
   re-derived after the rollout state moved underneath it is the TYPED
   `PR_DECISION_IDENTITY_CONFLICT` (never a silent rewrite); a different
   project/stage/release/observation is an INDEPENDENT decision.
 - **The consequence durability protocol (the PR #108 architect-review
-  correction):** the decision record is the ONLY durable idempotency
-  boundary, so it is RESERVED (insert-only, through the port's
-  `reserve`) BEFORE any governed consequence executes — a `halt`/
-  `recover`'s consequences run ONLY for the reservation owner (the loser
-  of a concurrent insert race converges and executes nothing), then the
-  `completeDecision` transition (pending → executed) records their REAL
-  outcomes; a `continue` reserves directly as executed (it carries no
-  governed consequences, so the reservation is atomically final). A
-  crash or a concurrent delivery can therefore NEVER re-execute a
-  non-idempotent consequence (a rollback invocation, a signal emission)
-  for a decision identity that is already durable: the re-delivery that
-  finds a durable-but-unresolved (pending) reservation fails closed with
-  the TYPED `PR_DECISION_CONSEQUENCES_PENDING` — never a re-execution,
-  never a clean duplicate, never a silent continue. The port exposes NO
-  ungated single-shot save (the pre-correction `save`-after-consequences
-  ordering is structurally impossible).
+  correction + the 2026-09-01 re-review claim correction):** the decision
+  record is the ONLY idempotency boundary for the governed consequences,
+  so it is RESERVED (insert-only, through the port's `reserve`, persisted
+  to the composed boundary) BEFORE any governed consequence executes — a
+  `halt`/`recover`'s consequences run ONLY for the reservation owner (the
+  loser of a concurrent insert race converges and executes nothing), then
+  the `completeDecision` transition (pending → executed) records their
+  REAL outcomes; a `continue` reserves directly as executed (it carries
+  no governed consequences, so the reservation is atomically final).
+  Within the composed boundary, a crash or a concurrent delivery can
+  therefore NEVER re-execute a non-idempotent consequence (a rollback
+  invocation, a signal emission) for a decision identity that is already
+  reserved: the re-delivery that finds a reserved-but-unresolved
+  (pending) reservation fails closed with the TYPED
+  `PR_DECISION_CONSEQUENCES_PENDING` — never a re-execution, never a
+  clean duplicate, never a silent continue. The port exposes NO ungated
+  single-shot save (the pre-correction `save`-after-consequences ordering
+  is structurally impossible). The STRENGTH of this guarantee is the
+  composed adapter's (the re-review's exact ruling): under a DURABLE
+  (PostgreSQL-class) adapter the reservation is cross-process and
+  crash-surviving — the four re-review proof cases (two independent
+  service instances racing a HALT; two racing a RECOVER with rollback
+  bound; process-loss retry over a fresh repository/connection seeing
+  the durable pending claim; distinct repository/service instances) are
+  proven by the real-PG integration suite; under the production
+  in-memory adapter the reservation is PROCESS-LOCAL and cross-process
+  idempotency is NOT claimed (the domain suite pins the acknowledged
+  limit as a discrimination proof).
 
 ### The verification battery
 
@@ -363,26 +388,36 @@ suite (the PR #108 architect-review cases: concurrent halt deliveries,
 concurrent recover deliveries with the rollback authority bound — both
 the insert-race and the in-flight windows, the crash between the
 consequence execution and the completion persistence, and the preserved
-duplicate-delivery guarantee), and the halt/recover signal flow (the
-WORK-067 authority consumed — the release-correlated signal chain, the
-rollback invocation through the port, the honest no-signal continue case,
-the unbound-authority fail-closed cases — extended with the durable
-pending-tombstone assertions). The mutation/discrimination
-proofs prove the protections (removing the validation binding, the runtime
-binding, the governed-decision boundary, the rollback boundary, the
-no-second-authority boundary, or the signal channel makes the corresponding
-test FAIL). The static-architecture suite pins the no-second-authority
-matrix at the source level — including INVARIANT 11 (the reserve-first
-consequence durability protocol: the reservation write precedes the
-consequence execution which precedes the completion write, the pending
-tombstone fails closed, and the in-memory adapter implements NO ungated
-save). The real-PG two-actor integration suite proves
-the keyed-uniqueness contract under true concurrency (two independent
-connections, no sequential-call shortcuts) — including the full-service
-two-actor halt/recover proofs (the shared non-idempotent consequence
-counters: the rollback authority invoked EXACTLY ONCE, one audit event)
-and the crash-window proof (the durable pending record + the typed
-closed re-delivery).
+duplicate-delivery guarantee — plus THE ACKNOWLEDGED COMPOSITION LIMIT
+discrimination proof: two SEPARATE in-memory repository instances do NOT
+share the reservation, the honestly-pinned process-local boundary), and
+the halt/recover signal flow (the WORK-067 authority consumed — the
+release-correlated signal chain, the rollback invocation through the
+port, the honest no-signal continue case, the unbound-authority
+fail-closed cases — extended with the persisted pending-tombstone
+assertions). The mutation/discrimination proofs prove the protections
+(removing the validation binding, the runtime binding, the
+governed-decision boundary, the rollback boundary, the
+no-second-authority boundary, or the signal channel makes the
+corresponding test FAIL). The static-architecture suite pins the
+no-second-authority matrix at the source level — including INVARIANT 11
+(the reserve-first consequence durability protocol: the reservation
+write precedes the consequence execution which precedes the completion
+write, the pending tombstone fails closed, the in-memory adapter
+implements NO ungated save, and the composition's PROCESS-LOCAL boundary
++ cross-process non-claim + future-ACR-before-drive-surface declaration
+are pinned at the composition root and at the port — the claim can never
+outrun the composed adapter). The real-PG two-actor integration suite
+proves the keyed-uniqueness contract under true concurrency (two
+independent connections, no sequential-call shortcuts) — including the
+four 2026-09-01 re-review proof cases mapped 1:1 (CASE 1: two
+independent service instances over two connections racing the same HALT
+identity → exactly one consequence; CASE 2: the same for a RECOVER with
+the rollback bound → exactly one rollback invocation; CASES 3+4: the
+crash window + PROCESS LOSS — the re-delivery over a FRESH repository
+instance on a FRESH connection, the prior process's state entirely gone,
+sees the durable pending claim and fails closed typed, the non-idempotent
+counters unchanged) and the pre-existing two-actor/mutation proofs.
 
 ### The architect-review correction record (PR #108 — 2026-09-01)
 
@@ -394,12 +429,12 @@ potentially repeat the rollback for the same decision identity (the
 in-memory production composition made the decision record the only
 durable boundary, and the pre-correction ordering left NO record in the
 crash window). The correction is the consequence durability protocol
-recorded above: reserve (durable, insert-only) → execute (the reservation
-owner only) → complete (the pending → executed transition), with the
-typed `PR_DECISION_CONSEQUENCES_PENDING` fail-closed tombstone for the
-crash window — implemented WITHOUT a schema migration (the Work Order's
-`migrations: []` ruling is untouched: the protocol lives entirely at the
-existing repository PORT; the real-PG proofs use the test-schema
+recorded above: reserve (persisted, insert-only) → execute (the
+reservation owner only) → complete (the pending → executed transition),
+with the typed `PR_DECISION_CONSEQUENCES_PENDING` fail-closed tombstone
+for the crash window — implemented WITHOUT a schema migration (the Work
+Order's `migrations: []` ruling is untouched: the protocol lives entirely
+at the existing repository PORT; the real-PG proofs use the test-schema
 fixture table as before). The secondary observation (a malformed
 non-string `releaseObservedAt` could escape as a native `TypeError`
 from `Date.parse` before the `typeof` check) is corrected in the same
@@ -410,3 +445,65 @@ required (concurrent halt, concurrent recover with the rollback bound,
 the crash window, and the preserved duplicate guarantee) is implemented
 in `backend/tests/progressive-release/consequence-idempotency.test.ts`
 and extended in the real-PG integration suite.
+
+### The architect re-review correction record (PR #108 — 2026-09-01, comment 5486874072)
+
+The architect re-review of the corrected head (`4e38cc1`) found the
+`reserve → execute → complete` correction directionally correct but the
+claimed crash/concurrency guarantee NOT provided by the production
+composition: `buildApp()` wires the process-local
+`InMemoryProgressiveReleaseDecisionRepository`, so a restart loses the
+reservation and the same logical halt/recover consequence can execute
+again; the real-PG suite proved a TEST-adapter contract, not the
+production cross-process guarantee. The disposition offered two
+resolutions: a genuinely durable production reservation boundary, or an
+explicit architectural change removing the cross-process claim.
+
+**The resolution taken (the claim correction — no migration smuggling):**
+a durable production boundary requires a production table, which the
+Work Order's own `migrations: []` ruling forbids and which the architect
+explicitly declined to have smuggled into WORK-069 ("raise the
+appropriate governed architecture change rather than smuggling a
+migration into WORK-069"). The reservation-strength claim is therefore
+corrected to match the composed reality, per the 064/066/067 precedent:
+the protocol and its ordering are UNCHANGED (the architect's "keep the
+`reserve → execute → complete` ordering"); what changed is the CLAIM —
+(1) every source/spec/doc surface now states the two-level boundary (the
+port contract under a durable adapter vs. the process-local in-memory
+composition — types.ts §8 THE HONEST BOUNDARY STATEMENT, the service
+header, the in-memory adapter header, the app.ts composition comment,
+INVARIANT 11, this Work Order's persistence ruling and protocol bullet);
+(2) the production composition's non-claim is PINNED structurally — the
+static-architecture suite requires app.ts to declare the process-local
+reservation, the cross-process non-claim, and the future-ACR-before-
+drive-surface rule, and requires the port + adapter docs to carry the
+same statement (the claim can never again outrun the composed adapter);
+(3) the honest limit is discrimination-tested in the domain suite (two
+separate in-memory repository instances — two processes — do NOT share
+the reservation: both decide, both consequences execute; that test is
+the rewrite trigger for the future durable ACR).
+
+**The four required proof cases (comment 5486874072), proven for the
+DURABLE-ADAPTER contract of the port in the real-PG integration suite,
+mapped 1:1:** CASE 1 — two independent service instances over two
+connections racing the same HALT identity → exactly one consequence
+(one decision row, one audit event); CASE 2 — the same for a RECOVER
+with the rollback authority bound → exactly one rollback invocation
+(the shared non-idempotent counter); CASES 3+4 — the crash window +
+PROCESS LOSS: the completion fails after the consequences executed, the
+record is durable and pending, and the re-delivery — over a FRESH
+repository instance on a FRESH connection with a complete fresh service
+stack (the prior process's state entirely gone) — SEES the durable
+pending claim, fails closed typed, and re-executes NOTHING (the
+non-idempotent counters unchanged across both re-deliveries).
+
+**The durable binding point (the future ACR):** productionizing the
+durable adapter (the production table + the keyed-uniqueness constraint
++ the pending-tombstone semantics + the composition wiring) is a
+governed architecture change beyond WORK-069's authorized scope; the
+port contract it must satisfy is already proven by the real-PG suite,
+and the binding point MUST precede any future drive-surface activation
+that delivers decisions from more than one process (the production
+composition today wires NO route surface and an UNBOUND rollback
+authority — there is no production delivery path for the decisions
+yet).

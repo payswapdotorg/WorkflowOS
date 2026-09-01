@@ -147,20 +147,23 @@ export const PROGRESSIVE_DELIVERY_OUTCOMES = ['decided', 'duplicate'] as const;
 export type ProgressiveDeliveryOutcome = (typeof PROGRESSIVE_DELIVERY_OUTCOMES)[number];
 
 /**
- * The consequence-execution phase of a decision record — the durability
+ * The consequence-execution phase of a decision record — the reserve-first
  * protocol that makes a decision identity's governed consequences
- * AT-MOST-ONCE (the PR #108 architect-review correction: consequences
- * may NEVER execute before the decision record is durable, or a crash or
+ * AT-MOST-ONCE within the persistence boundary the composed adapter
+ * provides (the PR #108 architect-review correction + the 2026-09-01
+ * re-review claim correction: consequences may NEVER execute before the
+ * decision record is RESERVED through the persistence port, or a crash or
  * a concurrent delivery can repeat them — signal re-emission and, once
  * the rollback authority is bound, a repeated rollback for the same
  * decision identity).
  *
- *   - `pending` — the record is RESERVED (durable) and its consequence
- *     execution is unresolved: in flight, or interrupted by a crash or an
- *     authority failure between the reservation and the completion. A
- *     re-delivery that finds a pending record NEVER re-executes the
- *     consequences and NEVER reports a clean duplicate — it fails closed
- *     with the typed `PR_DECISION_CONSEQUENCES_PENDING`.
+ *   - `pending` — the record is RESERVED (persisted through the composed
+ *     boundary) and its consequence execution is unresolved: in flight,
+ *     or interrupted by a crash or an authority failure between the
+ *     reservation and the completion. A re-delivery that finds a pending
+ *     record NEVER re-executes the consequences and NEVER reports a clean
+ *     duplicate — it fails closed with the typed
+ *     `PR_DECISION_CONSEQUENCES_PENDING`.
  *   - `executed` — the governed consequences are executed and their
  *     outcomes recorded (or none were required: a `continue` decision
  *     reserves DIRECTLY as executed — it carries no governed
@@ -376,12 +379,16 @@ export interface ProgressiveReleaseDecisionRecord {
   /** Present on recover decisions (invoked or the typed unbound reason). */
   readonly rollback: RollbackInvocationResult | null;
   /**
-   * The consequence-execution phase (the reserve-first durability
-   * protocol — the PR #108 architect-review correction): `pending`
-   * records are durable RESERVATIONS whose governed consequences are
-   * unresolved (in flight or interrupted); `executed` records carry the
-   * final outcomes. The record is the idempotency boundary, so it is
-   * durable BEFORE any consequence executes.
+   * The consequence-execution phase (the reserve-first protocol — the
+   * PR #108 architect-review correction): `pending` records are
+   * RESERVATIONS (persisted through the composed boundary) whose governed
+   * consequences are unresolved (in flight or interrupted); `executed`
+   * records carry the final outcomes. The record is the idempotency
+   * boundary, so it is persisted BEFORE any consequence executes — under
+   * a DURABLE adapter the reservation is cross-process and
+   * crash-surviving; under the composition's in-memory adapter it is
+   * process-local (see §8: CROSS-PROCESS idempotency is not claimed by
+   * that composition).
    */
   readonly consequencePhase: ProgressiveConsequencePhase;
   /** The WORK-064 outcome kind consumed as the decisive evidence (null when the run was unusable). */
@@ -412,9 +419,9 @@ export interface DecisionConsequenceOutcomes {
 
 /**
  * The outcome of the INSERT-ONLY reservation claim:
- *   - `reserved` — THIS caller created the durable record and therefore
- *     OWNS the governed consequence execution for the decision identity
- *     (exactly one owner; the loser of a concurrent insert race receives
+ *   - `reserved` — THIS caller created the record and therefore OWNS the
+ *     governed consequence execution for the decision identity (exactly
+ *     one owner; the loser of a concurrent insert race receives
  *     `converged` and executes NOTHING);
  *   - `converged` — a record with the same decision identity already
  *     exists (a concurrent delivery won the insert, or a prior delivery
@@ -435,18 +442,35 @@ export type DecisionReservation =
  * at this port.
  *
  * THE CONSEQUENCE DURABILITY PROTOCOL (the PR #108 architect-review
- * correction): the decision record is the ONLY durable idempotency
- * boundary, so it MUST be durable BEFORE any governed consequence
- * executes. The port therefore exposes an explicit two-phase write —
- * `reserve` (the insert-only durable claim) then `completeDecision` (the
- * pending → executed transition with the real outcomes) — and NO ungated
- * single-shot save: a crash or a concurrent delivery can never re-execute
- * a non-idempotent consequence (a rollback invocation, a signal emission)
- * for a decision identity that is already durable.
+ * correction): the decision record is the ONLY idempotency boundary for
+ * the governed consequences, so it MUST be RESERVED (persisted through
+ * this port) BEFORE any governed consequence executes. The port therefore
+ * exposes an explicit two-phase write — `reserve` (the insert-only
+ * idempotency claim) then `completeDecision` (the pending → executed
+ * transition with the real outcomes) — and NO ungated single-shot save.
+ *
+ * THE HONEST BOUNDARY STATEMENT (the 2026-09-01 architect re-review,
+ * comment 5486874072 — the claim correction): the STRENGTH of the
+ * protocol is the strength of the boundary the composed adapter
+ * provides. A DURABLE (PostgreSQL-class) adapter of this port makes the
+ * reservation CROSS-PROCESS and CRASH-SURVIVING — two independent
+ * service/repository instances racing on one identity converge to ONE
+ * consequence, and a process-loss retry sees the pending claim — exactly
+ * the contract the real-PG integration suite proves and exactly what the
+ * future ACR productionizes. The PRODUCTION composition binds the
+ * IN-MEMORY adapter (`migrations: []`): its reservation is PROCESS-LOCAL
+ * — duplicate delivery and completion failure are guarded within one
+ * process (the repository instance's lifetime), and CROSS-PROCESS
+ * consequence idempotency is NOT claimed by that composition (a restart
+ * releases the reservation; the domain suite pins this acknowledged
+ * limit as a discrimination proof). The durable binding point MUST
+ * precede any future drive-surface activation that delivers decisions
+ * from more than one process.
  */
 export interface ProgressiveReleaseDecisionRepository {
   /**
-   * RESERVE the decision record — the durable, INSERT-ONLY claim that
+   * RESERVE the decision record — the INSERT-ONLY idempotency claim
+   * (persisted through the composed adapter's boundary) that
    * MUST precede any governed consequence execution. A reserve whose
    * decisionId already exists with the SAME identity fingerprint
    * converges (the stored record decides); with a DIFFERENT identity
@@ -510,18 +534,22 @@ export interface ProgressiveReleaseService {
   /**
    * Derive the governed continue/halt/recover decision for one rollout
    * stage binding and persist it through the consequence durability
-   * protocol: the decision record is RESERVED (durably, insert-only)
-   * BEFORE any governed consequence executes, the consequences (the
-   * WORK-067 signal flow, the rollback authority invocation) run only for
-   * the reservation owner, and the completion transition records their
-   * real outcomes. Deterministic for identical (tenant, project, release,
-   * stage, validation run, runtime observation, rollout history, clock).
-   * Idempotent under duplicate delivery (same identity → the recorded
-   * decision is returned; no consequence is re-executed); a delivery that
-   * finds a durable-but-unresolved reservation fails closed with the
+   * protocol: the decision record is RESERVED (insert-only, persisted
+   * through the composed boundary) BEFORE any governed consequence
+   * executes, the consequences (the WORK-067 signal flow, the rollback
+   * authority invocation) run only for the reservation owner, and the
+   * completion transition records their real outcomes. Deterministic for
+   * identical (tenant, project, release, stage, validation run, runtime
+   * observation, rollout history, clock). Idempotent under duplicate
+   * delivery (same identity → the recorded decision is returned; no
+   * consequence is re-executed); a delivery that finds a
+   * reserved-but-unresolved (pending) reservation fails closed with the
    * typed PR_DECISION_CONSEQUENCES_PENDING (never a re-execution, never
    * a silent continue). Fail closed: every unsafe/unknown state is a
-   * typed halt, never a continue.
+   * typed halt, never a continue. (The protocol's cross-process strength
+   * is the composed adapter's — see §8: the production in-memory adapter
+   * is process-local; cross-process idempotency is NOT claimed by that
+   * composition.)
    */
   decideProgressiveRelease(input: DecideProgressiveReleaseInput): Promise<ProgressiveReleaseDecisionResult>;
   /** Read a decision by id (null when absent — never fabricated). */

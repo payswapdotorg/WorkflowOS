@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
  * decision record is RESERVED (insert-only) BEFORE any governed
  * consequence executes, so a concurrent delivery or a crash can never
  * re-execute a non-idempotent consequence (a signal emission, a rollback
- * invocation) for a decision identity that is already durable.
+ * invocation) for a decision identity that is already reserved.
  *
  * ARCHITECTURAL CONTEXT (the repository truth): WORK-069 authorizes NO
  * schema migration (`migrations: []` — the Work Order's own declaration;
@@ -25,6 +25,30 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
  * ACR productionizes, and it satisfies the "prefer PostgreSQL
  * constraints over application-only races" discipline at the contract
  * level.
+ *
+ * THE 2026-09-01 ARCHITECT RE-REVIEW (comment 5486874072) required the
+ * proofs to demonstrate the guarantee across DISTINCT repository/service
+ * instances and process loss — not merely against one in-memory Map. This
+ * suite proves exactly that FOR THE DURABLE ADAPTER CLASS of the port
+ * (what the future ACR productionizes); the production composition's
+ * in-memory adapter is honestly NON-durable (its process-local limit is
+ * pinned as a discrimination proof in the domain suite —
+ * tests/progressive-release/consequence-idempotency.test.ts). The four
+ * required cases, mapped 1:1 to the tests below:
+ *
+ *   CASE 1 — two independent service instances racing on the same HALT
+ *            identity → exactly one consequence;
+ *   CASE 2 — two independent service instances racing on the same
+ *            RECOVER identity → exactly one rollback invocation when
+ *            rollback is bound;
+ *   CASE 3 — process-loss/crash after reservation/consequence → the
+ *            retry sees the durable pending claim and does NOT repeat
+ *            the consequence;
+ *   CASE 4 — the guarantee holds across distinct repository/service
+ *            instances (every two-actor proof uses two connections +
+ *            two full service stacks; the crash proof re-delivers over a
+ *            FRESH repository instance on a FRESH connection — the prior
+ *            process's state is entirely gone).
  *
  * A single-threaded pglite run CANNOT demonstrate true concurrent
  * statement interleaving — the suite SKIPS on pglite and runs when
@@ -513,7 +537,7 @@ describe.skipIf(!isRealPg)('WORK-069 — the decision-repository contract under 
     expect(historyA[0]!.decisionId).toBe(historyB[0]!.decisionId);
   });
 
-  it('ARCHITECT-REGRESSION (PR #108) — the full-service two-actor HALT: concurrent deliveries of the same halt identity → the consequences execute EXACTLY ONCE (ONE decision row, ONE audit event; the loser NEVER re-executes)', async () => {
+  it('ARCHITECT-REGRESSION (PR #108) — CASE 1 — the full-service two-actor HALT: two independent service instances over two connections racing on the same halt identity → the consequences execute EXACTLY ONCE (ONE decision row, ONE audit event; the loser NEVER re-executes)', async () => {
     await db.client.exec(`DELETE FROM wfos_test_progressive_decisions`);
     const clock = fixedClock('2026-09-02T00:00:00Z');
     // ONE shared audit writer — the discriminating consequence counter
@@ -602,7 +626,7 @@ describe.skipIf(!isRealPg)('WORK-069 — the decision-repository contract under 
     expect(events[0]!.metadata).toMatchObject({ signalsEmitted: 1 });
   });
 
-  it('ARCHITECT-REGRESSION (PR #108) — the full-service two-actor RECOVER with the rollback authority BOUND: concurrent deliveries → the rollback is invoked EXACTLY ONCE (ONE decision row; the loser NEVER re-invokes)', async () => {
+  it('ARCHITECT-REGRESSION (PR #108) — CASE 2 — the full-service two-actor RECOVER with the rollback authority BOUND: two independent service instances over two connections racing on the same recover identity → the rollback is invoked EXACTLY ONCE (ONE decision row; the loser NEVER re-invokes)', async () => {
     await db.client.exec(`DELETE FROM wfos_test_progressive_decisions`);
     const clock = fixedClock('2026-09-02T00:00:00Z');
     // ONE shared rollback authority — the NON-IDEMPOTENT consequence
@@ -699,7 +723,7 @@ describe.skipIf(!isRealPg)('WORK-069 — the decision-repository contract under 
     expect(row.rollback).toMatchObject({ invoked: true });
   });
 
-  it('ARCHITECT-REGRESSION (PR #108) — the crash window: a completion that fails after the consequences executed leaves a DURABLE pending record; the re-delivery fails closed (typed) and re-executes NOTHING', async () => {
+  it('ARCHITECT-REGRESSION (PR #108) — CASES 3+4 — the crash window + PROCESS LOSS: a completion that fails after the consequences executed leaves a DURABLE pending record; the re-delivery — including over a FRESH repository instance on a FRESH connection (the prior process\'s state entirely gone) — fails closed (typed) and re-executes NOTHING', async () => {
     await db.client.exec(`DELETE FROM wfos_test_progressive_decisions`);
     const clock = fixedClock('2026-09-02T00:00:00Z');
     const sharedRollback = new RecordingRollbackAuthority(invokedRollback);
@@ -770,7 +794,7 @@ describe.skipIf(!isRealPg)('WORK-069 — the decision-repository contract under 
     expect(durable!.consequencePhase).toBe('pending');
     expect(durable!.decision).toBe('recover');
     // The re-delivery (a NEW service instance over the honest adapter):
-    // it finds the durable-but-unresolved reservation and fails CLOSED —
+    // it finds the reserved-but-unresolved reservation and fails CLOSED —
     // it does NOT re-execute the consequences:
     const reDelivery = new DefaultProgressiveReleaseService({
       continuousValidationService,
@@ -796,6 +820,63 @@ describe.skipIf(!isRealPg)('WORK-069 — the decision-repository contract under 
     // …and the side effects were NOT repeated (exactly ONE rollback
     // invocation — from the first, crashed delivery only):
     expect(sharedRollback.invocations).toHaveLength(1);
+
+    // PROCESS LOSS (the 2026-09-01 re-review, CASES 3+4): the prior
+    // process's ENTIRE state is gone — its connection, its repository
+    // instance, its service instance. A FRESH process builds a FRESH
+    // repository over a FRESH connection to the SAME database and
+    // re-delivers the SAME decision request: the DURABLE PENDING CLAIM is
+    // what the fresh instance SEES (the reservation survived the process
+    // loss — the in-memory adapter could never provide this; this is the
+    // durable-adapter contract the future ACR productionizes), so the
+    // fresh delivery fails CLOSED typed and re-executes NOTHING:
+    const third = await db.createSecondClient!();
+    try {
+      const actorC = new PgTestSchemaDecisionRepository(third.client);
+      // The fresh repository instance SEES the durable pending claim:
+      const freshView = await actorC.findById(decisionId);
+      expect(freshView).not.toBeNull();
+      expect(freshView!.consequencePhase).toBe('pending');
+      expect(freshView!.decision).toBe('recover');
+      // A complete FRESH service stack over the FRESH repository (its own
+      // authorities — only the shared DATABASE state carries over):
+      const freshValidation = new DefaultContinuousValidationService({
+        runRepository: new InMemoryValidationRunRepository(),
+        verificationService: new FakeVerificationBoundaryForPg(),
+      });
+      await completedPostReleaseRun(freshValidation, {
+        runId: 'run-pg-crash',
+        releaseRef: 'release-pg-crash',
+        outcome: 'validation_failure',
+      });
+      const freshProcessReDelivery = new DefaultProgressiveReleaseService({
+        continuousValidationService: freshValidation,
+        engineeringSignalService: new DefaultEngineeringSignalService({
+          signalRepository: new InMemoryEngineeringSignalRepository(),
+          continuousValidationService: freshValidation,
+          now: clock,
+        }),
+        runtimeObservationReader: new FakeRuntimeObservationReader({
+          kind: 'deployment',
+          deploymentId: 'dpl-rollout-1',
+          deploymentStatus: 'ready',
+          observedAt: '2026-09-01T12:10:00Z',
+        }),
+        rollbackAuthority: sharedRollback,
+        decisionRepository: actorC,
+        auditWriter: new RecordingAuditWriter(),
+        now: clock,
+      });
+      await expect(
+        freshProcessReDelivery.decideProgressiveRelease({ ...request }),
+      ).rejects.toThrowError(/\[PR_DECISION_CONSEQUENCES_PENDING\]/);
+      // …and STILL exactly ONE rollback invocation (the process-loss
+      // retry re-executed NOTHING — the non-idempotent counter is
+      // unchanged across BOTH re-deliveries):
+      expect(sharedRollback.invocations).toHaveLength(1);
+    } finally {
+      await third.close();
+    }
   });
 
   it('the identity conflict: the same decision id with a DIFFERENT identity fingerprint is the typed conflict (fail closed)', async () => {

@@ -23,16 +23,25 @@
  *     emitted through the /audit application boundary.
  *
  * CONSEQUENCE DURABILITY PROTOCOL (the PR #108 architect-review
- * correction): the decision record is the ONLY durable idempotency
- * boundary, so it is RESERVED (insert-only) BEFORE any governed
- * consequence executes — a halt/recover's consequences run only for the
- * reservation owner, then the completion transition records their real
- * outcomes. A `continue` reserves directly as executed (it carries no
- * governed consequences). A crash or a concurrent delivery can therefore
- * NEVER re-execute a non-idempotent consequence (a rollback invocation, a
- * signal emission) for an identity that is already durable: the next
- * delivery that finds a durable-but-unresolved (pending) reservation
- * fails closed with the typed PR_DECISION_CONSEQUENCES_PENDING.
+ * correction + the 2026-09-01 re-review claim correction): the decision
+ * record is the ONLY idempotency boundary for the governed consequences,
+ * so it is RESERVED (insert-only, persisted through the repository
+ * port) BEFORE any governed consequence executes — a halt/recover's
+ * consequences run only for the reservation owner, then the completion
+ * transition records their real outcomes. A `continue` reserves
+ * directly as executed (it carries no governed consequences). The
+ * protocol's STRENGTH is the composed adapter's boundary: under a
+ * DURABLE (PostgreSQL-class) adapter a crash or a concurrent delivery
+ * can never re-execute a non-idempotent consequence (a rollback
+ * invocation, a signal emission) for an identity that is already
+ * reserved — the next delivery that finds a reserved-but-unresolved
+ * (pending) reservation fails closed with the typed
+ * PR_DECISION_CONSEQUENCES_PENDING. The PRODUCTION composition binds
+ * the in-memory adapter (`migrations: []`), whose reservation is
+ * PROCESS-LOCAL: duplicate delivery and completion failure are guarded
+ * within one process, and CROSS-PROCESS consequence idempotency is NOT
+ * claimed by that composition (the durable binding point is the
+ * documented future ACR at the port — see types.ts §8).
  *
  * IDEMPOTENCY: the deterministic decision identity (release, stage,
  * validation run, runtime observation, scope) — a duplicate delivery
@@ -136,7 +145,7 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     //    re-executed); a mismatch means the same logical decision event
     //    would carry two different outcomes (the rollout history moved
     //    underneath it) — a typed conflict, never a silent rewrite. A
-    //    durable-but-PENDING record is the typed fail-closed tombstone
+    //    reserved-but-PENDING record is the typed fail-closed tombstone
     //    (its consequences are unresolved — NEVER re-executed, never a
     //    clean duplicate).
     const prior = await this.deps.decisionRepository.findById(decisionId);
@@ -144,12 +153,13 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
       return this.classifyRecordedDecision(prior, contentFingerprint, input, stage);
     }
 
-    // 7. RESERVE the decision record FIRST — the durable idempotency claim
-    //    that MUST precede any governed consequence (the PR #108
-    //    architect-review correction: consequences executing before the
-    //    record is durable could repeat under a crash or a concurrent
-    //    delivery — signal re-emission and, once the rollback authority is
-    //    bound, a repeated rollback for the same decision identity). A
+    // 7. RESERVE the decision record FIRST — the idempotency claim
+    //    (persisted to the composed boundary) that MUST precede any
+    //    governed consequence (the PR #108 architect-review correction:
+    //    consequences executing before the record is persisted could
+    //    repeat under a crash or a concurrent delivery — signal
+    //    re-emission and, once the rollback authority is bound, a
+    //    repeated rollback for the same decision identity). A
     //    `continue` decision carries NO governed consequences, so it
     //    reserves directly as EXECUTED (atomically final); a halt/recover
     //    reserves as PENDING and only the reservation owner executes and
@@ -194,8 +204,10 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     }
 
     // 8. execute the governed consequences — the RESERVATION OWNER ONLY
-    //    (the record is already durable; a crash from here on can never
-    //    cause a re-execution).
+    //    (the record is already persisted to the composed boundary; a
+    //    crash from here on can never cause a re-execution within that
+    //    boundary — the pending tombstone is what a durable adapter's
+    //    process-loss retry, and an in-process re-delivery, both see).
     const signalOutcomes: HaltSignalOutcome[] = [];
     let rollback: RollbackInvocationResult | null = null;
     if (derivation.decision === 'halt' || derivation.decision === 'recover') {
@@ -221,7 +233,7 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     //     own discipline: audit is forensic history, not authority; a
     //     write failure after persistence must not fabricate a different
     //    decision, so it propagates as a typed error while the record
-    //    stays durable).
+    //    stays persisted).
     if (this.deps.auditWriter !== undefined) {
       await this.deps.auditWriter.write({
         projectId: input.projectId,
@@ -275,7 +287,7 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
   // --- the recorded-decision classification (the idempotency gate) ------
 
   /**
-   * The classification of an already-durable record against the CURRENT
+   * The classification of an already-reserved record against the CURRENT
    * derivation: a content mismatch is the typed conflict (the same
    * logical decision event cannot carry two different outcomes); an
    * EXECUTED record is the idempotent duplicate (no consequence is
@@ -310,7 +322,7 @@ export class DefaultProgressiveReleaseService implements ProgressiveReleaseServi
     }
     throw new ProgressiveReleaseError(
       'PR_DECISION_CONSEQUENCES_PENDING',
-      `decision ${prior.decisionId} (release '${prior.releaseRef}', stage '${prior.rolloutStage}', run '${prior.validationRunId}') is durable but its governed consequences are unresolved (reserved and not completed — in flight, or interrupted by a crash/authority failure between the reservation and the completion); the re-delivery does NOT re-execute them and does NOT report a duplicate: reconcile the pending reservation through the governed path`,
+      `decision ${prior.decisionId} (release '${prior.releaseRef}', stage '${prior.rolloutStage}', run '${prior.validationRunId}') is reserved but its governed consequences are unresolved (persisted through the composed boundary and pending — in flight, or interrupted by a crash/authority failure between the reservation and the completion); the re-delivery does NOT re-execute them and does NOT report a duplicate: reconcile the pending reservation through the governed path`,
     );
   }
 
