@@ -67,5 +67,6 @@ The `governance-manifest` detector evaluates this state at an exact revision thr
 7. Checkpoint enforcement references remain present.
 8. V2 derived artifacts cannot supersede frozen V1 authority or activate a proposed V2 architecture version.
 9. Post-merge reconciliation records authoritative Git facts only; it is not a second approval authority.
+10. The post-merge finalization protocol remains explicit and code-pinned as the merged-finalization invariant.
 
 A repository whose governance state violates any invariant is not a valid governed state: the control plane refuses to treat it as valid and the governance-manifest checkpoint fails closed.
