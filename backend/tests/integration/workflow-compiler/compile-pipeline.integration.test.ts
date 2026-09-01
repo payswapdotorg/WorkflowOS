@@ -204,8 +204,12 @@ describe('V2-007 real pipeline: V2-003 builder → transport round-trip → comp
   });
 
   it('the builder-authored workflow is semantically the merged triage fixture (independent client)', () => {
-    // cross-client equivalence through the merged V2-003 canonical serializer
-    expect(serializeWorkflowIrDocument(authored)).toBe(serializeWorkflowIrDocument(buildTriageDocument()));
+    // cross-client equivalence through the merged V2-003 canonical SEMANTIC
+    // digest (presentation excluded by design — the literal fixture carries
+    // presentation, this builder client does not)
+    expect(computeWorkflowVersionSemanticDigest(authored).digest).toBe(
+      computeWorkflowVersionSemanticDigest(buildTriageDocument()).digest,
+    );
   });
 
   it('transport round-trip (serialize → parse → re-validate) then compile succeeds', () => {

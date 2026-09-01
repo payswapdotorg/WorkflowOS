@@ -102,7 +102,9 @@ describe('V2-007 — placement conflict (contradictory placement requirements)',
 
   it('the conflict diagnostic identifies the node and both contradictory placements', () => {
     const diagnostics = diagnosticsOf(buildPlacementConflictDocument());
-    const conflict = diagnostics.find((d) => d.code === 'WORKFLOW_COMPILER_PLACEMENT_CONFLICT');
+    const conflict = diagnostics.find(
+      (d) => d.code === 'WORKFLOW_COMPILER_PLACEMENT_CONFLICT' && d.path.includes('review_gate'),
+    );
     expect(conflict).toBeDefined();
     expect(conflict?.path).toContain('review_gate');
     expect(conflict?.message).toContain('device_local');
@@ -118,10 +120,20 @@ describe('V2-007 — placement conflict (contradictory placement requirements)',
     expect(diagnostics.some((d) => d.code === 'WORKFLOW_COMPILER_PLACEMENT_CONFLICT')).toBe(true);
   });
 
-  it('workflow default cloud_required + node cloud_preferred is NOT a conflict', () => {
+  it('workflow default cloud_required + node cloud_preferred is NOT a conflict for that node', () => {
+    // notify_channel is cloud_preferred in the fixture: the pair
+    // (cloud_required default, cloud_preferred node) shares the cloud
+    // location class and never conflicts — while the device-local nodes
+    // still do, proving the check is per-pair, not blanket cloud rejection.
     const document = withNodePlacement(buildTriageDocument(), 'notify_channel', 'cloud_preferred');
     const result = compileWorkflow(withDefaultPlacement(document, 'cloud_required'));
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const conflicts = result.diagnostics.filter((d) => d.code === 'WORKFLOW_COMPILER_PLACEMENT_CONFLICT');
+      expect(conflicts.some((d) => d.path.includes('notify_channel'))).toBe(false);
+      expect(conflicts.some((d) => d.path.includes('review_gate'))).toBe(true);
+      expect(conflicts.some((d) => d.path.includes('log_rejection'))).toBe(true);
+    }
   });
 
   it('workflow default any_supported_node never conflicts (negative control)', () => {

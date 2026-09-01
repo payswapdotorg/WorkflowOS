@@ -238,7 +238,7 @@ export function buildUnreachableNodeDocument(): WorkflowIrDocument {
     outputs: [],
     failurePolicy: { strategy: 'fail_workflow' },
   };
-  document.ir.nodes.push(isolated);
+  document.ir.nodes.push(clone(isolated));
   return document;
 }
 

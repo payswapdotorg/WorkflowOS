@@ -92,7 +92,7 @@ describe('V2-007 — the provenance block records compiler + source + options id
   });
 
   it('omits sourceRefs entirely when the source declares none (deterministic omission)', () => {
-    const source = okArtifact(AUTHORED).provenance.source as Record<string, unknown>;
+    const source = okArtifact(AUTHORED).provenance.source as unknown as Record<string, unknown>;
     expect(source['sourceRefs']).toBeUndefined();
   });
 
@@ -201,6 +201,10 @@ describe('V2-007 — inspectability: the artifact is a readable, structured plan
     expect(gate).toBeDefined();
     expect(gate?.onSuccess).toEqual([]);
     expect(gate?.onFailure).toBeNull();
-    expect(gate?.onOutcomes.map((outcome) => outcome.outcome).sort()).toEqual(['approved', 'rejected']);
+    // the two `approved` continuation edges fan out to two distinct units;
+    // the DECLARED outcomes covered by the flattening are approved/rejected
+    const coveredOutcomes = gate ? [...new Set(gate.onOutcomes.map((o) => o.outcome))] : [];
+    expect(coveredOutcomes.sort()).toEqual(['approved', 'rejected']);
+    expect(gate?.onOutcomes.length).toBe(3);
   });
 });
