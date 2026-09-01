@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "status": "REQUIRED",
   "capabilities": {
     "browser": ["browser.navigate","browser.click","browser.type","browser.select","browser.observe","browser.download","browser.upload"],
@@ -12,12 +12,14 @@
     "workflow": ["workflow.execute","workflow.pause","workflow.resume","workflow.cancel","workflow.deploy","workflow.observe"],
     "github": ["github.repository.read","github.pull_request.create","github.pull_request.merge"]
   },
-  "events": ["workflow.run.requested","workflow.run.started","workflow.step.started","workflow.step.completed","workflow.run.paused","workflow.run.resumed","workflow.run.completed","workflow.run.failed","capability.invocation.requested","capability.invocation.completed","observation.recorded","verification.completed","device.connected","device.disconnected","phone.call.received","phone.call.ended","messaging.message.received","notification.received","file.created","file.changed","application.opened","social.post.engagement.threshold_crossed","workflow.deployment.enabled","workflow.deployment.disabled"],
+  "events": ["workflow.run.requested","workflow.run.started","workflow.step.started","workflow.step.completed","workflow.run.paused","workflow.run.resumed","workflow.run.completed","workflow.run.failed","capability.invocation.requested","capability.invocation.completed","observation.recorded","verification.completed","execution.attestation.issued","execution.attestation.verified","execution.proof.updated","device.connected","device.disconnected","phone.call.received","phone.call.ended","messaging.message.received","notification.received","file.created","file.changed","application.opened","social.post.engagement.threshold_crossed","workflow.deployment.enabled","workflow.deployment.disabled"],
   "executionClasses": ["deterministic_api","agentic_computer_use","human","subworkflow"],
   "placement": ["device_local","device_preferred","cloud_allowed","cloud_preferred","cloud_required","any_supported_node"],
   "visibility": ["private","organization","public"],
   "evidence": ["intent","observation","claim","verification","human_confirmation"],
-  "digest": {"algorithm":"SHA-256","input":"canonical-json(semantic-object)","presentationExcluded":true},
+  "attestationObjectTypes": ["workflowos/execution-statement/v1","workflowos/execution-attestation/v1","workflowos/execution-proof-graph/v1"],
+  "assurance": ["software_signed","hardware_backed","tee_attested","verifiable_computation"],
+  "digest": {"algorithm":"SHA-256","input":"canonical-json(semantic-object)","presentationExcluded":true,"executionDomain":"workflowos/execution-statement/v1"},
   "aliasesForbidden": true,
-  "authorityRules": ["capability-advertisement-is-not-authorization","marketplace-entitlement-is-not-execution-authority","command-ack-is-not-side-effect-evidence"]
+  "authorityRules": ["capability-advertisement-is-not-authorization","marketplace-entitlement-is-not-execution-authority","command-ack-is-not-side-effect-evidence","signature-is-not-automatic-execution-truth","attestation-is-not-verification-authority"]
 }

@@ -21,34 +21,27 @@ Owns repository identity, Workflow, WorkflowVersion, version ancestry, fork iden
 Owns the canonical semantic IR, graph/control/data semantics, deterministic serialization, validation, compatibility and semantic digest.
 
 ### V2-004 — Node + Capability Protocol
-Owns Node identity, capability advertisement, capability requirement matching, placement/locality/privacy constraints and cross-host conformance.
+Owns Node identity, capability advertisement/versioning, capability requirement matching, placement/locality/privacy constraints and cross-host conformance.
 
-**Why parallel:** each item consumes the already-merged V2-001 protocol contract. None requires another item's implementation. Each scope excludes the other sibling's internals.
+## Wave 2A — Execution-proof foundation in parallel
 
-## Wave 2 — Execution foundation
-
-After Wave 1 implementation siblings are merged:
-
-### V2-005 — Workflow Runs + Evidence
-Owns Run lifecycle, evidence, pause/resume, idempotency, correlation and execution history. It consumes the V2-002 repository implementation plus frozen V2-003/V2-004 contracts.
+After Wave 1 implementation siblings are merged, these items run independently from the same stable main.
 
 ### V2-006 — Teaching Sessions
-Owns TeachingSession, learner state, explanations, practice and teaching evidence. It consumes frozen W1 contracts only and can run in parallel with V2-005/V2-007.
+Owns TeachingSession, learner state, explanations, practice and teaching evidence. It consumes frozen W1 contracts only.
 
 ### V2-007 — Workflow Compiler
-Owns deterministic compilation from the merged V2-003 IR implementation and does not depend on V2-005's unmerged implementation. Full compiler↔run composition is deferred to IG-003.
+Owns deterministic compilation from the merged V2-003 IR implementation. Full compiler↔run composition is deferred to IG-003.
 
-**Preferred arrangement:**
+### V2-014 — Execution Attestation Protocol
+Owns canonical ExecutionStatement, domain-separated ExecutionDigest, authenticated ExecutionAttestation, freshness/anti-replay semantics, attester/workload identity binding, assurance levels, and cryptographic verification primitives. It consumes only merged W1 contracts and does not own Run persistence or Node internals.
 
-```text
-V2-005 Run/evidence
-V2-006 Teaching sessions      ← parallel, same stable base
-V2-007 Compiler core
-             ↓
-     feature-boundary dogfood
-             ↓
-   IG-001 / IG-002 as required
-```
+**Why parallel:** V2-006, V2-007 and V2-014 have disjoint authoritative surfaces. V2-014 is a protocol/evidence primitive and does not require another sibling implementation.
+
+## Wave 2B — Durable runs and evidence
+
+### V2-005 — Workflow Runs + Evidence
+Starts after V2-002 implementation and the V2-014 contract are merged, while consuming the V2-003/V2-004 contracts. It owns Run lifecycle, evidence persistence, correlation/causation, and bindings to attestation references.
 
 ## Integration gates before computer execution
 
@@ -63,7 +56,7 @@ These gates start from the then-current `main` after their inputs merge. They ar
 
 ### V2-008 — Computer-Agent Runtime
 
-Activates only after V2-004, V2-005 and V2-007 implementations are merged **and IG-001 + IG-002 are COMPLETE**. Owns browser/desktop/mobile computer execution and host adapters while preserving universal workflow semantics.
+Activates only after V2-004, V2-005 and V2-007 implementations are merged **and IG-001 + IG-002 are COMPLETE**. It owns browser/desktop/mobile computer execution and host adapters while preserving universal workflow semantics.
 
 ## Wave 4 — Events, scheduling and optimization foundations
 
@@ -78,31 +71,43 @@ Owns converting installed workflows into human lessons and may run in parallel w
 ### V2-011 — Optimization
 Owns optimization analysis and explicit proposed versions. It may replace GUI sequences with APIs, reuse workflows, parallelize safe steps, improve placement or reduce cost/reliability risk, but never silently mutates an installed version.
 
+## Cross-device attestation gate
+
+After V2-005, V2-008, V2-009 and V2-014 are merged, run **IG-006** from current `main` to prove cross-device execution-attestation composition, freshness, handoff idempotency, and attestation-gated dependent execution.
+
+## Wave 5 — Ecosystem + verifiable coordination
+
+The following remain parallel after their dependencies are satisfied:
+
+### V2-012 — Collaboration + Marketplace + Economics
+Combines repository/versioning, execution/evidence, teaching and optimization after their implementations have merged. Entitlement never grants execution authority.
+
+### V2-015 — Execution Proof Graph and Trust-Minimized Coordination
+Owns composable causal/dependency graphs of ExecutionAttestations, VerifiedExecutionFact predicates, and cross-device coordination. It does not replace WorkflowIR, Run, Node, capability, authorization, or verification authorities.
+
+**Why parallel:** V2-012 owns ecosystem/commercial surfaces while V2-015 owns execution-proof composition. They do not depend on each other's unmerged implementation.
+
+## Wave 6 — Self-hosting
+
+### V2-013 — WorkflowOS Self-Hosted Workflow Library
+Turns WorkflowOS's software-engineering, maintenance, deployment, verification, dogfooding and governed development procedures into ordinary installable workflows using the same protocol and governance boundaries. It consumes the merged proof/coordination capability but does not create a second engine.
+
 ## Integration gates
 
-Whenever independently developed capabilities first interact, use a dedicated integration Work Order from current `main` rather than rebasing a sibling branch. Declared gates:
+Whenever independently developed capabilities first interact, use a dedicated integration Work Order from current `main` rather than rebasing a sibling. Declared gates:
 
 - `IG-001` repository ↔ IR;
 - `IG-002` IR ↔ capability/placement;
 - `IG-003` compiler ↔ runs/evidence ↔ computer execution;
 - `IG-004` events ↔ reverse teaching ↔ optimization;
-- `IG-005` marketplace ↔ self-hosting.
-
-## Wave 5 — Ecosystem
-
-### V2-012 — Collaboration + Marketplace + Economics
-Combines repository/versioning, execution/evidence, teaching and optimization after their implementations have merged. Entitlement never grants execution authority.
-
-## Wave 6 — Self-hosting
-
-### V2-013 — WorkflowOS Self-Hosted Workflow Library
-Turns WorkflowOS's software-engineering, maintenance, deployment, verification and dogfooding procedures into ordinary installable workflows using the same protocol and governance boundaries.
+- `IG-005` marketplace ↔ self-hosting;
+- `IG-006` execution attestations ↔ runs ↔ computer execution ↔ events/placement.
 
 ## Dogfooding placement
 
 Every user-facing/execution-facing Work Order has a feature-boundary experiment before completion. Every integration gate has an additional cross-feature experiment before downstream progression.
 
-The evidence is empirical and append-only. Contract-relevant failure blocks the affected dependency subtree. Unrelated findings become targeted corrective Work Orders.
+Execution-attestation dogfooding must verify a real signature and independent verification, then demonstrate rejection of tampered or stale material. Proof-graph dogfooding must use two real supported hosts where capabilities and placement permit it.
 
 ## No-rebase quality invariant
 
@@ -113,11 +118,14 @@ Speed is never purchased by rebasing, weakening tests, reducing dogfooding, coll
 ```text
 W0: 1
 W1: 3 parallel
-W2: 2–3 parallel
-IG-001 + IG-002: integration gates
+W2A: 3 parallel
+W2B: 1
+IG-001 + IG-002
 W3: 1
 W4: 3 parallel
-W5: 1
+IG-006
+W5: 2 parallel
 W6: 1
-IG-003..005: integration gates at composition boundaries
+IG-003..005 at their existing composition boundaries
 ```
+

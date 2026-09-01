@@ -14,6 +14,7 @@ Every V2 implementation agent MUST read, apply, and truthfully satisfy this chec
 - [ ] Read `spec/architecture/v2/workflow-marketplace-economics.md` when commercial/version-access concerns are in scope.
 - [ ] Read `spec/development-state/v2-work-order-state.json`.
 - [ ] Read the assigned Work Order and, for an integration gate, the gate's machine-state entry.
+- [ ] Read `spec/architecture/v2/execution-attestation.md` whenever execution proof, attestation, cryptographic evidence, trust, or cross-device coordination is in scope.
 - [ ] Verify current `main` SHA from GitHub.
 - [ ] Verify every hard dependency is actually COMPLETE.
 - [ ] Verify every `contract` dependency is available from merged/frozen state.
@@ -38,6 +39,11 @@ Every V2 implementation agent MUST read, apply, and truthfully satisfy this chec
 - [ ] Publisher maintenance cannot silently mutate an installed version.
 - [ ] Self-hosting cannot bypass the same protocol/policy/governance boundaries.
 - [ ] V1 authority is not silently rewritten or replaced.
+- [ ] ExecutionDigest is distinct from WorkflowVersion digest.
+- [ ] ExecutionAttestation authenticates a statement but does not automatically become verification truth.
+- [ ] Attestations bind to Run/attempt/step, causal context and freshness when decision-relevant.
+- [ ] Node identity, workload identity, capability, authorization, trust, assurance and verification remain separate.
+- [ ] ExecutionProofGraph is evidence about executions, never a replacement workflow graph.
 
 ## Implementation
 
@@ -50,6 +56,8 @@ Every V2 implementation agent MUST read, apply, and truthfully satisfy this chec
 - [ ] Cross-process state uses explicit durable semantics where claimed.
 - [ ] Event-triggered actions are idempotent where duplicate delivery is possible.
 - [ ] Failure states are explicit and fail closed where authority is unavailable.
+- [ ] Unknown/unsupported attestation assurance fails closed where policy requires it.
+- [ ] No blockchain/transparency service is made a mandatory correctness dependency.
 - [ ] Integration behavior is implemented only after required sibling implementations are merged; sibling branches are never used as dependency bases.
 
 ## Verification
@@ -60,6 +68,9 @@ Every V2 implementation agent MUST read, apply, and truthfully satisfy this chec
 - [ ] Concurrency/crash testing exists for cross-process or durable claims.
 - [ ] Security/authorization tests cover negative cases.
 - [ ] Protocol-visible identifiers are checked against the canonical registry.
+- [ ] Cryptographic tests use real signing/verification rather than only mocks.
+- [ ] Replay/freshness/wrong-run/wrong-step/wrong-parent negatives exist where attestation is decision-relevant.
+- [ ] Assurance downgrade and capability-vs-authorization negatives exist where applicable.
 - [ ] Exact final-head verification rerun after the final evidence/documentation change.
 
 ## Dogfooding
@@ -72,6 +83,8 @@ Every V2 implementation agent MUST read, apply, and truthfully satisfy this chec
 - [ ] Contract-relevant failures block dependent work.
 - [ ] Unrelated findings become separate corrective work rather than drive-by fixes.
 - [ ] Integration gates receive a second cross-feature dogfooding experiment.
+- [ ] Attestation feature-boundary dogfood includes a positive real-crypto verification and a negative tamper/stale/replay experiment.
+- [ ] Cross-device proof features exercise at least two real supported hosts when required capabilities exist.
 
 ## PR / completion
 
@@ -91,6 +104,9 @@ An implementation agent MUST stop and escalate through a governed architecture c
 - a frozen V2 concept must be reinterpreted;
 - two authoritative surfaces cannot be made independently mergeable without semantic compromise;
 - a Work Order's stated safety invariant cannot be proven;
+- a claimed execution proof cannot be objectively verified at its declared assurance level;
+- a signature is being treated as automatic proof of a physical side effect;
+- freshness/replay protection cannot be proven;
 - a platform capability required by the protocol cannot be honestly represented;
 - durable semantics are claimed but the actual composed adapter is not durable;
 - dogfooding reveals a contract-level product failure outside the Work Order's scope;

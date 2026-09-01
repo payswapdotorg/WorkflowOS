@@ -22,6 +22,8 @@ Read these as the repository-resident source of truth:
 - `V2-CTRL-002-roadmap-lock.md` — canonical wave graph and no-rebase lock.
 - `dogfooding-protocol.md` — mandatory feature- and integration-boundary experiments.
 - `v2-work-order-state.json` — canonical machine-readable progress/eligibility/state.
+- `architecture-change-requests/V2-ACR-001-execution-attestation.md` — governed execution-attestation evolution.
+- `execution-attestation.md` — normative execution statement/digest/attestation/proof model.
 
 The `fresh-architect-bootstrap.md` file is the shortest safe reading path for a zero-history agent.
 
@@ -29,26 +31,30 @@ The `fresh-architect-bootstrap.md` file is the shortest safe reading path for a 
 
 The product sequence is an index, not the execution order:
 
-`V2-001 → V2-002 → V2-003 → V2-004 → V2-005 → V2-006 → V2-007 → V2-008 → V2-009 → V2-010 → V2-011 → V2-012 → V2-013`
+`V2-001 → V2-002 → V2-003 → V2-004 → V2-006/V2-007/V2-014 → V2-005 → V2-008 → V2-009/V2-010/V2-011 → IG-006 → V2-012/V2-015 → V2-013`
 
-The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `v2-work-order-state.json`**, not this linear index.
+The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `v2-work-order-state.json`**, not this linear/index sequence.
 
-Current wave model:
+## Current wave model
 
 ```text
-W0  V2-001
-     ↓
-W1  V2-002   V2-003   V2-004        ← same base, parallel, no rebase
-     ↓
-W2  V2-005   V2-006   V2-007        ← independent where state says so
-     ↓
-W3  V2-008
-     ↓
-W4  V2-009   V2-010   V2-011        ← same-base parallel wave
-     ↓
-W5  V2-012
-     ↓
-W6  V2-013
+W0   V2-001 COMPLETE
+        ↓
+W1   V2-002   V2-003   V2-004             ← same base, parallel, no rebase
+        ↓
+W2A  V2-006   V2-007   V2-014             ← same base, parallel, no rebase
+        ↓
+W2B  V2-005                              ← Run/evidence consumes V2-014 contract
+        ↓
+W3   IG-001 + IG-002 → V2-008
+        ↓
+W4   V2-009   V2-010   V2-011              ← parallel, no rebase
+        ↓
+     IG-006                                ← cross-device attestation composition
+        ↓
+W5   V2-012   V2-015                      ← parallel, no rebase
+        ↓
+W6   V2-013
 ```
 
 Integration gates are first-class repository work: they start from current `main` after their inputs are complete and never require sibling branch rebasing.
@@ -83,6 +89,30 @@ Marketplace entitlement never becomes execution authority. One-time purchases an
 
 Optimization is advisory and version-producing; it can propose API substitution, workflow reuse, safer placement, parallelization and reliability/cost improvements.
 
+## Execution proof architecture
+
+V2 now defines an additive verifiable-execution layer:
+
+```text
+WorkflowIR
+  ↓
+WorkflowRun
+  ↓
+ExecutionStatement
+  ↓
+ExecutionDigest
+  ↓
+ExecutionAttestation
+  ↓
+verification/appraisal
+  ↓
+VerifiedExecutionFact
+  ↓
+ExecutionProofGraph (later)
+```
+
+The cryptographic layer does not replace WorkflowIR, Run, Node, authorization, or verification. A signature authenticates a statement; it does not automatically prove a physical side effect. Freshness, evidence sufficiency, trust and assurance are explicit.
+
 ## Mechanical execution
 
 Every V2 Work Order follows:
@@ -111,6 +141,8 @@ Parallel Work Orders are independently mergeable and never depend on another sib
 Tests validate implementation correctness. Dogfooding validates the real integrated product at the smallest useful boundary. Every user-facing/execution-facing feature and every integration gate has an explicit experiment. Contract-relevant failures block the affected dependency subtree; unrelated findings become targeted corrective Work Orders.
 
 No speed optimization may remove a required regression, real-system proof, security boundary, evidence requirement or dogfooding experiment.
+
+For execution attestation specifically, feature-boundary dogfooding must include real cryptographic verification plus at least one negative replay/tamper/freshness experiment. Cross-device proof composition requires a real two-host experiment where supported.
 
 ## V1 boundary
 

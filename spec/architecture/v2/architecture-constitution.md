@@ -314,3 +314,32 @@ Every V2 Work Order must identify:
 - known exclusions.
 
 A Work Order that discovers a contradiction in a frozen V2 concept must stop and raise a governed architecture change rather than silently reinterpret the concept.
+
+## 21. Execution attestation and verifiable execution
+
+WorkflowOS may represent a bounded execution fact through the following additive protocol layers:
+
+```text
+ExecutionStatement
+   ↓
+ExecutionDigest
+   ↓
+ExecutionAttestation
+   ↓
+verification/appraisal
+   ↓
+VerifiedExecutionFact
+```
+
+The following rules are constitutional:
+
+- `ExecutionDigest` is distinct from the WorkflowVersion semantic digest.
+- Execution statements use deterministic, domain-separated canonical serialization.
+- An attestation authenticates an attester's statement; a valid signature does not automatically prove physical execution or side-effect completion.
+- Decision-relevant attestations bind to WorkflowVersion, WorkflowRun, execution attempt, applicable step, causal parents, and freshness context.
+- Freshness/replay resistance is mandatory where an attestation affects a current decision. Timestamps alone are insufficient.
+- Node identity, workload identity, capability possession, authorization, placement, policy, cryptographic authenticity, assurance, observed effect, and verification remain separate dimensions.
+- Initial assurance identifiers are `software_signed`, `hardware_backed`, `tee_attested`, and `verifiable_computation`. They are evidence/trust properties, not execution classes.
+- Hosts may lack stronger assurance. The protocol reports that absence explicitly rather than silently downgrading or emulating it.
+- ExecutionProofGraph is evidence about WorkflowRuns, not a second WorkflowIR, workflow engine, execution authority, or verification authority.
+- Transparency logs, blockchains, external ledgers, TEEs and zero-knowledge mechanisms are optional assurance/anchoring mechanisms unless a later governed architecture change explicitly changes that rule.

@@ -13,16 +13,18 @@ This file is the shortest safe recovery path for a new LLM architect or implemen
 7. `spec/architecture/v2/v1-transition.md`
 8. `spec/architecture/v2/optimized-roadmap.md` and `V2-CTRL-002-roadmap-lock.md`
 9. `spec/development-state/v2-work-order-state.json`
-10. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
-11. `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`
-12. `spec/architecture/v2/workflow-teaching-and-marketplace.md`
-13. `spec/architecture/v2/workflow-marketplace-economics.md` when commercial access is relevant
-14. `spec/architecture/v2/mobile-device-runtime.md` when device/mobile/cross-device behavior is relevant
-15. relevant existing V1 public contracts before reusing any V1 capability
+10. `spec/architecture/v2/architecture-change-requests/V2-ACR-001-execution-attestation.md`
+11. `spec/architecture/v2/execution-attestation.md` when execution proof, trust, cryptographic evidence or cross-device behavior is relevant
+12. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
+13. `docs/superpowers/specs/2026-09-01-workflowos-2-0-universal-workflow-protocol-design.md`
+14. `spec/architecture/v2/workflow-teaching-and-marketplace.md`
+15. `spec/architecture/v2/workflow-marketplace-economics.md` when commercial access is relevant
+16. `spec/architecture/v2/mobile-device-runtime.md` when device/mobile/cross-device behavior is relevant
+17. relevant existing V1 public contracts before reusing any V1 capability
 
 ## Status interpretation
 
-V2 is **APPROVED FOR IMPLEMENTATION** but remains a **PROPOSED architecture generation** until a formal V2 architecture version is frozen through the repository governance process. This means implementation is authorized while V2 design changes remain subject to the constitution and governed architecture-change process.
+V2 is **APPROVED FOR IMPLEMENTATION** but remains a **PROPOSED architecture generation** until a formal V2 architecture version is frozen through repository governance. This means implementation is authorized while V2 design changes remain governed. V2-ACR-001 records the accepted execution-attestation evolution; its implementation work cannot activate before the governing architecture-change record is merged.
 
 ## Product definition
 
@@ -64,9 +66,33 @@ Each step is deterministic/API, agentic/computer-use, human, or subworkflow. Pre
 
 Triggers are typed event patterns. Workflows and steps can specify locality/placement. Device-local events may execute locally without cloud round trips when required. Cross-device handoff preserves run identity, causation and evidence and must be idempotent.
 
+## Execution attestation
+
+Execution proof is layered:
+
+```text
+ExecutionStatement
+    ↓
+ExecutionDigest
+    ↓
+ExecutionAttestation
+    ↓
+verification/appraisal
+    ↓
+VerifiedExecutionFact
+    ↓
+ExecutionProofGraph
+```
+
+A digest is a canonical commitment, not execution truth. A signature authenticates an attester's statement, not a physical side effect. Decision-relevant attestations bind to WorkflowVersion/Run/attempt/step and freshness. Node identity, workload identity, authorization, capability, trust, assurance and verification remain separate.
+
+The initial assurance identifiers are `software_signed`, `hardware_backed`, `tee_attested`, and `verifiable_computation`. Stronger assurance is optional by host/policy and may never be silently substituted.
+
+ExecutionProofGraph is evidence about WorkflowRuns, not another workflow representation or engine. Cross-device composition preserves Run/WorkflowVersion identity, causation and idempotency.
+
 ## Teaching model
 
-Automation and teaching are two views over one immutable workflow version. Teaching sessions are derived, resumable and evidence-separated. Reverse teaching lets a person install a workflow and request instruction without creating a second workflow format.
+Automation and teaching are symmetric views over one immutable workflow version. Teaching sessions are derived, resumable and evidence-separated. Reverse teaching lets a person install a workflow and request instruction without creating a second workflow format.
 
 ## Marketplace model
 
@@ -88,12 +114,34 @@ The machine-readable state file is authoritative for V2 progress. A fresh agent 
 
 Parallel means independently mergeable:
 
-- same stable merged base;
+- same stable merged main base;
 - disjoint authoritative surfaces;
 - no sibling branch dependency;
 - no rebase onto sibling branches;
 - complete tests and dogfooding per item;
 - integration Work Order when composition itself needs proof.
+
+## Current roadmap
+
+```text
+W0   V2-001 COMPLETE
+ ↓
+W1   V2-002 + V2-003 + V2-004
+ ↓
+W2A  V2-006 + V2-007 + V2-014
+ ↓
+W2B  V2-005
+ ↓
+W3   IG-001 + IG-002 → V2-008
+ ↓
+W4   V2-009 + V2-010 + V2-011
+ ↓
+IG-006
+ ↓
+W5   V2-012 + V2-015
+ ↓
+W6   V2-013
+```
 
 ## Mechanical loop
 
@@ -124,12 +172,15 @@ Stop and raise a governed architecture change when implementation would:
 - create a protocol-name alias that conflicts with the canonical registry;
 - make a platform-specific semantic fork;
 - turn an assertion into evidence;
+- turn a signature/hash into automatic proof of a physical side effect;
 - make a non-durable adapter claim durable behavior;
-- bypass authorization through capability possession or marketplace entitlement;
+- bypass authorization through capability possession, marketplace entitlement, or signing-key possession;
+- accept stale/replayed execution attestations;
+- silently downgrade required attestation assurance;
 - mutate an immutable workflow version silently;
 - hide a missing platform capability;
 - revive deferred V1 without an allowed reason;
-- remove or weaken a required dogfooding or discrimination test to make progress;
+- remove or weaken a required dogfooding, discrimination, freshness, replay, or cryptographic test to make progress;
 - require an unmerged sibling implementation as a dependency;
 - activate an integration gate before every listed input is actually COMPLETE.
 
