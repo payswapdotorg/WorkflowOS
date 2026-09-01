@@ -1,6 +1,7 @@
 # WorkflowOS 2.0 — Mobile and Cross-Device Runtime
 
-**Status:** PROPOSED / normative V2 design
+**Status:** PROPOSED / implementation-authorized normative V2 design  
+**Canonical registry:** `V2-CTRL-003-protocol-registry.md` + `V2-CTRL-003-protocol-registry.json`
 
 ## One protocol, many surfaces
 
@@ -21,21 +22,37 @@ Each participating device/runner is a `Node` with:
 
 Capability advertisement is not authorization. A workflow may execute only when capability, authorization, workflow policy and placement all agree.
 
-## Mobile-first capabilities
+## Canonical capability vocabulary
 
-The capability vocabulary may include, where the platform permits:
+Protocol-visible capability identifiers MUST come from `V2-CTRL-003`. This specification does not define aliases. Examples used below are canonical:
 
-- calls.observe / calls.identify / calls.answer / calls.reject;
-- messages.observe / messages.read / messages.send;
-- contacts.read / contacts.search / contacts.create;
-- notifications.observe;
-- microphone.capture / speech.synthesis;
-- camera.capture;
-- location.read;
-- app.open / app.observe / app.interact;
-- screen.observe / ui.inspect / ui.tap / ui.type.
+- `phone.call.observe`
+- `phone.call.identify`
+- `phone.call.answer`
+- `phone.call.reject`
+- `phone.call.end`
+- `messaging.observe`
+- `messaging.read`
+- `messaging.send`
+- `contacts.read`
+- `contacts.search`
+- `notifications.observe`
+- `microphone.capture`
+- `speech.synthesis`
+- `camera.capture`
+- `location.read`
+- `application.open`
+- `application.observe`
+- `application.interact`
+- `screen.observe`
+- `ui.inspect`
+- `ui.click`
+- `ui.type`
+- `social.post.observe`
+- `social.post.publish`
+- `social.engagement.observe`
 
-Platform adapters advertise only what the operating system and granted permissions actually permit.
+Platform adapters advertise only capabilities they can actually perform under current OS and permission conditions.
 
 ## Platform asymmetry
 
@@ -105,13 +122,13 @@ social.post.engagement.threshold_crossed
       ↓
 workflow instance
       ↓
-retrieve content under allowed policy
+retrieve content via social.post.observe
       ↓
 agent analysis/remix
       ↓
 human approval if required
       ↓
-publish via authorized capability
+social.post.publish via authorized capability
 ```
 
 Threshold crossing is an event fact with a stable event identity; polling duplicates must converge to one workflow trigger.
@@ -131,6 +148,7 @@ Examples:
 
 No implementation may:
 
+- invent alternate capability aliases when a canonical identifier exists;
 - create separate workflow semantics for iOS/Android/desktop/web;
 - hide unsupported capabilities behind simulated success;
 - route device-sensitive actions through cloud by default when locality forbids it;
