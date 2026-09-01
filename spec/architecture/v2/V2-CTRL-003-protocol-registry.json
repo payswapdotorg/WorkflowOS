@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "status": "REQUIRED",
+  "capabilities": {
+    "browser": ["browser.navigate","browser.click","browser.type","browser.select","browser.observe","browser.download","browser.upload"],
+    "desktop": ["filesystem.read","filesystem.write","application.open","application.observe","application.interact","screen.observe","ui.inspect","ui.click","ui.type"],
+    "phone": ["phone.call.observe","phone.call.identify","phone.call.answer","phone.call.reject","phone.call.end"],
+    "messaging": ["messaging.observe","messaging.read","messaging.send","contacts.read","contacts.search","contacts.create"],
+    "device": ["notifications.observe","microphone.capture","speech.synthesis","camera.capture","location.read"],
+    "spreadsheet": ["spreadsheet.read","spreadsheet.edit"],
+    "social": ["social.post.observe","social.post.publish","social.engagement.observe"],
+    "workflow": ["workflow.execute","workflow.pause","workflow.resume","workflow.cancel","workflow.deploy","workflow.observe"],
+    "github": ["github.repository.read","github.pull_request.create","github.pull_request.merge"]
+  },
+  "events": ["workflow.run.requested","workflow.run.started","workflow.step.started","workflow.step.completed","workflow.run.paused","workflow.run.resumed","workflow.run.completed","workflow.run.failed","capability.invocation.requested","capability.invocation.completed","observation.recorded","verification.completed","device.connected","device.disconnected","phone.call.received","phone.call.ended","messaging.message.received","notification.received","file.created","file.changed","application.opened","social.post.engagement.threshold_crossed","workflow.deployment.enabled","workflow.deployment.disabled"],
+  "executionClasses": ["deterministic_api","agentic_computer_use","human","subworkflow"],
+  "placement": ["device_local","device_preferred","cloud_allowed","cloud_preferred","cloud_required","any_supported_node"],
+  "visibility": ["private","organization","public"],
+  "evidence": ["intent","observation","claim","verification","human_confirmation"],
+  "digest": {"algorithm":"SHA-256","input":"canonical-json(semantic-object)","presentationExcluded":true},
+  "aliasesForbidden": true,
+  "authorityRules": ["capability-advertisement-is-not-authorization","marketplace-entitlement-is-not-execution-authority","command-ack-is-not-side-effect-evidence"]
+}
