@@ -1,10 +1,12 @@
 # WorkflowOS 2.0 — Executable Development Control Plane
 
-**Status:** PROPOSED / repository-resident control contract  
-**Authority:** V2 architecture proposal; v1.0 remains authoritative until V2 is explicitly approved.
+**Status:** PROPOSED / implementation-authorized repository control contract  
+**Authority:** V2 architecture proposal; implementation is authorized by `V2-CTRL-000`; v1.0 remains authoritative for V1 behavior until a governed V2 transition.
 
 **Mandatory companion artifacts:**
+- `spec/architecture/v2/V2-CTRL-000-implementation-authorization.md`
 - `spec/architecture/v2/architecture-constitution.md`
+- `spec/architecture/v2/V2-CTRL-003-protocol-registry.md` + `.json`
 - `spec/architecture/v2/V2-CTRL-001-conformance-checklist.md`
 - `spec/architecture/v2/V2-CTRL-002-roadmap-lock.md`
 - `spec/architecture/v2/dogfooding-protocol.md`
@@ -14,6 +16,10 @@
 ## Purpose
 
 This control plane makes V2 implementation mechanical while maximizing safe parallelism. Every V2 feature is represented by a Work Order, machine-readable state, explicit dependencies, declared change surfaces, acceptance evidence, and dogfooding.
+
+## Status interpretation
+
+`architectureStatus: PROPOSED` means the V2 generation is not yet formally frozen as a final architecture version. `implementationAuthorization: APPROVED` means the product owner has authorized implementation against the current constitution and governed change process. Agents must not treat the word PROPOSED as permission to ignore the controls, nor treat implementation authorization as permission to reinterpret frozen concepts.
 
 ## Work-order lifecycle
 
@@ -52,13 +58,21 @@ Parallel siblings start from the same stable `main` SHA, own disjoint authoritat
 
 Integration gates start from current `main` after required siblings merge. Never rebase sibling implementation branches onto one another.
 
+## Protocol naming
+
+Every protocol-visible capability, event, execution class, placement identifier, evidence class, or deterministic digest rule comes from `V2-CTRL-003`. A Work Order must search the registry before introducing any name. Existing semantics are reused rather than aliased.
+
+## Integration-gate state
+
+`IG-*` entries are first-class development state. A gate is not merely prose: its machine-state entry records whether it is locked, waiting for inputs, eligible, in flight, or complete. A gate cannot activate until every listed `after` dependency is COMPLETE. Its completion is required wherever the machine-state entry or roadmap lock says it gates downstream work.
+
 ## Activation record
 
 Each `IN_FLIGHT` Work Order records exact base SHA, branch, dependency types, declared change surfaces, acceptance tests, real-system proofs, feature dogfooding, expected integration gates, known exclusions, last verified SHA, unresolved findings and next mechanical action.
 
 ## Mechanical execution loop
 
-1. Read the Constitution, Control Plane, Conformance Checklist, Roadmap Lock, machine state and assigned Work Order.
+1. Read V2-CTRL-000, the Constitution, Protocol Registry, Control Plane, Conformance Checklist, Roadmap Lock, machine state and assigned Work Order.
 2. Verify current `main` and all dependencies from GitHub.
 3. Activate only the assigned eligible wave item(s).
 4. Create the branch from the exact stable base SHA.
@@ -98,6 +112,9 @@ A contract-relevant dogfooding failure blocks dependents. An unrelated failure b
 14. Frozen V2 concepts change only through governed V2 architecture change.
 15. V2 never silently supersedes frozen v1.0 authority.
 16. V2-CTRL-002 is the canonical no-rebase wave lock; informal parallelization advice cannot override it.
+17. Protocol-visible names must conform to V2-CTRL-003.
+18. Integration-gate state cannot claim COMPLETE before every `after` dependency is actually COMPLETE.
+19. A Work Order cannot claim COMPLETE without persisted dogfooding/equivalent-conformance evidence referenced by machine state.
 
 ## Evidence classes
 
@@ -121,7 +138,7 @@ Interrupted work resumes from GitHub state, never conversation memory. The machi
 
 ## Canonical current execution
 
-Read `spec/development-state/v2-work-order-state.json` for the active/next eligible wave. Read `spec/architecture/v2/V2-CTRL-002-roadmap-lock.md` for the exact parallel/no-rebase graph.
+Read `spec/development-state/v2-work-order-state.json` for the active/next eligible wave and integration-gate state. Read `spec/architecture/v2/V2-CTRL-002-roadmap-lock.md` for the exact parallel/no-rebase graph.
 
 ## Namespace
 
