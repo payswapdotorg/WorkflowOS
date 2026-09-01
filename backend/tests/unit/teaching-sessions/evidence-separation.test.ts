@@ -4,13 +4,15 @@ import { fileURLToPath } from 'node:url';
 import {
   TEACHING_EVIDENCE_CLASS,
   TEACHING_EVIDENCE_KINDS,
+  type TeachingEvidenceRecord,
+} from '../../../src/teaching-sessions/index.js';
+import {
   teachThrough,
   buildService,
   buildSupportTriageDocument,
   pinLinearDocument,
 } from './helpers.js';
 import { WORKFLOW_IR_REGISTRY_VOCABULARY } from '../../../src/workflow-ir/index.js';
-import type { TeachingEvidenceRecord } from '../../../src/teaching-sessions/index.js';
 
 /**
  * V2-006 — EVIDENCE SEPARATION (required regression).

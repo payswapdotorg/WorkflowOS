@@ -53,13 +53,16 @@ describe('V2-006 — teaching content uses only canonical registry vocabulary', 
 describe('V2-006 — non-canonical aliases are rejected at begin time (workflow-ir validation)', () => {
   it('a forbidden alias capability is rejected with the merged typed validation issue', () => {
     const service = buildService();
-    const document = clone(buildLinearDocument());
+    const base = clone(buildLinearDocument());
     const aliased: WorkflowNode = {
-      ...document.ir.nodes[0]!,
+      ...base.ir.nodes[0]!,
       spec: { class: 'deterministic_api', capability: 'browser.observe.v2' },
       capabilityRequirements: ['browser.observe.v2'],
     };
-    document.ir.nodes = [aliased, document.ir.nodes[1]!];
+    const document: WorkflowIrDocument = {
+      ...base,
+      ir: { ...base.ir, nodes: [aliased, base.ir.nodes[1]!] },
+    };
     const pinned: PinnedWorkflowVersion = {
       workflowId: 'wf-alias-rejection',
       versionId: 'wfv_alias_1',

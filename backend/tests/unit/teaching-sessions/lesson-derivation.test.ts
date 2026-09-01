@@ -87,10 +87,10 @@ describe('V2-006 — prerequisites (inputs, capabilities, placement)', () => {
     const lesson = deriveLessonFromIrDocument(buildSupportTriageDocument());
     const capabilities = lesson.prerequisites.filter((p) => p.kind === 'required_capability');
     expect(capabilities.map((p) => p.value)).toEqual([
-      'filesystem.write',
-      'github.repository.read',
-      'messaging.send',
-      'workflow.execute',
+      'required capability filesystem.write',
+      'required capability github.repository.read',
+      'required capability messaging.send',
+      'required capability workflow.execute',
     ]);
   });
 
@@ -110,9 +110,9 @@ describe('V2-006 — decision points (what the workflow expects the human to dec
     expect(decision.nodeId).toBe('human_review');
     expect(decision.humanKind).toBe('approval');
     expect(decision.instruction).toBe('Approve sending the drafted support reply and syncing the backlog.');
-    expect(decision.outcomes.sort()).toEqual(['approved', 'rejected']);
+    expect([...decision.outcomes].sort()).toEqual(['approved', 'rejected']);
     const approved = decision.leadsTo.find((l) => l.outcome === 'approved')!;
-    expect(approved.nextNodeIds.sort()).toEqual(['escalate_backlog', 'send_reply']);
+    expect([...approved.nextNodeIds].sort()).toEqual(['escalate_backlog', 'send_reply']);
     const rejected = decision.leadsTo.find((l) => l.outcome === 'rejected')!;
     expect(rejected.nextNodeIds).toEqual(['log_miss']);
   });

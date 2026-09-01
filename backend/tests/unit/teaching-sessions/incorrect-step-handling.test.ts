@@ -115,8 +115,10 @@ describe('V2-006 — a wrong practice answer is a typed INCORRECT outcome (not a
     expect(after.progress.nextCheckpointNodeId).toBe('draft_reply');
     expect(after.progress.practiceAttemptCount).toBe(1);
     expect(after.progress.correctPracticeAttemptCount).toBe(0);
-    expect(after.evidence).toHaveLength(1);
-    expect(after.evidence[0]!.kind).toBe('learner_practice_attempt');
+    expect(after.evidence).toHaveLength(2);
+    expect(after.evidence[0]!.kind).toBe('learner_checkpoint_confirmation');
+    expect(after.evidence[1]!.kind).toBe('learner_practice_attempt');
+    expect(after.evidence[1]!.detail).toMatchObject({ nodeId: 'draft_reply', correct: false });
   });
 
   it('a correct practice answer is a typed correct outcome and increments the counters', () => {

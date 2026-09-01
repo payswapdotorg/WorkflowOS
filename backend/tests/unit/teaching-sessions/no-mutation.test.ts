@@ -72,7 +72,7 @@ describe('V2-006 — a full teaching flow never mutates the source document', ()
     service.beginLesson({ sessionId: session.id, document });
 
     // Tamper with the caller-side object (the session holds its own frozen snapshot).
-    const mutable = document as { ir: { start: string; nodes: { id: string; spec: unknown }[] } };
+    const mutable = document as unknown as { ir: { start: string; nodes: { id: string; spec: unknown }[] } };
     mutable.ir.start = 'log_miss';
     mutable.ir.nodes[0]!.spec = { class: 'deterministic_api', capability: 'filesystem.write' };
 
@@ -92,7 +92,7 @@ describe('V2-006 — a full teaching flow never mutates the source document', ()
       (stored.pinnedDocument as { ir: { start: string } }).ir.start = 'tampered';
     }).toThrowError();
     expect(() => {
-      (stored.lesson as { stepOrder: string[] }).stepOrder.push('ghost');
+      (stored.lesson as unknown as { stepOrder: string[] }).stepOrder.push('ghost');
     }).toThrowError();
     const still = service.getSession({ sessionId: session.id, learnerId: LEARNER_A });
     expect(still.pinnedDocument!.ir.start).toBe('observe_page');
@@ -109,7 +109,7 @@ describe('V2-006 — a full teaching flow never mutates the source document', ()
 
     const view = service.getSession({ sessionId: session.id, learnerId: LEARNER_A });
     expect(() => {
-      (view.progress as { confirmedCheckpoints: unknown[] }).confirmedCheckpoints.pop();
+      (view.progress as unknown as { confirmedCheckpoints: unknown[] }).confirmedCheckpoints.pop();
     }).toThrowError();
     const again = service.getSession({ sessionId: session.id, learnerId: LEARNER_A });
     expect(again.progress.confirmedCheckpoints).toHaveLength(1);

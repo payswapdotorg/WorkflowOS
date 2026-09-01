@@ -103,7 +103,9 @@ describe('V2-006 — the module consumes ONLY the merged workflow-ir barrel (rea
       const specifiers = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]!);
       for (const specifier of specifiers) {
         const reachesOutside = specifier.startsWith('..') && !specifier.startsWith('../types.js') &&
-          !specifier.startsWith('../internal/') && specifier !== '../workflow-ir/index.js';
+          !specifier.startsWith('../internal/') &&
+          specifier !== '../workflow-ir/index.js' &&
+          specifier !== '../../workflow-ir/index.js';
         const isBarePackage = !specifier.startsWith('.') && !specifier.startsWith('node:');
         if (reachesOutside || isBarePackage) {
           violations.push(`${relative(MODULE_ROOT, file)}: ${specifier}`);

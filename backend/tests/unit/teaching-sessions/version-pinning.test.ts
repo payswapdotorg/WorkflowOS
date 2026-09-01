@@ -116,7 +116,7 @@ describe('V2-006 — pinned digest shape is validated at session creation (fail 
       ...pinLinearDocument(buildLinearDocument()),
       semanticDigest: {
         algorithm: 'md5' as unknown as 'sha-256',
-        domain: 'workflowos/workflow-ir/v1',
+        domain: 'workflowos/workflow-ir/v1' as const,
         digest: 'a'.repeat(64),
       },
     };
@@ -131,7 +131,7 @@ describe('V2-006 — pinned digest shape is validated at session creation (fail 
       ...pinLinearDocument(buildLinearDocument()),
       semanticDigest: {
         algorithm: 'sha-256' as const,
-        domain: 'some/other/domain/v1',
+        domain: 'some/other/domain/v1' as unknown as 'workflowos/workflow-ir/v1',
         digest: 'a'.repeat(64),
       },
     };
@@ -146,7 +146,7 @@ describe('V2-006 — pinned digest shape is validated at session creation (fail 
       ...pinLinearDocument(buildLinearDocument()),
       semanticDigest: {
         algorithm: 'sha-256' as const,
-        domain: 'workflowos/workflow-ir/v1',
+        domain: 'workflowos/workflow-ir/v1' as const,
         digest: 'not-hex',
       },
     };

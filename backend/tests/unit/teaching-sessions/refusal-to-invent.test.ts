@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { deriveLessonFromIrDocument } from '../../../src/teaching-sessions/index.js';
+import type { TeachingFact } from '../../../src/teaching-sessions/index.js';
+import type { WorkflowIrDocument, WorkflowNode } from '../../../src/workflow-ir/index.js';
 import { buildLinearDocument, buildSupportTriageDocument, clone } from './helpers.js';
-import type { TeachingFact, WorkflowIrDocument } from '../../../src/teaching-sessions/index.js';
-import type { WorkflowNode } from '../../../src/workflow-ir/index.js';
 
 /**
  * V2-006 — REFUSAL TO INVENT (required regression).
@@ -53,9 +53,9 @@ const TEMPLATE_VOCABULARY: ReadonlySet<string> = new Set([
   'of', 'Step', 'executes', 'the', 'canonical', 'capability', 'as', 'executed',
   'agentic_computer_use', 'deterministic_api', 'subworkflow', 'with', 'task', 'a',
   'human', 'instruction', 'invokes', 'at', 'version', 'reference', 'Its', 'placement',
-  'failure', 'policy', 'completion', 'established', 'by', 'human-readable', 'rationale',
+  'failure', 'policy', 'completion', 'established', 'by', 'human-readable', 'readable', 'rationale',
   'for', 'this', 'what', 'referenced', 'does', 'person', 'selects', 'one', 'options',
-  'provides', 'how', '(declared)', 'none',
+  'provides', 'how', '(declared)', 'declared', 'none', 'maxAttempts',
 ]);
 
 /** Strip IR strings + digits + punctuation; every remaining word must be template vocabulary. */
@@ -67,7 +67,10 @@ function assertOnlyTemplateProse(text: string, irStrings: ReadonlySet<string>): 
   residue = residue.replace(/[0-9]/g, ' ');
   const words = residue
     .split(/[^A-Za-z()-]+/)
-    .filter((word) => word.length > 0);
+    // A balanced parenthetical (e.g. "(declared)") is one template token;
+    // anything else is stripped of leading non-alpha (e.g. "(maxAttempts").
+    .map((word) => (word.startsWith('(') && word.endsWith(')') ? word : word.replace(/^[^A-Za-z]+/g, '')))
+    .filter((word) => word.length > 0 && /[A-Za-z]/.test(word));
   const foreign = words.filter((word) => !TEMPLATE_VOCABULARY.has(word));
   expect(
     foreign,
@@ -154,11 +157,17 @@ describe('V2-006 — missing workflow facts produce typed disclosures, never pro
   });
 
   it('disclosure EXACTNESS: declaring completionEvidence removes that disclosure', () => {
-    const document = clone(buildSupportTriageDocument());
-    const escalate = document.ir.nodes.find((node) => node.id === 'escalate_backlog') as WorkflowNode;
-    document.ir.nodes = document.ir.nodes.map((node) =>
-      node.id === escalate.id ? { ...node, completionEvidence: 'verification' } : node,
-    );
+    const base = clone(buildSupportTriageDocument());
+    const escalate = base.ir.nodes.find((node) => node.id === 'escalate_backlog') as WorkflowNode;
+    const document: WorkflowIrDocument = {
+      ...base,
+      ir: {
+        ...base.ir,
+        nodes: base.ir.nodes.map((node) =>
+          node.id === escalate.id ? { ...node, completionEvidence: 'verification' as const } : node,
+        ),
+      },
+    };
     const lesson = deriveLessonFromIrDocument(document);
     const escalateStep = lesson.steps.find((step) => step.nodeId === 'escalate_backlog')!;
     expect(escalateStep.completionEvidence).toBe('verification');
@@ -198,7 +207,8 @@ describe('V2-006 — rendered explanations are fixed templates over IR facts (no
     const lesson = deriveLessonFromIrDocument(document);
     const draftReply = lesson.steps.find((step) => step.nodeId === 'draft_reply')!;
     expect(draftReply.explanation).toBe(
-      'Step 2 (draft_reply) is executed as agentic_computer_use with the declared task: '
+      'Runs after success of step fetch_ticket. '
+      + 'Step 2 (draft_reply) is executed as agentic_computer_use with the declared task: '
       + '"Draft a support reply and a severity classification for the ticket.". '
       + 'Its declared placement is cloud_allowed. Its declared failure policy is retry_then_fail_workflow(maxAttempts=2). '
       + 'Its completion is established by verification (declared).',

@@ -54,7 +54,7 @@ function authorSupportTriageDocument(): WorkflowIrDocument {
       { name: 'ticketId', type: { kind: 'string' } },
       { name: 'body', type: { kind: 'string' } },
     ],
-  };
+  } as const;
   return createWorkflowIrBuilder()
     .withStart('fetch_ticket')
     .addWorkflowInput({ name: 'ticketUrl', type: { kind: 'string' } })

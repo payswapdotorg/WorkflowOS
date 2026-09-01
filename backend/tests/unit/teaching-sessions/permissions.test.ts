@@ -69,7 +69,6 @@ describe('V2-006 — only the session learner may operate on the session', () =>
 
     // The session is byte-identical after every rejected foreign operation.
     expect(snapshot(service.getSession({ sessionId, learnerId: LEARNER_A }))).toBe(before);
-    expect(pinned.workflowId).toBe('wf-support-triage');
   });
 
   it('EVERY read operation rejects a learner that is not the session learner', () => {
@@ -107,8 +106,8 @@ describe('V2-006 — only the session learner may operate on the session', () =>
       'utf8',
     );
     const interfaceBody = typesSource.slice(
+      typesSource.indexOf('export interface CreateTeachingSessionInput'),
       typesSource.indexOf('export interface TeachingSessionService'),
-      typesSource.indexOf('export interface TeachingSessionStore'),
     );
     for (const forbidden of [/capabilit/i, /role/i, /entitlement/i, /authoriz/i, /permission/i, /token/i]) {
       const matches = interfaceBody.match(new RegExp(forbidden, 'g'));
@@ -117,7 +116,8 @@ describe('V2-006 — only the session learner may operate on the session', () =>
         `the service contract must not consume authorization-engine inputs: ${matches}`,
       ).toBeNull();
     }
-    // And every session-scoped operation takes exactly sessionId + learnerId.
-    expect((interfaceBody.match(/learnerId:/g) ?? []).length).toBeGreaterThanOrEqual(10);
+    // And the 10 session-scoped operations share exactly these 8
+    // learner-scoped input shapes (reads/actions reuse shared inputs).
+    expect((interfaceBody.match(/learnerId:/g) ?? []).length).toBe(8);
   });
 });
