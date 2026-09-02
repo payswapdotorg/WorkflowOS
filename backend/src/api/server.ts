@@ -51,6 +51,10 @@ import {
   workflowRepositoryRoutes,
   type WorkflowRepositoryRouteDeps,
 } from './routes/workflow-repository.route.js';
+import {
+  workflowRunsRoutes,
+  type WorkflowRunsRouteDeps,
+} from './routes/workflow-runs.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -175,6 +179,12 @@ export interface ServerDeps extends JobsRouteDeps {
    *  decided by the injected WorkflowRepositoryService. Registered when
    *  auth is enabled. */
   workflowRepository?: WorkflowRepositoryRouteDeps;
+  /** V2-005 (W2B): Workflow Runs routes — the durable run command + history
+   *  HTTP surface (request/start/pause/resume/interrupt/cancel/complete/
+   *  fail, step + invocation records, evidence, attestation attach, run +
+   *  reconstructed history). Backend-authorized; tenant scoping is decided
+   *  by the injected WorkflowRunService. Registered when auth is enabled. */
+  workflowRuns?: WorkflowRunsRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -306,6 +316,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.workflowRepository) {
     await workflowRepositoryRoutes(app, deps.workflowRepository);
+  }
+  if (deps.auth && deps.workflowRuns) {
+    await workflowRunsRoutes(app, deps.workflowRuns);
   }
   return app;
 }

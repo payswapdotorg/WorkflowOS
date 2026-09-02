@@ -1115,7 +1115,11 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // workflow/version/installation repository schema (wfos_workflows,
           // wfos_workflow_versions, wfos_workflow_installations and the
           // immutability triggers).
-          expectedLastMigrationNumber: 60,
+          // V2-005 (the workflow runs + evidence — W2B): 0061 is the durable
+          // run/attempt/step/invocation/evidence/attestation-binding schema
+          // (wfos_v2_runs and the run-lifecycle guard triggers); the
+          // self-host head pin advances with the tree.
+          expectedLastMigrationNumber: 61,
         },
       },
     ]);
