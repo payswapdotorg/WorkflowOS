@@ -1,0 +1,146 @@
+/**
+ * V2-009 — the injected trigger clock (PURE: no Date API anywhere in this
+ * module).
+ *
+ * All trigger timestamps come from an injected `WorkflowTriggerClock`; the
+ * module source never touches the ambient clock (pinned at source level by
+ * the module-boundary test). The fixed format
+ * `YYYY-MM-DDTHH:MM:SS.sssZ` is produced/parsed by a pure civil-from-days
+ * conversion of injected epoch milliseconds (the Howard Hinnant algorithm —
+ * the workflow-runs/computer-agent precedent, deterministic across leap
+ * days/year boundaries/negative epochs).
+ */
+const MS_PER_DAY = 86_400_000;
+const MS_PER_HOUR = 3_600_000;
+const MS_PER_MINUTE = 60_000;
+const MS_PER_SECOND = 1000;
+
+function pad2(value: number): string {
+  return value < 10 ? `0${value}` : String(value);
+}
+
+function pad3(value: number): string {
+  if (value < 10) return `00${value}`;
+  if (value < 100) return `0${value}`;
+  return String(value);
+}
+
+function pad4(value: number): string {
+  if (value < 0) return `-${pad4(-value)}`;
+  if (value < 10) return `000${value}`;
+  if (value < 100) return `00${value}`;
+  if (value < 1000) return `0${value}`;
+  return String(value);
+}
+
+/**
+ * Format injected epoch milliseconds as the fixed-format UTC timestamp
+ * `YYYY-MM-DDTHH:MM:SS.sssZ` (pure civil conversion — chronological string
+ * comparison equals chronological time comparison).
+ */
+export function formatUtcTimestamp(epochMs: number): string {
+  const days = Math.floor(epochMs / MS_PER_DAY);
+  let remainder = epochMs - days * MS_PER_DAY;
+  const hours = Math.floor(remainder / MS_PER_HOUR);
+  remainder -= hours * MS_PER_HOUR;
+  const minutes = Math.floor(remainder / MS_PER_MINUTE);
+  remainder -= minutes * MS_PER_MINUTE;
+  const seconds = Math.floor(remainder / MS_PER_SECOND);
+  const millis = remainder - seconds * MS_PER_SECOND;
+
+  const { year, month, day } = civilFromDays(days);
+  return `${pad4(year)}-${pad2(month)}-${pad2(day)}T${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}.${pad3(millis)}Z`;
+}
+
+/** Parse the fixed-format UTC timestamp into epoch milliseconds (inverse). */
+export function epochMsOf(timestamp: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/.exec(timestamp);
+  if (!match) {
+    throw new Error(`workflow-deployments clock: not a fixed-format UTC timestamp: "${timestamp}"`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const millis = Number(match[7]);
+  return (
+    daysFromCivil(year, month, day) * MS_PER_DAY +
+    hour * MS_PER_HOUR +
+    minute * MS_PER_MINUTE +
+    second * MS_PER_SECOND +
+    millis
+  );
+}
+
+/** Age of `timestamp` relative to `now` in milliseconds (pure). */
+export function ageMs(timestamp: string, now: string): number {
+  return epochMsOf(now) - epochMsOf(timestamp);
+}
+
+/**
+ * Normalize a wire/database timestamp to the fixed-format UTC string
+ * (numbers → formatted; Date objects → ISO; PostgreSQL text forms →
+ * normalized; canonical strings pass through). Pure.
+ */
+export function toUtcIsoString(value: unknown): string {
+  if (typeof value === 'number') return formatUtcTimestamp(value);
+  if (typeof value === 'object' && value !== null && typeof (value as Date).toISOString === 'function') {
+    return (value as Date).toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z');
+  }
+  if (typeof value !== 'string') return String(value);
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return value;
+  let text = value.trim();
+  const pg = text.match(/^(\d{4}-\d{2}-\d{2})[ ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(?:([+]\d{2}|[+]\d{2}:\d{2}|Z))?$/);
+  if (pg) {
+    const [, datePart, timePart, fraction] = pg;
+    const millis = (fraction ?? '000').padEnd(3, '0').slice(0, 3);
+    return `${datePart}T${timePart}.${millis}Z`;
+  }
+  const iso = text.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+]\d{2}:\d{2})?$/);
+  if (iso) {
+    const [, datePart, timePart, fraction] = iso;
+    const millis = (fraction ?? '000').padEnd(3, '0').slice(0, 3);
+    return `${datePart}T${timePart}.${millis}Z`;
+  }
+  return text;
+}
+
+/** Days since 1970-01-01 → (year, month, day) in the proleptic Gregorian calendar. */
+export function civilFromDays(days: number): { year: number; month: number; day: number } {
+  const z = days + 719_468;
+  const era = Math.floor(z / 146_097);
+  const doe = z - era * 146_097; // [0, 146096]
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) / 365); // [0, 399]
+  const y = yoe + era * 400;
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100)); // [0, 365]
+  const mp = Math.floor((5 * doy + 2) / 153); // [0, 11]
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1; // [1, 31]
+  const m = mp < 10 ? mp + 3 : mp - 9; // [1, 12]
+  return { year: m <= 2 ? y + 1 : y, month: m, day: d };
+}
+
+/** (year, month, day) → days since 1970-01-01 (Hinnant days_from_civil). */
+export function daysFromCivil(year: number, month: number, day: number): number {
+  const y = month <= 2 ? year - 1 : year;
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400; // [0, 399]
+  const mp = month > 2 ? month - 3 : month + 9; // [0, 11]
+  const doy = Math.floor((153 * mp + 2) / 5) + day - 1; // [0, 365]
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy; // [0, 146096]
+  return era * 146_097 + doe - 719_468;
+}
+
+/**
+ * The deterministic injected stepping clock (tests + harnesses): each now()
+ * call advances the epoch by `stepMs` from `baseMs`.
+ */
+export function createSteppingTriggerClock(baseMs: number, stepMs: number): () => string {
+  let current = baseMs;
+  return () => {
+    const stamp = formatUtcTimestamp(current);
+    current += stepMs;
+    return stamp;
+  };
+}

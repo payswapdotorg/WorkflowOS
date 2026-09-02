@@ -1117,9 +1117,12 @@ describe('WORK-051 — ArchitectureCheckpointService (application-layer orchestr
           // immutability triggers).
           // V2-005 (the workflow runs + evidence — W2B): 0061 is the durable
           // run/attempt/step/invocation/evidence/attestation-binding schema
-          // (wfos_v2_runs and the run-lifecycle guard triggers); the
-          // self-host head pin advances with the tree.
-          expectedLastMigrationNumber: 61,
+          // (wfos_v2_runs and the run-lifecycle guard triggers).
+          // V2-009 (the workflow deployments + triggers — W4): 0062 is the
+          // deployment/subscription/event-inbox/trigger-delivery schema
+          // (wfos_v2_deployments and the delivery-lifecycle guard trigger);
+          // the self-host head pin advances with the tree.
+          expectedLastMigrationNumber: 62,
         },
       },
     ]);

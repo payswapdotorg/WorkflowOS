@@ -11220,9 +11220,9 @@ describe('WORK-040 invariants — Continuous Development Planner (planner capabi
     const last = migrations[migrations.length - 1];
     // Baseline updated by V2-002 (W1 — the workflow repository): 0060 is the
     // workflow/version/installation repository schema; advanced by V2-005
-    // (W2B — the workflow runs + evidence schema 0061). The pin advances
-    // with the tree. WORK-040 still adds no migration of its own.
-    expect(last, 'WORK-040 adds no migration (the last migration is V2-005\u2019s workflow runs 0061 — after V2-002\u2019s workflow repository 0060, WORK-074\u2019s identity runtime 0059 (the WORK-063 RUNTIME activation), the WORK-062 orchestration substrate ledger 0058, the WORK-046 delegation coordination ledger 0057, and the merged WORK-051 migrations 0052\u20130056; no planner-owned table)').toMatch(/^0061_/);
+    // (W2B — the workflow runs + evidence schema 0061), then by V2-009
+    // (W4 — the workflow deployments + trigger schema 0062). The pin advances
+    expect(last, 'WORK-040 adds no migration (the last migration is V2-009\u2019s workflow deployments 0062 — after V2-005\u2019s workflow runs 0061, V2-002\u2019s workflow repository 0060, WORK-074\u2019s identity runtime 0059 (the WORK-063 RUNTIME activation), the WORK-062 orchestration substrate ledger 0058, the WORK-046 delegation coordination ledger 0057, and the merged WORK-051 migrations 0052\u20130056; no planner-owned table)').toMatch(/^0062_/);
     // The planner domain must NOT define any CREATE TABLE.
     const files = listTsFiles(DP_DIR);
     expect(files.length, 'src/development-planner/ must contain implementation files').toBeGreaterThan(0);
@@ -17440,6 +17440,7 @@ describe('WORK-046 invariants — Multi-Agent Delegation (coordination, not auth
     // The migration pin advanced (WORK-040's last-migration expectation).
     const staticSelf = readFileSync(join(BACKEND_ROOT, 'tests', 'architecture', 'static-architecture.test.ts'), 'utf8');
     expect(staticSelf).toMatch(/the last migration is the WORK-062 orchestration substrate ledger 0058/);
+    expect(staticSelf).toMatch(/workflow deployments 0062/);
   });
 
   // --- (k) the attempt-generation fence (architect round-3 correction) ---------
@@ -17870,10 +17871,11 @@ describe('WORK-047 invariants — Agent Intelligence (advisory/ranking only, nev
       .sort();
     // Baseline updated by WORK-074 (the identity runtime 0059 — the WORK-063
     // RUNTIME activation), then by V2-002 (the workflow repository 0060 — W1),
-    // then by V2-005 (the workflow runs 0061 — W2B); WORK-047 still declares
-    // no migration of its own.
-    expect(migrations[migrations.length - 1]).toMatch(/^0061_/);
-    expect(migrations.some((m) => m.startsWith('0062'))).toBe(false);
+    // then by V2-005 (the workflow runs 0061 — W2B), then by V2-009 (the
+    // workflow deployments 0062 — W4); WORK-047 still declares no migration
+    // of its own.
+    expect(migrations[migrations.length - 1]).toMatch(/^0062_/);
+    expect(migrations.some((m) => m.startsWith('0063'))).toBe(false);
   });
 
   // --- (f) DETERMINISM — the documented constants + the total-order tie-break --
@@ -18441,8 +18443,9 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
     const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
     // The route set as WORK-048 left it (32 files), since extended to 34 by
     // WORK-074 (auth + organizations — the identity runtime), to 35 by
-    // V2-002 (workflow-repository — the W1 workflow repository HTTP surface)
-    // and to 36 by V2-005 (workflow-runs — the W2B run command surface).
+    // V2-002 (workflow-repository — the W1 workflow repository HTTP surface),
+    // to 36 by V2-005 (workflow-runs — the W2B run command surface) and to
+    // 37 by V2-009 (workflow-deployments — the W4 trigger-layer HTTP surface).
     // WORK-049 adds NO route file of its own.
     // (health.route.ts is WORK-001/023's PLATFORM liveness/readiness probe —
     // it predates WORK-049 and is NOT a project-health read model.)
@@ -18462,7 +18465,7 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
       'onboarding.route.ts', 'organizations.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
       'requirements.route.ts', 'review.route.ts', 'runtime.route.ts', 'specifications.route.ts',
       'verification.route.ts', 'work-items.route.ts', 'workbench.route.ts',
-      'workflow-repository.route.ts', 'workflow-runs.route.ts', 'workflow.route.ts',
+      'workflow-deployments.route.ts', 'workflow-repository.route.ts', 'workflow-runs.route.ts', 'workflow.route.ts',
     ]);
     // The maintenance read model remains WORK-041's (unchanged by WORK-049):
     // GET-only health/signals reads, project.read, server-side scoping.
@@ -18669,7 +18672,8 @@ describe('WORK-050 invariants — Unified Execution UX (consumer, never authorit
     // (workflow-runs — 36 files); WORK-050 still adds endpoints to the
     // EXISTING execution + delegation route files, never new files of its own.
     const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
-    expect(routeFiles.length).toBe(36);
+    // 37 since V2-009 (workflow-deployments — the W4 trigger-layer surface).
+    expect(routeFiles.length).toBe(37);
     expect(routeFiles).toContain('execution.route.ts');
     expect(routeFiles).toContain('delegation.route.ts');
     expect(routeFiles).toContain('work-items.route.ts');
@@ -18835,10 +18839,11 @@ describe('WORK-064 invariants — Continuous Product Validation (the domain/mode
     const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql'));
     // The migration set grows only by WORK-074's identity runtime 0059 (the
     // WORK-063 RUNTIME activation — authorized by its own Work Order),
-    // V2-002's workflow repository 0060 (authorized by the V2-002 Work Order)
-    // and V2-005's workflow runs 0061 (authorized by the V2-005 Work Order);
+    // V2-002's workflow repository 0060, V2-005's workflow runs 0061 and
+    // V2-009's workflow deployments 0062 (each authorized by its own Work
+    // Order);
     // WORK-064 still declares NO migration of its own:
-    expect(migrationFiles).toHaveLength(61);
+    expect(migrationFiles).toHaveLength(62);
     for (const name of migrationFiles) {
       const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
       expect(
@@ -19639,7 +19644,7 @@ describe('WORK-065 invariants — Synthetic Browser Validation Agent (the execut
     // V2-005's 0061_workflow_runs_v2 (the W2B run/evidence schema — the pin
     // advances with the tree).
     const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql'));
-    expect(migrationFiles).toHaveLength(61);
+    expect(migrationFiles).toHaveLength(62); // 62 since V2-009's workflow deployments (own Work Order)
     for (const name of migrationFiles) {
       const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
       expect(
@@ -20116,7 +20121,7 @@ describe('WORK-066 invariants — Validation Scheduling & Change Triggers (the d
     // it grew to 61 only through V2-002's workflow repository 0060 (W1) and
     // V2-005's workflow runs 0061 (W2B):
     const migrationFiles = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql'));
-    expect(migrationFiles).toHaveLength(61);
+    expect(migrationFiles).toHaveLength(62); // 62 since V2-009's workflow deployments (own Work Order)
     for (const name of migrationFiles) {
       const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8');
       expect(
@@ -20545,10 +20550,11 @@ describe('WORK-067 invariants — Engineering Signal & Regression Correlation (t
 
   it('INVARIANT 19 — NO unauthorized migration: the migration set is unchanged (the WORK-067 parallel-execution metadata declares migrations: [] — the in-memory port precedent)', () => {
     const migrations = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql'));
-    // The set grew to 61 only through V2-002's workflow repository 0060 (W1 —
-    // authorized by its own Work Order) and V2-005's workflow runs 0061 (W2B —
-    // authorized by its own Work Order); WORK-067 declares none of its own:
-    expect(migrations).toHaveLength(61);
+    // The set grew to 62 through V2-002's workflow repository 0060 (W1),
+    // V2-005's workflow runs 0061 (W2B) and V2-009's workflow deployments
+    // 0062 (W4 — each authorized by its own Work Order); WORK-067 declares
+    // none of its own:
+    expect(migrations).toHaveLength(62);
     // …and the domain declares no migration of its own:
     for (const { path, src } of readEsFiles()) {
       const stripped = stripCodeComments(src);

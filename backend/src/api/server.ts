@@ -55,6 +55,10 @@ import {
   workflowRunsRoutes,
   type WorkflowRunsRouteDeps,
 } from './routes/workflow-runs.route.js';
+import {
+  workflowDeploymentsRoutes,
+  type WorkflowDeploymentsRouteDeps,
+} from './routes/workflow-deployments.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -185,6 +189,12 @@ export interface ServerDeps extends JobsRouteDeps {
    *  reconstructed history). Backend-authorized; tenant scoping is decided
    *  by the injected WorkflowRunService. Registered when auth is enabled. */
   workflowRuns?: WorkflowRunsRouteDeps;
+  /** V2-009 (W4): Workflow Deployments routes — the trigger-layer HTTP
+   *  surface (deployments + placement policy, trigger subscriptions, the
+   *  idempotent event inbox, the engine tick, delivery/correlation reads,
+   *  manual launch). Backend-authorized; tenant scoping is decided by the
+   *  injected WorkflowDeploymentService. Registered when auth is enabled. */
+  workflowDeployments?: WorkflowDeploymentsRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -319,6 +329,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.workflowRuns) {
     await workflowRunsRoutes(app, deps.workflowRuns);
+  }
+  if (deps.auth && deps.workflowDeployments) {
+    await workflowDeploymentsRoutes(app, deps.workflowDeployments);
   }
   return app;
 }
