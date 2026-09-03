@@ -46,6 +46,18 @@ export interface StepAttestationMaterial {
   readonly observationCommitments: readonly string[];
   /** Opaque evidence-record references (V2-005 record ids). */
   readonly evidenceReferences: readonly string[];
+  /**
+   * V2-016 — the causal predecessor execution digests a DEPENDENT
+   * execution declares (the admitted preconditions' declared set). Absent
+   * (or empty) for non-dependent steps: the zero-parent statement shape
+   * (unchanged pre-V2-016 behavior). Flow UNCHANGED into the canonical
+   * V2-014 `ExecutionStatement.causalParents` (sorted set semantics) —
+   * the production path never invents a parent digest, and the runtime's
+   * independent verification binds the produced statement to EXACTLY this
+   * declared set (a silent `causalParents: []` fallback for a dependent
+   * step fails the verification gate, never passes).
+   */
+  readonly causalParents?: readonly string[];
 }
 
 /** The injected production context (clock + epoch; never ambient). */
@@ -59,9 +71,22 @@ export interface AttestationProductionContext {
 }
 
 /**
+ * The canonical deterministic causal-parent form: sorted, de-duplicated
+ * (V2-016 — parent ordering is deterministic; set semantics canonical).
+ */
+function canonicalCausalParents(material: StepAttestationMaterial): readonly string[] {
+  return [...new Set(material.causalParents ?? [])].sort();
+}
+
+/**
  * Build the canonical ExecutionStatement for one completed step (bound to
  * the exact workflow/version/run/attempt/step/node; commitment-based, no
  * secrets; single-use nonce from the host's freshness source).
+ *
+ * V2-016: the declared causal parent digests flow UNCHANGED (sorted set)
+ * into `ExecutionStatement.causalParents` — exactly the declared parents,
+ * never an invented one, never a silent empty fallback when a dependent
+ * step declared parents.
  */
 export function buildStepStatement(
   host: AttestingComputerHost,
@@ -87,7 +112,7 @@ export function buildStepStatement(
     outputCommitments: [...material.outputCommitments].sort(),
     observationCommitments: [...material.observationCommitments].sort(),
     evidenceReferences: [...material.evidenceReferences].sort(),
-    causalParents: [],
+    causalParents: canonicalCausalParents(material),
     nonce: host.nextNonce(),
     epoch: context.epoch,
     outcome: 'succeeded',
@@ -139,7 +164,11 @@ export function verifyStepAttestationIndependently(
       runId: material.runId,
       attemptId: material.attemptNumber,
       stepId: material.stepId,
-      causalParents: [],
+      // V2-016 — the produced statement must carry EXACTLY the declared
+      // causal parents (sorted set). For a dependent step that declared
+      // parents, a silent `[]` fallback is a BINDING MISMATCH (typed
+      // rejection), never an accepted un-parented statement.
+      causalParents: canonicalCausalParents(material),
     },
     freshness: {
       now: context.now,

@@ -73,6 +73,7 @@ export type {
   TakeoverSession,
   TakeoverActionResult,
   ComputerAgentErrorCode,
+  DependentStepPrecondition,
 } from './types.js';
 
 // The frozen registry vocabulary snapshot (no-drift; pinned against the
@@ -152,6 +153,21 @@ export {
   valueCommitmentOf,
 } from './internal/attesting.js';
 export type { StepAttestationMaterial, AttestationProductionContext } from './internal/attesting.js';
+
+// V2-016 — the dependent-step composition admission helpers (pure structure;
+// the runtime applies them internally — exported for deterministic reuse by
+// adjacent composition drivers, NOT as a second admission authority).
+export {
+  admitDependentPreconditions,
+  canonicalParentDigests,
+  causalParentsForStep,
+  dependentStepsOf,
+} from './internal/preconditions.js';
+export type {
+  AdmittedStepPrecondition,
+  PreconditionAdmission,
+  PreconditionRejection,
+} from './internal/preconditions.js';
 
 // The runtime (the observation/action loop + the run walk + takeover).
 export { ComputerAgentRuntime } from './internal/runtime.js';

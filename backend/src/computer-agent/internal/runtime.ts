@@ -76,6 +76,13 @@ import {
   observationCommitmentOf,
   type StepAttestationMaterial,
 } from './attesting.js';
+import {
+  admitDependentPreconditions,
+  causalParentsForStep,
+  dependentStepsOf,
+  type AdmittedStepPrecondition,
+} from './preconditions.js';
+import type { DependentStepPrecondition } from '../types.js';
 
 // ============================================================================
 // §0 Deps + class
@@ -106,6 +113,12 @@ export interface FinishTakeoverInput {
   readonly hosts: readonly ComputerHostAdapter[];
   readonly decider?: AgentDecider;
   readonly workflowInputs?: Readonly<Record<string, unknown>>;
+  /**
+   * V2-016 — the dependent-step composition preconditions for the
+   * continuation walk (see `DependentStepPrecondition`; validated at drive
+   * entry before any recorder command of the drive).
+   */
+  readonly preconditions?: readonly DependentStepPrecondition[];
 }
 
 /** Input to the resume-after-human-pause drive. */
@@ -120,6 +133,17 @@ export interface ResumeAfterHumanInput {
   readonly humanUserId: string;
   readonly decider?: AgentDecider;
   readonly workflowInputs?: Readonly<Record<string, unknown>>;
+  /**
+   * V2-016 — the dependent-step composition preconditions for this resume
+   * drive (see `DependentStepPrecondition`). Structurally validated BEFORE
+   * `resumeRun` — a supplied precondition that fails binding is a typed
+   * rejection with zero host side effects and zero durable mutations of
+   * this drive (the run stays paused, re-drivable with a corrected
+   * precondition). This is the exact surface a cross-device composition
+   * driver (IG-006) uses to hand a V2-014-verified predecessor fact to the
+   * dependent step's admission boundary.
+   */
+  readonly preconditions?: readonly DependentStepPrecondition[];
 }
 
 const SUBWORKFLOW_FAILURE: AgentFailure = {
@@ -144,6 +168,13 @@ interface WalkState {
   reports: StepExecutionReport[];
   humanOutcome?: string;
   humanProvidedValue?: unknown;
+  /**
+   * V2-016 — the per-step ADMITTED composition preconditions (validated at
+   * drive entry; consumed at the dependent step's admission gate before
+   * its first host invocation, and by the causal-parent material
+   * derivation). Empty map = no dependent admission (pre-V2-016 behavior).
+   */
+  admitted: ReadonlyMap<string, readonly AdmittedStepPrecondition[]>;
   /**
    * Steps completed in THIS call before the walk started (e.g. the human
    * step a resume just completed): they route successors like
@@ -200,6 +231,10 @@ export class ComputerAgentRuntime {
     if (run.state !== 'requested' && run.state !== 'paused' && run.state !== 'running') {
       throw new ComputerAgentError('COMPUTER_AGENT_RUN_TERMINAL', `run ${input.runId} is ${run.state}`);
     }
+    // V2-016 — admission validation BEFORE any recorder command of this
+    // drive (zero durable mutations, zero host side effects on rejection;
+    // the run stays exactly in its pre-drive state).
+    const admitted = this.admitOrReject(run, input.preconditions);
     if (run.state === 'requested') {
       await this.recorder.startRun(principal, this.command(input.runId, 'start'), { runId: input.runId });
     }
@@ -215,6 +250,7 @@ export class ComputerAgentRuntime {
       workflowInputs: input.workflowInputs ?? {},
       values: initialValues(input.workflowInputs ?? {}),
       reports: [],
+      admitted,
       entry: run.state === 'paused' ? findPausedStep(history) ?? undefined : undefined,
     });
   }
@@ -228,6 +264,12 @@ export class ComputerAgentRuntime {
     if (run.state !== 'paused') {
       throw new ComputerAgentError('COMPUTER_AGENT_RUN_NOT_PAUSED', `run ${input.runId} is ${run.state}`);
     }
+    // V2-016 — admission validation BEFORE resumeRun: a supplied
+    // precondition that fails binding is a typed rejection with the run
+    // left PAUSED (zero side effects, re-drivable with a corrected
+    // precondition). This is the dependent admission boundary a
+    // cross-device driver hands its V2-014-verified predecessor fact to.
+    const admitted = this.admitOrReject(run, input.preconditions);
     const resumeOutcome = await this.recorder.resumeRun(
       principal,
       this.command(input.runId, `resume-${input.runId}`),
@@ -279,6 +321,7 @@ export class ComputerAgentRuntime {
       workflowInputs: input.workflowInputs ?? {},
       values: initialValues(input.workflowInputs ?? {}),
       reports: [],
+      admitted,
       humanOutcome: input.humanOutcome,
       humanProvidedValue: input.providedValue,
       extraCompleted:
@@ -434,6 +477,10 @@ export class ComputerAgentRuntime {
     if (run.state !== 'paused' && run.state !== 'running') {
       throw new ComputerAgentError('COMPUTER_AGENT_RUN_TERMINAL', `run ${session.runId} is ${run.state}`);
     }
+    // V2-016 — admission validation BEFORE any continuation recorder
+    // command of this drive (same fail-closed discipline as the other
+    // drive surfaces).
+    const admitted = this.admitOrReject(run, input.preconditions);
     // resume only when still paused (takeover actions already resumed under
     // the human executor); complete-step also requires a running run.
     if (run.state === 'paused') {
@@ -469,6 +516,7 @@ export class ComputerAgentRuntime {
       workflowInputs: input.workflowInputs ?? {},
       values: initialValues(input.workflowInputs ?? {}),
       reports: [],
+      admitted,
       entry: session.stepId,
     });
   }
@@ -693,6 +741,36 @@ export class ComputerAgentRuntime {
         inputCommitments: [commitmentJson(resolveUnitInputs(unit, state.values, state.workflowInputs))],
       },
     );
+
+    // V2-016 — the DEPENDENT-ADMISSION GATE: for a step configured to
+    // require a verified predecessor, an admitted precondition MUST have
+    // been consumed here, BEFORE host routing and BEFORE the first host
+    // invocation of any kind (hence before the first dependent
+    // side-effecting host invocation). A missing precondition is a typed,
+    // non-recoverable failure: the step is durably failed (started →
+    // failed), the run fails honestly, and ZERO host side effects occur.
+    // (Supplied-but-invalid preconditions were already rejected at drive
+    // entry — this gate catches the missing case, including a dependent
+    // step reached without its caller-side composition driver.)
+    if (dependentStepsOf(this.policy).has(unit.unit) && !state.admitted.has(unit.unit)) {
+      const failure: AgentFailure = {
+        code: 'AGENT_PRECONDITION_REJECTED',
+        detail: `step "${unit.unit}" requires a V2-014-derived verified predecessor precondition and none was admitted on this drive — the dependent side effect is prevented before any host invocation (admission is not authorization: grants, placement, and attestation gates are separate dimensions)`,
+        recoverable: false,
+      };
+      await this.failStepRecord(principal, state, unit);
+      return {
+        stepId: unit.unit,
+        executionClass: unit.executionClass,
+        outcome: 'failed',
+        actions: 0,
+        observations: 0,
+        attestationsAttached: 0,
+        attestationsRejected: 0,
+        failure,
+        nodeId: null,
+      };
+    }
 
     const host = this.routeHost(state, unit);
     if ('failure' in host) {
@@ -1238,7 +1316,7 @@ export class ComputerAgentRuntime {
     state: WalkState,
     unit: CompiledUnit,
     host: WalkHost,
-    material: Omit<StepAttestationMaterial, 'workflowId' | 'workflowVersionId' | 'workflowVersionSemanticDigest' | 'deploymentId' | 'runId' | 'attemptNumber' | 'stepId'> & {
+    material: Omit<StepAttestationMaterial, 'workflowId' | 'workflowVersionId' | 'workflowVersionSemanticDigest' | 'deploymentId' | 'runId' | 'attemptNumber' | 'stepId' | 'causalParents'> & {
       executionClass: 'deterministic_api' | 'agentic_computer_use';
     },
   ): Promise<{ attached: number; rejected: number; failure: AgentFailure | null }> {
@@ -1251,6 +1329,11 @@ export class ComputerAgentRuntime {
       attemptNumber: state.attemptNumber,
       stepId: unit.unit,
       ...material,
+      // V2-016 — the causal parents come EXCLUSIVELY from the step's
+      // ADMITTED preconditions (sorted set; [] for non-dependent steps).
+      // Positioned AFTER the spread and behind the Omit type so no call
+      // site can inject or invent parent digests through the material.
+      causalParents: causalParentsForStep(state.admitted, unit.unit),
     };
 
     // Gate 1 — attestation production where the host supports the V2-014
@@ -1491,6 +1574,35 @@ export class ComputerAgentRuntime {
 
   private command(runId: string, suffix: string): { commandId: string; correlationId: string } {
     return { commandId: `cmd-agent-${runId}-${suffix}`, correlationId: `agent-${runId}` };
+  }
+
+  // ==========================================================================
+  // §8.5 V2-016 — dependent-precondition admission (drive entry)
+  // ==========================================================================
+
+  /**
+   * Validate and admit the drive's composition preconditions against the
+   * run being driven (pure structure — zero recorder commands, zero host
+   * I/O). A supplied precondition that fails binding raises the typed
+   * `COMPUTER_AGENT_PRECONDITION_REJECTED` error BEFORE any recorder
+   * command of the drive: zero durable mutations, zero host side effects,
+   * the run stays exactly in its pre-drive state (re-drivable with a
+   * corrected precondition). No preconditions supplied = the empty
+   * admission (steps configured dependent still fail closed at their
+   * admission gate — the missing case is a step-level typed failure).
+   */
+  private admitOrReject(
+    run: WorkflowRun,
+    preconditions: readonly DependentStepPrecondition[] | undefined,
+  ): ReadonlyMap<string, readonly AdmittedStepPrecondition[]> {
+    const admission = admitDependentPreconditions(run, this.policy, preconditions);
+    if (!admission.ok) {
+      throw new ComputerAgentError(
+        'COMPUTER_AGENT_PRECONDITION_REJECTED',
+        admission.rejection.reason,
+      );
+    }
+    return admission.admitted;
   }
 
   // ==========================================================================

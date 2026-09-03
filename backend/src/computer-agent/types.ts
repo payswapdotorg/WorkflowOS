@@ -33,6 +33,14 @@
  *     verifier path) before attachment — and honest representation of
  *     unsupported attestation assurance (no key ⇒ no attestation, never a
  *     fabricated or upclaimed one).
+ *   - the V2-016 dependent-step composition hooks: a typed, NON-AUTHORITATIVE
+ *     admission precondition derived from a V2-014 VerifiedExecutionFact
+ *     (produced by the canonical verifier — never raw attestation bytes),
+ *     fail-closed consumption before the first dependent side-effecting host
+ *     invocation, and declared causal-parent execution digests flowing
+ *     unchanged into the runtime-produced V2-014 statement. The runtime owns
+ *     the admission boundary and the faithful causal record ONLY; it never
+ *     becomes a verification, authorization, or proof-graph authority.
  *
  * BOUNDARY CONTRACT (load-bearing, pinned by
  * tests/unit/computer-agent/module-boundary.test.ts):
@@ -66,7 +74,7 @@
 
 
 import type { RunExecutionClass, WorkflowRunState, WorkflowRunService } from '../workflow-runs/index.js';
-import type { ExecutionAttestation, ExecutionStatement } from '../execution-attestation/index.js';
+import type { ExecutionAttestation, ExecutionStatement, Sha256Hex, VerifiedExecutionFact } from '../execution-attestation/index.js';
 import type { CapabilityAdvertisement, NodePlatformClass } from '../node-capability/index.js';
 import type { AssuranceLevel } from '../execution-attestation/index.js';
 
@@ -337,6 +345,15 @@ export const AGENT_FAILURE_CODES = [
   'AGENT_ATTESTATION_REJECTED',
   /** subworkflow execution is out of this runtime's scope (honest, typed) */
   'AGENT_SUBWORKFLOW_UNSUPPORTED',
+  /**
+   * A step CONFIGURED to require a verified predecessor (the V2-016
+   * dependent-admission policy) reached the runtime action loop with NO
+   * V2-014-derived verified predecessor precondition admitted for it —
+   * the dependent side effect is prevented BEFORE any host invocation.
+   * The precondition is an admission input, NEVER an authorization: the
+   * capability/authorization gates still apply after admission.
+   */
+  'AGENT_PRECONDITION_REJECTED',
 ] as const;
 export type AgentFailureCode = (typeof AGENT_FAILURE_CODES)[number];
 
@@ -388,6 +405,74 @@ export interface ComputerAgentPolicy {
   readonly safeAction: SafeActionPolicy;
   /** The attestation expectations (production + independent verification). */
   readonly attestation: AgentAttestationPolicy;
+  /**
+   * V2-016 — the dependent-admission configuration: step ids that REQUIRE at
+   * least one structurally valid V2-014-derived verified-predecessor
+   * precondition (supplied per drive on the execution/resume input) before
+   * their FIRST side-effecting host invocation. Absent (or empty) = no step
+   * is admission-gated (the pre-V2-016 behavior — zero-parent, freely
+   * executing steps). This is RUNTIME configuration, never WorkflowIR
+   * semantics: the workflow graph carries no proof-graph edges (V2-015's
+   * concern); the caller-side composition authority declares dependence by
+   * configuring the runtime and supplying the precondition.
+   */
+  readonly dependentStepIds?: readonly string[];
+}
+
+// ============================================================================
+// §6.5 V2-016 — the typed dependent-step composition precondition
+// ============================================================================
+
+/**
+ * V2-016 — one typed composition precondition for a DEPENDENT step.
+ *
+ * NON-AUTHORITATIVE by construction (constitution §5/§21): the verified
+ * fact attests statement authenticity ONLY; carrying it here NEVER implies
+ * authorization, capability possession, correct behavior, an observed
+ * effect, or sufficient evidence. After admission the dependent step still
+ * passes the existing capability, safe-action, placement, freshness, and
+ * attestation gates unchanged — the precondition is an ADMISSION input,
+ * never a grant.
+ *
+ * The fact is the canonical V2-014 `VerifiedExecutionFact` — the RESULT of
+ * the merged verifier under an explicit policy (trusted attester keys,
+ * freshness, replay, assurance). Raw/unverified `ExecutionAttestation`
+ * bytes are a DIFFERENT type and cannot be supplied here: the runtime
+ * consumes verification RESULTS, and never re-implements cryptographic
+ * verification (V2-014 owns that authority).
+ *
+ * Structural binding enforced by the runtime (all fail-closed, all typed):
+ *   - `runId` / `workflowVersionId` / `workflowVersionSemanticDigest` must
+ *     match the run being driven — a precondition minted for one
+ *     Run/WorkflowVersion cannot be consumed by another;
+ *   - the embedded fact's statement must bind the SAME run and the SAME
+ *     WorkflowVersion (cross-run/cross-version predecessor substitution
+ *     rejected);
+ *   - `predecessorAttestationId` must equal the fact's attestation identity;
+ *   - the predecessor's statement step must DIFFER from the dependent step
+ *     (a step cannot be its own predecessor);
+ *   - `causalParentDigests` must be non-empty and must equal, AS A SET, the
+ *     execution digests of the verified predecessor facts supplied for the
+ *     same dependent step — the runtime never invents a parent digest, never
+ *     silently drops a relied-upon predecessor, and propagates exactly the
+ *     declared set (deterministic sorted order) into the runtime-produced
+ *     V2-014 `ExecutionStatement.causalParents`.
+ */
+export interface DependentStepPrecondition {
+  /** The dependent step this precondition admits (must be one the runtime's dependent-admission policy requires). */
+  readonly dependentStepId: string;
+  /** The predecessor attestation identity relied upon (V2-014 `attestationId`). */
+  readonly predecessorAttestationId: string;
+  /** The canonical V2-014-derived verified fact for the predecessor (the merged verifier's successful result — never raw bytes). */
+  readonly verifiedPredecessor: VerifiedExecutionFact;
+  /** The causal predecessor execution digests the dependent step declares (non-empty; digests of the supplied verified predecessors). */
+  readonly causalParentDigests: readonly Sha256Hex[];
+  /** The Run identity the precondition is bound to (cross-run substitution fails closed). */
+  readonly runId: string;
+  /** The WorkflowVersion identity the precondition is bound to (cross-version substitution fails closed). */
+  readonly workflowVersionId: string;
+  /** The WorkflowIR semantic digest of the bound WorkflowVersion (V2-014 binding data, consumed verbatim). */
+  readonly workflowVersionSemanticDigest: Sha256Hex;
 }
 
 // ============================================================================
@@ -492,6 +577,17 @@ export interface ExecuteRunInput {
   readonly decider: AgentDecider;
   /** Resolved workflow input values (typed JSON; never secret material). */
   readonly workflowInputs?: Readonly<Record<string, unknown>>;
+  /**
+   * V2-016 — the dependent-step composition preconditions for this drive
+   * (see `DependentStepPrecondition`). Validated structurally BEFORE the
+   * drive starts (before `startRun`/any recorder command on a fresh drive):
+   * a supplied precondition that fails binding is a typed rejection with
+   * ZERO side effects of any kind. Steps configured by the runtime policy
+   * to require a verified predecessor but reaching the action loop without
+   * an admitted precondition fail closed with
+   * `AGENT_PRECONDITION_REJECTED` before any host invocation.
+   */
+  readonly preconditions?: readonly DependentStepPrecondition[];
 }
 
 /** The per-step execution report. */
@@ -557,6 +653,17 @@ export const COMPUTER_AGENT_ERROR_CODES = [
   'COMPUTER_AGENT_TAKEOVER_SESSION_CLOSED',
   'COMPUTER_AGENT_ATTESTATION_KEY_REQUIRED',
   'COMPUTER_AGENT_INVALID_REQUEST',
+  /**
+   * V2-016 — a SUPPLIED dependent-step composition precondition failed
+   * structural binding (wrong run/version/semantic-digest/step/predecessor
+   * identity, an uncovered or invented causal parent digest, or a
+   * precondition targeting a step the runtime's dependent-admission policy
+   * does not declare). Raised at drive entry BEFORE any recorder command of
+   * the drive — zero durable mutations, zero host side effects, the run
+   * stays exactly in its pre-drive state (re-drivable with a corrected
+   * precondition).
+   */
+  'COMPUTER_AGENT_PRECONDITION_REJECTED',
 ] as const;
 export type ComputerAgentErrorCode = (typeof COMPUTER_AGENT_ERROR_CODES)[number];
 
