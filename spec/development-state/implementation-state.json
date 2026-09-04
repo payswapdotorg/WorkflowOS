@@ -18,9 +18,9 @@
   "asOf": "2026-09-04",
   "currentMainPolicy": "re-read live main immediately before dispatch; no stored main SHA is treated as durable current truth",
   "workOrderStatus": "READY",
-  "currentTask": "T2",
-  "nextEligible": ["T3", "T5", "T13"],
-  "nextAction": "Retire the pre-protocol T2 PR #178, preserve it as historical evidence, and dispatch a fresh T2 resident worker from the live current main SHA after it is re-read immediately before dispatch. The worker must create exactly one implementation PR from that verified base and remain resident through review iterations.",
+  "currentTask": "T5",
+  "nextEligible": ["T5", "T13"],
+  "nextAction": "T3 is complete by authoritative merge evidence. Select the next eligible sibling from the repository frontier, re-read live main immediately before dispatch, and create one resident-worker implementation dispatch from that exact head.",
   "tasks": {
     "T1": {
       "status": "COMPLETE",
@@ -33,16 +33,23 @@
       "scope": "consumer shell, Home/Workflows/Explore/Activity navigation, Create and Expert entry, protected-route preservation"
     },
     "T2": {
-      "status": "STALE_BASE",
+      "status": "COMPLETE",
       "dependsOn": ["T1"],
-      "historicalPr": 178,
-      "historicalBranch": "feat/v2-017-task-2-workflow-first-home-r2",
-      "historicalHeadSha": "ace0e8975abb398f46f3aad01589fe25bdf81ca7",
-      "requiredBasePolicy": "LIVE_MAIN_AT_DISPATCH",
-      "evidence": "PR #178 is a historical implementation checkpoint created before the resident-worker process was synchronized. It is not a dependency or merge target. Its RED-first Home contract and implementation evidence remain recoverable reference material for the fresh resident-worker run.",
+      "pr": 180,
+      "headSha": "8b273ed3991bd26a94be325caef1bd3000eb4276",
+      "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7",
+      "evidence": "PR #180 corrected F-T2-001 on the same branch, re-verified exact-head frontend/CI/browser evidence, then merged. Home aggregates workflow and run reads across every organization with all-or-error semantics.",
       "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
     },
-    "T3": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "workflow library"},
+    "T3": {
+      "status": "COMPLETE",
+      "dependsOn": ["T1"],
+      "pr": 182,
+      "headSha": "ddccd90a4aff07c59c7a4273b7d955c420197c72",
+      "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8",
+      "evidence": "PR #182 exact-head verification: 22 frontend files / 173 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 browser 4/4, lifecycle 1/1, Architecture Governance success, zero PR-attributable CI regressions; merged from main a862498.",
+      "scope": "workflow library: My Workflows, Installed, Shared with me, Drafts, Archived; contextual attention filters and human-readable workflow card facts"
+    },
     "T4": {"status": "BLOCKED", "dependsOn": ["T3"], "scope": "workflow detail"},
     "T5": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "Tell / Show / Tell + Show creation"},
     "T6": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "Run / approval / where-it-runs"},
@@ -77,6 +84,8 @@
     {"event": "GOVERNANCE_ROADMAP_MERGED", "pr": 176, "mergeCommit": "6637c0bcfd0f1d66cabe6420af5637e295da310b", "recordedAt": "2026-09-04"},
     {"event": "T2_MARKED_STALE_BASE", "pr": 175, "oldBaseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8", "newRequiredBaseSha": "6637c0bcfd0f1d66cabe6420af5637e295da310b", "recordedAt": "2026-09-04"},
     {"event": "RESIDENT_WORKER_PROCESS_ADOPTED", "protocol": "docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md", "operations": "spec/development-state/resident-worker-operations.md", "dispatchTemplate": "spec/development-state/dispatch-template.md", "recordedAt": "2026-09-04"},
-    {"event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART", "pr": 178, "requiredBasePolicy": "LIVE_MAIN_AT_DISPATCH", "recordedAt": "2026-09-04"}
+    {"event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART", "pr": 178, "requiredBasePolicy": "LIVE_MAIN_AT_DISPATCH", "recordedAt": "2026-09-04"},
+    {"event": "T2_COMPLETE", "pr": 180, "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7", "recordedAt": "2026-09-04"},
+    {"event": "T3_COMPLETE", "pr": 182, "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8", "recordedAt": "2026-09-04"}
   ]
 }

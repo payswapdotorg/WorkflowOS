@@ -125,8 +125,8 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 | Task | Status | Dependencies | Primary outcome |
 |---|---|---|---|
 | T1 | ✅ COMPLETE | V2-017 activation | Universal product shell, navigation, expert entry |
-| T2 | 🟨 STALE_BASE | T1 | Workflow-first Home and attention surfaces |
-| T3 | ⬜ ELIGIBLE | T1 | Workflow library |
+| T2 | ✅ COMPLETE | T1 | Workflow-first Home and attention surfaces |
+| T3 | ✅ COMPLETE | T1 | Workflow library |
 | T4 | ⬜ BLOCKED | T3 | Workflow detail |
 | T5 | ⬜ ELIGIBLE | T1 | Tell / Show / Tell + Show creation |
 | T6 | ⬜ BLOCKED | T4 | Run / approval / where-it-runs |
@@ -146,16 +146,13 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 ```text
 ELIGIBLE FRONTIER
 
-T3  Workflow library
 T5  Tell / Show / Tell + Show
 T13 Expert/developer workspace
 
 CURRENT TASK
 
-T2  Workflow-first Home
-    historical implementation checkpoint: PR #178
-    required base: LIVE_MAIN_AT_DISPATCH
-    resident-worker protocol: ACTIVE
+T5  Tell / Show / Tell + Show creation
+    T1 dependency complete; T3 merged and reconciled separately
 ```
 
 No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence. A stale implementation branch is historical evidence, not a current implementation dependency.
@@ -163,10 +160,11 @@ No task may become eligible merely because a branch exists. Dependencies are com
 ## Current implementation snapshot
 
 - T1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
-- T2 historical implementation checkpoints include PR #175 and PR #178; neither is a current implementation dependency.
-- PR #178 was based before the resident-worker operating process was synchronized. It remains preserved as historical implementation evidence only.
-- The exact T2 implementation base is **always the live `main` SHA re-read immediately before worker dispatch**. No stored governance artifact is treated as a durable current-main hash.
-- The resident-worker operating protocol, operations artifact, and dispatch template are repository-resident and govern all future resident Z.ai implementation sessions.
+- T2 is complete through **PR #180**, merged as `a862498980036ef49b844cb1fa15bcd2e93c76c7`.
+- T3 is complete through **PR #182**, merged as `27e6162c03f50c26041d7a71ae5c1ff99151f9a8`.
+- T2's historical PR #175 and #178 remain historical evidence only; neither is a current implementation dependency.
+- The exact implementation base for each new task is **always the live `main` SHA re-read immediately before worker dispatch**. No stored governance artifact is treated as durable current-main truth.
+- The resident-worker operating protocol, operations artifact, and dispatch template are repository-resident and govern all resident Z.ai implementation sessions.
 
 The exact live branch/PR state must always be re-read from GitHub before continuing.
 
