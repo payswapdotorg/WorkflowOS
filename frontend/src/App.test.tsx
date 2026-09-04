@@ -58,16 +58,20 @@ describe('App router regression — no redirect loop (session-based gate)', () =
       );
     });
 
-    it('renders ProjectListPage at `/` (no redirect loop)', async () => {
-      const { getByText } = render(
+    it('renders the human-facing Home page at `/` (no redirect loop)', async () => {
+      const { getByRole } = render(
         <MemoryRouter initialEntries={['/']}>
           <App />
         </MemoryRouter>,
       );
-      await waitFor(() => expect(getByText('New Project')).toBeInTheDocument());
+      // V2-017: the product root is the universal Home (the approved
+      // human-facing model); the project list moved to `/projects`.
+      await waitFor(() =>
+        expect(getByRole('heading', { name: /What do you want to get done\?/i })).toBeInTheDocument(),
+      );
     });
 
-    it('renders ProjectListPage at `/projects` (route now exists)', async () => {
+    it('renders ProjectListPage at `/projects` (the expert entry route remains reachable)', async () => {
       const { getByText } = render(
         <MemoryRouter initialEntries={['/projects']}>
           <App />
@@ -77,12 +81,14 @@ describe('App router regression — no redirect loop (session-based gate)', () =
     });
 
     it('catch-all redirects unknown routes to `/` (which renders, no loop)', async () => {
-      const { getByText } = render(
+      const { getByRole } = render(
         <MemoryRouter initialEntries={['/totally-unknown-path']}>
           <App />
         </MemoryRouter>,
       );
-      await waitFor(() => expect(getByText('New Project')).toBeInTheDocument());
+      await waitFor(() =>
+        expect(getByRole('heading', { name: /What do you want to get done\?/i })).toBeInTheDocument(),
+      );
     });
   });
 

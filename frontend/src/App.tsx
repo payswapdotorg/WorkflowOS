@@ -22,6 +22,13 @@ import BenchmarkDetailPage from './pages/BenchmarkDetailPage';
 import BenchmarkComparisonPage from './pages/BenchmarkComparisonPage';
 import BenchmarkTrialPage from './pages/BenchmarkTrialPage';
 import ExecutionPreferencesPage from './pages/ExecutionPreferencesPage';
+import UniversalProductShell from './components/shell/UniversalProductShell';
+import HomePage from './pages/HomePage';
+import WorkflowsPage from './pages/WorkflowsPage';
+import ExplorePage from './pages/ExplorePage';
+import ProductActivityPage from './pages/ProductActivityPage';
+import CreatePage from './pages/CreatePage';
+import ExpertPage from './pages/ExpertPage';
 
 export default function App() {
   // WORK-074: the auth gate reads the ONE canonical auth-state source. When a
@@ -58,9 +65,64 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<ProjectListPage />} />
+      {/* V2-017 Task 1 — the universal product shell. Primary navigation is
+          Home / Workflows / Explore / Activity plus the universal Create
+          entry; the developer/engineering workspace stays reachable through
+          the Expert entry (progressive disclosure, never primary
+          navigation). Every existing protected/expert route below is
+          unchanged. */}
+      <Route
+        path="/"
+        element={
+          <UniversalProductShell>
+            <HomePage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/workflows"
+        element={
+          <UniversalProductShell>
+            <WorkflowsPage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/explore"
+        element={
+          <UniversalProductShell>
+            <ExplorePage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/activity"
+        element={
+          <UniversalProductShell>
+            <ProductActivityPage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/create"
+        element={
+          <UniversalProductShell>
+            <CreatePage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/expert"
+        element={
+          <UniversalProductShell>
+            <ExpertPage />
+          </UniversalProductShell>
+        }
+      />
       {/* WORK-028: Companion handoff bridge page (fragment-only deep link). */}
       <Route path="/companion/handoff" element={<CompanionHandoffPage />} />
+      {/* The expert-entry target: the existing project list (developer
+          workspace) — re-contextualized, not deleted. */}
       <Route path="/projects" element={<ProjectListPage />} />
       <Route
         path="/projects/:projectId"

@@ -72,12 +72,13 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     await page.locator('#password').fill(ALICE_PASSWORD);
     await page.getByRole('button', { name: 'Create account' }).click();
 
-    // The protected shell (Projects dashboard) appears synchronously.
-    await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible({ timeout: 15_000 });
+    // The protected shell (the V2-017 universal product Home) appears
+    // synchronously — the post-login landing is the product root.
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
 
     // 3. Refresh persistence — a full reload keeps the authenticated shell.
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
 
     // 4. Logout — server-side revocation; the shell returns to the login page.
     await page.getByRole('button', { name: 'Sign Out' }).click();

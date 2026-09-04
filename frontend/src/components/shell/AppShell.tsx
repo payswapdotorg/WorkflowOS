@@ -39,6 +39,14 @@ import { ToastHost } from '@/components/ui/toast';
 /**
  * AppShell — the persistent product frame (sidebar + topbar + footer).
  *
+ * V2-017 re-contextualization: this shell is now the EXPERT frame for the
+ * project/engineering control surface. The human-facing product lives in
+ * UniversalProductShell (Home / Workflows / Explore / Activity); this shell
+ * remains fully reachable and unchanged in behavior — its "All Projects"
+ * and breadcrumb links target the project list at /projects (the product
+ * root `/` is now the universal Home), and the brand link returns to the
+ * product Home.
+ *
  * The shell NEVER owns project state. It only:
  *   - renders navigation;
  *   - reads route params to derive breadcrumbs;
@@ -104,8 +112,10 @@ function SidebarNav({ _pid, project, onNavigate }: SidebarNavProps) {
   const projectBase = _pid ? `/projects/${_pid}` : null;
   return (
     <nav className="flex h-full flex-col gap-1.5 p-3" aria-label="Primary">
+      {/* V2-017: the expert project list lives at /projects (the product
+          root is the universal Home). */}
       <Link
-        to="/"
+        to="/projects"
         onClick={onNavigate}
         className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent"
       >
@@ -201,6 +211,8 @@ function useBreadcrumbs(): { items: { label: string; to?: string }[] } {
   const location = useLocation();
   const { projectId: _pid = "" } = useParams<{ projectId: string }>();
   const path = location.pathname;
+  // V2-017: the root crumb returns to the universal product Home; the
+  // Projects crumb targets the expert project list at /projects.
   const items: { label: string; to?: string }[] = [
     { label: 'WorkflowOS', to: '/' },
   ];
@@ -215,7 +227,7 @@ function useBreadcrumbs(): { items: { label: string; to?: string }[] } {
   const projectMatch = path.match(/^\/projects\/([^/]+)(\/([^/]+))?/);
   if (projectMatch) {
     const _pid = projectMatch[1]!;
-    items.push({ label: 'Projects', to: '/' });
+    items.push({ label: 'Projects', to: '/projects' });
     items.push({ label: _pid.slice(0, 8), to: `/projects/${_pid}` });
     const section = projectMatch[3];
     if (section) {
@@ -225,14 +237,14 @@ function useBreadcrumbs(): { items: { label: string; to?: string }[] } {
   }
   const workItemMatch = path.match(/^\/work-items\/([^/]+)/);
   if (workItemMatch) {
-    items.push({ label: 'Projects', to: '/' });
+    items.push({ label: 'Projects', to: '/projects' });
     items.push({ label: `Work Item ${workItemMatch[1]!.slice(0, 8)}` });
     return { items };
   }
   // WORK-032: Benchmarks top-level nav section. The benchmarks harness
   // is a cross-cutting consumer that lives outside any single project.
   if (path.startsWith('/benchmarks')) {
-    items.push({ label: 'Projects', to: '/' });
+    items.push({ label: 'Projects', to: '/projects' });
     items.push({ label: 'Benchmarks', to: '/benchmarks' });
     const newMatch = path.match(/^\/benchmarks\/new$/);
     if (newMatch) {
