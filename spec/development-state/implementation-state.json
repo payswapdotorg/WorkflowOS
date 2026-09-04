@@ -9,15 +9,17 @@
   "workOrder": "spec/architecture/v2/work-orders/V2-017.md",
   "programMap": "spec/architecture/v2/post-w6-product-roadmap.md",
   "executionContract": "docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md",
+  "residentWorkerProtocol": "docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md",
+  "residentWorkerOperations": "spec/development-state/resident-worker-operations.md",
   "machineWorkOrderState": "spec/development-state/v2-work-order-state.json",
   "completionAuthority": "actual Git merge",
   "statusVocabulary": ["ELIGIBLE", "IN_PROGRESS", "BLOCKED", "COMPLETE", "STALE_BASE", "OBSOLETE"],
   "asOf": "2026-09-04",
-  "currentMain": "6637c0bcfd0f1d66cabe6420af5637e295da310b",
+  "currentMain": "b5e370896b1425dbf04b10bf726482b15e330bfd",
   "workOrderStatus": "READY",
   "currentTask": "T2",
   "nextEligible": ["T3", "T5", "T13"],
-  "nextAction": "Close obsolete T2 PR #175, then restart T2 from current main 6637c0bcfd0f1d66cabe6420af5637e295da310b. Recreate or carry forward only the RED-first Home contract on the fresh task branch. No implementation branch may use the pre-governance base as its dependency.",
+  "nextAction": "Discard PR #178 as a pre-protocol implementation checkpoint, preserve it as historical evidence, and restart T2 from current main b5e370896b1425dbf04b10bf726482b15e330bfd through the resident-worker dispatch process. No implementation branch may use the pre-protocol base as its dependency.",
   "tasks": {
     "T1": {
       "status": "COMPLETE",
@@ -32,11 +34,11 @@
     "T2": {
       "status": "STALE_BASE",
       "dependsOn": ["T1"],
-      "baseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
-      "pr": 175,
-      "branch": "feat/v2-017-task-2-workflow-first-home",
-      "headSha": "7fa73064468861271d8843c1b2ba34fc4a97f8be",
-      "evidence": "PR #175 contains the RED-first Home contract, but its base predates the merged governance roadmap package at main 6637c0bcfd0f1d66cabe6420af5637e295da310b. The branch is preserved as historical evidence only and must not be used as an implementation dependency.",
+      "baseSha": "b5e370896b1425dbf04b10bf726482b15e330bfd",
+      "pr": 178,
+      "branch": "feat/v2-017-task-2-workflow-first-home-r2",
+      "headSha": "ace0e8975abb398f46f3aad01589fe25bdf81ca7",
+      "evidence": "PR #178 was created before the resident-worker operating protocol was installed and its base predates the current governance head. It is preserved as historical implementation evidence only and must not be used as a dependency or merge target.",
       "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
     },
     "T3": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "workflow library"},
@@ -62,7 +64,11 @@
     "roadmapAndStateSynchronized": true,
     "freshExactHeadVerification": true,
     "dogfoodingRequired": true,
-    "noSecondAuthority": true
+    "noSecondAuthority": true,
+    "residentWorker": true,
+    "samePrReviewIterations": true,
+    "sessionIsDisposable": true,
+    "durableDispatchRequired": true
   },
   "history": [
     {
@@ -88,6 +94,19 @@
       "pr": 175,
       "oldBaseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
       "newRequiredBaseSha": "6637c0bcfd0f1d66cabe6420af5637e295da310b",
+      "recordedAt": "2026-09-04"
+    },
+    {
+      "event": "RESIDENT_WORKER_PROCESS_ADOPTED",
+      "protocol": "docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md",
+      "operations": "spec/development-state/resident-worker-operations.md",
+      "recordedMain": "b5e370896b1425dbf04b10bf726482b15e330bfd",
+      "recordedAt": "2026-09-04"
+    },
+    {
+      "event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART",
+      "pr": 178,
+      "requiredBaseSha": "b5e370896b1425dbf04b10bf726482b15e330bfd",
       "recordedAt": "2026-09-04"
     }
   ]
