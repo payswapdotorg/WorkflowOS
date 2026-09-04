@@ -2,6 +2,10 @@
 
 This file is the shortest safe recovery path for a new LLM architect or implementation agent with zero conversation history.
 
+## Repository-only rule
+
+The GitHub repository is the only source of truth for architecture, Work Orders, dependencies, implementation progress, verification evidence, dogfooding evidence, blockers, and the next governed action. Conversation history, chat summaries, agent memory, pasted reports, and verbal instructions are non-authoritative and must never be required to resume work.
+
 ## Read in this order
 
 1. `spec/architecture/v2/V2-CTRL-000-implementation-authorization.md`
@@ -16,11 +20,13 @@ This file is the shortest safe recovery path for a new LLM architect or implemen
 10. `spec/development-state/README.md`
 11. `spec/development-state/governance-model.json`
 12. `spec/development-state/program-state.json`
-13. the derived `dependency-state.json`, `frontier-state.json`, and `checkpoint-state.json` only as projections; regenerate/validate them when they disagree with underlying facts
+13. the V2 canonical machine-state artifact referenced by `spec/architecture/v2/README.md` plus its derived `dependency-state.json`, `frontier-state.json`, and `checkpoint-state.json` only as projections; regenerate/validate derived projections when they disagree with underlying facts
 14. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
-15. `spec/architecture/v2/architecture-change-requests/V2-ACR-001-execution-attestation.md` when execution proof, trust, cryptographic evidence or cross-device behavior is relevant
-16. supporting V2 product specifications relevant to the Work Order
-17. relevant existing V1 public contracts before reusing any V1 capability
+15. the relevant Architecture Change Request in `spec/architecture/v2/architecture-change-requests/`
+16. if the assigned Work Order is `V2-017`, read `spec/architecture/v2/post-w6-product-roadmap.md` and `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`
+17. `docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md` and the approved V2-017 UX design when V2-017 is assigned
+18. supporting V2 product specifications relevant to the Work Order
+19. relevant existing V1 public contracts before reusing any V1 capability
 
 ## Status interpretation
 
@@ -131,7 +137,27 @@ Integration gates consume merged capabilities and begin from current `main`.
 
 ## Recovery
 
-Resume from GitHub state, Work Order operational state, and verification/dogfooding evidence. Do not trust conversational memory or stale navigation fields such as `nextEligible`, `nextAction`, or copied wave summaries when they disagree with the underlying graph and Git history.
+Resume from current GitHub state, the canonical Work Order operational state, and repository-resident verification/dogfooding evidence. Recompute the eligible frontier from authoritative facts when convenience projections disagree. Do not trust conversational memory, unchecked plan boxes, stale navigation fields such as `nextEligible`/`nextAction`, agent-generated summaries, or PR prose when they conflict with underlying repository facts.
+
+For V2-017 specifically, recover through:
+
+```text
+current main
+  ↓
+V2 canonical state
+  ↓
+V2-017 Work Order
+  ↓
+V2-017 post-W6 program map
+  ↓
+repository-only V2-017 execution contract
+  ↓
+open/merged V2-017 PRs and actual Git history
+  ↓
+CI + persisted dogfooding evidence
+  ↓
+recompute eligible T1–T16 frontier
+```
 
 ## Non-negotiable stop conditions
 
@@ -154,4 +180,5 @@ Stop and raise a governed architecture change when implementation would:
 - require an unmerged sibling implementation as a dependency;
 - activate an integration gate before every listed input is actually COMPLETE;
 - treat a derived governance projection as an authority source;
-- record completion without authoritative Git merge evidence.
+- record completion without authoritative Git merge evidence;
+- require conversation history to determine the next implementation step.
