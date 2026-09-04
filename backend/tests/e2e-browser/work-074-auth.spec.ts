@@ -100,4 +100,63 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     // Still unauthenticated: the login surface remains.
     await expect(page.getByRole('heading', { name: 'WorkflowOS' })).toBeVisible();
   });
+
+  // V2-017 T2 — the workflow-first Home honest-state journey, real topology:
+  // the identity stack serves the real session + /organizations reads (but
+  // no V2-002/V2-005 product routes), so this journey proves in a real
+  // browser: the goal/search/creation entry, the honest SUCCESSFUL-EMPTY
+  // states for a member of no organization, the honest Unavailable surfaces
+  // without an exposed read, the entry-mode landing on /create, and — after
+  // creating an organization through the public route — the honest ERROR
+  // states when the org-scoped reads fail (404 on this stack): failed reads
+  // NEVER render as successful empty states.
+  test('T2 Home: goal entry, honest empty → error transitions, and Unavailable surfaces', async ({ page }) => {
+    // Fresh user (no organization): the derivable-empty Home.
+    await page.goto('/');
+    await page.getByText('Create one', { exact: true }).click();
+    await page.locator('#displayName').fill('Bob (T2)');
+    await page.locator('#email').fill('bob-t2@e2e.example.com');
+    await page.locator('#password').fill('the-t2-password-42');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
+
+    // The goal/search/creation entry exists with the three entry modes.
+    await expect(page.getByRole('search')).toBeVisible();
+    await expect(page.getByRole('textbox', { name: /goal or search/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Describe it' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show me' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Describe + show' })).toBeVisible();
+
+    // Honest SUCCESSFUL-EMPTY (real /organizations read: no organization).
+    await expect(page.getByText(/No workflows yet/i)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Nothing needs your attention/i)).toBeVisible();
+    // Surfaces without an exposed read are honestly Unavailable — not fake-empty.
+    await expect(page.getByRole('status', { name: 'Unavailable' })).toHaveCount(3);
+
+    // Entry-mode journey: Describe + show lands on /create with the mode active.
+    await page.getByRole('button', { name: 'Describe + show' }).click();
+    await expect(page.getByRole('heading', { name: /Create a workflow/i })).toBeVisible();
+    await expect(page).toHaveURL(/mode=tell-show/);
+    await expect(page.locator('li[aria-current="true"]')).toContainText('Tell + Show');
+
+    // Search journey: a typed goal starts creation with the goal as context.
+    await page.getByRole('link', { name: 'Home', exact: true }).click();
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible();
+    await page.getByRole('textbox', { name: /goal or search/i }).fill('Send the weekly invoice digest');
+    await page.getByRole('button', { name: 'Start' }).click();
+    await expect(page).toHaveURL(/\/create\?mode=tell&q=/);
+    await expect(page.getByText(/Send the weekly invoice digest/i)).toBeVisible();
+
+    // Failed reads stay visibly FAILED, never successful-empty: create an
+    // organization through the public route; the org-scoped workflow/run
+    // reads then 404 on this identity-only topology → honest error states.
+    const res = await page.request.post('/api/organizations', { data: { name: 'Acme T2' } });
+    expect(res.ok()).toBeTruthy();
+    await page.goto('/');
+    await expect(page.getByRole('alert')).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.getByRole('button', { name: /try again/i })).toHaveCount(2);
+    await expect(page.getByText(/No workflows yet/i)).toHaveCount(0);
+    await expect(page.getByText(/Nothing needs your attention/i)).toHaveCount(0);
+    await expect(page.getByRole('status', { name: 'Unavailable' })).toHaveCount(3);
+  });
 });

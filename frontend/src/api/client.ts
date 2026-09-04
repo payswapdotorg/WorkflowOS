@@ -273,6 +273,63 @@ export const organizations = {
   },
 };
 
+// --- V2 product reads (consume-only: existing public routes) ---
+// T2 (V2-017): the workflow-first Home reads the organization's workflows
+// (the V2-002 repository route) and runs (the V2-005 runs route). These are
+// READS of existing public authorities — no second workflow model, no
+// client-side authority, no mutation surface. Failed reads throw (the
+// honest-error contract); the caller decides how to present each state.
+
+export interface ProductWorkflow {
+  id: string;
+  organizationId: string;
+  ownerUserId: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  visibility: string;
+  headVersionId: string | null;
+  forkedFromWorkflowId: string | null;
+  forkedFromVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const workflowRepository = {
+  /** The organization's workflows visible to the caller (V2-002 read). */
+  listForOrganization: async (organizationId: string): Promise<ProductWorkflow[]> => {
+    const body = await apiGet<{ workflows: ProductWorkflow[] }>(
+      `/organizations/${organizationId}/workflow-repository/workflows`,
+    );
+    return body.workflows ?? [];
+  },
+};
+
+export interface ProductWorkflowRun {
+  id: string;
+  organizationId: string;
+  workflowId: string;
+  versionId: string;
+  installationId: string | null;
+  trigger: unknown;
+  triggeredByUserId: string | null;
+  inputCommitments: string[];
+  inputDigest: string;
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const workflowRuns = {
+  /** The organization's runs (V2-005 read — the tenant's run list). */
+  listForOrganization: async (organizationId: string): Promise<ProductWorkflowRun[]> => {
+    const body = await apiGet<{ runs: ProductWorkflowRun[] }>(
+      `/organizations/${organizationId}/workflow-runs/runs`,
+    );
+    return body.runs ?? [];
+  },
+};
+
 // --- Projects ---
 
 export interface Project {
