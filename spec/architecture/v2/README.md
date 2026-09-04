@@ -19,9 +19,12 @@ Read these as the repository-resident source of truth:
 - `V2-CTRL-003-protocol-registry.md` + `.json` — canonical protocol names, capabilities, events, placement, execution classes, evidence and digest rules.
 - `execution-control-plane.md` — Work Order lifecycle, dependency typing, no-rebase model, integration-gate state, recovery and completion.
 - `V2-CTRL-001-conformance-checklist.md` — mandatory implementation/verification/dogfooding checks.
-- `V2-CTRL-002-roadmap-lock.md` — canonical wave graph and no-rebase lock.
+- `V2-CTRL-002-roadmap-lock.md` — canonical original V2 wave graph and no-rebase lock through W6.
 - `dogfooding-protocol.md` — mandatory feature- and integration-boundary experiments.
-- `v2-work-order-state.json` — canonical machine-readable progress/eligibility/state.
+- `spec/development-state/v2-work-order-state.json` — canonical machine-readable V2 Work Order progress/eligibility/state.
+- `spec/architecture/v2/architecture-change-requests/V2-ACR-003-post-w6-universal-product-ux.md` — governed post-W6 product-layer evolution authority.
+- `spec/architecture/v2/post-w6-product-roadmap.md` — authoritative V2-017 product program decomposition and sequencing.
+- `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md` — repository-only bootstrap, execution, recovery and handoff contract for V2-017.
 - `architecture-change-requests/V2-ACR-001-execution-attestation.md` — governed execution-attestation evolution.
 - `execution-attestation.md` — normative execution statement/digest/attestation/proof model.
 
@@ -33,9 +36,11 @@ The product sequence is an index, not the execution order:
 
 `V2-001 → V2-002 → V2-003 → V2-004 → V2-006/V2-007/V2-014 → V2-005 → V2-008 → V2-009/V2-010/V2-011 → IG-006 → V2-012/V2-015 → V2-013`
 
-The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `v2-work-order-state.json`**, not this linear/index sequence.
+The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `spec/development-state/v2-work-order-state.json` through W6, followed by any explicitly governed post-W6 evolution such as `V2-017` in `spec/architecture/v2/post-w6-product-roadmap.md`**.
 
 ## Current wave model
+
+The original V2 roadmap concludes at W6; post-W6 evolution is separately governed and does not rewrite the W0–W6 lock.
 
 ```text
 W0   V2-001 COMPLETE
@@ -55,6 +60,8 @@ W4   V2-009   V2-010   V2-011              ← parallel, no rebase
 W5   V2-012   V2-015                      ← parallel, no rebase
         ↓
 W6   V2-013
+        ↓
+POST-W6-PRODUCT   V2-017                  ← separately governed under V2-ACR-003
 ```
 
 Integration gates are first-class repository work: they start from current `main` after their inputs are complete and never require sibling branch rebasing.
@@ -134,6 +141,8 @@ read authorization + constitution + registry + state + Work Order
 → next eligible wave
 ```
 
+For V2-017, the same control loop is applied to T1–T16 through `post-w6-product-roadmap.md`; task status is derived from repository state and actual Git history, not from conversation or unchecked plan boxes.
+
 Parallel Work Orders are independently mergeable and never depend on another sibling's unmerged branch. When interaction requires integration, use an `IG-*` Work Order instead of rebasing siblings.
 
 ## Quality and dogfooding
@@ -143,6 +152,8 @@ Tests validate implementation correctness. Dogfooding validates the real integra
 No speed optimization may remove a required regression, real-system proof, security boundary, evidence requirement or dogfooding experiment.
 
 For execution attestation specifically, feature-boundary dogfooding must include real cryptographic verification plus at least one negative replay/tamper/freshness experiment. Cross-device proof composition requires a real two-host experiment where supported.
+
+For V2-017 product UX, acceptance criteria, verification and dogfooding requirements remain in `V2-017.md` and the V2-017 program map; evidence must identify the exact tested revision.
 
 ## V1 boundary
 
