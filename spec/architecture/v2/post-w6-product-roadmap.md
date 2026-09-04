@@ -4,6 +4,7 @@
 **Program Work Order:** `V2-017`
 **Design authority:** `docs/superpowers/specs/2026-09-03-workflowos-universal-ux-design.md`
 **Implementation plan:** `docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md`
+**Repository-only execution contract:** `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`
 **Precondition:** Original V2 roadmap W0–W6 and IG-005 are complete.
 
 ## Purpose
@@ -21,6 +22,12 @@ This document is a program decomposition and dependency/navigation artifact. It 
 - `V2-017` owns product UX composition.
 - Existing V2 authorities remain authoritative for Workflow, WorkflowVersion, WorkflowIR, Deployment, Run, Node, Capability, authorization, placement, evidence, teaching semantics, marketplace economics, execution attestation/proof, and governance.
 - The existing developer/engineering surface remains an expert workspace, not a replacement product architecture.
+
+## Repository-only execution invariant
+
+A fresh agent must be able to execute and recover V2-017 using repository-resident information alone. Conversation history, chat summaries, agent memory, pasted reports, verbal instructions, and unstored assumptions are non-authoritative.
+
+For the complete bootstrap, task-entry, execution, evidence, recovery and handoff contract, read `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`.
 
 ## Product model
 
@@ -91,7 +98,7 @@ The visual grouping above is a product decomposition. Actual task dependencies b
 
 **T1 — Human-facing application shell**
 
-- Depends on: `V2-ACR-003` and stable post-W6 main.
+- Depends on: `V2-ACR-003` and stable post-W6 `main`.
 - Provides: Home / Workflows / Explore / Activity navigation, universal Create entry, session surface, Expert entry, protected-route preservation.
 - Merge boundary: independent Task 1 PR.
 
@@ -203,7 +210,7 @@ T6/T7/T9 → T10
 T2–T14 → T15 → T16
 ```
 
-Implementation agents must use the exact dependency relationships above in combination with the V2 control-plane rules. They must not make an unmerged task branch a dependency of another task; when composition requires merged artifacts, composition occurs from current `main` through a dedicated integration gate or the declared sequential boundary.
+Implementation agents must use the exact dependency relationships above in combination with the V2 control-plane rules. They must not make an unmerged task implementation a dependency of another task; when composition requires merged artifacts, composition occurs from current `main` through a dedicated integration gate or the declared sequential boundary.
 
 ## Integration boundaries
 
@@ -232,6 +239,7 @@ If any composition boundary requires changing an existing semantic or authority 
 - No second workflow protocol, workflow engine, execution authority, evidence authority, or verification authority.
 - No platform-specific workflow semantics.
 - Product terminology may simplify architecture vocabulary but may not change semantics.
+- Task checkboxes, PR prose, chat history and agent reports never override canonical repository state.
 
 ## Completion definition
 
@@ -244,4 +252,4 @@ V2-017 is complete only when:
 5. T16 receives sole-architect disposition and actual merge evidence;
 6. canonical development state is reconciled after merge.
 
-This document is a governed program map, not permission to skip the Work Order, verification, dogfooding, review, or merge requirements.
+This document is a governed program map, not permission to skip the Work Order, verification, dogfooding, review, or merge requirements. It must remain sufficient for a zero-history implementation agent to determine how to resume V2-017 from the repository.
