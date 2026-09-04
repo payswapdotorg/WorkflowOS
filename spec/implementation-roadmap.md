@@ -122,7 +122,7 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 | Task | Status | Dependencies | Primary outcome |
 |---|---|---|---|
 | T1 | ✅ COMPLETE | V2-017 activation | Universal product shell, navigation, expert entry |
-| T2 | 🟦 IN_PROGRESS | T1 | Workflow-first Home and attention surfaces |
+| T2 | 🟨 STALE_BASE | T1 | Workflow-first Home and attention surfaces |
 | T3 | ⬜ ELIGIBLE | T1 | Workflow library |
 | T4 | ⬜ BLOCKED | T3 | Workflow detail |
 | T5 | ⬜ ELIGIBLE | T1 | Tell / Show / Tell + Show creation |
@@ -147,22 +147,23 @@ T3  Workflow library
 T5  Tell / Show / Tell + Show
 T13 Expert/developer workspace
 
-CURRENT ACTIVE
+CURRENT TASK
 
 T2  Workflow-first Home
+    stale implementation branch: PR #175
+    required new base: 6637c0bcfd0f1d66cabe6420af5637e295da310b
 ```
 
-No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence.
+No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence. A stale implementation branch is historical evidence, not a current implementation dependency.
 
 ## Current implementation snapshot
 
-At the time this roadmap is introduced:
-
-- `main` is the authoritative base branch.
+- `main` after governance merge: `6637c0bcfd0f1d66cabe6420af5637e295da310b`.
 - V2-017 Task 1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
-- V2-017 Task 2 is the active implementation slice.
-- The active Task 2 work was initially opened as **PR #175** from `main` at `520b93b0c757bd0827d09de66d628f0fc4dbcba8`, with RED-first Home contract coverage at head `7fa73064468861271d8843c1b2ba34fc4a97f8be`.
-- That Task 2 branch is subject to the governance-artifact introduction described by the repository history. Any subsequent implementation must use the newest eligible `main` and must not depend on stale sibling branches.
+- V2-017 Task 2 was initially opened as **PR #175** from `520b93b0c757bd0827d09de66d628f0fc4dbcba8`, with RED-first Home contract coverage at `7fa73064468861271d8843c1b2ba34fc4a97f8be`.
+- The governance roadmap package then merged as **PR #176** at `6637c0bcfd0f1d66cabe6420af5637e295da310b`, making PR #175 stale by policy.
+- PR #175 must not be used as a dependency or merge target. Its RED-first test is recoverable historical evidence for a fresh T2 branch.
+- The next implementation base for T2 is exactly the current `main` SHA above.
 
 The exact live branch/PR state must always be re-read from GitHub before continuing.
 

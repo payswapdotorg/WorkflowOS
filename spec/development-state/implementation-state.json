@@ -13,11 +13,11 @@
   "completionAuthority": "actual Git merge",
   "statusVocabulary": ["ELIGIBLE", "IN_PROGRESS", "BLOCKED", "COMPLETE", "STALE_BASE", "OBSOLETE"],
   "asOf": "2026-09-04",
-  "currentMain": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
+  "currentMain": "6637c0bcfd0f1d66cabe6420af5637e295da310b",
   "workOrderStatus": "READY",
   "currentTask": "T2",
   "nextEligible": ["T3", "T5", "T13"],
-  "nextAction": "Finish T2 from the newest eligible main. T2 must not depend on an unmerged sibling. After a task is accepted and merged, reconcile this artifact and the human-readable roadmap, then recompute the frontier.",
+  "nextAction": "Close obsolete T2 PR #175, then restart T2 from current main 6637c0bcfd0f1d66cabe6420af5637e295da310b. Recreate or carry forward only the RED-first Home contract on the fresh task branch. No implementation branch may use the pre-governance base as its dependency.",
   "tasks": {
     "T1": {
       "status": "COMPLETE",
@@ -30,13 +30,13 @@
       "scope": "consumer shell, Home/Workflows/Explore/Activity navigation, Create and Expert entry, protected-route preservation"
     },
     "T2": {
-      "status": "IN_PROGRESS",
+      "status": "STALE_BASE",
       "dependsOn": ["T1"],
       "baseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
       "pr": 175,
       "branch": "feat/v2-017-task-2-workflow-first-home",
       "headSha": "7fa73064468861271d8843c1b2ba34fc4a97f8be",
-      "evidence": "RED-first Home contract committed on PR #175; test must be followed by implementation and exact-head verification.",
+      "evidence": "PR #175 contains the RED-first Home contract, but its base predates the merged governance roadmap package at main 6637c0bcfd0f1d66cabe6420af5637e295da310b. The branch is preserved as historical evidence only and must not be used as an implementation dependency.",
       "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
     },
     "T3": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "workflow library"},
@@ -75,6 +75,19 @@
       "event": "T2_STARTED",
       "pr": 175,
       "headSha": "7fa73064468861271d8843c1b2ba34fc4a97f8be",
+      "recordedAt": "2026-09-04"
+    },
+    {
+      "event": "GOVERNANCE_ROADMAP_MERGED",
+      "pr": 176,
+      "mergeCommit": "6637c0bcfd0f1d66cabe6420af5637e295da310b",
+      "recordedAt": "2026-09-04"
+    },
+    {
+      "event": "T2_MARKED_STALE_BASE",
+      "pr": 175,
+      "oldBaseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
+      "newRequiredBaseSha": "6637c0bcfd0f1d66cabe6420af5637e295da310b",
       "recordedAt": "2026-09-04"
     }
   ]
