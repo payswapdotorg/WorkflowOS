@@ -128,7 +128,7 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 | T2 | ✅ COMPLETE | T1 | Workflow-first Home and attention surfaces |
 | T3 | ✅ COMPLETE | T1 | Workflow library |
 | T4 | ⬜ BLOCKED | T3 | Workflow detail |
-| T5 | ⬜ ELIGIBLE | T1 | Tell / Show / Tell + Show creation |
+| T5 | ✅ COMPLETE | T1 | Tell / Show / Tell + Show creation |
 | T6 | ⬜ BLOCKED | T4 | Run / approval / where-it-runs |
 | T7 | ⬜ BLOCKED | T6 | Failure / recovery / takeover |
 | T8 | ⬜ BLOCKED | T4 | Scheduling and events |
@@ -146,13 +146,12 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 ```text
 ELIGIBLE FRONTIER
 
-T5  Tell / Show / Tell + Show
 T13 Expert/developer workspace
 
 CURRENT TASK
 
-T5  Tell / Show / Tell + Show creation
-    T1 dependency complete; T3 merged and reconciled separately
+T13 Expert/developer workspace
+    T1 dependency complete; T5 merged and reconciled separately
 ```
 
 No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence. A stale implementation branch is historical evidence, not a current implementation dependency.
@@ -162,6 +161,9 @@ No task may become eligible merely because a branch exists. Dependencies are com
 - T1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
 - T2 is complete through **PR #180**, merged as `a862498980036ef49b844cb1fa15bcd2e93c76c7`.
 - T3 is complete through **PR #182**, merged as `27e6162c03f50c26041d7a71ae5c1ff99151f9a8`.
+- T5 is complete through **PR #185**, squash-merged as `c958f17f93f2d03ff82ff1c06619ce0968e3e6b8` from corrected head `e759c6b4a992c526aa716b636868ae399c23414e`.
+- T5 completion included correction of F-T5-001: the false `workflowos-captured-input-v1` use of the frozen WorkflowIR compatibility field was removed; the creation flow fails closed because no valid public captured-input authoring contract exists.
+- T5 exact-head verification: Architecture Governance, frontend, lifecycle, governance-artifacts, work-026/027/048/049/050 browser E2E, and companion extension checks passed at the corrected head. Backend and deploy failures remained identical pre-existing failures from the canonical base. Frontend 22 files / 179 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 browser 5/5, lifecycle 1/1, and architecture 914/915 with the single WORK-052 failure pre-existing at base.
 - T2's historical PR #175 and #178 remain historical evidence only; neither is a current implementation dependency.
 - The exact implementation base for each new task is **always the live `main` SHA re-read immediately before worker dispatch**. No stored governance artifact is treated as durable current-main truth.
 - The resident-worker operating protocol, operations artifact, and dispatch template are repository-resident and govern all resident Z.ai implementation sessions.

@@ -18,9 +18,9 @@
   "asOf": "2026-09-04",
   "currentMainPolicy": "re-read live main immediately before dispatch; no stored main SHA is treated as durable current truth",
   "workOrderStatus": "READY",
-  "currentTask": "T5",
-  "nextEligible": ["T5", "T13"],
-  "nextAction": "T3 is complete by authoritative merge evidence. Select the next eligible sibling from the repository frontier, re-read live main immediately before dispatch, and create one resident-worker implementation dispatch from that exact head.",
+  "currentTask": "T13",
+  "nextEligible": ["T13"],
+  "nextAction": "T5 is complete by authoritative merge evidence. Re-read live main immediately before dispatch, then create one resident-worker implementation dispatch for the remaining eligible sibling T13 from that exact head.",
   "tasks": {
     "T1": {
       "status": "COMPLETE",
@@ -51,7 +51,15 @@
       "scope": "workflow library: My Workflows, Installed, Shared with me, Drafts, Archived; contextual attention filters and human-readable workflow card facts"
     },
     "T4": {"status": "BLOCKED", "dependsOn": ["T3"], "scope": "workflow detail"},
-    "T5": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "Tell / Show / Tell + Show creation"},
+    "T5": {
+      "status": "COMPLETE",
+      "dependsOn": ["T1"],
+      "pr": 185,
+      "headSha": "e759c6b4a992c526aa716b636868ae399c23414e",
+      "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8",
+      "evidence": "PR #185 corrected F-T5-001 on the same branch, re-audited at exact head, and squash-merged. The false captured-input irSchemaVersion declaration was removed; the creation flow now fails closed and surfaces the missing captured-input authoring authority. Exact-head CI was successful for Architecture Governance, frontend, browser E2E, lifecycle, governance artifacts, work-026/027/048/049/050 E2E, and companion extension; backend and deploy failures were identical pre-existing failures at the canonical base. Frontend 22 files / 179 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 5/5, lifecycle 1/1, architecture 914/915 with the single WORK-052 failure pre-existing at base.",
+      "scope": "Tell / Show / Tell + Show creation; transient capture/preview/correction; fail-closed durable boundary when no valid public authoring contract exists"
+    },
     "T6": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "Run / approval / where-it-runs"},
     "T7": {"status": "BLOCKED", "dependsOn": ["T6"], "scope": "failure / recovery / takeover"},
     "T8": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "scheduling and events"},
@@ -86,6 +94,7 @@
     {"event": "RESIDENT_WORKER_PROCESS_ADOPTED", "protocol": "docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md", "operations": "spec/development-state/resident-worker-operations.md", "dispatchTemplate": "spec/development-state/dispatch-template.md", "recordedAt": "2026-09-04"},
     {"event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART", "pr": 178, "requiredBasePolicy": "LIVE_MAIN_AT_DISPATCH", "recordedAt": "2026-09-04"},
     {"event": "T2_COMPLETE", "pr": 180, "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7", "recordedAt": "2026-09-04"},
-    {"event": "T3_COMPLETE", "pr": 182, "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8", "recordedAt": "2026-09-04"}
+    {"event": "T3_COMPLETE", "pr": 182, "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8", "recordedAt": "2026-09-04"},
+    {"event": "T5_COMPLETE", "pr": 185, "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8", "recordedAt": "2026-09-04", "correction": "F-T5-001 removed fabricated/non-WorkflowIR irSchemaVersion usage; creation fails closed because no valid captured-input authoring contract exists"}
   ]
 }
