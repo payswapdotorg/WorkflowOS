@@ -3,12 +3,15 @@
 **Status:** PROPOSED / governed product-layer evolution
 **Related Work Order:** `V2-017`
 **Design authority:** `docs/superpowers/specs/2026-09-03-workflowos-universal-ux-design.md`
+**Program map:** `spec/architecture/v2/post-w6-product-roadmap.md`
 
 ## Reason
 V2-CTRL-002 intentionally closed the original V2 implementation roadmap after W6/IG-005. The merged V2 architecture now exposes a broad product surface that needs a coherent human-facing UX layer. This evolution is presentation/information-architecture work and does not change workflow semantics or execution authority.
 
 ## Decision
 Authorize one post-W6 product-layer Work Order, V2-017, to compose the human-facing UX over existing V2 authorities. Extend roadmap/state only enough to make that Work Order governable and independently verifiable.
+
+V2-017 is decomposed into a repository-resident implementation program map covering sixteen tasks (T1–T16), with explicit task dependencies, composition boundaries, verification expectations, and final Architect gating. The decomposition is a planning/governance aid under V2-017; it does not create additional semantic or authority owners.
 
 ## Preserved invariants
 - WorkflowIR remains the semantic source of truth.
@@ -26,6 +29,19 @@ The approved design organizes the human-facing experience around MAKE / DO / LEA
 
 ## Boundary
 User-facing terminology may translate architectural concepts but may not alter semantics. Conversation is an input mechanism, not a durable workflow format or authority. UI logic must not fabricate state when an authority read fails. Cryptographic authenticity must never be presented as automatic proof of a physical side effect.
+
+## Governance of the implementation program
+
+The program map is subordinate to this architecture-change record and V2-017. It may not:
+
+- activate work outside V2-017's frozen scope;
+- create a second dependency graph or completion authority;
+- redefine a V2 semantic/authority contract;
+- allow one unmerged task implementation to become another task's branch dependency;
+- bypass required verification, dogfooding, or Architect merge;
+- treat task numbering as independent Work Order identity.
+
+The canonical development state remains authoritative for activation/status. The program map provides the detailed task graph required to execute V2-017 mechanically.
 
 ## Stop condition
 If implementation requires changing a frozen semantic or authority contract, V2-017 must stop and raise a separate governed architecture change.
