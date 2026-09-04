@@ -140,6 +140,47 @@ describe('V2-017 Task 1 — universal product navigation', () => {
       ).toHaveAttribute('href', '/projects');
     });
 
+    it('labels the developer workspace landing with the expert mode and the return path (T13)', async () => {
+      render(
+        <MemoryRouter initialEntries={['/projects']}>
+          <App />
+        </MemoryRouter>,
+      );
+      // The transition target carries the explicit expert-mode labeling:
+      // the user understands they are in the advanced engineering workspace.
+      await waitFor(() =>
+        expect(screen.getByRole('banner', { name: 'Expert workspace context' })).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByText(/advanced engineering workspace/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/left the consumer workflow UX/i)).toBeInTheDocument();
+      // The return path back to the consumer product.
+      expect(
+        screen.getByRole('link', { name: /Back to WorkflowOS/i }),
+      ).toHaveAttribute('href', '/');
+      // The existing developer workspace surface still renders underneath.
+      await waitFor(() => expect(screen.getByText('New Project')).toBeInTheDocument());
+    });
+
+    it('names the mode crossing explicitly on the expert transition page (T13)', async () => {
+      render(
+        <MemoryRouter initialEntries={['/expert']}>
+          <App />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: /Expert workspace/i })).toBeInTheDocument(),
+      );
+      // The explicit crossing statement: not a silent product-mode switch.
+      expect(
+        screen.getByText(/you're leaving the consumer workflow UX/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('link', { name: /Open developer workspace/i }),
+      ).toHaveAttribute('href', '/projects');
+    });
+
     it('preserves the existing developer workbench route behind the expert surface', async () => {
       render(
         <MemoryRouter initialEntries={['/projects/project-1/workbench']}>

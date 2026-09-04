@@ -274,4 +274,43 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     await page.waitForTimeout(500);
     expect(createRequests).toHaveLength(0);
   });
+  // V2-017 T13 — the expert-workspace transition journey, real topology:
+  // proves in a real browser that the crossing from the consumer product
+  // shell into the developer workspace is EXPLICIT (named on both sides of
+  // the boundary), that the developer workspace remains reachable with its
+  // controls, and that the return path leads back to the consumer Home.
+  // The identity stack serves the real session; the projects read fails
+  // honestly there (404 — no /projects route on this topology), which the
+  // journey keeps visible rather than fabricated.
+  test('T13 Expert: explicit mode crossing, labeled workspace, return path', async ({ page }) => {
+    // Fresh user → the consumer shell.
+    await page.goto('/');
+    await page.getByText('Create one', { exact: true }).click();
+    await page.locator('#displayName').fill('Eve (T13)');
+    await page.locator('#email').fill('eve-t13@e2e.example.com');
+    await page.locator('#password').fill('the-t13-password-42');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
+
+    // The consumer shell's Expert entry (progressive disclosure, footer).
+    await page.getByRole('link', { name: 'Expert workspace' }).click();
+    await expect(page.getByRole('heading', { name: /Expert workspace/i })).toBeVisible();
+    // The explicit mode crossing is named BEFORE the switch.
+    await expect(page.getByText(/you're leaving the consumer workflow UX/i)).toBeVisible();
+
+    // Cross into the developer workspace.
+    await page.getByRole('link', { name: 'Open developer workspace' }).click();
+    await expect(page).toHaveURL(/\/projects$/);
+    // The landing labels the expert mode and carries the return path.
+    await expect(page.getByRole('banner', { name: 'Expert workspace context' })).toBeVisible();
+    await expect(page.getByText(/advanced engineering workspace/i)).toBeVisible();
+    await expect(page.getByText(/left the consumer workflow UX/i)).toBeVisible();
+    // The engineering surface is present (the projects read on this
+    // identity-only topology fails honestly — no fabricated project list).
+    await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
+
+    // The return path leads back to the consumer Home.
+    await page.getByRole('link', { name: 'Back to WorkflowOS' }).click();
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
+  });
 });

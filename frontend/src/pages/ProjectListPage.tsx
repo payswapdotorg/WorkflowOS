@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Plus, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,6 +45,30 @@ export default function ProjectListPage() {
           Sign Out
         </Button>
       </header>
+
+      {/* V2-017 T13 — the explicit expert-mode labeling at the transition
+          boundary: the developer workspace landing names the mode crossing
+          (the user has left the consumer workflow UX) and carries the
+          return path. The engineering surface itself is unchanged — this
+          is composition, not a migration of developer authority. */}
+      <div
+        role="banner"
+        aria-label="Expert workspace context"
+        className="border-b border-border bg-accent/40 px-6 py-3"
+      >
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-2">
+          <p className="text-sm text-muted-foreground">
+            You're in the advanced engineering workspace — you've left the
+            consumer workflow UX. The engineering controls live here.
+          </p>
+          <Link
+            to="/"
+            className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent"
+          >
+            Back to WorkflowOS
+          </Link>
+        </div>
+      </div>
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
         <div className="mb-8 flex items-center justify-between">
