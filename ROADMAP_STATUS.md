@@ -9,8 +9,10 @@
 - **worker mode:** resident Z.ai worker process
 - **durable identity:** task + branch + PR + exact base/head SHA
 - **Z.ai session:** disposable runtime reference; not persisted here as authority
-- **operator state:** preparing durable dispatch / resident-worker handoff
-- **next action:** verify live `main` and PR #178, then issue or correct the T2 dispatch packet against the exact eligible base
+- **operator state:** durable dispatch being issued
+- **current required base:** `b5e370896b1425dbf04b10bf726482b15e330bfd`
+- **historical implementation:** PR #178, preserved but retired because its base predates the resident-worker process synchronization
+- **next action:** create the fresh T2 worker branch/PR from the exact required base and leave the durable dispatch packet on the worker handoff issue
 - **completion authority:** actual Architect-authorized Git merge followed by canonical reconciliation
 
 ## Resident worker rules
