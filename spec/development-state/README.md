@@ -4,6 +4,28 @@
 
 For V2 governance-state semantics, read `spec/architecture/v2/V2-ACR-002-governance-control-plane-refinement.md` together with `spec/architecture/v2/execution-control-plane.md`.
 
+## Repository-only consumption
+
+Repository state is the sole source of truth for implementation progress and recovery. Conversation history, agent memory, pasted reports, verbal instructions, and copied summaries are non-authoritative.
+
+For `V2-017`, the repository-resident execution chain is:
+
+```text
+spec/architecture/v2/V2-ACR-003-post-w6-universal-product-ux.md
+  ↓
+spec/architecture/v2/work-orders/V2-017.md
+  ↓
+spec/architecture/v2/post-w6-product-roadmap.md
+  ↓
+docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md
+  ↓
+docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md
+  ↓
+actual GitHub PRs / commits / CI / persisted verification and dogfooding evidence
+```
+
+The canonical state in this directory determines Work Order status; actual Git merge is the completion fact; derived projections never authorize work.
+
 ## Authority classes
 
 The directory distinguishes authoritative facts, operational implementation state, and derived projections.
@@ -68,5 +90,6 @@ The `governance-manifest` detector evaluates this state at an exact revision thr
 8. V2 derived artifacts cannot supersede frozen V1 authority or activate a proposed V2 architecture version.
 9. Post-merge reconciliation records authoritative Git facts only; it is not a second approval authority.
 10. The post-merge finalization protocol remains explicit and code-pinned as the merged-finalization invariant.
+11. V2-017 implementation recovery can be completed from repository-resident artifacts without conversational history.
 
 A repository whose governance state violates any invariant is not a valid governed state: the control plane refuses to treat it as valid and the governance-manifest checkpoint fails closed.
