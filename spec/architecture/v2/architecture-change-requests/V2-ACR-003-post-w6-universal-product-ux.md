@@ -4,6 +4,7 @@
 **Related Work Order:** `V2-017`
 **Design authority:** `docs/superpowers/specs/2026-09-03-workflowos-universal-ux-design.md`
 **Program map:** `spec/architecture/v2/post-w6-product-roadmap.md`
+**Repository-only execution contract:** `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`
 
 ## Reason
 V2-CTRL-002 intentionally closed the original V2 implementation roadmap after W6/IG-005. The merged V2 architecture now exposes a broad product surface that needs a coherent human-facing UX layer. This evolution is presentation/information-architecture work and does not change workflow semantics or execution authority.
@@ -39,9 +40,10 @@ The program map is subordinate to this architecture-change record and V2-017. It
 - redefine a V2 semantic/authority contract;
 - allow one unmerged task implementation to become another task's branch dependency;
 - bypass required verification, dogfooding, or Architect merge;
-- treat task numbering as independent Work Order identity.
+- treat task numbering as independent Work Order identity;
+- require conversation history to determine task scope, eligibility, dependencies, blockers, verification, or the next action.
 
-The canonical development state remains authoritative for activation/status. The program map provides the detailed task graph required to execute V2-017 mechanically.
+The canonical development state remains authoritative for activation/status. Actual Git merge remains the completion authority. The program map provides the detailed task graph required to execute V2-017 mechanically, while `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md` defines the zero-history bootstrap, task-entry, recovery, evidence, and handoff protocol.
 
 ## Stop condition
 If implementation requires changing a frozen semantic or authority contract, V2-017 must stop and raise a separate governed architecture change.
