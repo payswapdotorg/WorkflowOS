@@ -12,6 +12,4 @@
 - **next action:** retire PR #178, then issue the T2 durable dispatch against the exact live `main` SHA
 - **completion authority:** Architect-authorized Git merge + canonical reconciliation
 
-## Resident worker rules
-
-The worker remains available after review-ready checkpoints. Review iterations remain on the same PR. A replacement session resumes from the latest durable checkpoint; it never creates a replacement PR merely because the provider session changed.
+The dashboard is updated only with events that actually occurred. Exact branch, PR, base, head, and merge identities are re-read from live GitHub.
