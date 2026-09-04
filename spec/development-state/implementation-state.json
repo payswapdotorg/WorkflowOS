@@ -15,11 +15,11 @@
   "completionAuthority": "actual Git merge",
   "statusVocabulary": ["ELIGIBLE", "IN_PROGRESS", "BLOCKED", "COMPLETE", "STALE_BASE", "OBSOLETE"],
   "asOf": "2026-09-04",
-  "currentMain": "b5e370896b1425dbf04b10bf726482b15e330bfd",
+  "currentMain": "48b613f92dfe7ded0beda77ec4a579dde441b076",
   "workOrderStatus": "READY",
   "currentTask": "T2",
   "nextEligible": ["T3", "T5", "T13"],
-  "nextAction": "Discard PR #178 as a pre-protocol implementation checkpoint, preserve it as historical evidence, and restart T2 from current main b5e370896b1425dbf04b10bf726482b15e330bfd through the resident-worker dispatch process. No implementation branch may use the pre-protocol base as its dependency.",
+  "nextAction": "Retire the pre-protocol T2 PR #178, preserve it as historical evidence, and dispatch a fresh T2 resident worker from current main 48b613f92dfe7ded0beda77ec4a579dde441b076. The worker must create exactly one new T2 implementation PR from that exact base and remain resident through review iterations.",
   "tasks": {
     "T1": {
       "status": "COMPLETE",
@@ -34,11 +34,11 @@
     "T2": {
       "status": "STALE_BASE",
       "dependsOn": ["T1"],
-      "baseSha": "b5e370896b1425dbf04b10bf726482b15e330bfd",
+      "baseSha": "48b613f92dfe7ded0beda77ec4a579dde441b076",
       "pr": 178,
       "branch": "feat/v2-017-task-2-workflow-first-home-r2",
       "headSha": "ace0e8975abb398f46f3aad01589fe25bdf81ca7",
-      "evidence": "PR #178 was created before the resident-worker operating protocol was installed and its base predates the current governance head. It is preserved as historical implementation evidence only and must not be used as a dependency or merge target.",
+      "evidence": "PR #178 is a historical implementation checkpoint created before the resident-worker process was synchronized with the governance head. It is not a dependency or merge target. Its RED-first Home contract and implementation evidence remain recoverable reference material for the fresh resident-worker run.",
       "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
     },
     "T3": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "workflow library"},
@@ -106,7 +106,7 @@
     {
       "event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART",
       "pr": 178,
-      "requiredBaseSha": "b5e370896b1425dbf04b10bf726482b15e330bfd",
+      "requiredBaseSha": "48b613f92dfe7ded0beda77ec4a579dde441b076",
       "recordedAt": "2026-09-04"
     }
   ]
