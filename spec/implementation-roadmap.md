@@ -8,6 +8,8 @@
 - Work Order eligibility and completion: `spec/development-state/v2-work-order-state.json` and `spec/development-state/program-state.json`
 - V2-017 task-level progress: `spec/development-state/implementation-state.json`
 - Derived dependency/frontier/checkpoint projections: `spec/development-state/dependency-state.json`, `frontier-state.json`, `checkpoint-state.json`
+- Resident worker operating protocol: `docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md`
+- Resident worker operations: `spec/development-state/resident-worker-operations.md`
 
 **Detailed supporting map:** `spec/implementation-map.md`
 
@@ -37,7 +39,7 @@ exact verification + dogfooding evidence
 recompute eligible frontier
 ```
 
-A chat message, agent memory, copied report, PR prose, stale checkbox, or external planning document is never a hidden prerequisite.
+A chat message, agent memory, copied report, PR prose, stale checkbox, provider session, or external planning document is never a hidden prerequisite.
 
 ## Authority model
 
@@ -53,6 +55,7 @@ A chat message, agent memory, copied report, PR prose, stale checkbox, or extern
 | V2 Work Order operational state | `spec/development-state/v2-work-order-state.json` |
 | Actual completion | authoritative Git merge |
 | Runtime tenant state | PostgreSQL / owning runtime authority |
+| Resident Z.ai worker process | disposable runtime; durable state is repository + GitHub |
 
 ### Synchronization invariant
 
@@ -150,20 +153,21 @@ T13 Expert/developer workspace
 CURRENT TASK
 
 T2  Workflow-first Home
-    stale implementation branch: PR #175
-    required new base: 6637c0bcfd0f1d66cabe6420af5637e295da310b
+    historical implementation checkpoint: PR #178
+    required new implementation base: b5e370896b1425dbf04b10bf726482b15e330bfd
+    resident-worker protocol: ACTIVE
 ```
 
 No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence. A stale implementation branch is historical evidence, not a current implementation dependency.
 
 ## Current implementation snapshot
 
-- `main` after governance merge: `6637c0bcfd0f1d66cabe6420af5637e295da310b`.
+- Current `main` governance head for resident-worker activation: `b5e370896b1425dbf04b10bf726482b15e330bfd`.
 - V2-017 Task 1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
-- V2-017 Task 2 was initially opened as **PR #175** from `520b93b0c757bd0827d09de66d628f0fc4dbcba8`, with RED-first Home contract coverage at `7fa73064468861271d8843c1b2ba34fc4a97f8be`.
-- The governance roadmap package then merged as **PR #176** at `6637c0bcfd0f1d66cabe6420af5637e295da310b`, making PR #175 stale by policy.
-- PR #175 must not be used as a dependency or merge target. Its RED-first test is recoverable historical evidence for a fresh T2 branch.
-- The next implementation base for T2 is exactly the current `main` SHA above.
+- T2 historical implementation checkpoints include PR #175 and PR #178; neither is a current implementation dependency.
+- PR #178 was based before the resident-worker operating process was installed. It remains preserved as historical implementation evidence only.
+- The current T2 implementation must be dispatched from the exact current `main` base identified in canonical development state and re-verified live immediately before implementation.
+- The resident-worker operating protocol and operations artifact are now repository-resident and govern all future resident Z.ai implementation sessions.
 
 The exact live branch/PR state must always be re-read from GitHub before continuing.
 
@@ -174,9 +178,11 @@ ROADMAP + MACHINE STATE
         ↓
 ELIGIBLE TASK
         ↓
-READ WORK ORDER / CONTRACTS
+ARCHITECT DURABLE DISPATCH
         ↓
-INSPECT ACTUAL REPOSITORY
+RESIDENT Z.AI WORKER
+        ↓
+VERIFY LIVE AUTHORITY
         ↓
 WRITE FAILING TEST (when behavior changes)
         ↓
@@ -186,9 +192,13 @@ DETERMINISTIC VERIFICATION
         ↓
 REAL-SYSTEM / BROWSER DOGFOOD
         ↓
-EVIDENCE
+DURABLE CHECKPOINT ON SAME PR
         ↓
-PR + ARCHITECT REVIEW
+WAITING_FOR_ARCHITECT
+        ↓
+REQUEST_CHANGES → SAME PR → RESUME
+        ↓
+ARCHITECT APPROVE / MERGE GATE
         ↓
 ACTUAL GIT MERGE
         ↓
@@ -199,13 +209,23 @@ ROADMAP + MACHINE STATE SYNCHRONIZED
 RECOMPUTE FRONTIER
 ```
 
+## Resident-worker discipline
+
+The worker's runtime session is disposable. The durable checkpoint is the same task branch and PR plus exact committed head SHA and persisted evidence.
+
+A `REQUEST_CHANGES` review must be tied to the exact reviewed head and contain stable finding IDs, affected paths, acceptance criteria, and concrete required actions. The worker resolves those findings on the same PR and publishes a new checkpoint.
+
+A disconnected or exhausted session may be replaced only by a fresh session that verifies the latest repository and GitHub state and resumes from the latest checkpoint. A session change never authorizes a replacement PR.
+
+No new commit alone proves a hang. Watchdog decisions must distinguish active work, review waiting, capacity exhaustion, and contradiction. Repeated identical restart/failure conditions escalate rather than loop.
+
 ## Merge discipline
 
 One implementation slice per branch/PR unless a governing Work Order explicitly defines a combined integration gate.
 
 A parallel sibling may depend only on already merged contracts. No unmerged branch is a dependency.
 
-A task is not complete because tests pass, a PR is green, or an agent reports completion. Completion requires the governing review/merge process and actual Git merge evidence.
+A task is not complete because tests pass, a PR is green, or an agent reports completion. Completion requires the governing review/merge process, actual Git merge evidence, and canonical reconciliation.
 
 ## Evidence discipline
 
@@ -229,8 +249,8 @@ Stop and reconcile the repository before coding when:
 - roadmap and machine state disagree;
 - a machine artifact says an item is complete without matching Git evidence;
 - Git proves a merge that machine state has not reconciled;
-- a proposed dependency is an unmerged sibling branch;
 - the required authority contract does not exist;
+- a proposed dependency is an unmerged sibling branch;
 - implementation would create a second workflow, execution, verification, evidence, authorization, or governance authority;
 - an implementation claim cannot be verified from the repository;
 - the next action cannot be determined from repository state alone.
@@ -247,8 +267,9 @@ A fresh agent can begin with:
 2. this roadmap
 3. `spec/development-state/README.md`
 4. `spec/development-state/implementation-state.json` for V2-017 task progress
-5. the applicable machine Work Order state
-6. the selected Work Order and dependency map
-7. current GitHub `main` and open/merged PRs
+5. `spec/development-state/resident-worker-operations.md` when a resident worker is active
+6. the applicable machine Work Order state
+7. the selected Work Order and dependency map
+8. current GitHub `main` and open/merged PRs
 
 Nothing else is required to reconstruct the current implementation position.
