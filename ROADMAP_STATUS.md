@@ -9,10 +9,10 @@
 - **worker mode:** resident Z.ai worker process
 - **durable identity:** task + branch + PR + exact base/head SHA
 - **Z.ai session:** disposable runtime reference; not persisted here as authority
-- **operator state:** ready for live dispatch verification
-- **base policy:** re-read live `main` immediately before dispatch; no stored dashboard SHA is authoritative
-- **historical implementation:** PR #178, preserved but retired because it predates the resident-worker process alignment
-- **next action:** retire/close the historical PR #178, then issue the durable T2 dispatch packet against the exact live `main` SHA and create one fresh implementation PR from that base
+- **operator state:** fresh dispatch base verified from live `main`
+- **verified dispatch base:** `0cd44a17c36fa27f39387d4aa4445e9b9134a685`
+- **historical implementation:** PR #178, preserved as historical evidence and retired from the active implementation path
+- **next action:** create exactly one fresh T2 implementation PR from the verified dispatch base, then keep the resident worker on that PR through review iterations
 - **completion authority:** actual Architect-authorized Git merge followed by canonical reconciliation
 
 ## Resident worker rules
