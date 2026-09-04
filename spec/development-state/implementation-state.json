@@ -18,48 +18,15 @@
   "asOf": "2026-09-04",
   "currentMainPolicy": "re-read live main immediately before dispatch; no stored main SHA is treated as durable current truth",
   "workOrderStatus": "READY",
-  "currentTask": "T13",
-  "nextEligible": ["T13"],
-  "nextAction": "T5 is complete by authoritative merge evidence. Re-read live main immediately before dispatch, then create one resident-worker implementation dispatch for the remaining eligible sibling T13 from that exact head.",
+  "currentTask": "T4",
+  "nextEligible": ["T4"],
+  "nextAction": "T13 is complete by authoritative merge evidence. Re-read live main immediately before dispatch, then create one resident-worker implementation dispatch for T4 from that exact head.",
   "tasks": {
-    "T1": {
-      "status": "COMPLETE",
-      "dependency": ["V2-ACR-003"],
-      "baseSha": "fd5165ab332352101057d1ef6486541d0120be2b",
-      "pr": 173,
-      "headSha": "3530468abfe2cad4a0e5e3188b128ca9850eeab0",
-      "mergeCommit": "3a507199ec8b70f4c4feb2829bb1b6a2070bfc38",
-      "evidence": "PR #173 exact-head verification recorded in the merged PR; shell navigation and real browser auth journey verified.",
-      "scope": "consumer shell, Home/Workflows/Explore/Activity navigation, Create and Expert entry, protected-route preservation"
-    },
-    "T2": {
-      "status": "COMPLETE",
-      "dependsOn": ["T1"],
-      "pr": 180,
-      "headSha": "8b273ed3991bd26a94be325caef1bd3000eb4276",
-      "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7",
-      "evidence": "PR #180 corrected F-T2-001 on the same branch, re-verified exact-head frontend/CI/browser evidence, then merged. Home aggregates workflow and run reads across every organization with all-or-error semantics.",
-      "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
-    },
-    "T3": {
-      "status": "COMPLETE",
-      "dependsOn": ["T1"],
-      "pr": 182,
-      "headSha": "ddccd90a4aff07c59c7a4273b7d955c420197c72",
-      "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8",
-      "evidence": "PR #182 exact-head verification: 22 frontend files / 173 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 browser 4/4, lifecycle 1/1, Architecture Governance success, zero PR-attributable CI regressions; merged from main a862498.",
-      "scope": "workflow library: My Workflows, Installed, Shared with me, Drafts, Archived; contextual attention filters and human-readable workflow card facts"
-    },
-    "T4": {"status": "BLOCKED", "dependsOn": ["T3"], "scope": "workflow detail"},
-    "T5": {
-      "status": "COMPLETE",
-      "dependsOn": ["T1"],
-      "pr": 185,
-      "headSha": "e759c6b4a992c526aa716b636868ae399c23414e",
-      "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8",
-      "evidence": "PR #185 corrected F-T5-001 on the same branch, re-audited at exact head, and squash-merged. The false captured-input irSchemaVersion declaration was removed; the creation flow now fails closed and surfaces the missing captured-input authoring authority. Exact-head CI was successful for Architecture Governance, frontend, browser E2E, lifecycle, governance artifacts, work-026/027/048/049/050 E2E, and companion extension; backend and deploy failures were identical pre-existing failures at the canonical base. Frontend 22 files / 179 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 5/5, lifecycle 1/1, architecture 914/915 with the single WORK-052 failure pre-existing at base.",
-      "scope": "Tell / Show / Tell + Show creation; transient capture/preview/correction; fail-closed durable boundary when no valid public authoring contract exists"
-    },
+    "T1": {"status": "COMPLETE", "dependency": ["V2-ACR-003"], "baseSha": "fd5165ab332352101057d1ef6486541d0120be2b", "pr": 173, "headSha": "3530468abfe2cad4a0e5e3188b128ca9850eeab0", "mergeCommit": "3a507199ec8b70f4c4feb2829bb1b6a2070bfc38", "evidence": "PR #173 exact-head verification recorded in the merged PR; shell navigation and real browser auth journey verified.", "scope": "consumer shell, Home/Workflows/Explore/Activity navigation, Create and Expert entry, protected-route preservation"},
+    "T2": {"status": "COMPLETE", "dependsOn": ["T1"], "pr": 180, "headSha": "8b273ed3991bd26a94be325caef1bd3000eb4276", "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7", "evidence": "PR #180 corrected F-T2-001 on the same branch, re-verified exact-head frontend/CI/browser evidence, then merged. Home aggregates workflow and run reads across every organization with all-or-error semantics.", "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"},
+    "T3": {"status": "COMPLETE", "dependsOn": ["T1"], "pr": 182, "headSha": "ddccd90a4aff07c59c7a4273b7d955c420197c72", "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8", "evidence": "PR #182 exact-head verification: 22 frontend files / 173 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 browser 4/4, lifecycle 1/1, Architecture Governance success, zero PR-attributable CI regressions; merged from main a862498.", "scope": "workflow library: My Workflows, Installed, Shared with me, Drafts, Archived; contextual attention filters and human-readable workflow card facts"},
+    "T4": {"status": "ELIGIBLE", "dependsOn": ["T3"], "scope": "workflow detail"},
+    "T5": {"status": "COMPLETE", "dependsOn": ["T1"], "pr": 185, "headSha": "e759c6b4a992c526aa716b636868ae399c23414e", "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8", "evidence": "PR #185 corrected F-T5-001 on the same branch, re-audited at exact head, and squash-merged. The false captured-input irSchemaVersion declaration was removed; the creation flow now fails closed and surfaces the missing captured-input authoring authority. Exact-head CI was successful for Architecture Governance, frontend, browser E2E, lifecycle, governance artifacts, work-026/027/048/049/050 E2E, and companion extension; backend and deploy failures were identical pre-existing failures at the canonical base. Frontend 22 files / 179 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 5/5, lifecycle 1/1, architecture 914/915 with the single WORK-052 failure pre-existing at base.", "scope": "Tell / Show / Tell + Show creation; transient capture/preview/correction; fail-closed durable boundary when no valid public authoring contract exists"},
     "T6": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "Run / approval / where-it-runs"},
     "T7": {"status": "BLOCKED", "dependsOn": ["T6"], "scope": "failure / recovery / takeover"},
     "T8": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "scheduling and events"},
@@ -67,7 +34,7 @@
     "T10": {"status": "BLOCKED", "dependsOn": ["T6", "T7", "T9"], "scope": "Activity and trust"},
     "T11": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "versions / updates / optimization"},
     "T12": {"status": "BLOCKED", "dependsOn": ["T3", "T4", "T11"], "scope": "sharing / marketplace / install"},
-    "T13": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "expert/developer workspace"},
+    "T13": {"status": "COMPLETE", "dependsOn": ["T1"], "pr": 188, "headSha": "c71d30f0494fa30b4a03267f5106c552fbbd4ad0", "mergeCommit": "e1383a97508e711a0a758c52bca3cb188a340030", "evidence": "PR #188 exact-head Architect audit and acceptance confirmed the expert transition stays presentation-only: explicit crossing language on /expert, explicit expert-context and return banner on /projects, existing developer workspace and authorities preserved. 181 frontend tests passed, typecheck/lint/build clean, work-074 6/6, lifecycle 1/1, architecture 914/915 with the single WORK-052 failure pre-existing at base; CI attempt-pair reported zero PR-attributable regressions.", "scope": "expert/developer workspace transition; explicit mode crossing; preserved existing engineering control surface"},
     "T14": {"status": "BLOCKED", "dependsOn": ["T1"], "scope": "responsive/mobile adaptation"},
     "T15": {"status": "BLOCKED", "dependsOn": ["T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13", "T14"], "scope": "full verification and real product dogfooding"},
     "T16": {"status": "BLOCKED", "dependsOn": ["T15"], "scope": "sole Architect gate and merge"}
@@ -95,6 +62,7 @@
     {"event": "T2_PR_178_RETIRED_FOR_PROTOCOL_RESTART", "pr": 178, "requiredBasePolicy": "LIVE_MAIN_AT_DISPATCH", "recordedAt": "2026-09-04"},
     {"event": "T2_COMPLETE", "pr": 180, "mergeCommit": "a862498980036ef49b844cb1fa15bcd2e93c76c7", "recordedAt": "2026-09-04"},
     {"event": "T3_COMPLETE", "pr": 182, "mergeCommit": "27e6162c03f50c26041d7a71ae5c1ff99151f9a8", "recordedAt": "2026-09-04"},
-    {"event": "T5_COMPLETE", "pr": 185, "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8", "recordedAt": "2026-09-04", "correction": "F-T5-001 removed fabricated/non-WorkflowIR irSchemaVersion usage; creation fails closed because no valid captured-input authoring contract exists"}
+    {"event": "T5_COMPLETE", "pr": 185, "mergeCommit": "c958f17f93f2d03ff82ff1c06619ce0968e3e6b8", "recordedAt": "2026-09-04", "correction": "F-T5-001 removed fabricated/non-WorkflowIR irSchemaVersion usage; creation fails closed because no valid captured-input authoring contract exists"},
+    {"event": "T13_COMPLETE", "pr": 188, "mergeCommit": "e1383a97508e711a0a758c52bca3cb188a340030", "recordedAt": "2026-09-04", "evidence": "Architect audit accepted T13; explicit expert-mode crossing and return path added without migrating developer authority"}
   ]
 }
