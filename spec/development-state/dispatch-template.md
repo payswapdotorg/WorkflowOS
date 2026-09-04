@@ -1,5 +1,5 @@
 # Resident Worker Dispatch Template
 
-Use this structure for the durable GitHub dispatch comment on every resident-worker implementation run.
+The populated GitHub dispatch comment is the durable dispatch event for a resident Z.ai implementation run.
 
-The populated dispatch comment on the live implementation PR or handoff issue is the durable dispatch event.
+It must contain: task/work-item identity, exact live `main` base SHA, Work Order, merged dependencies, owned scope, forbidden scope, required verification/dogfooding, same-PR rule, resident-worker rule, and recovery/escalation rules.
