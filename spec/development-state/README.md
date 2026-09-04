@@ -8,10 +8,18 @@ For V2 governance-state semantics, read `spec/architecture/v2/V2-ACR-002-governa
 
 Repository state is the sole source of truth for implementation progress and recovery. Conversation history, agent memory, pasted reports, verbal instructions, and copied summaries are non-authoritative.
 
+The human-readable implementation surface is `spec/implementation-roadmap.md`. It is the governed roadmap and progress authority for human consumption and must remain synchronized with the relevant machine state.
+
 For `V2-017`, the repository-resident execution chain is:
 
 ```text
-spec/architecture/v2/V2-ACR-003-post-w6-universal-product-ux.md
+actual Git main
+  ↓
+spec/implementation-roadmap.md
+  ↓
+spec/development-state/implementation-state.json
+  ↓
+spec/development-state/v2-work-order-state.json
   ↓
 spec/architecture/v2/work-orders/V2-017.md
   ↓
@@ -19,77 +27,57 @@ spec/architecture/v2/post-w6-product-roadmap.md
   ↓
 docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md
   ↓
-docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md
-  ↓
-actual GitHub PRs / commits / CI / persisted verification and dogfooding evidence
+actual PRs / commits / CI / persisted verification + dogfooding evidence
 ```
 
-The canonical state in this directory determines Work Order status; actual Git merge is the completion fact; derived projections never authorize work.
+For legacy V1/V1.1 work, `program-state.json` remains the Work Order operational state. For V2 Work Orders, `v2-work-order-state.json` remains the machine activation/completion state. The roadmap may summarize both but must not silently create a competing dependency authority.
 
 ## Authority classes
-
-The directory distinguishes authoritative facts, operational implementation state, and derived projections.
 
 | Artifact | Authority | Role |
 |---|---|---|
 | `governance-model.json` | Governance MODEL | Architect-owned control-loop, assurance, checkpoint and boundary rules. |
-| `program-state.json` | Program/operational state | Work Order status and resume information; must agree with authoritative Git merge facts. |
-| `dependency-state.json` | Derived projection | Dependency eligibility and conflict projection. Never an independent authority. |
-| `frontier-state.json` | Derived projection | Current eligible frontier and live PR/base reconciliation. Never an independent authority. |
-| `checkpoint-state.json` | Derived projection | Checkpoint requirement/result summary. Verification evidence remains authoritative in `/verification`. |
-| V2 navigation fields such as `nextEligible` / `nextAction` | Derived projection | Convenience for agents; stale values must never override the underlying graph, Git history, or Work Order scope. |
+| `program-state.json` | V1/V1.1 operational state | Work Order status and resume information for the original Work Orders. |
+| `v2-work-order-state.json` | V2 Work Order operational state | V2 Work Order eligibility, activation, completion and merge evidence. |
+| `implementation-state.json` | V2-017 task state | Task-level progress inside the V2-017 Work Order; must agree with Git and the roadmap. |
+| `implementation-roadmap.md` | Human-readable roadmap authority | Frozen implementation sequence/progress surface; not a replacement for architecture or dependency authority. |
+| `dependency-state.json` | Derived projection | Dependency eligibility/conflict projection. Never an independent authority. |
+| `frontier-state.json` | Derived projection | Current eligible frontier/reconciliation projection. Never an independent authority. |
+| `checkpoint-state.json` | Derived projection | Checkpoint requirement/result summary. Verification evidence remains authoritative in owning modules. |
 
-The single authoritative dependency graph is the Work Order dependency graph. Roadmap locks constrain concurrency/composition but do not create a competing dependency graph.
+The single authoritative dependency graph remains the Work Order dependency graph. Task-level status is a bounded operational refinement for governed programs such as V2-017; it cannot introduce new dependency semantics.
 
 ## Completion authority
 
-The Architect's actual Git merge is the sole completion event.
+The Architect's actual Git merge is the sole completion event for an implementation task or Work Order.
 
 `mergedAs` is a durable identity binding to the actual PR and merge commit. A complete record without matching Git evidence is invalid. An in-flight record with authoritative merge evidence is invalid until reconciled.
 
-Post-merge reconciliation is bookkeeping: it may be automated or run deterministically from repository Git evidence, but it never approves a merge, expands scope, lowers assurance, or creates a new authority.
-
-A short red reconciliation window is intentional. Governance status must fail closed while Git proves a merge that canonical state has not yet recorded.
+Post-merge reconciliation is bookkeeping: it records authoritative Git facts, updates the roadmap and machine state, and never approves a merge, expands scope, lowers assurance, or creates a new authority.
 
 ## Who may write what
 
-`governance-model.json` changes only through an architect-governed Work Order/architecture-change path.
+`governance-model.json` and architecture-control artifacts change only through their governed architecture/control process.
 
-Operational program state is updated by implementation work within declared surfaces and becomes canonical when accepted through the repository's merge process.
+`implementation-roadmap.md` may change only through a governed roadmap/progress change. Implementation agents may update progress rows when objective evidence exists; they may not rewrite sequencing/dependencies to make work appear eligible.
 
-Derived projections are regenerated by governance tooling. They are never independently edited to make an ineligible or incomplete state appear valid.
+Machine operational state changes only from objective repository evidence and must remain synchronized with the roadmap. Derived projections are regenerated by governance tooling and are never independently edited to authorize work.
 
-Nothing in this directory is runtime tenant state. PostgreSQL remains authoritative for tenant runtime state; `/architecture` remains authoritative for project architecture/ADR state.
-
-## V1.1 evolution artifacts
-
-The next architecture generation remains proposed, not silently activated:
-
-- `spec/architecture/v1.1/` — additive architecture and lock package.
-- `spec/architecture-change-requests/ACR-001-v1-1-adaptive-engineering-control-system.md` — durable architecture-evolution proposal.
-- `spec/governance/` — persistent architect, worker, assurance and checkpoint contracts.
-- `spec/governance/future-roadmap.json` — planned v1.1 Work Order sequence.
-
-An approved Architecture Change Request is required before a new ArchitectureVersion becomes governing.
-
-## Consumption
-
-The development-governance implementation validates the canonical facts and projections fail-closed and answers control-plane queries. `governance:status` reports dependency/frontier/checkpoint inconsistencies and merged-but-unreconciled work.
-
-The `governance-manifest` detector evaluates this state at an exact revision through the architecture-checkpoint substrate.
+Nothing in this directory is runtime tenant state. PostgreSQL remains authoritative for tenant runtime state; `/architecture`, `/work-items`, `/workflows`, `/verification`, `/reviews`, and `/github` remain authoritative for their declared domains.
 
 ## Required invariants
 
 1. Schema versions and closed vocabularies are valid.
 2. The authoritative Work Order dependency graph is acyclic and references known Work Orders only.
-3. Completion evidence is bound to the actual Architect merge identity.
-4. In-flight work records an exact base SHA and cannot coexist with authoritative merge evidence without a reconciliation gap being reported.
-5. Derived dependency/frontier/checkpoint/navigation projections cannot authorize or redefine work.
-6. The governance boundary preserves code-pinned prohibitions and assurance dominance.
-7. Checkpoint enforcement references remain present.
-8. V2 derived artifacts cannot supersede frozen V1 authority or activate a proposed V2 architecture version.
-9. Post-merge reconciliation records authoritative Git facts only; it is not a second approval authority.
-10. The post-merge finalization protocol remains explicit and code-pinned as the merged-finalization invariant.
-11. V2-017 implementation recovery can be completed from repository-resident artifacts without conversational history.
+3. Completion evidence is bound to actual Architect-authorized Git merge identity.
+4. In-flight work records an exact base SHA and cannot be treated as complete without authoritative merge evidence.
+5. Roadmap, task-state and Work Order state cannot authorize work contrary to the dependency graph or frozen architecture.
+6. Derived dependency/frontier/checkpoint/navigation projections cannot authorize or redefine work.
+7. The governance boundary preserves code-pinned prohibitions and assurance dominance.
+8. Checkpoint enforcement references remain present.
+9. V2 derived artifacts cannot supersede frozen V1 authority or activate a proposed V2 architecture version.
+10. Post-merge finalization records authoritative Git facts only and remains separate from approval.
+11. V2-017 recovery can be completed from repository-resident artifacts without conversational history.
+12. The human-readable roadmap and its relevant machine state are synchronized for every governed progress change.
 
-A repository whose governance state violates any invariant is not a valid governed state: the control plane refuses to treat it as valid and the governance-manifest checkpoint fails closed.
+A repository whose governance state violates any invariant is not a valid governed state: implementation must stop until the inconsistency is repaired.

@@ -4,19 +4,42 @@ WorkflowOS is a platform for managing an AI-assisted software development
 workflow. This repository holds both the frozen architecture specification
 and the implementation.
 
-## Repository layout
+## Repository authority
 
-```
-WorkflowOS/
-├── spec/        # Frozen architecture (authoritative — do not modify)
-│   ├── architecture.md
-│   ├── architecture-lock.md
-│   ├── requirements.md
-│   ├── work-items.md
-│   └── dependency-graph.md
-├── backend/     # TypeScript modular-monolith backend (WORK-001+)
-└── docs/        # Work-item evidence and design notes
-```
+This GitHub repository is the sole source of truth for implementation. A fresh
+agent must not require conversation history, copied reports, or external
+planning notes to determine what to implement next.
+
+### Read first — all agents
+
+1. [`AGENTS.md`](AGENTS.md) — mandatory repository-only operating contract
+2. [`spec/implementation-roadmap.md`](spec/implementation-roadmap.md) — **frozen human-readable implementation sequencing and progress authority**
+3. [`spec/development-state/README.md`](spec/development-state/README.md) — development-governance authority declarations
+4. [`spec/development-state/implementation-state.json`](spec/development-state/implementation-state.json) — V2-017 task-level progress and recovery state
+5. [`spec/development-state/v2-work-order-state.json`](spec/development-state/v2-work-order-state.json) — V2 Work Order eligibility/completion state
+6. [`spec/development-state/program-state.json`](spec/development-state/program-state.json) — V1/V1.1 Work Order operational state
+7. [`spec/architecture-lock.md`](spec/architecture-lock.md) — frozen architecture invariants
+8. [`spec/architecture.md`](spec/architecture.md) — architecture description
+9. [`spec/requirements.md`](spec/requirements.md) — requirements
+10. applicable Work Order and dependency artifacts under [`spec/`](spec/)
+11. [`docs/implementation/IMPLEMENTATION-GUIDE.md`](docs/implementation/IMPLEMENTATION-GUIDE.md) — implementation protocol
+
+### Active program
+
+The current implementation frontier is **V2-017 — Universal Product UX**.
+Read the human-readable roadmap and V2-017 repository-only execution contract
+before starting or resuming work. The roadmap records task progress in a form
+that a human can audit; machine state remains the operational counterpart.
+
+## Implementation rule
+
+Select work only when its governing machine state and dependency graph make it
+eligible. Verify dependencies through actual Git merge evidence. Inspect the
+actual repository before coding. One bounded implementation slice per branch/PR.
+Write failing behavioral tests first where behavior changes. Run objective
+verification and required real-system/browser dogfooding. Record exact revision
+and evidence. Submit to the Architect gate. Actual Git merge establishes
+completion. Reconcile the roadmap and machine state immediately after merge.
 
 ## Architecture
 
@@ -27,15 +50,14 @@ The architecture is **frozen**. The authoritative documents are:
 
 Any change to the architecture requires an Architecture Change Request and a
 new immutable architecture version. Implementation agents must not modify the
-frozen architecture (architecture §2.4, §40).
+frozen architecture inside ordinary Work Orders.
 
-## Current state
+## Current product-layer state
 
-**WORK-001** — Platform and modular-monolith foundation — is implemented in
-[`backend/`](backend/). See [`docs/work-items/WORK-001.md`](docs/work-items/WORK-001.md)
-for the acceptance-criteria evidence.
-
-All subsequent work items build on this foundation.
+V2-017 Task 1 has merged through PR #173. Task 2 is the current implementation
+slice. Exact live status must always be re-read from GitHub and
+`spec/development-state/implementation-state.json`; this README is an entry
+point, not a substitute for current state.
 
 ## Quick start
 

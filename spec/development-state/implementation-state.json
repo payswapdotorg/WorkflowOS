@@ -1,0 +1,81 @@
+{
+  "$schema": "https://github.com/pectoraux/WorkflowOS/blob/main/spec/development-state/README.md",
+  "schemaVersion": 1,
+  "artifact": "workflowos-development-state/implementation-state",
+  "program": "V2-017",
+  "programTitle": "Universal Product UX",
+  "sourceOfTruth": "repository",
+  "roadmap": "spec/implementation-roadmap.md",
+  "workOrder": "spec/architecture/v2/work-orders/V2-017.md",
+  "programMap": "spec/architecture/v2/post-w6-product-roadmap.md",
+  "executionContract": "docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md",
+  "machineWorkOrderState": "spec/development-state/v2-work-order-state.json",
+  "completionAuthority": "actual Git merge",
+  "statusVocabulary": ["ELIGIBLE", "IN_PROGRESS", "BLOCKED", "COMPLETE", "STALE_BASE", "OBSOLETE"],
+  "asOf": "2026-09-04",
+  "currentMain": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
+  "workOrderStatus": "READY",
+  "currentTask": "T2",
+  "nextEligible": ["T3", "T5", "T13"],
+  "nextAction": "Finish T2 from the newest eligible main. T2 must not depend on an unmerged sibling. After a task is accepted and merged, reconcile this artifact and the human-readable roadmap, then recompute the frontier.",
+  "tasks": {
+    "T1": {
+      "status": "COMPLETE",
+      "dependency": ["V2-ACR-003"],
+      "baseSha": "fd5165ab332352101057d1ef6486541d0120be2b",
+      "pr": 173,
+      "headSha": "3530468abfe2cad4a0e5e3188b128ca9850eeab0",
+      "mergeCommit": "3a507199ec8b70f4c4feb2829bb1b6a2070bfc38",
+      "evidence": "PR #173 exact-head verification recorded in the merged PR; shell navigation and real browser auth journey verified.",
+      "scope": "consumer shell, Home/Workflows/Explore/Activity navigation, Create and Expert entry, protected-route preservation"
+    },
+    "T2": {
+      "status": "IN_PROGRESS",
+      "dependsOn": ["T1"],
+      "baseSha": "520b93b0c757bd0827d09de66d628f0fc4dbcba8",
+      "pr": 175,
+      "branch": "feat/v2-017-task-2-workflow-first-home",
+      "headSha": "7fa73064468861271d8843c1b2ba34fc4a97f8be",
+      "evidence": "RED-first Home contract committed on PR #175; test must be followed by implementation and exact-head verification.",
+      "scope": "goal/search entry, recent workflows, attention, approvals, updates, device issues; explicit success/empty/error distinction"
+    },
+    "T3": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "workflow library"},
+    "T4": {"status": "BLOCKED", "dependsOn": ["T3"], "scope": "workflow detail"},
+    "T5": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "Tell / Show / Tell + Show creation"},
+    "T6": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "Run / approval / where-it-runs"},
+    "T7": {"status": "BLOCKED", "dependsOn": ["T6"], "scope": "failure / recovery / takeover"},
+    "T8": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "scheduling and events"},
+    "T9": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "Teach Me / reverse teaching"},
+    "T10": {"status": "BLOCKED", "dependsOn": ["T6", "T7", "T9"], "scope": "Activity and trust"},
+    "T11": {"status": "BLOCKED", "dependsOn": ["T4"], "scope": "versions / updates / optimization"},
+    "T12": {"status": "BLOCKED", "dependsOn": ["T3", "T4", "T11"], "scope": "sharing / marketplace / install"},
+    "T13": {"status": "ELIGIBLE", "dependsOn": ["T1"], "scope": "expert/developer workspace"},
+    "T14": {"status": "BLOCKED", "dependsOn": ["T1"], "scope": "responsive/mobile adaptation"},
+    "T15": {"status": "BLOCKED", "dependsOn": ["T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13", "T14"], "scope": "full verification and real product dogfooding"},
+    "T16": {"status": "BLOCKED", "dependsOn": ["T15"], "scope": "sole Architect gate and merge"}
+  },
+  "rules": {
+    "repositoryOnly": true,
+    "oneImplementationSlicePerBranch": true,
+    "unmergedSiblingDependency": false,
+    "actualMergeCompletesTask": true,
+    "roadmapAndStateSynchronized": true,
+    "freshExactHeadVerification": true,
+    "dogfoodingRequired": true,
+    "noSecondAuthority": true
+  },
+  "history": [
+    {
+      "event": "T1_COMPLETE",
+      "pr": 173,
+      "mergeCommit": "3a507199ec8b70f4c4feb2829bb1b6a2070bfc38",
+      "recordedAt": "2026-09-04"
+    },
+    {
+      "event": "T2_STARTED",
+      "pr": 175,
+      "headSha": "7fa73064468861271d8843c1b2ba34fc4a97f8be",
+      "recordedAt": "2026-09-04"
+    }
+  ]
+}
