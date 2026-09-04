@@ -154,7 +154,7 @@ CURRENT TASK
 
 T2  Workflow-first Home
     historical implementation checkpoint: PR #178
-    required new implementation base: b5e370896b1425dbf04b10bf726482b15e330bfd
+    required base: LIVE_MAIN_AT_DISPATCH
     resident-worker protocol: ACTIVE
 ```
 
@@ -162,12 +162,11 @@ No task may become eligible merely because a branch exists. Dependencies are com
 
 ## Current implementation snapshot
 
-- Current `main` governance head for resident-worker activation: `b5e370896b1425dbf04b10bf726482b15e330bfd`.
-- V2-017 Task 1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
+- T1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
 - T2 historical implementation checkpoints include PR #175 and PR #178; neither is a current implementation dependency.
-- PR #178 was based before the resident-worker operating process was installed. It remains preserved as historical implementation evidence only.
-- The current T2 implementation must be dispatched from the exact current `main` base identified in canonical development state and re-verified live immediately before implementation.
-- The resident-worker operating protocol and operations artifact are now repository-resident and govern all future resident Z.ai implementation sessions.
+- PR #178 was based before the resident-worker operating process was synchronized. It remains preserved as historical implementation evidence only.
+- The exact T2 implementation base is **always the live `main` SHA re-read immediately before worker dispatch**. No stored governance artifact is treated as a durable current-main hash.
+- The resident-worker operating protocol, operations artifact, and dispatch template are repository-resident and govern all future resident Z.ai implementation sessions.
 
 The exact live branch/PR state must always be re-read from GitHub before continuing.
 
