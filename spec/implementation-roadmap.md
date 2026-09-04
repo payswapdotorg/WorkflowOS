@@ -127,17 +127,17 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 | T1 | ✅ COMPLETE | V2-017 activation | Universal product shell, navigation, expert entry |
 | T2 | ✅ COMPLETE | T1 | Workflow-first Home and attention surfaces |
 | T3 | ✅ COMPLETE | T1 | Workflow library |
-| T4 | ✅ ELIGIBLE | T3 | Workflow detail |
+| T4 | ✅ COMPLETE | T3 | Workflow detail |
 | T5 | ✅ COMPLETE | T1 | Tell / Show / Tell + Show creation |
-| T6 | ⬜ BLOCKED | T4 | Run / approval / where-it-runs |
+| T6 | ⬜ ELIGIBLE | T4 | Run / approval / where-it-runs |
 | T7 | ⬜ BLOCKED | T6 | Failure / recovery / takeover |
-| T8 | ⬜ BLOCKED | T4 | Scheduling and events |
-| T9 | ⬜ BLOCKED | T4 | Teach Me / reverse teaching |
+| T8 | ⬜ ELIGIBLE | T4 | Scheduling and events |
+| T9 | ⬜ ELIGIBLE | T4 | Teach Me / reverse teaching |
 | T10 | ⬜ BLOCKED | T6 / T7 / T9 | Activity and “How do you know?” |
-| T11 | ⬜ BLOCKED | T4 | Versions / updates / optimization |
+| T11 | ⬜ ELIGIBLE | T4 | Versions / updates / optimization |
 | T12 | ⬜ BLOCKED | T3 / T4 / T11 | Sharing / marketplace / install |
 | T13 | ✅ COMPLETE | T1 | Expert/developer workspace |
-| T14 | ⬜ BLOCKED | T1 + shared product shell | Responsive/mobile adaptation |
+| T14 | ⬜ ELIGIBLE | T1 + shared product shell | Responsive/mobile adaptation |
 | T15 | ⬜ BLOCKED | T2–T14 | Full verification + real product dogfooding |
 | T16 | ⬜ BLOCKED | T15 | Sole Architect review and merge gate |
 
@@ -146,12 +146,16 @@ The diagram is intentionally human-readable. The exact dependency graph remains 
 ```text
 ELIGIBLE FRONTIER
 
-T4  Workflow detail
+T6  Run / approval / where-it-runs
+T8  Scheduling and events
+T9  Teach Me / reverse teaching
+T11 Versions / updates / optimization
+T14 Responsive / mobile adaptation
 
 CURRENT TASK
 
-T4  Workflow detail
-    T3 dependency complete; T13 merged and reconciled separately
+T6  Run / approval / where-it-runs
+    T4 dependency complete; T4 is merged and reconciled
 ```
 
 No task may become eligible merely because a branch exists. Dependencies are complete only through authoritative merged Git evidence. A stale implementation branch is historical evidence, not a current implementation dependency.
@@ -161,6 +165,9 @@ No task may become eligible merely because a branch exists. Dependencies are com
 - T1 is complete through **PR #173**, merged as `3a507199ec8b70f4c4feb2829bb1b6a2070bfc38`.
 - T2 is complete through **PR #180**, merged as `a862498980036ef49b844cb1fa15bcd2e93c76c7`.
 - T3 is complete through **PR #182**, merged as `27e6162c03f50c26041d7a71ae5c1ff99151f9a8`.
+- T4 is complete through **PR #191**, squash-merged as `a9d70e9944d8d6af3cac7a3f7ddfe35c7c233636` from corrected head `35054853ba100deead33439aa2160507e421211c` on base `2904859fd6775063132e9c576e2319ee3cffdeda`.
+- T4 included correction of F-T4-001: step labels are sourced only from V2-003 `presentation.nodeLabels`; internal `WorkflowNode.id` values are never rendered as consumer-facing labels, and missing/invalid presentation labels fail closed to the honest steps-unavailable state.
+- T4 exact corrected-head verification: frontend 192/192, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean; e2e, work-026/027/048/049/050 browser E2E, companion extension, lifecycle, and Architecture Governance passed. Backend and deploy failures matched the same failures at canonical base, producing zero PR-attributable CI regressions.
 - T5 is complete through **PR #185**, squash-merged as `c958f17f93f2d03ff82ff1c06619ce0968e3e6b8` from corrected head `e759c6b4a992c526aa716b636868ae399c23414e`.
 - T5 completion included correction of F-T5-001: the false `workflowos-captured-input-v1` use of the frozen WorkflowIR compatibility field was removed; the creation flow fails closed because no valid public captured-input authoring contract exists.
 - T5 exact-head verification: Architecture Governance, frontend, lifecycle, governance-artifacts, work-026/027/048/049/050 browser E2E, and companion extension checks passed at the corrected head. Backend and deploy failures remained identical pre-existing failures from the canonical base. Frontend 22 files / 179 tests passed, tsc clean, ESLint 0 errors with one pre-existing warning, Vite build clean, work-074 browser 5/5, lifecycle 1/1, and architecture 914/915 with the single WORK-052 failure pre-existing at base.
