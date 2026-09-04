@@ -2,6 +2,13 @@
 
 `spec/development-state/` is the canonical repository-resident development-governance state of WorkflowOS. It exists so that a fresh architect or implementation agent with zero conversational history can determine what architecture governs, which Work Orders exist, what can run in parallel, which checkpoints apply, and how interrupted work resumes.
 
+## Fresh takeover navigation
+
+- [`ARCHITECT_START_HERE.md`](../../ARCHITECT_START_HERE.md) — root entrypoint for a zero-history Architect.
+- [`current-state.md`](./current-state.md) — human-readable convenience projection; not authority.
+- [`../../docs/architecture/ARCHITECT-REVIEW-PROTOCOL.md`](../../docs/architecture/ARCHITECT-REVIEW-PROTOCOL.md) — repeatable Architect PR review loop.
+- [`../../docs/implementation/ZAI-RESIDENT-WORKER-PROMPT.md`](../../docs/implementation/ZAI-RESIDENT-WORKER-PROMPT.md) — resident implementation-worker operating prompt.
+
 For V2 governance-state semantics, read `spec/architecture/v2/V2-ACR-002-governance-control-plane-refinement.md` together with `spec/architecture/v2/execution-control-plane.md`.
 
 ## Repository-only consumption
