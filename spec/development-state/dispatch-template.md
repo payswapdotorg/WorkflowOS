@@ -1,6 +1,6 @@
 # Resident Worker Dispatch Template
 
-Use this as the structure for the durable GitHub dispatch comment on every resident-worker implementation run.
+Use this structure for the durable GitHub dispatch comment on every resident-worker implementation run.
 
 ```text
 ARCHITECT — DURABLE Z.AI DISPATCH
@@ -42,4 +42,4 @@ Recovery:
 - if the branch/base/task is contradictory, stop and escalate.
 ```
 
-This template is procedural guidance only. A populated dispatch comment on the live implementation PR or handoff issue is the actual durable dispatch event.
+This template is procedural guidance only. The populated dispatch comment on the live implementation PR or handoff issue is the durable dispatch event.
