@@ -295,16 +295,6 @@ export interface ProductWorkflow {
   updatedAt: string;
 }
 
-export const workflowRepository = {
-  /** The organization's workflows visible to the caller (V2-002 read). */
-  listForOrganization: async (organizationId: string): Promise<ProductWorkflow[]> => {
-    const body = await apiGet<{ workflows: ProductWorkflow[] }>(
-      `/organizations/${organizationId}/workflow-repository/workflows`,
-    );
-    return body.workflows ?? [];
-  },
-};
-
 export interface ProductWorkflowRun {
   id: string;
   organizationId: string;
@@ -327,6 +317,118 @@ export const workflowRuns = {
       `/organizations/${organizationId}/workflow-runs/runs`,
     );
     return body.runs ?? [];
+  },
+};
+
+// T3 (V2-017): the workflow library reads the tenant's installations with
+// their pinned versions (the V2-002 repository route) plus the deployments
+// and per-deployment trigger subscriptions (the workflow-deployments routes
+// — placement/environment, enable state, schedule/event facts). These are
+// READS of existing public authorities — consume-only, no second workflow
+// model, no mutation surface. Failed reads throw (the honest-error
+// contract); the caller aggregates with all-or-error semantics.
+
+/** One installation with its pinned version resolved (the V2-002 detail). */
+export interface ProductInstallation {
+  id: string;
+  organizationId: string;
+  workflowId: string;
+  versionId: string;
+  installedByUserId: string;
+  status: string;
+  installedAt: string;
+  updatedAt: string;
+}
+
+/** The immutable version an installation pins (never auto-updates). */
+export interface ProductPinnedVersion {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  contentDigest: string;
+  protocol: unknown;
+}
+
+export interface ProductInstallationDetail {
+  installation: ProductInstallation;
+  pinnedVersion: ProductPinnedVersion;
+}
+
+/** The execution placement policy (V2-004's contracts, consumed verbatim). */
+export interface ProductPlacementPolicy {
+  placement: { required: string; fallbackOrder?: string[] };
+  privacy: { localOnly: boolean };
+}
+
+export interface ProductDeployment {
+  id: string;
+  organizationId: string;
+  workflowId: string;
+  versionId: string;
+  installationId: string | null;
+  name: string;
+  description: string | null;
+  placement: ProductPlacementPolicy;
+  enabled: boolean;
+  enabledAt: string | null;
+  disabledAt: string | null;
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One trigger subscription attached to a deployment (schedule or event). */
+export interface ProductTriggerSubscription {
+  id: string;
+  organizationId: string;
+  deploymentId: string;
+  kind: string;
+  schedule: unknown;
+  eventPattern: unknown;
+  deliveryPolicy: unknown;
+  enabled: boolean;
+  cursor: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const workflowRepository = {
+  /** The organization's workflows visible to the caller (V2-002 read). */
+  listForOrganization: async (organizationId: string): Promise<ProductWorkflow[]> => {
+    const body = await apiGet<{ workflows: ProductWorkflow[] }>(
+      `/organizations/${organizationId}/workflow-repository/workflows`,
+    );
+    return body.workflows ?? [];
+  },
+
+  /** The tenant's installations with their pinned versions (V2-002 read). */
+  listInstallationsForOrganization: async (
+    organizationId: string,
+  ): Promise<ProductInstallationDetail[]> => {
+    const body = await apiGet<{ installations: ProductInstallationDetail[] }>(
+      `/organizations/${organizationId}/workflow-repository/installations`,
+    );
+    return body.installations ?? [];
+  },
+};
+
+export const workflowDeployments = {
+  /** The organization's deployments — placement and enable state (read). */
+  listForOrganization: async (organizationId: string): Promise<ProductDeployment[]> => {
+    const body = await apiGet<{ deployments: ProductDeployment[] }>(
+      `/organizations/${organizationId}/workflow-deployments/deployments`,
+    );
+    return body.deployments ?? [];
+  },
+
+  /** One deployment's trigger subscriptions (schedule/event facts). */
+  listSubscriptionsForDeployment: async (
+    deploymentId: string,
+  ): Promise<ProductTriggerSubscription[]> => {
+    const body = await apiGet<{ subscriptions: ProductTriggerSubscription[] }>(
+      `/workflow-deployments/deployments/${deploymentId}/subscriptions`,
+    );
+    return body.subscriptions ?? [];
   },
 };
 

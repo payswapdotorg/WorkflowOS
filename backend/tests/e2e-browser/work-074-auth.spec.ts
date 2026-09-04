@@ -159,4 +159,59 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     await expect(page.getByText(/Nothing needs your attention/i)).toHaveCount(0);
     await expect(page.getByRole('status', { name: 'Unavailable' })).toHaveCount(3);
   });
+
+  // V2-017 T3 — the workflow library honest-state journey, real topology:
+  // the identity stack serves the real session + /organizations reads (but
+  // no V2-002/workflow-deployment routes), so this journey proves in a real
+  // browser: the five approved library sections, the honest SUCCESSFUL-EMPTY
+  // wired sections for a member of no organization, the honest Unavailable
+  // panels for Drafts/Archived (no authoritative read exists for those
+  // states), and — after creating an organization through the public route —
+  // the honest ERROR state (org-scoped reads 404 here): a failed read is
+  // NEVER a successful empty state.
+  test('T3 Library: five sections, honest empty → error transition, Unavailable panels', async ({ page }) => {
+    // Fresh user (no organization): the derivable-empty library.
+    await page.goto('/');
+    await page.getByText('Create one', { exact: true }).click();
+    await page.locator('#displayName').fill('Carl (T3)');
+    await page.locator('#email').fill('carl-t3@e2e.example.com');
+    await page.locator('#password').fill('the-t3-password-42');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('heading', { name: 'WorkflowOS' })).toBeVisible({ timeout: 15_000 });
+
+    // The library renders its five approved sections.
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Library sections' })).toBeVisible();
+    const tabs = page.getByRole('tab');
+    await expect(tabs).toHaveCount(5);
+    await expect(page.getByRole('tab', { name: 'My Workflows' })).toHaveAttribute('aria-selected', 'true');
+
+    // Honest SUCCESSFUL-EMPTY (real /organizations read: no organization ⇒
+    // derivably no workflows anywhere).
+    await expect(page.getByText(/No workflows yet/i)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('alert')).toHaveCount(0);
+
+    // Drafts and Archived: no authoritative read exists — honest Unavailable,
+    // never fabricated empties.
+    await page.getByRole('tab', { name: 'Drafts' }).click();
+    await expect(page.getByRole('status', { name: 'Unavailable' })).toBeVisible();
+    await page.getByRole('tab', { name: 'Archived' }).click();
+    await expect(page.getByRole('status', { name: 'Unavailable' })).toBeVisible();
+
+    // Failed reads stay visibly FAILED, never successful-empty: create an
+    // organization through the public route; the org-scoped library reads
+    // then 404 on this identity-only topology → the honest error state.
+    const res = await page.request.post('/api/organizations', { data: { name: 'Acme T3' } });
+    expect(res.ok()).toBeTruthy();
+    await page.goto('/workflows');
+    await expect(page.getByRole('tab', { name: 'My Workflows' })).toBeVisible();
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: /try again/i })).toBeVisible();
+    await expect(page.getByText(/No workflows yet/i)).toHaveCount(0);
+    // The Unavailable panels are unaffected by the data-read failure.
+    await page.getByRole('tab', { name: 'Drafts' }).click();
+    await expect(page.getByRole('status', { name: 'Unavailable' })).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
 });
