@@ -25,6 +25,7 @@ import ExecutionPreferencesPage from './pages/ExecutionPreferencesPage';
 import UniversalProductShell from './components/shell/UniversalProductShell';
 import HomePage from './pages/HomePage';
 import WorkflowsPage from './pages/WorkflowsPage';
+import WorkflowDetailPage from './pages/WorkflowDetailPage';
 import ExplorePage from './pages/ExplorePage';
 import ProductActivityPage from './pages/ProductActivityPage';
 import CreatePage from './pages/CreatePage';
@@ -84,6 +85,18 @@ export default function App() {
         element={
           <UniversalProductShell>
             <WorkflowsPage />
+          </UniversalProductShell>
+        }
+      />
+      {/* V2-017 Task 4 — the workflow detail experience, reached through
+          the library (the workflow is the primary durable mental model).
+          Composed over existing V2-002/V2-005 authorities; no second
+          workflow model. */}
+      <Route
+        path="/workflows/:workflowId"
+        element={
+          <UniversalProductShell>
+            <WorkflowDetailPage />
           </UniversalProductShell>
         }
       />

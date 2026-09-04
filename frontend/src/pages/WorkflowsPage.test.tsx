@@ -411,6 +411,25 @@ describe('V2-017 T3 — workflow library', () => {
     });
   });
 
+  describe('detail entry (T4)', () => {
+    it('cards open the workflow detail — My/Shared workflow cards and the Installed card', async () => {
+      // The library is the entry to the detail experience: every card
+      // carries the authoritative workflow id forward as the product route.
+      await renderLibrary(orgOneRoutes());
+      // My Workflows (default): wf-a's card opens the detail.
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+      );
+      expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/workflows/wf-a');
+      // Shared with me: wf-b's card.
+      await openTab('Shared with me');
+      expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/workflows/wf-b');
+      // Installed: the install card opens the pinned workflow's detail.
+      await openTab('Installed');
+      expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/workflows/wf-b');
+    });
+  });
+
   describe('contextual filters (presentation-level, honestly derived)', () => {
     it('Needs attention keeps only workflows with failed/paused runs', async () => {
       await renderLibrary(orgOneRoutes());

@@ -401,6 +401,22 @@ export const workflowRepository = {
     return body.workflows ?? [];
   },
 
+  /** One workflow (visibility-checked; the V2-002 read). */
+  get: async (workflowId: string): Promise<ProductWorkflow> => {
+    const body = await apiGet<{ workflow: ProductWorkflow }>(
+      `/workflow-repository/workflows/${workflowId}`,
+    );
+    return body.workflow;
+  },
+
+  /** The workflow's immutable versions in stable order (V2-002 read). */
+  listVersionsForWorkflow: async (workflowId: string): Promise<ProductWorkflowVersion[]> => {
+    const body = await apiGet<{ versions: ProductWorkflowVersion[] }>(
+      `/workflow-repository/workflows/${workflowId}/versions`,
+    );
+    return body.versions ?? [];
+  },
+
   /** The tenant's installations with their pinned versions (V2-002 read). */
   listInstallationsForOrganization: async (
     organizationId: string,
@@ -411,6 +427,19 @@ export const workflowRepository = {
     return body.installations ?? [];
   },
 };
+
+/** An immutable workflow version (the V2-002 wire shape). */
+export interface ProductWorkflowVersion {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  contentDigest: string;
+  content: unknown;
+  protocol: unknown;
+  parentVersionId: string | null;
+  createdByUserId: string;
+  createdAt: string;
+}
 
 export const workflowDeployments = {
   /** The organization's deployments — placement and enable state (read). */

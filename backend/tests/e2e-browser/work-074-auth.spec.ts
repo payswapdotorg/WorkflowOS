@@ -313,4 +313,42 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     await page.getByRole('link', { name: 'Back to WorkflowOS' }).click();
     await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
   });
+
+  // V2-017 T4 — the workflow detail journey, real topology: the identity
+  // stack serves the real session (but no V2-002/workflow-deployment
+  // routes), so this journey proves in a real browser: the detail route
+  // renders INSIDE the product shell (reached from the library), the
+  // honest LOADING → ERROR transition (the workflow read 404s on this
+  // topology — a failed read is NEVER a fabricated empty detail), the
+  // retry affordance, and the return path through the product shell nav.
+  test('T4 Detail: route through the shell, honest error, retry, and the return path', async ({ page }) => {
+    // Fresh user → the consumer shell.
+    await page.goto('/');
+    await page.getByText('Create one', { exact: true }).click();
+    await page.locator('#displayName').fill('Fay (T4)');
+    await page.locator('#email').fill('fay-t4@e2e.example.com');
+    await page.locator('#password').fill('the-t4-password-42');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('heading', { name: /What do you want to get done\?/i })).toBeVisible({ timeout: 15_000 });
+
+    // The library is the entry surface (the workflow mental model).
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+
+    // Open a workflow detail by its product URL. The route renders INSIDE
+    // the product shell; the honest state on this identity-only topology
+    // is the ERROR (the read fails — never a fake 'not run yet' detail).
+    await page.goto('/workflows/wf-t4-1');
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/couldn't load this workflow right now/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /try again/i })).toBeVisible();
+    // No fabricated detail facts on a failed read.
+    await expect(page.getByText(/not run yet/i)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toHaveCount(0);
+
+    // The product shell still surrounds the detail surface — the return
+    // path stays present, and it leads back to the library.
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+  });
 });

@@ -88,6 +88,30 @@ describe('V2-017 Task 1 — universal product navigation', () => {
     });
   });
 
+  describe('workflow detail route (T4)', () => {
+    it('renders the detail route inside the product shell with the honest error state', async () => {
+      // The route contract: /workflows/:workflowId renders the detail page
+      // INSIDE the product shell. Under this mock every product read
+      // succeeds with an empty object, so the workflow read resolves to no
+      // workflow — the honest ERROR surface (never a fabricated empty
+      // detail), with retry, and the shell's return path still present.
+      render(
+        <MemoryRouter initialEntries={['/workflows/wf-nav-1']}>
+          <App />
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+      expect(screen.getByText(/couldn't load this workflow right now/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+      // The product shell surrounds the detail surface — the library
+      // return path stays present.
+      expect(screen.getByRole('link', { name: 'Workflows' })).toHaveAttribute(
+        'href',
+        '/workflows',
+      );
+    });
+  });
+
   describe('primary navigation model', () => {
     it('exposes Home / Workflows / Explore / Activity plus the universal Create entry', async () => {
       render(

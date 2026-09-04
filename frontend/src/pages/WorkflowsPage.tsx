@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import {
   organizations,
@@ -306,6 +307,16 @@ function WorkflowCard({
         {/* Implementation identifiers stay secondary (a muted detail line;
             digests never appear on the card). */}
         <p className="mt-2 font-mono text-xs text-muted-foreground/70">{workflow.slug}</p>
+        {/* T4: the card opens the workflow detail — the product route
+            carries the authoritative workflow id forward. */}
+        <div className="mt-3">
+          <Link
+            to={`/workflows/${workflow.id}`}
+            className="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Open
+          </Link>
+        </div>
       </article>
     </li>
   );
@@ -364,6 +375,16 @@ function InstallationCard({
         {workflow && (
           <p className="mt-2 font-mono text-xs text-muted-foreground/70">{workflow.slug}</p>
         )}
+        {/* T4: the install card opens the pinned workflow's detail — the
+            product route carries the authoritative workflow id forward. */}
+        <div className="mt-3">
+          <Link
+            to={`/workflows/${detail.installation.workflowId}`}
+            className="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Open
+          </Link>
+        </div>
       </article>
     </li>
   );
