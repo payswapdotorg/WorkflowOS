@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   workflowRepository,
   workflowRuns,
@@ -133,6 +133,11 @@ const DEVICE_PLACEMENTS: ReadonlySet<string> = new Set(['device_local', 'device_
 
 export default function WorkflowDetailPage() {
   const { workflowId } = useParams<{ workflowId: string }>();
+  // T10 F02 (§16 direct links): the Activity entries' "Open the run"
+  // link — a ?run= param on THIS route selects the run the run-status
+  // surface presents. Top-level hook (unconditional, before the early
+  // returns); the authoritative runs read governs the lookup below.
+  const [searchParams] = useSearchParams();
   const [state, setState] = useState<DetailState>({ kind: 'loading' });
   const [nonce, setNonce] = useState(0);
   const [actionNote, setActionNote] = useState<string | null>(null);
@@ -235,6 +240,14 @@ export default function WorkflowDetailPage() {
     .slice(0, 5);
   // The newest run (T6's run-status data source — authoritative).
   const latestRun = latestRuns[0] ?? null;
+  // The ?run= selection: the runs read governs — an unknown or absent
+  // id presents the newest run (never a fabricated run); an earlier run
+  // is passed with isLatest=false so the surface discloses it honestly.
+  const runParam = searchParams.get('run');
+  const runFocus = runParam
+    ? (runs.find((r) => r.id === runParam) ?? null)
+    : null;
+  const runStatusRun = runFocus ?? latestRun;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -294,7 +307,8 @@ export default function WorkflowDetailPage() {
           versions={versions}
           installation={installation}
           deployments={deployments}
-          latestRun={latestRun}
+          run={runStatusRun}
+          isLatest={runStatusRun?.id === latestRun?.id}
           onRunsChanged={refetch}
         />
       </section>

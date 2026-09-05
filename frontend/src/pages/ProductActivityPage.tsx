@@ -28,6 +28,18 @@
  * The per-run "How do you know?" region loads the run's history on demand
  * (progressive disclosure): concise evidence first, then advanced
  * verification, with the no-physical-proof boundary (§17 / rule 6).
+ *
+ * §16 DIRECT LINKS (architect F02): every run entry reaches BOTH its
+ * Workflow (the name link) and its SPECIFIC Run — the explicit
+ * "Open the run" link carries ?run=<id> to the workflow route, where
+ * the run-status surface presents exactly that run.
+ *
+ * THE NEEDS-ME BUCKET (architect F01): the filter uses the SAME
+ * authoritative approval derivation as the "Waiting for you" state
+ * word — a run enters Needs me only when the history read proves the
+ * pause rides an IR approval node. A paused run whose history or
+ * version facts are unavailable (loading, failed read, missing
+ * version) is NEVER upgraded into the bucket: no evidence, no claim.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -253,11 +265,16 @@ export default function ProductActivityPage() {
     if (filter === 'all') return events;
     return events.filter((event) => {
       if (event.kind !== 'run') return false;
-      if (filter === 'needs-me') return event.run.state === 'paused';
+      // F01: Needs me is the SAME authoritative derivation as the state
+      // word (needsYouWord) — never the raw paused state. When the
+      // history/version facts are unavailable, the run is not upgraded
+      // into the Needs-me bucket.
+      if (filter === 'needs-me')
+        return needsYouWord(event.run, runHistories, versions) !== null;
       if (filter === 'completed') return event.run.state === 'completed';
       return event.run.state === 'failed';
     });
-  }, [events, filter]);
+  }, [events, filter, runHistories, versions]);
 
   const anyLoading =
     workflowsState.kind === 'loading' ||
@@ -399,6 +416,9 @@ export default function ProductActivityPage() {
                 );
               }
               const { name, to } = workflowName(event.run.workflowId);
+              // F02 (§16): the run-level direct link — ?run= selects THIS
+              // run on the workflow's run-status surface.
+              const runTo = `/workflows/${event.run.workflowId}?run=${event.run.id}`;
               const stateWord =
                 needsYouWord(event.run, runHistories, versions) ??
                 humanRunState(event.run);
@@ -420,7 +440,14 @@ export default function ProductActivityPage() {
                       —{' '}
                       <span className={stateWord === 'Waiting for you' ? 'font-medium text-primary' : 'font-medium'}>
                         {stateWord}
-                      </span>
+                      </span>{' '}
+                      ·{' '}
+                      <Link
+                        to={runTo}
+                        className="text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                      >
+                        Open the run
+                      </Link>
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {formatRelative(event.occurredAt)}
