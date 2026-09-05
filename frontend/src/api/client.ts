@@ -322,6 +322,42 @@ export interface ProductRunTimelineEntry {
   detail: Record<string, unknown> | null;
 }
 
+// T10 (V2-017): the typed views of the history read's evidence and
+// attestation-binding arrays (the V2-005 wire shapes, consumed verbatim —
+// the evidence facts arrive through the V2-005 history read; the V2-014
+// attestation facts arrive as the bindings the Run boundary verified).
+// Typing these arrays changes no authority: the frontend renders, never
+// re-derives.
+
+/** One evidence record (provenance is mandatory on the wire). */
+export interface ProductRunEvidenceRecord {
+  id: string;
+  runId: string;
+  attemptNumber: number;
+  stepId: string | null;
+  evidenceClass: string;
+  producerKind: string;
+  producerId: string;
+  contentCommitment: string;
+  description: string | null;
+  recordedAt: string;
+}
+
+/** One VERIFIED attestation binding (only attached bindings appear here). */
+export interface ProductRunAttestationBinding {
+  attestationId: string;
+  runId: string;
+  attemptNumber: number;
+  stepId: string | null;
+  executionDigest: string;
+  attesterKeyId: string;
+  assurance: string;
+  nonce: string;
+  statement: Record<string, unknown>;
+  verifiedAt: string;
+  attachedAt: string;
+}
+
 /** The reconstructed execution history (the parts the product surface reads). */
 export interface ProductRunHistory {
   run: ProductWorkflowRun;
@@ -329,8 +365,8 @@ export interface ProductRunHistory {
   attempts: unknown[];
   steps: unknown[];
   invocations: unknown[];
-  evidence: unknown[];
-  attestations: unknown[];
+  evidence: ProductRunEvidenceRecord[];
+  attestations: ProductRunAttestationBinding[];
   attestationRejections: unknown[];
   commands: unknown[];
 }

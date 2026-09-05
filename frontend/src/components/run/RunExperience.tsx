@@ -9,6 +9,9 @@ import {
   type ProductWorkflowRun,
   type ProductRunHistory,
 } from '../../api/client';
+import { humanRunState, humanRunStateSentence } from '../activity/run-state-language';
+import { approvalStepIdsFromContent } from '../activity/workflow-ir-facts';
+import TrustDisclosure from '../activity/TrustDisclosure';
 
 /**
  * RunExperience — the Run / approval / where-it-runs surface (V2-017 Task 6).
@@ -38,6 +41,10 @@ import {
  *     the honest Unavailable surface when the run-details read fails (the
  *     record-derived state word stays factual — a known fact is never
  *     discarded);
+ *   - T10 F02 (§16 direct links): the surface presents the ?run=
+ *     selected run (the Activity "Open the run" link) — by default the
+ *     workflow's newest run; an earlier run is disclosed as such
+ *     (isLatest=false), never mistaken for the current status;
  *   - internal run-state terminology (state words, run ids, trigger
  *     types) appears ONLY inside Advanced details (progressive
  *     disclosure).
@@ -91,74 +98,15 @@ function capabilitiesFromContent(content: unknown): string[] {
   return [...capabilities];
 }
 
-/** The IR's approval-node step ids (the CONSENT boundary facts). */
-function approvalStepIdsFromContent(content: unknown): ReadonlySet<string> {
-  if (typeof content !== 'object' || content === null || Array.isArray(content)) {
-    return new Set();
-  }
-  const doc = content as { objectType?: unknown; ir?: { nodes?: unknown } | null };
-  if (doc.objectType !== 'workflowos/workflow-ir/v1') return new Set();
-  if (!doc.ir || !Array.isArray(doc.ir.nodes)) return new Set();
-  const ids = new Set<string>();
-  for (const node of doc.ir.nodes) {
-    if (typeof node !== 'object' || node === null) continue;
-    const spec = (node as { spec?: unknown; id?: unknown }).spec;
-    const { id } = node as { id?: unknown };
-    if (typeof id !== 'string') continue;
-    if (typeof spec !== 'object' || spec === null) continue;
-    const human = (spec as { human?: unknown }).human;
-    if (
-      typeof human === 'object' &&
-      human !== null &&
-      (human as { kind?: unknown }).kind === 'approval'
-    ) {
-      ids.add(id);
-    }
-  }
-  return ids;
-}
-
-/** The run's human state word (UX spec §15) from the authoritative record. */
+/** The run's human state word (UX spec §15) from the authoritative record
+ *  — the SHARED vocabulary (run-state-language), one source for the
+ *  run-status surface and the Activity timeline. */
 function humanState(run: ProductWorkflowRun): string {
-  switch (run.state) {
-    case 'requested':
-      return 'Ready';
-    case 'running':
-      return 'Running';
-    case 'paused':
-      return 'Paused';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Couldn\u2019t complete';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      // An unknown authoritative state: the honest word is the state
-      // itself — never a guessed human translation.
-      return run.state;
-  }
+  return humanRunState(run);
 }
 
 function humanStateSentence(state: string): string {
-  switch (state) {
-    case 'Ready':
-      return 'Ready to run — it hasn\u2019t started yet.';
-    case 'Running':
-      return 'It\u2019s working right now.';
-    case 'Waiting for you':
-      return 'It\u2019s paused for your approval before it continues.';
-    case 'Paused':
-      return 'It\u2019s paused.';
-    case 'Completed':
-      return 'It finished.';
-    case 'Couldn\u2019t complete':
-      return 'It stopped before finishing.';
-    case 'Cancelled':
-      return 'It was cancelled.';
-    default:
-      return '';
-  }
+  return humanRunStateSentence(state);
 }
 
 interface WhereOption {
@@ -305,14 +253,20 @@ export default function RunExperience({
   versions,
   installation,
   deployments,
-  latestRun,
+  run,
+  isLatest = true,
   onRunsChanged,
 }: {
   workflow: ProductWorkflow;
   versions: ProductWorkflowVersion[];
   installation: ProductInstallationDetail | null;
   deployments: ProductDeployment[];
-  latestRun: ProductWorkflowRun | null;
+  /** The run this surface presents — by default the workflow's newest
+   *  run; a ?run= direct link (T10 F02) may select an earlier one. */
+  run: ProductWorkflowRun | null;
+  /** Whether `run` is the newest run (an earlier run is disclosed as
+   *  such — never mistaken for the current status). */
+  isLatest?: boolean;
   onRunsChanged: () => void;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -346,15 +300,15 @@ export default function RunExperience({
   // the Advanced details. A failure is the honest Unavailable surface — the
   // record-derived state word stays factual.
   const loadHistory = useCallback(async () => {
-    if (!latestRun) return;
+    if (!run) return;
     setHistoryState({ kind: 'loading' });
     try {
-      const history = await workflowRuns.getHistory(latestRun.id);
+      const history = await workflowRuns.getHistory(run.id);
       setHistoryState({ kind: 'data', history });
     } catch {
       setHistoryState({ kind: 'error' });
     }
-  }, [latestRun]);
+  }, [run]);
 
   useEffect(() => {
     void loadHistory();
@@ -363,8 +317,8 @@ export default function RunExperience({
   // The Waiting-for-you derivation: paused at an approval step. The pause
   // timeline entry carries the executor-reported pause point in
   // detail.atStepId (the authoritative wire shape) — never guessed.
-  let stateWord = latestRun ? humanState(latestRun) : null;
-  if (latestRun && latestRun.state === 'paused' && historyState.kind === 'data') {
+  let stateWord = run ? humanState(run) : null;
+  if (run && run.state === 'paused' && historyState.kind === 'data') {
     const approvalIds = content ? approvalStepIdsFromContent(content) : new Set<string>();
     const pauses = historyState.history.timeline
       .filter((e) => e.eventName === 'workflow.run.paused')
@@ -443,10 +397,15 @@ export default function RunExperience({
       </section>
 
       {/* The run status surface (the human vocabulary + Advanced details). */}
-      {latestRun && stateWord && (
+      {run && stateWord && (
         <section aria-label="Run status" className="rounded-xl border border-border bg-card p-5">
           <p className="font-medium">{stateWord}</p>
           <p className="mt-1 text-sm text-muted-foreground">{humanStateSentence(stateWord)}</p>
+          {!isLatest && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              An earlier run — the newest run appears in Recent activity.
+            </p>
+          )}
           {historyState.kind === 'loading' && (
             <p
               role="status"
@@ -476,6 +435,18 @@ export default function RunExperience({
             </div>
           )}
           {historyState.kind === 'data' && (
+            // T10 (V2-017): the §17 "How do you know?" trust presentation —
+            // composed from the SAME history read (no second evidence
+            // authority): concise evidence first, advanced verification on
+            // demand, the no-physical-proof boundary always stated.
+            <section
+              aria-label="How do you know?"
+              className="mt-3 border-t border-border pt-3"
+            >
+              <TrustDisclosure history={historyState.history} />
+            </section>
+          )}
+          {historyState.kind === 'data' && (
             <details
               className="mt-3"
               open={advancedOpen}
@@ -488,19 +459,19 @@ export default function RunExperience({
                 <dl className="mt-2 space-y-1 text-xs text-muted-foreground">
                   <div className="flex gap-2">
                     <dt className="font-medium">Run state</dt>
-                    <dd>{latestRun.state}</dd>
+                    <dd>{run.state}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="font-medium">Run id</dt>
-                    <dd className="font-mono">{latestRun.id}</dd>
+                    <dd className="font-mono">{run.id}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="font-medium">Trigger</dt>
-                    <dd>{(latestRun.trigger as { type?: string } | null)?.type ?? 'unknown'}</dd>
+                    <dd>{(run.trigger as { type?: string } | null)?.type ?? 'unknown'}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="font-medium">Started</dt>
-                    <dd>{latestRun.createdAt}</dd>
+                    <dd>{run.createdAt}</dd>
                   </div>
                 </dl>
               )}
