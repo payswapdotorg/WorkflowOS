@@ -38,6 +38,10 @@ const OWNER_KEY = 'raw-key-v2-017-t11-opt-owner';
 const MEMBER_KEY = 'raw-key-v2-017-t11-opt-member';
 const OWNER_ID = 'v2-017-t11-opt-owner';
 const MEMBER_ID = 'v2-017-t11-opt-member';
+/** The SECOND fully-independent owner (own org, own workflow) for the
+ * concurrency regression: their key provisions in the test body. */
+const OWNER2_KEY = 'raw-key-v2-017-t11-opt-owner2';
+const OWNER2_ID = 'v2-017-t11-opt-owner2';
 
 interface VersionPayload {
   id: string;
@@ -150,6 +154,7 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     stack = await buildAuthStack({
       WFOS_TEST_KEY_V2_017_T11_OWNER: OWNER_KEY,
       WFOS_TEST_KEY_V2_017_T11_MEMBER: MEMBER_KEY,
+      WFOS_TEST_KEY_V2_017_T11_OWNER2: OWNER2_KEY,
     });
     const org = await stack.organizationRepository.create({ name: 'T11 Optimization Route Org' });
     const owner = await stack.userRepository.upsertByExternalId({
@@ -458,5 +463,163 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     for (const p of body.proposals) {
       expect(p.id).toMatch(/^opt_/);
     }
+  });
+
+  it("CONCURRENCY REGRESSION (the PR #203 architect gate): two simultaneous materializations remain owner-isolated — a request's authenticated principal can never create a version under the other request's identity", async () => {
+    // A SECOND fully-independent owner in a SECOND organization with their
+    // OWN workflow. V2-002 createVersion is WORKFLOW-OWNER-ONLY (fail-closed
+    // WORKFLOW_NOT_OWNED / not-visible), so if request A's materializer ever
+    // ran under request B's principal, A's materialization would fail closed
+    // (502 MATERIALIZER_FAILED) instead of silently succeeding — the leak is
+    // observable, never silent, and this regression fails loudly either way.
+    const org2 = await stack.organizationRepository.create({
+      name: 'T11 Optimization Concurrency Org B',
+    });
+    const owner2 = await stack.userRepository.upsertByExternalId({
+      externalId: OWNER2_ID,
+      displayName: 'T11 Owner B',
+    });
+    await stack.membershipRepository.assign({
+      userId: owner2.id,
+      organizationId: org2.id,
+      roleId: 'owner',
+    });
+    await stack.apiKeyProvisioner.provision({
+      keyId: 'v2-017-t11-owner2-key',
+      secretRef: 'WFOS_TEST_KEY_V2_017_T11_OWNER2',
+      externalId: OWNER2_ID,
+      label: 'T11 Owner B',
+      rawKey: OWNER2_KEY,
+    });
+
+    const wf2Res = await server.inject({
+      method: 'POST',
+      url: `/organizations/${org2.id}/workflow-repository/workflows`,
+      headers: { 'x-api-key': OWNER2_KEY },
+      payload: {
+        slug: 't11-concurrent-b',
+        name: 'T11 Concurrent B',
+        description: 'The second owner’s own optimizable workflow',
+        visibility: 'private',
+        ...bodyOf(authorOptimizableWorkflow('concurrent-b')),
+      },
+    });
+    expect(wf2Res.statusCode, wf2Res.body).toBe(201);
+    const wf2Created = wf2Res.json() as {
+      workflow: { id: string };
+      initialVersion: VersionPayload;
+    };
+    const workflow2Id = wf2Created.workflow.id;
+    const workflow2V1 = wf2Created.initialVersion;
+
+    // One APPROVED proposal per owner, each pinned to their OWN workflow's
+    // baseline (the materializer composes V2-002 createVersion as the
+    // AUTHENTICATED owner of exactly that workflow).
+    const createApprovedProposal = async (
+      key: string,
+      wfId: string,
+      versionId: string,
+    ): Promise<string> => {
+      const create = await server.inject({
+        method: 'POST',
+        url: '/workflow-optimization/proposals',
+        headers: { 'x-api-key': key },
+        payload: { workflowId: wfId, versionId, opportunityNodeId: 'scan_board' },
+      });
+      expect(create.statusCode, create.body).toBe(201);
+      const proposalId = (create.json() as { proposal: { id: string } }).proposal.id;
+      const approve = await server.inject({
+        method: 'POST',
+        url: `/workflow-optimization/proposals/${proposalId}/approve`,
+        headers: { 'x-api-key': key },
+        payload: {},
+      });
+      expect(approve.statusCode, approve.body).toBe(200);
+      return proposalId;
+    };
+
+    const proposalA = await createApprovedProposal(ownerKey, workflowId, version1.id);
+    const proposalB = await createApprovedProposal(OWNER2_KEY, workflow2Id, workflow2V1.id);
+
+    // --- TWO SIMULTANEOUS materializations with REAL I/O interleaving ------
+    // A is dispatched first and driven into its createVersion PGlite I/O by
+    // a macrotask ladder; B is dispatched while A is still in flight, so the
+    // two requests genuinely overlap against the same route instance.
+    const inFlightA = server.inject({
+      method: 'POST',
+      url: `/workflow-optimization/proposals/${proposalA}/materialize`,
+      headers: { 'x-api-key': ownerKey },
+      payload: {},
+    });
+    for (let i = 0; i < 12; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const inFlightB = server.inject({
+      method: 'POST',
+      url: `/workflow-optimization/proposals/${proposalB}/materialize`,
+      headers: { 'x-api-key': OWNER2_KEY },
+      payload: {},
+    });
+    const [resA, resB] = await Promise.all([inFlightA, inFlightB]);
+
+    // BOTH requests succeed — under a shared mutable principal a leak would
+    // fail one of them closed (502) or create under the wrong identity.
+    expect(resA.statusCode, resA.body).toBe(200);
+    expect(resB.statusCode, resB.body).toBe(200);
+    const bodyA = resA.json() as {
+      proposal: { status: string };
+      materialization: { workflowId: string; versionId: string };
+    };
+    const bodyB = resB.json() as {
+      proposal: { status: string };
+      materialization: { workflowId: string; versionId: string };
+    };
+    expect(bodyA.proposal.status).toBe('materialized');
+    expect(bodyB.proposal.status).toBe('materialized');
+    // each materialization belongs to ITS OWN workflow — never the other's.
+    expect(bodyA.materialization.workflowId).toBe(workflowId);
+    expect(bodyB.materialization.workflowId).toBe(workflow2Id);
+    const candidateA = bodyA.materialization.versionId;
+    const candidateB = bodyB.materialization.versionId;
+    expect(candidateA).not.toBe(candidateB);
+
+    // Each candidate is a REAL WorkflowVersion of ITS OWN workflow, parented
+    // by its own baseline — and NO cross-creation happened.
+    const versionsA = await server.inject({
+      method: 'GET',
+      url: `/workflow-repository/workflows/${workflowId}/versions`,
+      headers: { 'x-api-key': ownerKey },
+    });
+    const versionsB = await server.inject({
+      method: 'GET',
+      url: `/workflow-repository/workflows/${workflow2Id}/versions`,
+      headers: { 'x-api-key': OWNER2_KEY },
+    });
+    expect(versionsA.statusCode, versionsA.body).toBe(200);
+    expect(versionsB.statusCode, versionsB.body).toBe(200);
+    const listA = (versionsA.json() as { versions: VersionPayload[] }).versions;
+    const listB = (versionsB.json() as { versions: VersionPayload[] }).versions;
+    const candidateVersionA = listA.find((v) => v.id === candidateA)!;
+    const candidateVersionB = listB.find((v) => v.id === candidateB)!;
+    expect(candidateVersionA.parentVersionId).toBe(version1.id);
+    expect(candidateVersionB.parentVersionId).toBe(workflow2V1.id);
+    expect(listA.map((v) => v.id)).not.toContain(candidateB);
+    expect(listB.map((v) => v.id)).not.toContain(candidateA);
+
+    // Cross-owner reads fail closed: each candidate version is visible ONLY
+    // to its own workflow's visibility chain (a version created under the
+    // wrong request's identity would surface here as a cross-visible row).
+    const crossReadByB = await server.inject({
+      method: 'GET',
+      url: `/workflow-repository/workflows/${workflowId}/versions/${candidateA}`,
+      headers: { 'x-api-key': OWNER2_KEY },
+    });
+    const crossReadByA = await server.inject({
+      method: 'GET',
+      url: `/workflow-repository/workflows/${workflow2Id}/versions/${candidateB}`,
+      headers: { 'x-api-key': ownerKey },
+    });
+    expect(crossReadByB.statusCode).toBe(404);
+    expect(crossReadByA.statusCode).toBe(404);
   });
 });

@@ -17,14 +17,19 @@
  * `CandidateVersionMaterializer`, satisfied in composition by the REAL
  * V2-002 `createVersion` (the integration-test recipe). The adapter must
  * run as the AUTHENTICATED owner (createVersion is owner-only), so this
- * route file owns the service composition with a request-scoped principal
- * channel around materialization. The created candidate version merely
- * EXISTS — nothing is activated, installed or deployed (the §20 rule).
+ * route file owns the service composition with a REQUEST-LOCAL principal
+ * channel: the authenticated owner rides the request's own async context
+ * (`node:async_hooks` AsyncLocalStorage — the same mechanism the platform
+ * execution-context uses), NEVER a shared mutable variable, so a concurrent
+ * request can never overwrite another request's principal (the PR #203
+ * architect gate). The created candidate version merely EXISTS — nothing is
+ * activated, installed or deployed (the §20 rule).
  *
  * The in-memory proposal store is transport state (the V2-011 reference
  * store; durable proposal persistence is a separately-owned concern).
  */
 import type { FastifyInstance } from 'fastify';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   DefaultWorkflowOptimizationService,
   InMemoryOptimizationProposalStore,
@@ -174,19 +179,24 @@ export async function workflowOptimizationRoutes(
 ): Promise<void> {
   const repository = deps.workflowRepositoryService;
 
-  // The request-scoped principal channel for the materializer port: the
-  // adapter runs V2-002 createVersion as the AUTHENTICATED owner (the
-  // integration-test recipe, per-request). Set only around materialize.
-  let materializePrincipal: { userId: string } | null = null;
+  // The REQUEST-LOCAL principal channel for the materializer port: the
+  // adapter runs V2-002 createVersion as the AUTHENTICATED owner. The
+  // principal rides the REQUEST'S OWN async context — established by
+  // materializePrincipalContext.run() around each materialization — so it
+  // is request-local by construction and a concurrent request can never
+  // overwrite it (no shared mutable state; the PR #203 architect gate).
+  const materializePrincipalContext = new AsyncLocalStorage<{ userId: string }>();
   const service: WorkflowOptimizationService = new DefaultWorkflowOptimizationService({
     idFactory: deps.idFactory ?? (() => `opt_${crypto.randomUUID()}`),
     clock: deps.clock ?? (() => Date.now()),
     store: new InMemoryOptimizationProposalStore(),
     materializer: {
       createCandidateVersion: async (input) => {
-        const principal = materializePrincipal;
-        if (principal === null) {
-          throw new Error('workflow-optimization: materializer invoked without an authenticated principal');
+        const principal = materializePrincipalContext.getStore();
+        if (principal === undefined) {
+          throw new Error(
+            'workflow-optimization: materializer invoked outside the authenticated request context that owns the proposal',
+          );
         }
         const result = await repository.createVersion(principal, input.workflowId, {
           content: input.content,
@@ -327,19 +337,23 @@ export async function workflowOptimizationRoutes(
     return runAuthed(req, async () => {
       const user = await requireUser(req, reply);
       const { proposalId } = req.params as { proposalId: string };
-      materializePrincipal = { userId: user.id };
-      try {
-        const result = await service.materializeProposal({ proposalId, ownerId: user.id });
-        return reply.code(200).send({
-          proposal: serializeProposal(result.proposal as never),
-          materialization: result.materialization,
-        });
-      } catch (err) {
-        sendError(reply, err);
-        return reply;
-      } finally {
-        materializePrincipal = null;
-      }
+      // REQUEST-LOCAL principal: this request's async context carries the
+      // authenticated owner through the whole materialization chain (across
+      // every await inside V2-011's materializeProposal and V2-002's
+      // createVersion). A concurrent request's context is separate by
+      // construction — the principal cannot be overwritten.
+      return materializePrincipalContext.run({ userId: user.id }, async () => {
+        try {
+          const result = await service.materializeProposal({ proposalId, ownerId: user.id });
+          return reply.code(200).send({
+            proposal: serializeProposal(result.proposal as never),
+            materialization: result.materialization,
+          });
+        } catch (err) {
+          sendError(reply, err);
+          return reply;
+        }
+      });
     });
   });
 
