@@ -310,6 +310,31 @@ export interface ProductWorkflowRun {
   updatedAt: string;
 }
 
+/** One run-history timeline entry (V2-005's reconstructed history read). */
+export interface ProductRunTimelineEntry {
+  id: string;
+  runId: string;
+  attemptNumber: number | null;
+  stepId: string | null;
+  eventName: string;
+  occurredAt: string;
+  sequence: number;
+  detail: Record<string, unknown> | null;
+}
+
+/** The reconstructed execution history (the parts the product surface reads). */
+export interface ProductRunHistory {
+  run: ProductWorkflowRun;
+  timeline: ProductRunTimelineEntry[];
+  attempts: unknown[];
+  steps: unknown[];
+  invocations: unknown[];
+  evidence: unknown[];
+  attestations: unknown[];
+  attestationRejections: unknown[];
+  commands: unknown[];
+}
+
 export const workflowRuns = {
   /** The organization's runs (V2-005 read — the tenant's run list). */
   listForOrganization: async (organizationId: string): Promise<ProductWorkflowRun[]> => {
@@ -317,6 +342,53 @@ export const workflowRuns = {
       `/organizations/${organizationId}/workflow-runs/runs`,
     );
     return body.runs ?? [];
+  },
+
+  /**
+   * The full reconstructed execution history of one run (V2-005 read — the
+   * crash-recovery projection; the consumer surface reads the timeline for
+   * the human run-state derivations).
+   */
+  getHistory: async (runId: string): Promise<ProductRunHistory> => {
+    return apiGet<ProductRunHistory>(`/workflow-runs/runs/${runId}/history`);
+  },
+
+  /**
+   * Request a run through the REAL V2-005 command (create-or-converge on
+   * the deterministic trigger surface). The command envelope + a fresh
+   * manual trigger identity preserve the authoritative idempotency
+   * semantics: a fresh trigger id = a fresh intended execution; duplicate
+   * delivery of the same id converges on ONE run (the backend decides).
+   */
+  request: async (organizationId: string, input: {
+    workflowId: string;
+    versionId: string;
+    installationId: string | null;
+  }): Promise<{ run: ProductWorkflowRun; created: boolean }> => {
+    return apiPost<{ run: ProductWorkflowRun; created: boolean }>(
+      `/organizations/${organizationId}/workflow-runs/runs`,
+      {
+        commandId: crypto.randomUUID(),
+        correlationId: crypto.randomUUID(),
+        workflowId: input.workflowId,
+        versionId: input.versionId,
+        installationId: input.installationId,
+        trigger: { type: 'manual', id: crypto.randomUUID() },
+        inputCommitments: [],
+      },
+    );
+  },
+
+  /**
+   * Start a requested run through the REAL V2-005 lifecycle command (the
+   * same command envelope discipline; the backend owns every transition
+   * decision — typed rejections surface as errors, never as state).
+   */
+  start: async (runId: string): Promise<{ run: ProductWorkflowRun }> => {
+    return apiPost<{ run: ProductWorkflowRun }>(`/workflow-runs/runs/${runId}/start`, {
+      commandId: crypto.randomUUID(),
+      correlationId: crypto.randomUUID(),
+    });
   },
 };
 

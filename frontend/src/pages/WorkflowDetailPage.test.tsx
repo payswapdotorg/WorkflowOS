@@ -415,14 +415,12 @@ describe('V2-017 T4 — workflow detail', () => {
     expect(screen.queryByRole('list', { name: /what it does/i })).not.toBeInTheDocument();
   });
 
-  it('Run and Teach Me carry honest arrives-with states (no fabricated flows); Edit enters the expert workspace', async () => {
+  it('Teach Me carries its honest arrives-with state; Edit enters the expert workspace (Run is owned by the T6 run experience)', async () => {
     renderDetail('wf-1', fullRoutes());
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
     );
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Run' }));
-    expect(screen.getByText(/run experience arrives with the run task/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Teach Me' }));
     expect(screen.getByText(/teaching experience arrives with the teaching task/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Edit' })).toHaveAttribute('href', '/expert');

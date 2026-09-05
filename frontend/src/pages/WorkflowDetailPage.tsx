@@ -11,6 +11,7 @@ import {
   type ProductDeployment,
   type ProductTriggerSubscription,
 } from '../api/client';
+import RunExperience from '../components/run/RunExperience';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -131,7 +132,6 @@ export default function WorkflowDetailPage() {
   const [state, setState] = useState<DetailState>({ kind: 'loading' });
   const [nonce, setNonce] = useState(0);
   const [actionNote, setActionNote] = useState<string | null>(null);
-
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
@@ -232,6 +232,8 @@ export default function WorkflowDetailPage() {
   const latestRuns = [...runs]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 5);
+  // The newest run (T6's run-status data source — authoritative).
+  const latestRun = latestRuns[0] ?? null;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -262,29 +264,35 @@ export default function WorkflowDetailPage() {
         </p>
       </header>
 
-      {/* The primary actions (UX spec §6). The deep flows belong to their
-          tasks; the entries are honest about that. */}
-      <section aria-label="Primary actions" className="flex flex-wrap gap-3">
-        <button
-          type="button"
-          onClick={() => setActionNote('The run experience arrives with the run task.')}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          Run
-        </button>
-        <button
-          type="button"
-          onClick={() => setActionNote('The teaching experience arrives with the teaching task.')}
-          className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
-        >
-          Teach Me
-        </button>
-        <Link
-          to="/expert"
-          className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
-        >
-          Edit
-        </Link>
+      {/* The primary actions (UX spec §6). Run is the T6 run experience —
+          the consequential-action preview, the where-it-runs facts and the
+          authoritative run commands. Teach Me's deep flow belongs to the
+          teaching task (T9); its entry carries the honest note. Edit
+          enters the EXISTING expert workspace. */}
+      <section aria-label="Primary actions" className="space-y-3">
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => setActionNote('The teaching experience arrives with the teaching task.')}
+            className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+          >
+            Teach Me
+          </button>
+          <Link
+            to="/expert"
+            className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+          >
+            Edit
+          </Link>
+        </div>
+        <RunExperience
+          workflow={workflow}
+          versions={versions}
+          installation={installation}
+          deployments={deployments}
+          latestRun={latestRun}
+          onRunsChanged={refetch}
+        />
       </section>
       {actionNote && (
         <p role="status" className="rounded-md bg-accent/40 p-3 text-sm text-muted-foreground">
