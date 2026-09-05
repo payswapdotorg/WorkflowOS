@@ -104,11 +104,10 @@ describe('V2-017 Task 1 — universal product navigation', () => {
       expect(screen.getByText(/couldn't load this workflow right now/i)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
       // The product shell surrounds the detail surface — the library
-      // return path stays present.
-      expect(screen.getByRole('link', { name: 'Workflows' })).toHaveAttribute(
-        'href',
-        '/workflows',
-      );
+      // return path stays present (T14: on every navigation surface).
+      for (const link of screen.getAllByRole('link', { name: 'Workflows' })) {
+        expect(link).toHaveAttribute('href', '/workflows');
+      }
     });
   });
 
@@ -124,11 +123,24 @@ describe('V2-017 Task 1 — universal product navigation', () => {
           screen.getByRole('heading', { name: /What do you want to get done\?/i }),
         ).toBeInTheDocument(),
       );
-      expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
-      expect(screen.getByRole('link', { name: 'Workflows' })).toHaveAttribute('href', '/workflows');
-      expect(screen.getByRole('link', { name: 'Explore' })).toHaveAttribute('href', '/explore');
-      expect(screen.getByRole('link', { name: 'Activity' })).toHaveAttribute('href', '/activity');
-      expect(screen.getByRole('link', { name: 'Create' })).toHaveAttribute('href', '/create');
+      // T14: the approved model holds on EVERY navigation surface (the
+      // header row and the mobile bottom bar render the identical
+      // destinations — strengthening, not weakening, the T1 contract).
+      for (const link of screen.getAllByRole('link', { name: 'Home' })) {
+        expect(link).toHaveAttribute('href', '/');
+      }
+      for (const link of screen.getAllByRole('link', { name: 'Workflows' })) {
+        expect(link).toHaveAttribute('href', '/workflows');
+      }
+      for (const link of screen.getAllByRole('link', { name: 'Explore' })) {
+        expect(link).toHaveAttribute('href', '/explore');
+      }
+      for (const link of screen.getAllByRole('link', { name: 'Activity' })) {
+        expect(link).toHaveAttribute('href', '/activity');
+      }
+      for (const link of screen.getAllByRole('link', { name: 'Create' })) {
+        expect(link).toHaveAttribute('href', '/create');
+      }
     });
   });
 
