@@ -84,7 +84,7 @@ function scoreLine(name: string, delta: ProductCriterionDelta | undefined): stri
   if (!delta || typeof delta.baseline !== 'number' || typeof delta.candidate !== 'number') {
     return null;
   }
-  return `${name} score ${delta.baseline} to ${delta.candidate}`;
+  return `${name} estimated score ${delta.baseline} to ${delta.candidate}`;
 }
 
 /**
