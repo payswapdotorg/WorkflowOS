@@ -43,6 +43,17 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* V2-017 T14 — keep keyboard focus visible across the responsive shell.
+   Links intentionally use utility classes elsewhere for local styling, but
+   this global baseline ensures the header, mobile bottom bar, Create entry,
+   and footer remain visibly keyboard navigable even where a component does
+   not provide its own focus treatment. */
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
