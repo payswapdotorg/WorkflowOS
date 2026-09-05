@@ -42,6 +42,10 @@ const MEMBER_ID = 'v2-017-t11-opt-member';
  * concurrency regression: their key provisions in the test body. */
 const OWNER2_KEY = 'raw-key-v2-017-t11-opt-owner2';
 const OWNER2_ID = 'v2-017-t11-opt-owner2';
+/** A fully-independent OUTSIDER (own org, NOT a member of the workflow's
+ * org) for the F01 authorization regression: provisions in the test body. */
+const OUTSIDER_KEY = 'raw-key-v2-017-t11-opt-outsider';
+const OUTSIDER_ID = 'v2-017-t11-opt-outsider';
 
 interface VersionPayload {
   id: string;
@@ -155,6 +159,7 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
       WFOS_TEST_KEY_V2_017_T11_OWNER: OWNER_KEY,
       WFOS_TEST_KEY_V2_017_T11_MEMBER: MEMBER_KEY,
       WFOS_TEST_KEY_V2_017_T11_OWNER2: OWNER2_KEY,
+      WFOS_TEST_KEY_V2_017_T11_OUTSIDER: OUTSIDER_KEY,
     });
     const org = await stack.organizationRepository.create({ name: 'T11 Optimization Route Org' });
     const owner = await stack.userRepository.upsertByExternalId({
@@ -463,6 +468,90 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     for (const p of body.proposals) {
       expect(p.id).toMatch(/^opt_/);
     }
+  });
+
+  it('GET proposals authorizes the workflow through the canonical V2-002 gate (architect finding T11-F01)', async () => {
+    // A fully-independent outsider (own org, NOT a member of the workflow's
+    // org) cannot enumerate another workflow's proposals: the V2-002
+    // visibility/ownership gate fails closed BEFORE the proposal store is
+    // read — never the proposal rows.
+    const outsiderOrg = await stack.organizationRepository.create({
+      name: 'T11 Optimization Outsider Org',
+    });
+    const outsider = await stack.userRepository.upsertByExternalId({
+      externalId: OUTSIDER_ID,
+      displayName: 'T11 Outsider',
+    });
+    await stack.membershipRepository.assign({
+      userId: outsider.id,
+      organizationId: outsiderOrg.id,
+      roleId: 'owner',
+    });
+    await stack.apiKeyProvisioner.provision({
+      keyId: 'v2-017-t11-outsider-key',
+      secretRef: 'WFOS_TEST_KEY_V2_017_T11_OUTSIDER',
+      externalId: OUTSIDER_ID,
+      label: 'T11 Outsider',
+      rawKey: OUTSIDER_KEY,
+    });
+
+    const denied = await server.inject({
+      method: 'GET',
+      url: `/workflow-optimization/proposals?workflowId=${workflowId}`,
+      headers: { 'x-api-key': OUTSIDER_KEY },
+    });
+    expect(denied.statusCode, denied.body).toBe(404);
+    const deniedBody = denied.json() as { error: string; proposals?: unknown };
+    expect(deniedBody.error).toBe('workflow-optimization-workflow-not-found');
+    // no proposal state leaks through the denial.
+    expect(deniedBody.proposals).toBeUndefined();
+
+    // The denial is INDISTINGUISHABLE from an unknown workflow (the V2-002
+    // convention — no existence leak).
+    const unknown = await server.inject({
+      method: 'GET',
+      url: '/workflow-optimization/proposals?workflowId=wf_does_not_exist',
+      headers: { 'x-api-key': ownerKey },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect((unknown.json() as { error: string }).error).toBe(
+      'workflow-optimization-workflow-not-found',
+    );
+
+    // An unscoped listing is rejected fail-closed: there is no workflow to
+    // authorize the read against, so it must not enumerate proposal state
+    // across workflows.
+    const unscoped = await server.inject({
+      method: 'GET',
+      url: '/workflow-optimization/proposals',
+      headers: { 'x-api-key': ownerKey },
+    });
+    expect(unscoped.statusCode).toBe(400);
+
+    // The gate is V2-002's OWN visibility decision — neither broader nor an
+    // owner-only re-invention: this fixture workflow is PRIVATE (owner-only
+    // reads in V2-002), so a same-org MEMBER is denied exactly as V2-002
+    // denies them …
+    const memberRes = await server.inject({
+      method: 'GET',
+      url: `/workflow-optimization/proposals?workflowId=${workflowId}`,
+      headers: { 'x-api-key': memberKey },
+    });
+    expect(memberRes.statusCode, memberRes.body).toBe(404);
+    expect((memberRes.json() as { error: string }).error).toBe(
+      'workflow-optimization-workflow-not-found',
+    );
+
+    // … while the authorized OWNER still reads the converge list.
+    const ownerRes = await server.inject({
+      method: 'GET',
+      url: `/workflow-optimization/proposals?workflowId=${workflowId}`,
+      headers: { 'x-api-key': ownerKey },
+    });
+    expect(ownerRes.statusCode, ownerRes.body).toBe(200);
+    expect(
+      (ownerRes.json() as { proposals: unknown[] }).proposals.length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("CONCURRENCY REGRESSION (the PR #203 architect gate): two simultaneous materializations remain owner-isolated — a request's authenticated principal can never create a version under the other request's identity", async () => {

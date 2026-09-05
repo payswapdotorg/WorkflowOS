@@ -110,6 +110,43 @@ function versionUnresolvable(): { ok: false; status: number; body: unknown } {
 }
 
 /**
+ * The honest unresolvable-workflow reply (the V2-002 convention: denied
+ * reads are typed 404s — no existence leak; never an empty success).
+ */
+function workflowUnresolvable(): { ok: false; status: number; body: unknown } {
+  return {
+    ok: false,
+    status: 404,
+    body: {
+      error: 'workflow-optimization-workflow-not-found',
+      code: 'OPTIMIZATION_INPUT_INVALID',
+      message: 'the workflow whose proposals were requested was not found',
+    },
+  };
+}
+
+/**
+ * The canonical V2-002 workflow authorization gate (the architect finding
+ * V2-017-T11-F01): `getWorkflow` is the repository's visibility-checked
+ * read — THE visibility/ownership authority. The transport route composes
+ * that authority over HTTP; it never re-implements (and never invents a
+ * second) authorization rule. Any denial (unknown, not visible, not a
+ * member) fails closed as the SAME typed 404 — no existence leak.
+ */
+async function authorizeWorkflowRead(
+  repository: WorkflowRepositoryService,
+  userId: string,
+  workflowId: string,
+): Promise<{ ok: false; status: number; body: unknown } | { ok: true }> {
+  try {
+    await repository.getWorkflow({ userId }, workflowId);
+  } catch {
+    return workflowUnresolvable();
+  }
+  return { ok: true };
+}
+
+/**
  * The server-side document resolution (the T9 resolvePin precedent): the
  * authoritative V2-002 visibility-checked version read + the V2-003 parse.
  */
@@ -288,12 +325,25 @@ export async function workflowOptimizationRoutes(
 
   app.get('/workflow-optimization/proposals', async (req, reply) => {
     return runAuthed(req, async () => {
-      await requireUser(req, reply);
+      const user = await requireUser(req, reply);
       const query = req.query as { workflowId?: string };
+      // The proposal listing is a WORKFLOW-scoped read (the §20 converge
+      // read). The workflowId scope is REQUIRED — an unscoped listing would
+      // enumerate proposal state across workflows with nothing to authorize
+      // against — and the workflow itself must pass the canonical V2-002
+      // visibility/ownership gate BEFORE the proposal store is read (the
+      // architect finding V2-017-T11-F01; no second authorization authority).
+      if (typeof query.workflowId !== 'string' || query.workflowId.length === 0) {
+        invalidRequest(reply, 'workflowId is required');
+        return reply;
+      }
+      const gate = await authorizeWorkflowRead(repository, user.id, query.workflowId);
+      if (!gate.ok) {
+        reply.code(gate.status).send(gate.body);
+        return reply;
+      }
       try {
-        const proposals = service.listProposals(
-          query.workflowId ? { workflowId: query.workflowId } : undefined,
-        );
+        const proposals = service.listProposals({ workflowId: query.workflowId });
         return reply.code(200).send({
           proposals: proposals.map((p) => serializeProposal(p as never)),
         });
