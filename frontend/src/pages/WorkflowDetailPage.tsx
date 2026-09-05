@@ -15,6 +15,7 @@ import RunExperience from '../components/run/RunExperience';
 import WhenSection from '../components/when/WhenSection';
 import RecoveryExperience from '../components/recovery/RecoveryExperience';
 import TeachExperience from '../components/teach/TeachExperience';
+import VersionsExperience from '../components/versions/VersionsExperience';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -174,8 +175,17 @@ export default function WorkflowDetailPage() {
           workflow,
           versions,
           runs: runs.filter((r) => r.workflowId === workflowId),
+          // The T11 adoption rule: after an explicit adoption there can be
+          // TWO installation rows for one workflow (the retired pin + the
+          // adopted pin). The ACTIVE (enabled) installation is the one the
+          // page binds — never a stale first-match. No enabled row (all
+          // retired) falls back to the newest row, shown honestly.
           installation:
-            installations.find((i) => i.installation.workflowId === workflowId) ?? null,
+            installations.find(
+              (i) => i.installation.workflowId === workflowId && i.installation.status === 'enabled',
+            ) ??
+            installations.find((i) => i.installation.workflowId === workflowId) ??
+            null,
           deployments: deployments.filter((d) => d.workflowId === workflowId),
           // Every configured subscription of THIS workflow's deployments
           // (enabled and paused alike — the T8 When surface presents the
@@ -423,6 +433,18 @@ export default function WorkflowDetailPage() {
           )}
         </section>
       </div>
+
+      {/* T11 (V2-017): the versions/updates/improvements experience —
+          version history (addressable + inspectable), the §19 update
+          banner with explicit adoption over the EXISTING V2-002 install +
+          lifecycle commands, and §20 optimization proposals as NEW
+          versions through the V2-011 transport routes. */}
+      <VersionsExperience
+        workflow={workflow}
+        versions={versions}
+        installation={installation}
+        onRefresh={refetch}
+      />
 
       {/* Advanced inspection — the existing expert workspace. */}
       <p className="text-sm">

@@ -67,6 +67,10 @@ import {
   reverseTeachingRoutes,
   type ReverseTeachingRouteDeps,
 } from './routes/reverse-teaching.route.js';
+import {
+  workflowOptimizationRoutes,
+  type WorkflowOptimizationRouteDeps,
+} from './routes/workflow-optimization.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -212,6 +216,14 @@ export interface ServerDeps extends JobsRouteDeps {
    *  surface over the frozen V2-010 authority (manual-task view, safety
    *  gates, manual performance). Transport only. Registered when auth is on. */
   reverseTeaching?: ReverseTeachingRouteDeps;
+  /** V2-017 T11: workflow-optimization TRANSPORT routes — the §19/§20
+   *  versions/updates/improvements surface over the frozen V2-011
+   *  authority (analysis, proposals, the owner approval gate,
+   *  materialization as NEW versions through the V2-002-backed materializer
+   *  port, the deterministic comparison). Transport only; the route owns
+   *  the request-scoped principal channel for the materializer. Registered
+   *  when auth is on. */
+  workflowOptimization?: WorkflowOptimizationRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -355,6 +367,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.reverseTeaching) {
     await reverseTeachingRoutes(app, deps.reverseTeaching);
+  }
+  if (deps.auth && deps.workflowOptimization) {
+    await workflowOptimizationRoutes(app, deps.workflowOptimization);
   }
   return app;
 }

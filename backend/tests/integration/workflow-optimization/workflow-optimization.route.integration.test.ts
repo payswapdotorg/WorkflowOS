@@ -45,6 +45,7 @@ interface VersionPayload {
   versionNumber: number;
   contentDigest: string;
   content: Record<string, unknown>;
+  parentVersionId: string | null;
 }
 
 /**
@@ -139,6 +140,7 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
   let orgId: string;
   let ownerKey: string;
   let memberKey: string;
+  let ownerUserId: string;
   let workflowId: string;
   let version1: VersionPayload;
   let version2: VersionPayload;
@@ -171,6 +173,7 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     orgId = org.id;
     ownerKey = OWNER_KEY;
     memberKey = MEMBER_KEY;
+    ownerUserId = owner.id;
 
     const memberships: OrganizationMembershipResolver = {
       isMember: async (userId, organizationId) =>
@@ -283,7 +286,7 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     const created = (createRes.json() as { proposal: Record<string, unknown> }).proposal;
     const proposalId = created.id as string;
     expect(created.status).toBe('proposed');
-    expect(created.ownerId).toBe(OWNER_ID);
+    expect(created.ownerId).toBe(ownerUserId);
     const comparison = created.comparison as { correctness: { equivalent: boolean } };
     expect(comparison.correctness.equivalent).toBe(true);
     // the embedded documents are NOT carried on the wire.
@@ -383,12 +386,13 @@ describe('V2-017 T11 — the optimization transport routes over the real authori
     expect(res.statusCode, res.body).toBe(200);
     const body = res.json() as {
       comparison: {
+        rulesVersion: string;
         correctness: { equivalent: boolean; firstDivergence: string | null };
         negotiation: { decision: string };
         latency: { baseline: number; candidate: number; delta: number };
       };
     };
-    expect(body.comparison.rulesVersion ?? body.comparison).toBeDefined();
+    expect(body.comparison.rulesVersion).toBe('workflowos-optimization-rules-v1');
     expect(typeof body.comparison.correctness.equivalent).toBe('boolean');
     expect(typeof body.comparison.latency.delta).toBe('number');
 

@@ -73,11 +73,13 @@ function mockApi(routes: Record<string, RouteHandler>): ReturnType<typeof vi.fn>
 const WORKFLOW: ProductWorkflow = {
   id: 'wf-1',
   organizationId: 'org-1',
+  ownerUserId: 'user-1',
   slug: 'weekly-ticket-digest',
   name: 'Weekly ticket digest',
   description: 'Collect the open tickets and email the digest.',
   visibility: 'private',
   headVersionId: 'ver-3',
+  forkedFromWorkflowId: null,
   forkedFromVersionId: null,
   createdAt: '2026-09-02T09:00:00Z',
   updatedAt: '2026-09-02T09:00:00Z',
@@ -90,7 +92,7 @@ function version(id: string, versionNumber: number, parentVersionId: string | nu
     versionNumber,
     contentDigest: 'd'.repeat(64),
     content: {
-      objectType: 'workflowos/workflow-ir/v1',
+      objectType: 'workflowos/workflow-ir-v1',
       ir: {
         nodes: [
           { id: 'fetch', executionClass: 'deterministic_api' },
@@ -159,7 +161,7 @@ const ANALYSIS = {
 const COMPARISON = {
   rulesVersion: 'workflowos-optimization-rules-v1',
   correctness: { equivalent: true, firstDivergence: null },
-  negotiation: { decision: 'accept', detail: 'public-surface-unchanged' },
+  negotiation: { decision: 'accept', reason: 'public-surface-unchanged' },
   latency: { baseline: 7, candidate: 5, delta: -2 },
   cost: { baseline: 6, candidate: 3, delta: -3 },
   reliability: { baseline: 0.29, candidate: 0.16, delta: -0.13 },
@@ -215,7 +217,8 @@ function renderVersions({
   routes = {},
   onRefresh = vi.fn(),
 }: RenderProps = {}) {
-  vi.stubGlobal('fetch', mockApi(routes));
+  const fetchMock = mockApi(routes);
+  vi.stubGlobal('fetch', fetchMock);
   const utils = render(
     <VersionsExperience
       workflow={workflow}
@@ -224,7 +227,7 @@ function renderVersions({
       onRefresh={onRefresh}
     />,
   );
-  return { user: userEvent.setup(), onRefresh, ...utils };
+  return { user: userEvent.setup(), onRefresh, fetchMock, ...utils };
 }
 
 function defaultRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
@@ -309,14 +312,14 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
     // The comparison is fetched from the optimization transport route.
     await waitFor(() =>
       expect(
-        within(update).getByText(/task-for-task equivalent — verified/i),
+        within(update).getByText(/task-for-task equivalent - verified/i),
       ).toBeInTheDocument(),
     );
     // The modeled rubric deltas render as ESTIMATES (never measurements).
-    expect(within(update).getByText(/speed score 7 → 5/i)).toBeInTheDocument();
-    expect(within(update).getByText(/cost score 6 → 3/i)).toBeInTheDocument();
-    expect(within(update).getByText(/reliability score 0\.29 → 0\.16/i)).toBeInTheDocument();
-    expect(within(update).getByText(/maintenance score 6 → 5/i)).toBeInTheDocument();
+    expect(within(update).getByText(/speed score 7 to 5/i)).toBeInTheDocument();
+    expect(within(update).getByText(/cost score 6 to 3/i)).toBeInTheDocument();
+    expect(within(update).getByText(/reliability score 0\.29 to 0\.16/i)).toBeInTheDocument();
+    expect(within(update).getByText(/maintenance score 6 to 5/i)).toBeInTheDocument();
     expect(within(update).getByText(/estimates, not measurements/i)).toBeInTheDocument();
     expect(within(update).getByRole('button', { name: /approve update/i })).toBeInTheDocument();
   });
@@ -332,7 +335,7 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
     const update = await screen.findByRole('region', { name: 'Update available' });
     await user.click(within(update).getByRole('button', { name: /review update/i }));
     await waitFor(() =>
-      expect(within(update).getByText(/reliability score 0\.18 → 0\.19/i)).toBeInTheDocument(),
+      expect(within(update).getByText(/reliability score 0\.18 to 0\.19/i)).toBeInTheDocument(),
     );
   });
 
@@ -349,7 +352,14 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
   });
 
   it('Approve update = the EXISTING V2-002 commands only: install the new version, retire the old installation', async () => {
-    const { user, onRefresh, fetchMock } = renderVersions({ routes: defaultRoutes() });
+    const { user, onRefresh, fetchMock } = renderVersions({
+      routes: defaultRoutes({
+        'POST /workflow-repository/installations': () =>
+          jsonResponse(201, { installation: INSTALLATION.installation }),
+        'POST /workflow-repository/installations/inst-1/disable': () =>
+          jsonResponse(200, { installation: { ...INSTALLATION.installation, status: 'disabled' } }),
+      }),
+    });
     const update = await screen.findByRole('region', { name: 'Update available' });
     await user.click(within(update).getByRole('button', { name: /review update/i }));
     await user.click(within(update).getByRole('button', { name: /approve update/i }));
@@ -406,10 +416,10 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
     );
     await user.click(within(update).getByRole('button', { name: /approve update/i }));
     const alert = await within(update).findByRole('alert');
-    expect(alert).toHaveTextContent(/couldn't approve the update/i);
+    expect(alert).toHaveTextContent(/couldn't be approved/i);
   });
 
-  it('on the newest version: the honest "You're on the newest version." (no fabricated update)', async () => {
+  it('on the newest version: the honest newest-version state (no fabricated update)', async () => {
     const onHead: ProductInstallationDetail = {
       ...INSTALLATION,
       installation: { ...INSTALLATION.installation, versionId: 'ver-3' },
@@ -471,9 +481,9 @@ describe('V2-017 T11 — improvements as NEW versions (§20)', () => {
     await waitFor(() =>
       expect(within(improvements).getByText(/direct github\.repository\.read API call/i)).toBeInTheDocument(),
     );
-    expect(within(improvements).getByText(/task-for-task equivalent — verified/i)).toBeInTheDocument();
+    expect(within(improvements).getByText(/task-for-task equivalent - verified/i)).toBeInTheDocument();
     // The trade-offs (estimates).
-    expect(within(improvements).getByText(/speed score 7 → 5/i)).toBeInTheDocument();
+    expect(within(improvements).getByText(/speed score 7 to 5/i)).toBeInTheDocument();
     expect(within(improvements).getByText(/estimates, not measurements/i)).toBeInTheDocument();
     // The approval gate: status Proposed + the Approve action.
     expect(within(improvements).getByText(/proposed/i)).toBeInTheDocument();
@@ -515,7 +525,7 @@ describe('V2-017 T11 — improvements as NEW versions (§20)', () => {
     );
     await user.click(within(improvements).getByRole('button', { name: /approve improvement/i }));
     await waitFor(() =>
-      expect(within(improvements).getByText(/approved — not created yet/i)).toBeInTheDocument(),
+      expect(within(improvements).getByText(/approved - not created yet/i)).toBeInTheDocument(),
     );
     // NOTHING is a version until materialization ("requires adoption" §20).
     expect(onRefresh).not.toHaveBeenCalled();
