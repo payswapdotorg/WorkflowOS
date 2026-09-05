@@ -16,6 +16,7 @@ import WhenSection from '../components/when/WhenSection';
 import RecoveryExperience from '../components/recovery/RecoveryExperience';
 import TeachExperience from '../components/teach/TeachExperience';
 import VersionsExperience from '../components/versions/VersionsExperience';
+import ShareExperience from '../components/marketplace/ShareExperience';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -143,6 +144,7 @@ export default function WorkflowDetailPage() {
   const [nonce, setNonce] = useState(0);
   const [actionNote, setActionNote] = useState<string | null>(null);
   const [teachOpen, setTeachOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
@@ -309,6 +311,16 @@ export default function WorkflowDetailPage() {
           >
             {teachOpen ? 'Close lesson' : 'Teach Me'}
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActionNote(null);
+              setShareOpen((v) => !v);
+            }}
+            className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+          >
+            {shareOpen ? 'Close share' : 'Share'}
+          </button>
           <Link
             to="/expert"
             className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
@@ -331,6 +343,16 @@ export default function WorkflowDetailPage() {
           workflow={workflow}
           versions={versions}
           installation={installation}
+        />
+      )}
+      {/* T12 (V2-017): the Share experience — visibility facts, the
+          public-workflow precondition (the EXISTING V2-002 owner command),
+          and listing publication over the V2-012 transport routes. */}
+      {shareOpen && (
+        <ShareExperience
+          workflow={workflow}
+          headVersion={headVersion}
+          onRefresh={refetch}
         />
       )}
       {actionNote && (

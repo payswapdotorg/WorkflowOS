@@ -562,3 +562,47 @@ describe('V2-017 T4 — workflow detail', () => {
     expect(screen.getByText(/No installs/i)).toBeInTheDocument();
   });
 });
+
+describe('V2-017 T12 — Share on the workflow detail (Issue #7)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('the Share action opens the share surface with the honest visibility + publish precondition', async () => {
+    renderDetail('wf-1', fullRoutes());
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    const share = await screen.findByRole('region', { name: 'Share' });
+    expect(within(share).getByText('Private — only you')).toBeInTheDocument();
+    expect(
+      within(share).getByText('Publishing to Explore requires this workflow to be public.'),
+    ).toBeInTheDocument();
+    expect(within(share).getByRole('button', { name: /make it public/i })).toBeInTheDocument();
+    // The fork disclosure is part of the share surface (§21).
+    expect(within(share).getByText('Have its own versions')).toBeInTheDocument();
+    expect(within(share).getByText('Not receive the publisher’s secrets')).toBeInTheDocument();
+  });
+
+  it('closing the Share panel returns to the plain detail surface', async () => {
+    renderDetail('wf-1', fullRoutes());
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Share' }));
+    expect(await screen.findByRole('region', { name: 'Share' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close share' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Share' })).not.toBeInTheDocument(),
+    );
+  });
+});

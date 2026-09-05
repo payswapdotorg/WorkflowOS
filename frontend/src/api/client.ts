@@ -639,6 +639,48 @@ export const workflowRepository = {
       {},
     );
   },
+
+  /**
+   * Fork a visible source version into the caller's tenant ("Make my own",
+   * the EXISTING V2-002 command). The copy has its own versions and keeps
+   * the original attribution — it never receives the publisher's private
+   * data or secrets (V2-002 semantics, consumed verbatim).
+   */
+  fork: async (
+    organizationId: string,
+    input: {
+      sourceWorkflowId: string;
+      sourceVersionId: string;
+      slug: string;
+      name?: string;
+    },
+  ): Promise<{
+    workflow: ProductWorkflow;
+    initialVersion: { id: string; versionNumber: number };
+    created: boolean;
+  }> => {
+    return apiPost<{
+      workflow: ProductWorkflow;
+      initialVersion: { id: string; versionNumber: number };
+      created: boolean;
+    }>(`/organizations/${organizationId}/workflow-repository/forks`, input);
+  },
+
+  /**
+   * Update repository metadata ONLY (the EXISTING V2-002 owner command —
+   * name/description/visibility; never versions). Sharing composes this
+   * to make a workflow public before publishing a listing.
+   */
+  update: async (
+    workflowId: string,
+    patch: { name?: string; description?: string; visibility?: string },
+  ): Promise<ProductWorkflow> => {
+    const body = await apiPatch<{ workflow: ProductWorkflow }>(
+      `/workflow-repository/workflows/${workflowId}`,
+      patch,
+    );
+    return body.workflow;
+  },
 };
 
 /** An immutable workflow version (the V2-002 wire shape). */
@@ -653,6 +695,242 @@ export interface ProductWorkflowVersion {
   createdByUserId: string;
   createdAt: string;
 }
+
+// T12 (V2-017): the marketplace transport wire shapes (the V2-012
+// authority payloads, consumed verbatim — the frontend renders, never
+// re-derives; an entitlement is CONTENT access only, never an execution
+// authorization, and installation flows through the V2-002 commands).
+
+/** The frozen commercial models (V2-012's vocabulary). */
+export type ProductCommercialModel =
+  | 'free'
+  | 'one_time_purchase'
+  | 'maintenance_subscription';
+
+/** One offer's terms (the authority's frozen discriminated union). */
+export type ProductListingOfferTerms =
+  | { model: 'free' }
+  | {
+      model: 'one_time_purchase';
+      amount: string;
+      currency: string;
+      updatePolicy: 'pinned_only' | 'compatible_updates';
+    }
+  | { model: 'maintenance_subscription'; amount: string; currency: string };
+
+/** One immutable offer of one listing revision. */
+export interface ProductListingOffer {
+  id: string;
+  model: ProductCommercialModel;
+  terms: ProductListingOfferTerms;
+  createdAt: number;
+}
+
+/** The exact version identity a listing revision pins (V2-002 facts). */
+export interface ProductListedVersionPin {
+  workflowId: string;
+  versionId: string;
+  versionNumber: number;
+  contentDigest: string;
+  protocol: { irSchemaVersion: string };
+}
+
+/** The frozen derived trust metadata of one listing revision (DISCLOSURE — never authorization or proof). */
+export interface ProductListingTrust {
+  publisherOrganizationId: string;
+  publisherUserId: string;
+  workflowId: string;
+  versionId: string;
+  versionNumber: number;
+  contentDigest: string;
+  semanticDigest: string;
+  requiredCapabilities: string[];
+  sensitiveCapabilities: string[];
+  placements: string[];
+  dependencyGraph: { nodeId: string; dependencyRef: string }[];
+  provenance: { forkedFromWorkflowId: string | null; forkedFromVersionId: string | null };
+}
+
+/** ONE immutable listing revision: pins ONE exact WorkflowVersion. */
+export interface ProductListingRevision {
+  id: string;
+  listingId: string;
+  sequence: number;
+  pin: ProductListedVersionPin;
+  offers: ProductListingOffer[];
+  trust: ProductListingTrust;
+  createdAt: number;
+}
+
+/** A marketplace listing (the commercial distribution surface of one workflow). */
+export interface ProductListing {
+  id: string;
+  publisherOrganizationId: string;
+  publisherUserId: string;
+  workflowId: string;
+  name: string;
+  description: string | null;
+  status: string;
+  distribution: string;
+  grantedOrganizationIds: string[];
+  currentRevisionId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** The listing with its current revision resolved. */
+export interface ProductListingWithRevision {
+  listing: ProductListing;
+  revision: ProductListingRevision;
+}
+
+/** A customer's entitlement: CONTENT/version access ONLY (never a grant). */
+export interface ProductEntitlement {
+  id: string;
+  customerOrganizationId: string;
+  listingId: string;
+  revisionId: string;
+  offerId: string;
+  model: ProductCommercialModel;
+  status: string;
+  pinnedVersionId: string;
+  transactionId: string | null;
+  acceptedByUserId: string;
+  grantedAt: number;
+  endedAt: number | null;
+}
+
+/** A normalized marketplace transaction (adapter facts, never provider state). */
+export interface ProductMarketplaceTransaction {
+  id: string;
+  listingId: string;
+  revisionId: string;
+  offerId: string;
+  customerOrganizationId: string;
+  amount: string;
+  currency: string;
+  status: string;
+  adapterReference: string | null;
+  failureCode: string | null;
+  createdAt: number;
+  refundedAt: number | null;
+}
+
+/** The version-access DECISION (content access only — the frozen boundary). */
+export type ProductVersionAccessDecision =
+  | { entitled: true; basis: 'free_listing' | 'one_time_purchase' | 'maintenance_subscription'; entitlementId: string | null }
+  | { entitled: false; reason: string };
+
+/** One offer declaration for a new listing (the create input). */
+export interface ProductCreateListingOfferInput {
+  model: ProductCommercialModel;
+  terms: ProductListingOfferTerms;
+}
+
+export const marketplace = {
+  /** The listings visible to the caller (V2-012 browse read). */
+  listListings: async (): Promise<ProductListingWithRevision[]> => {
+    const body = await apiGet<{ listings: ProductListingWithRevision[] }>(
+      '/marketplace/listings',
+    );
+    return body.listings ?? [];
+  },
+
+  /** One listing with its current revision (visibility-checked read). */
+  getListing: async (listingId: string): Promise<ProductListingWithRevision> => {
+    const body = await apiGet<{ listing: ProductListing; revision: ProductListingRevision }>(
+      `/marketplace/listings/${listingId}`,
+    );
+    return { listing: body.listing, revision: body.revision };
+  },
+
+  /** The listing's immutable revision history. */
+  listRevisions: async (listingId: string): Promise<ProductListingRevision[]> => {
+    const body = await apiGet<{ revisions: ProductListingRevision[] }>(
+      `/marketplace/listings/${listingId}/revisions`,
+    );
+    return body.revisions ?? [];
+  },
+
+  /**
+   * Create-or-converge a draft listing (the V2-012 command; revision 1
+   * pins the EXACT version). Convergence answers created=false with the
+   * EXISTING listing — never a second listing.
+   */
+  createListing: async (
+    input: {
+      organizationId: string;
+      workflowId: string;
+      versionId: string;
+      name: string;
+      description?: string | null;
+      offers: ProductCreateListingOfferInput[];
+    },
+  ): Promise<ProductListingWithRevision & { created: boolean }> => {
+    const body = await apiPost<{
+      listing: ProductListing;
+      revision: ProductListingRevision;
+      created: boolean;
+    }>('/marketplace/listings', input);
+    return { listing: body.listing, revision: body.revision, created: body.created };
+  },
+
+  /** Publish (draft → published; the public-workflow rule is the authority's). */
+  publishListing: async (listingId: string): Promise<ProductListingWithRevision> => {
+    const body = await apiPost<{ listing: ProductListing; revision: ProductListingRevision }>(
+      `/marketplace/listings/${listingId}/publish`,
+      {},
+    );
+    return { listing: body.listing, revision: body.revision };
+  },
+
+  /**
+   * Accept an offer (the purchase flow → the entitlement). A payment
+   * failure is a typed error that grants NOTHING.
+   */
+  acceptOffer: async (
+    listingId: string,
+    offerId: string,
+    customerOrganizationId: string,
+  ): Promise<{
+    entitlement: ProductEntitlement;
+    transaction: ProductMarketplaceTransaction | null;
+    created: boolean;
+  }> => {
+    return apiPost<{
+      entitlement: ProductEntitlement;
+      transaction: ProductMarketplaceTransaction | null;
+      created: boolean;
+    }>(`/marketplace/listings/${listingId}/offers/${offerId}/accept`, {
+      customerOrganizationId,
+    });
+  },
+
+  /**
+   * The version-access DECISION for one organization (a read that answers
+   * "may this organization access this content/version?" — never a grant).
+   */
+  checkVersionAccess: async (
+    organizationId: string,
+    listingId: string,
+    versionId: string,
+  ): Promise<ProductVersionAccessDecision> => {
+    const body = await apiGet<{ decision: ProductVersionAccessDecision }>(
+      `/organizations/${organizationId}/marketplace/listings/${listingId}/version-access?versionId=${encodeURIComponent(versionId)}`,
+    );
+    return body.decision;
+  },
+
+  /** Customer cancellation (stops future maintenance; preserves history). */
+  cancelSubscription: async (
+    entitlementId: string,
+  ): Promise<{ entitlement: ProductEntitlement }> => {
+    return apiPost<{ entitlement: ProductEntitlement }>(
+      `/marketplace/entitlements/${entitlementId}/cancel`,
+      {},
+    );
+  },
+};
 
 // T9 (V2-017): the teaching transport wire shapes (the V2-006 authority
 // payloads, consumed verbatim — the frontend renders, never re-derives).

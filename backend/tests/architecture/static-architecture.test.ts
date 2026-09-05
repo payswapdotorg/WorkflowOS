@@ -18467,7 +18467,7 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
       'companion.route.ts', 'delegation.route.ts', 'development-planner.route.ts',
       'execution-policy.route.ts', 'execution-routing.route.ts', 'execution.route.ts',
       'github-provisioning.route.ts', 'github-webhook.route.ts', 'health.route.ts',
-      'jobs.route.ts', 'llm.route.ts', 'maintenance.route.ts', 'notification.route.ts',
+      'jobs.route.ts', 'llm.route.ts', 'maintenance.route.ts', 'marketplace.route.ts', 'notification.route.ts',
       'onboarding.route.ts', 'organizations.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
       'requirements.route.ts', 'reverse-teaching.route.ts', 'review.route.ts', 'runtime.route.ts',
       'specifications.route.ts', 'teaching-sessions.route.ts',
@@ -18684,8 +18684,10 @@ describe('WORK-050 invariants — Unified Execution UX (consumer, never authorit
     // 37 since V2-009 (workflow-deployments — the W4 trigger-layer surface);
     // 39 since V2-017 T9 (the Teach Me transport routes over the frozen
     // V2-006/V2-010 authorities); 40 since V2-017 T11 (the optimization
-    // transport routes over the frozen V2-011 authority).
-    expect(routeFiles.length).toBe(40);
+    // transport routes over the frozen V2-011 authority); 41 since V2-017
+    // T12 (the marketplace transport routes over the frozen V2-012
+    // authority — the §21/§22/§23 sharing/marketplace/install surface).
+    expect(routeFiles.length).toBe(41);
     expect(routeFiles).toContain('execution.route.ts');
     expect(routeFiles).toContain('delegation.route.ts');
     expect(routeFiles).toContain('work-items.route.ts');
