@@ -586,7 +586,12 @@ describe('V2-017 T6 — the run experience', () => {
         .map((c) => (c[1] as RequestInit | undefined)?.body)
         .filter(Boolean)
         .map((b) => JSON.parse(String(b)) as Record<string, unknown>);
-      const requestCall = bodies.find((b) => b.workflowId === 'wf-1');
+      // T11: the page's versions experience also POSTs (the analysis)
+      // carrying workflowId — the RUN envelope is the body carrying the
+      // authoritative trigger (uniquely).
+      const requestCall = bodies.find(
+        (b) => b.workflowId === 'wf-1' && b.trigger !== undefined,
+      );
       expect(requestCall).toMatchObject({
         workflowId: 'wf-1',
         versionId: 'ver-2',

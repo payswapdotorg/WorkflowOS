@@ -606,6 +606,39 @@ export const workflowRepository = {
     );
     return body.installations ?? [];
   },
+
+  /**
+   * Install ONE EXACT version into the tenant (the EXISTING V2-002
+   * command). The installation pins that version forever — the explicit
+   * ADOPTION action of the §19 update UX composes this (a newer version
+   * never moves an existing installation).
+   */
+  installVersion: async (
+    organizationId: string,
+    workflowId: string,
+    versionId: string,
+  ): Promise<{ installation: ProductInstallationDetail['installation'] }> => {
+    return apiPost<{ installation: ProductInstallationDetail['installation'] }>(
+      `/organizations/${organizationId}/workflow-repository/installations`,
+      { workflowId, versionId },
+    );
+  },
+
+  /**
+   * Enable / disable / uninstall an installation (the EXISTING V2-002
+   * lifecycle command — never touches versions). Adoption retires the old
+   * installation through this after the new pin is installed.
+   */
+  setInstallationStatus: async (
+    organizationId: string,
+    installationId: string,
+    action: 'enable' | 'disable' | 'uninstall',
+  ): Promise<{ installation: ProductInstallationDetail['installation'] }> => {
+    return apiPost<{ installation: ProductInstallationDetail['installation'] }>(
+      `/organizations/${organizationId}/workflow-repository/installations/${installationId}/${action}`,
+      {},
+    );
+  },
 };
 
 /** An immutable workflow version (the V2-002 wire shape). */
@@ -977,6 +1010,178 @@ export const reverseTeaching = {
       `/reverse-teaching/sessions/${sessionId}/finalize`,
       {},
     );
+  },
+};
+
+// T11 (V2-017): the optimization transport wire shapes (the V2-011
+// authority payloads, consumed verbatim — the frontend renders, never
+// re-derives; the deep-frozen baseline/candidate documents stay
+// server-side: the version content arrives through the V2-002 reads).
+
+/** One detected optimization opportunity (the §20 recommendation). */
+export interface ProductOptimizationOpportunity {
+  kind: 'api_substitution' | 'workflow_reuse';
+  nodeId?: string;
+  nodeIds?: string[];
+  declaredTask?: string;
+  declaredRequirements?: string[];
+  apiCapability?: string;
+  rationale: string;
+}
+
+/** The deterministic analysis of one version (§20 "found N improvements"). */
+export interface ProductOptimizationAnalysis {
+  analysisId: string;
+  rulesVersion: string;
+  opportunities: ProductOptimizationOpportunity[];
+  rejected: Array<{ kind: string; nodeIds: string[]; reason: string; rationale: string }>;
+}
+
+/** The per-criterion rubric delta (negative = the candidate improves). */
+export interface ProductCriterionDelta {
+  baseline: number;
+  candidate: number;
+  delta: number;
+}
+
+/** The deterministic baseline-vs-candidate comparison (§19 What changed). */
+export interface ProductVersionComparison {
+  rulesVersion: string;
+  correctness: { equivalent: boolean; firstDivergence: string | null };
+  negotiation: { decision: string; reason?: string };
+  latency: ProductCriterionDelta;
+  cost: ProductCriterionDelta;
+  reliability: ProductCriterionDelta;
+  maintenance: ProductCriterionDelta;
+  maintenanceBreakdown: {
+    baseline: { nodeCount: number; duplicateNodeCount: number; agenticNodeCount: number; score: number };
+    candidate: { nodeCount: number; duplicateNodeCount: number; agenticNodeCount: number; score: number };
+  };
+}
+
+/** The record of a materialized candidate version (a NEW version). */
+export interface ProductMaterializationRecord {
+  workflowId: string;
+  versionId: string;
+  materializedAt: number;
+  candidateDigest: string;
+}
+
+/** One optimization proposal (§20 — becomes a NEW version only through
+ * the owner's explicit approval + materialization). */
+export interface ProductOptimizationProposal {
+  id: string;
+  kind: 'api_substitution' | 'workflow_reuse';
+  ownerId: string;
+  provenance: {
+    baseline: { workflowId: string; versionId: string; semanticDigest: string };
+    analysisId: string;
+    rulesVersion: string;
+    opportunityKind: string;
+    opportunityNodeIds: string[];
+    candidateDigest: string;
+  };
+  affectedNodeIds: string[];
+  rationale: string;
+  comparison: ProductVersionComparison;
+  status: 'proposed' | 'approved' | 'rejected' | 'materialized';
+  createdAt: number;
+  decision: { ownerId: string; decidedAt: number; note?: string } | null;
+  materialization: ProductMaterializationRecord | null;
+  reuseTarget: { workflowId: string; versionRef: string } | null;
+}
+
+export const optimization = {
+  /**
+   * Analyze one version (the §20 "found N improvements" telemetry). The
+   * document resolves SERVER-SIDE; the client passes identifiers only.
+   */
+  analyze: async (
+    workflowId: string,
+    versionId: string,
+  ): Promise<{ analysis: ProductOptimizationAnalysis }> => {
+    return apiPost<{ analysis: ProductOptimizationAnalysis }>('/workflow-optimization/analyze', {
+      workflowId,
+      versionId,
+    });
+  },
+
+  /**
+   * Create the proposal for one analyzed opportunity (the owner review
+   * card: what changed, why semantics-preserving, the trade-offs).
+   */
+  createProposal: async (
+    workflowId: string,
+    versionId: string,
+    opportunityNodeId: string,
+  ): Promise<{ proposal: ProductOptimizationProposal }> => {
+    return apiPost<{ proposal: ProductOptimizationProposal }>('/workflow-optimization/proposals', {
+      workflowId,
+      versionId,
+      opportunityNodeId,
+    });
+  },
+
+  /** The workflow's proposals (the converge read, stable creation order). */
+  listProposals: async (
+    workflowId: string,
+  ): Promise<{ proposals: ProductOptimizationProposal[] }> => {
+    const body = await apiGet<{ proposals: ProductOptimizationProposal[] }>(
+      `/workflow-optimization/proposals?workflowId=${encodeURIComponent(workflowId)}`,
+    );
+    return { proposals: body.proposals ?? [] };
+  },
+
+  /** The owner's explicit approval (proposed → approved). */
+  approveProposal: async (
+    proposalId: string,
+  ): Promise<{ proposal: ProductOptimizationProposal }> => {
+    return apiPost<{ proposal: ProductOptimizationProposal }>(
+      `/workflow-optimization/proposals/${proposalId}/approve`,
+      {},
+    );
+  },
+
+  /** The owner's explicit rejection (terminal). */
+  rejectProposal: async (
+    proposalId: string,
+    note?: string,
+  ): Promise<{ proposal: ProductOptimizationProposal }> => {
+    return apiPost<{ proposal: ProductOptimizationProposal }>(
+      `/workflow-optimization/proposals/${proposalId}/reject`,
+      note ? { note } : {},
+    );
+  },
+
+  /**
+   * Materialize the APPROVED proposal as a NEW version (the only
+   * version-creation path — never an activation, never a mutation of the
+   * installed pin).
+   */
+  materializeProposal: async (
+    proposalId: string,
+  ): Promise<{ proposal: ProductOptimizationProposal; materialization: ProductMaterializationRecord }> => {
+    return apiPost<{ proposal: ProductOptimizationProposal; materialization: ProductMaterializationRecord }>(
+      `/workflow-optimization/proposals/${proposalId}/materialize`,
+      {},
+    );
+  },
+
+  /**
+   * The deterministic comparison of two versions (§19 "What changed").
+   * Both documents resolve SERVER-SIDE (the V2-011 authority's comparison
+   * — the frontend never re-derives comparison semantics).
+   */
+  compareVersions: async (
+    workflowId: string,
+    baselineVersionId: string,
+    candidateVersionId: string,
+  ): Promise<{ comparison: ProductVersionComparison }> => {
+    return apiPost<{ comparison: ProductVersionComparison }>('/workflow-optimization/compare', {
+      workflowId,
+      baselineVersionId,
+      candidateVersionId,
+    });
   },
 };
 
