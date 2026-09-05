@@ -4,11 +4,11 @@
 
 Verified against repository `main` and relevant GitHub PR/CI evidence on 2026-09-05.
 
-## Current main SHA
+## Current main / reconciliation
 
-`675fd2860724ee80da34ad7405f20513199af960`
+PR #194 merged T6 as `52ca783fb927a44889e217117a6569633f14a98b`.
 
-The immediately preceding product merge is PR #194, merged as `52ca783fb927a44889e217117a6569633f14a98b`. The two subsequent commits reconcile canonical machine state and this human-readable projection.
+The canonical machine-state reconciliation followed on `main`; this projection is the final human-readable reconciliation record. Before any new implementation dispatch, workers MUST re-read live `main` rather than relying on a stored SHA here.
 
 ## Current active program
 
@@ -28,7 +28,7 @@ T6 is complete by actual Git merge. T8 is already durably dispatched for residen
 
 - Dispatch issue: **#196** — `V2-017 T8 — Resident Z.ai implementation dispatch: Scheduling and events`
 - Original dispatch base: `b58dc58f46bd65b6cf14eb575596f77b9030ffd6`
-- Refreshed execution base: `675fd2860724ee80da34ad7405f20513199af960`
+- Execution base after T6 reconciliation: the live `main` at time of worker startup (the stale original base is superseded by the durable issue comment)
 - T6 merge: `52ca783fb927a44889e217117a6569633f14a98b`
 - T7 is newly unblocked by T6 completion; T8, T9, T11 and T14 remain eligible.
 
@@ -70,8 +70,8 @@ PR #194 is **merged** and is no longer an open implementation PR.
 
 ## Required next action
 
-Continue from live `main`. Review/implement the durably dispatched T8 slice on its own branch/PR, starting from the refreshed execution base above, or another frontier slice when explicitly dispatched. T6 requires no further review action unless a new repository regression is found.
+Continue from live `main`. Review/implement the durably dispatched T8 slice on its own branch/PR, beginning only after the worker verifies the current live `main`. T6 requires no further review action unless a new repository regression is found.
 
 ## Reconciliation note
 
-Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #194. Canonical `implementation-state.json` records T6 COMPLETE with its merge identity and the recomputed frontier; this projection is synchronized to that state and to the latest live `main` SHA.
+Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #194. Canonical `implementation-state.json` records T6 COMPLETE with its merge identity and the recomputed frontier; this projection is synchronized to that state. The exact live `main` SHA is intentionally not treated as durable navigation state; it must always be fetched from Git before new work.
