@@ -50,7 +50,7 @@ export default function TrustDisclosure({ history }: { history: ProductRunHistor
         </ul>
       )}
       <details className="text-sm">
-        <summary className="cursor-pointer text-muted-foreground">
+        <summary className="cursor-pointer text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
           Advanced verification
         </summary>
         <div className="mt-2 space-y-2">
