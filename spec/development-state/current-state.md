@@ -1,24 +1,16 @@
 # WorkflowOS — Current Development State
 
-> **This file is a convenience projection only. Git and canonical machine state remain authoritative.**
+> Convenience projection only. Git and canonical machine state remain authoritative.
 
-Verified against repository `main` and relevant GitHub PR/CI evidence on 2026-09-05.
+Verified on 2026-09-05 against the active product-development remote `payswapdotorg/WorkflowOS`.
 
-## Current main / reconciliation
+## Active remote
 
-PR #194 merged T6 as `52ca783fb927a44889e217117a6569633f14a98b`.
+`payswapdotorg/WorkflowOS`
 
-PR #198 merged T8 as `63549e02e30c720da45f66e3dd1facc6323da3ed` after exact-head Architect acceptance of `51e41da01a6b010d5287fb698640de8e73c9b274`.
+This fork is now the active product-development remote. GitHub issue/PR identities from `pectoraux/WorkflowOS` are historical and are not used for new dispatches.
 
-PR #199 merged T7 as `2b00f0cc0096af23ca031bc543d6f01bd13a157b` after exact-head Architect acceptance of `8b6d440744d5a8b309a7faa531c8716da0468dea`.
-
-PR #201 merged T9 as `99500cf5a51fe593fefbc1380538f0b779f3dfba` after the Architect gate correction on the same PR. Corrected head was `4cc2510b93703b4d225e8580640224996d1acce0`, rebased onto `23deb8a0a23f0493ffcb4650696c3335d9670e01`.
-
-T9 correction evidence included authoritative V2-002 installation-pin enforcement, mismatch fail-closed regressions, and fresh exact-head verification. The documented two backend/deploy failures remained inherited baseline failures; all reported T9-specific and relevant browser/teaching evidence passed.
-
-Before any new implementation dispatch, workers MUST re-read live `main`; stored SHAs are not durable current truth.
-
-## Current active program
+## Current program
 
 **V2-017 — Universal Product UX** (`POST-W6-PRODUCT`)
 
@@ -26,45 +18,33 @@ Before any new implementation dispatch, workers MUST re-read live `main`; stored
 
 **T11 — Versions, updates and optimization**
 
-T9 is complete by actual Git merge. T11 and T14 are now independently eligible. T10 remains blocked until T9 was complete; T12 remains blocked on T11; T15/T16 remain later completion gates.
+T9 is complete by actual Git merge as PR #201 -> `99500cf5a51fe593fefbc1380538f0b779f3dfba`.
 
-- T9 dispatch issue: **#200** — completed through PR #201
-- T9 merge: `99500cf5a51fe593fefbc1380538f0b779f3dfba`
-- T11 dispatch issue: **#202** — implementation dispatch from post-T9 live `main`
-- T11 dispatch base recorded at dispatch: `99500cf5a51fe593fefbc1380538f0b779f3dfba`
+T11 is durably dispatched on this remote as **Issue #1**.
+
+T14 remains independently eligible and must not become an unmerged dependency of T11.
 
 ## Completed tasks
 
-Authoritative task-level machine state should record these V2-017 slices COMPLETE:
-
-- T1 — human-facing application shell
-- T2 — workflow-first Home
-- T3 — workflow library
-- T4 — workflow detail
-- T5 — Tell / Show / Tell + Show creation
-- T6 — Run / approval / where-it-runs
-- T7 — failure / recovery / takeover
-- T8 — scheduling and events
-- T9 — Teach Me / reverse teaching
-- T13 — expert/developer workspace transition
+T1, T2, T3, T4, T5, T6, T7, T8, T9 and T13 are complete by actual Git merge.
 
 ## Eligible frontier
 
 **T11, T14**
 
-Eligibility is derived from the Work Order dependency graph, actual Git merge facts, roadmap constraints, and required evidence. No eligible slice may depend on an unmerged sibling.
-
 ## Blocked items
 
-- **T10** — blocked on T6, T7, and T9.
-- **T12** — blocked on T3, T4, and T11.
-- **T15** — blocked until the required T2–T14 implementation/verification responsibilities are complete.
-- **T16** — blocked on T15; it is the final Architect gate and merge.
+- T10 — blocked on T6, T7 and T9.
+- T12 — blocked on T3, T4 and T11.
+- T15 — blocked until T2–T14 implementation/verification responsibilities are complete.
+- T16 — blocked on T15.
 
-## Required next action
+## Worker rule
 
-Execute the durably dispatched **T11** slice from its own branch/PR, beginning only after the resident worker verifies the current live `main`. Keep T14 independently eligible and do not make it an unmerged dependency of T11.
+Before editing, the resident worker must read the governing repository files and re-read live `main`. Any dispatch SHA is only a point-in-time observation.
 
-## Reconciliation note
+T11 must remain one bounded slice on one branch/PR. Corrections stay on the same PR. Do not implement T12 or T14 within T11.
 
-Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #201. T9 is complete; Issue #202 is the durable T11 dispatch. The exact live `main` SHA must always be fetched from Git immediately before new work.
+## Next action
+
+Continue T11 from the current live `main` of `payswapdotorg/WorkflowOS`, using **Issue #1** as the durable implementation dispatch. After T11 reaches an Architect-accepted merge, reconcile canonical state and recompute the frontier.
