@@ -9,6 +9,9 @@ import {
   type ProductWorkflowRun,
   type ProductRunHistory,
 } from '../../api/client';
+import { humanRunState, humanRunStateSentence } from '../activity/run-state-language';
+import { approvalStepIdsFromContent } from '../activity/workflow-ir-facts';
+import TrustDisclosure from '../activity/TrustDisclosure';
 
 /**
  * RunExperience — the Run / approval / where-it-runs surface (V2-017 Task 6).
@@ -91,74 +94,15 @@ function capabilitiesFromContent(content: unknown): string[] {
   return [...capabilities];
 }
 
-/** The IR's approval-node step ids (the CONSENT boundary facts). */
-function approvalStepIdsFromContent(content: unknown): ReadonlySet<string> {
-  if (typeof content !== 'object' || content === null || Array.isArray(content)) {
-    return new Set();
-  }
-  const doc = content as { objectType?: unknown; ir?: { nodes?: unknown } | null };
-  if (doc.objectType !== 'workflowos/workflow-ir/v1') return new Set();
-  if (!doc.ir || !Array.isArray(doc.ir.nodes)) return new Set();
-  const ids = new Set<string>();
-  for (const node of doc.ir.nodes) {
-    if (typeof node !== 'object' || node === null) continue;
-    const spec = (node as { spec?: unknown; id?: unknown }).spec;
-    const { id } = node as { id?: unknown };
-    if (typeof id !== 'string') continue;
-    if (typeof spec !== 'object' || spec === null) continue;
-    const human = (spec as { human?: unknown }).human;
-    if (
-      typeof human === 'object' &&
-      human !== null &&
-      (human as { kind?: unknown }).kind === 'approval'
-    ) {
-      ids.add(id);
-    }
-  }
-  return ids;
-}
-
-/** The run's human state word (UX spec §15) from the authoritative record. */
+/** The run's human state word (UX spec §15) from the authoritative record
+ *  — the SHARED vocabulary (run-state-language), one source for the
+ *  run-status surface and the Activity timeline. */
 function humanState(run: ProductWorkflowRun): string {
-  switch (run.state) {
-    case 'requested':
-      return 'Ready';
-    case 'running':
-      return 'Running';
-    case 'paused':
-      return 'Paused';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Couldn\u2019t complete';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      // An unknown authoritative state: the honest word is the state
-      // itself — never a guessed human translation.
-      return run.state;
-  }
+  return humanRunState(run);
 }
 
 function humanStateSentence(state: string): string {
-  switch (state) {
-    case 'Ready':
-      return 'Ready to run — it hasn\u2019t started yet.';
-    case 'Running':
-      return 'It\u2019s working right now.';
-    case 'Waiting for you':
-      return 'It\u2019s paused for your approval before it continues.';
-    case 'Paused':
-      return 'It\u2019s paused.';
-    case 'Completed':
-      return 'It finished.';
-    case 'Couldn\u2019t complete':
-      return 'It stopped before finishing.';
-    case 'Cancelled':
-      return 'It was cancelled.';
-    default:
-      return '';
-  }
+  return humanRunStateSentence(state);
 }
 
 interface WhereOption {
@@ -474,6 +418,18 @@ export default function RunExperience({
                 Try again
               </button>
             </div>
+          )}
+          {historyState.kind === 'data' && (
+            // T10 (V2-017): the §17 "How do you know?" trust presentation —
+            // composed from the SAME history read (no second evidence
+            // authority): concise evidence first, advanced verification on
+            // demand, the no-physical-proof boundary always stated.
+            <section
+              aria-label="How do you know?"
+              className="mt-3 border-t border-border pt-3"
+            >
+              <TrustDisclosure history={historyState.history} />
+            </section>
           )}
           {historyState.kind === 'data' && (
             <details
