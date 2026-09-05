@@ -18444,8 +18444,11 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
     // The route set as WORK-048 left it (32 files), since extended to 34 by
     // WORK-074 (auth + organizations — the identity runtime), to 35 by
     // V2-002 (workflow-repository — the W1 workflow repository HTTP surface),
-    // to 36 by V2-005 (workflow-runs — the W2B run command surface) and to
-    // 37 by V2-009 (workflow-deployments — the W4 trigger-layer HTTP surface).
+    // to 36 by V2-005 (workflow-runs — the W2B run command surface), to
+    // 37 by V2-009 (workflow-deployments — the W4 trigger-layer HTTP surface)
+    // and to 39 by V2-017 T9 (teaching-sessions + reverse-teaching — the
+    // consumer Teach Me transport routes over the frozen V2-006/V2-010
+    // teaching authorities; transport only, per V2-017 rule 9).
     // WORK-049 adds NO route file of its own.
     // (health.route.ts is WORK-001/023's PLATFORM liveness/readiness probe —
     // it predates WORK-049 and is NOT a project-health read model.)
@@ -18463,7 +18466,8 @@ describe('WORK-049 invariants — Project Health and Maintenance UX (consumer, n
       'github-provisioning.route.ts', 'github-webhook.route.ts', 'health.route.ts',
       'jobs.route.ts', 'llm.route.ts', 'maintenance.route.ts', 'notification.route.ts',
       'onboarding.route.ts', 'organizations.route.ts', 'projects.route.ts', 'repository-intelligence.route.ts',
-      'requirements.route.ts', 'review.route.ts', 'runtime.route.ts', 'specifications.route.ts',
+      'requirements.route.ts', 'reverse-teaching.route.ts', 'review.route.ts', 'runtime.route.ts',
+      'specifications.route.ts', 'teaching-sessions.route.ts',
       'verification.route.ts', 'work-items.route.ts', 'workbench.route.ts',
       'workflow-deployments.route.ts', 'workflow-repository.route.ts', 'workflow-runs.route.ts', 'workflow.route.ts',
     ]);
@@ -18668,12 +18672,16 @@ describe('WORK-050 invariants — Unified Execution UX (consumer, never authorit
     const routesDir = join(BACKEND_ROOT, 'src', 'api', 'routes');
     // The route FILE set grows only by WORK-074's identity surface (auth +
     // organizations — 34 files), V2-002's workflow repository
-    // (workflow-repository — 35 files) and V2-005's workflow runs
-    // (workflow-runs — 36 files); WORK-050 still adds endpoints to the
-    // EXISTING execution + delegation route files, never new files of its own.
+    // (workflow-repository — 35 files), V2-005's workflow runs
+    // (workflow-runs — 36 files) and V2-017 T9's teaching transport routes
+    // (teaching-sessions + reverse-teaching — 39 files); WORK-050 still
+    // adds endpoints to the EXISTING execution + delegation route files,
+    // never new files of its own.
     const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith('.route.ts')).sort();
-    // 37 since V2-009 (workflow-deployments — the W4 trigger-layer surface).
-    expect(routeFiles.length).toBe(37);
+    // 37 since V2-009 (workflow-deployments — the W4 trigger-layer surface);
+    // 39 since V2-017 T9 (the Teach Me transport routes over the frozen
+    // V2-006/V2-010 authorities).
+    expect(routeFiles.length).toBe(39);
     expect(routeFiles).toContain('execution.route.ts');
     expect(routeFiles).toContain('delegation.route.ts');
     expect(routeFiles).toContain('work-items.route.ts');

@@ -40,11 +40,21 @@ function jsonResponse(status: number, body: unknown): Response {
 type RouteHandler = () => Response | Promise<Response>;
 
 function mockApi(routes: Record<string, RouteHandler>): ReturnType<typeof vi.fn> {
+  // Keys may carry a method prefix ('POST /path'); the longest fragment
+  // wins, and a method-prefixed key matches only that HTTP verb.
   const ordered = Object.entries(routes).sort((a, b) => b[0].length - a[0].length);
-  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+  return vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input).replace(/^https?:\/\/[^/]+/, '');
-    for (const [fragment, handler] of ordered) {
-      if (url.includes(fragment)) return Promise.resolve(handler());
+    const method = (init?.method ?? 'GET').toUpperCase();
+    for (const [key, handler] of ordered) {
+      const methodPrefix = /^([A-Z]+) (.*)$/.exec(key);
+      if (methodPrefix) {
+        if (methodPrefix[1] === method && url.includes(methodPrefix[2])) {
+          return Promise.resolve(handler());
+        }
+        continue;
+      }
+      if (url.includes(key)) return Promise.resolve(handler());
     }
     return Promise.resolve(jsonResponse(500, { error: `unmocked ${url}` }));
   });
@@ -246,6 +256,37 @@ const RUN_HISTORY = {
   commands: [],
 };
 
+// The teaching session fixtures (T9): a created session bound to the
+// pinned version, with the derived lesson + one practice question.
+const TEACH_SESSION = {
+  id: 'ts_1',
+  learnerId: 'user-1',
+  pinned: {
+    workflowId: 'wf-1',
+    versionId: 'ver-2',
+    semanticDigest: { algorithm: 'sha-256', domain: 'workflowos/workflow-ir/v1', digest: 'a'.repeat(64) },
+  },
+  status: 'not_started',
+  createdAt: 1733568000000,
+  updatedAt: 1733568000000,
+  lesson: null,
+  pinnedDocument: null,
+  confirmedCheckpoints: [],
+  unresolvedQuestions: [],
+  evidence: [],
+  progress: {
+    confirmedCheckpoints: [],
+    nextCheckpointNodeId: null,
+    allCheckpointsConfirmed: false,
+    practiceAttemptCount: 0,
+    correctPracticeAttemptCount: 0,
+    assessmentAttemptCount: 0,
+    passedAssessment: false,
+  },
+};
+
+const TEACH_PRACTICE_QUESTIONS: unknown[] = [];
+
 function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
     '/workflow-repository/workflows/wf-1/versions': () => jsonResponse(200, { versions: VERSIONS }),
@@ -257,6 +298,14 @@ function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string
       jsonResponse(200, { subscriptions: SUBSCRIPTIONS }),
     '/workflow-repository/workflows': () => jsonResponse(200, { workflows: ORG_WORKFLOWS }),
     '/workflow-repository/workflows/wf-1': () => jsonResponse(200, { workflow: WORKFLOW }),
+    // T9: the teaching session create-or-converge (the transport route
+    // over the V2-006 authority).
+    'POST /teaching-sessions/sessions': () =>
+      jsonResponse(201, { session: TEACH_SESSION, created: true }),
+    'GET /teaching-sessions/sessions/ts_1': () =>
+      jsonResponse(200, { session: TEACH_SESSION }),
+    'GET /teaching-sessions/sessions/ts_1/practice-questions': () =>
+      jsonResponse(200, { questions: TEACH_PRACTICE_QUESTIONS }),
     ...overrides,
   };
 }
@@ -482,14 +531,18 @@ describe('V2-017 T4 — workflow detail', () => {
     expect(screen.queryByRole('list', { name: /what it does/i })).not.toBeInTheDocument();
   });
 
-  it('Teach Me carries its honest arrives-with state; Edit enters the expert workspace (Run is owned by the T6 run experience)', async () => {
+  it('Teach Me opens the real teaching experience beside Run (T9); Edit enters the expert workspace', async () => {
     renderDetail('wf-1', fullRoutes());
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
     );
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Teach Me' }));
-    expect(screen.getByText(/teaching experience arrives with the teaching task/i)).toBeInTheDocument();
+    // The §12 lesson surface replaces the arrives-with note.
+    const teach = await screen.findByRole('region', { name: 'Teach Me' });
+    expect(within(teach).getByText(/You'll learn to do this yourself/)).toBeInTheDocument();
+    expect(within(teach).getByRole('button', { name: 'Start lesson' })).toBeInTheDocument();
+    expect(screen.queryByText(/teaching experience arrives with the teaching task/i)).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Edit' })).toHaveAttribute('href', '/expert');
   });
 

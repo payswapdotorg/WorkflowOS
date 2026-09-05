@@ -14,6 +14,7 @@ import {
 import RunExperience from '../components/run/RunExperience';
 import WhenSection from '../components/when/WhenSection';
 import RecoveryExperience from '../components/recovery/RecoveryExperience';
+import TeachExperience from '../components/teach/TeachExperience';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -135,6 +136,7 @@ export default function WorkflowDetailPage() {
   const [state, setState] = useState<DetailState>({ kind: 'loading' });
   const [nonce, setNonce] = useState(0);
   const [actionNote, setActionNote] = useState<string | null>(null);
+  const [teachOpen, setTeachOpen] = useState(false);
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
@@ -265,17 +267,20 @@ export default function WorkflowDetailPage() {
 
       {/* The primary actions (UX spec §6). Run is the T6 run experience —
           the consequential-action preview, the where-it-runs facts and the
-          authoritative run commands. Teach Me's deep flow belongs to the
-          teaching task (T9); its entry carries the honest note. Edit
-          enters the EXISTING expert workspace. */}
+          authoritative run commands. Teach Me (T9) opens the real lesson
+          experience over the V2-006/V2-010 authorities. Edit enters the
+          EXISTING expert workspace. */}
       <section aria-label="Primary actions" className="space-y-3">
         <div className="flex flex-wrap gap-3">
           <button
             type="button"
-            onClick={() => setActionNote('The teaching experience arrives with the teaching task.')}
+            onClick={() => {
+              setActionNote(null);
+              setTeachOpen((v) => !v);
+            }}
             className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
           >
-            Teach Me
+            {teachOpen ? 'Close lesson' : 'Teach Me'}
           </button>
           <Link
             to="/expert"
@@ -293,6 +298,13 @@ export default function WorkflowDetailPage() {
           onRunsChanged={refetch}
         />
       </section>
+      {teachOpen && (
+        <TeachExperience
+          workflow={workflow}
+          versions={versions}
+          installation={installation}
+        />
+      )}
       {actionNote && (
         <p role="status" className="rounded-md bg-accent/40 p-3 text-sm text-muted-foreground">
           {actionNote}

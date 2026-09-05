@@ -585,6 +585,85 @@ export interface ProductWorkflowVersion {
   createdAt: string;
 }
 
+// T9 (V2-017): the teaching transport wire shapes (the V2-006 authority
+// payloads, consumed verbatim — the frontend renders, never re-derives).
+
+/** One teaching session bound to a pinned immutable version (V2-006). */
+export interface ProductTeachingSession {
+  id: string;
+  learnerId: string;
+  pinned: { workflowId: string; versionId: string; semanticDigest: unknown };
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+  lesson: unknown;
+  pinnedDocument: unknown;
+  confirmedCheckpoints: unknown[];
+  unresolvedQuestions: unknown[];
+  evidence: { evidenceClass: string; kind: string; id: string; recordedAt: number }[];
+  progress: {
+    confirmedCheckpoints: unknown[];
+    nextCheckpointNodeId: string | null;
+    allCheckpointsConfirmed: boolean;
+    practiceAttemptCount: number;
+    correctPracticeAttemptCount: number;
+    assessmentAttemptCount: number;
+    passedAssessment: boolean;
+  };
+}
+
+/** One practice question (the authority's own derivation). */
+export interface ProductPracticeQuestion {
+  id: string;
+  kind: string;
+  nodeId: string;
+  prompt: string;
+  options: string[];
+}
+
+/** The typed result of one practice attempt (never a session error). */
+export interface ProductPracticeResult {
+  outcome: 'correct' | 'incorrect';
+  attemptId: string;
+  nodeId: string;
+  feedback: string;
+}
+
+/** The independent performance assessment outcome. */
+export interface ProductAssessmentOutcome {
+  assessmentId: string;
+  passed: boolean;
+  orderCorrect: boolean;
+  perStep: unknown[];
+  corrections: string[];
+  sessionStatus: string;
+}
+
+// T9 (V2-017): the reverse-teaching transport wire shapes (V2-010).
+
+/** One reverse-teaching session bound to an INSTALLED pinned version. */
+export interface ProductReverseTeachingSession {
+  id: string;
+  learnerId: string;
+  pin: { workflowId: string; versionId: string; installationId: string; semanticDigest: unknown };
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+  lesson: unknown;
+  pinnedDocument: unknown;
+  performedSteps: unknown[];
+  safetyAcknowledgments: unknown[];
+  evidence: { evidenceClass: string; kind: string; id: string; recordedAt: number }[];
+  progress: {
+    performedSteps: unknown[];
+    nextStepNodeId: string | null;
+    allStepsPerformed: boolean;
+    safetyAcknowledgedStepIds: string[];
+    performedStepCount: number;
+    disclosureAcknowledgedStepCount: number;
+  };
+}
+
 export const workflowDeployments = {
   /** The organization's deployments — placement and enable state (read). */
   listForOrganization: async (organizationId: string): Promise<ProductDeployment[]> => {
@@ -674,6 +753,192 @@ export const workflowDeployments = {
     // lifecycle command (Fastify rejects a bodiless application/json POST).
     return apiPost<{ subscription: ProductTriggerSubscription }>(
       `/workflow-deployments/subscriptions/${subscriptionId}/${enabled ? 'enable' : 'disable'}`,
+      {},
+    );
+  },
+};
+
+// T9 (V2-017): the Teach Me / reverse-teaching command surface — the
+// REAL transport routes over the frozen V2-006 / V2-010 authorities
+// (create-or-converge 201/200; typed rejections throw; the backend owns
+// every teaching decision).
+
+export const teaching = {
+  /**
+   * Create (or converge on) the learner's session for this exact pinned
+   * version — the resumable entry. The route resolves the pin from the
+   * authoritative version content; the client sends only the ids.
+   */
+  startSession: async (
+    workflowId: string,
+    versionId: string,
+  ): Promise<{ session: ProductTeachingSession; created: boolean }> => {
+    return apiPost<{ session: ProductTeachingSession; created: boolean }>(
+      `/teaching-sessions/sessions`,
+      { workflowId, versionId },
+    );
+  },
+
+  /** The session read (status, lesson, progress, evidence). */
+  getSession: async (sessionId: string): Promise<{ session: ProductTeachingSession }> => {
+    return apiGet<{ session: ProductTeachingSession }>(`/teaching-sessions/sessions/${sessionId}`);
+  },
+
+  /** Begin the lesson (the authority derives it from the pinned content). */
+  beginLesson: async (sessionId: string): Promise<{ session: ProductTeachingSession }> => {
+    return apiPost<{ session: ProductTeachingSession }>(
+      `/teaching-sessions/sessions/${sessionId}/begin-lesson`,
+      {},
+    );
+  },
+
+  /** The practice questions (the authority's own derivation). */
+  listPracticeQuestions: async (sessionId: string): Promise<ProductPracticeQuestion[]> => {
+    const body = await apiGet<{ questions: ProductPracticeQuestion[] }>(
+      `/teaching-sessions/sessions/${sessionId}/practice-questions`,
+    );
+    return body.questions ?? [];
+  },
+
+  /** Confirm the next checkpoint (the learner action). */
+  confirmCheckpoint: async (
+    sessionId: string,
+    nodeId: string,
+  ): Promise<{ session: ProductTeachingSession }> => {
+    return apiPost<{ session: ProductTeachingSession }>(
+      `/teaching-sessions/sessions/${sessionId}/checkpoints/confirm`,
+      { nodeId },
+    );
+  },
+
+  /** One practice attempt (typed outcome, never a session error). */
+  attemptPractice: async (
+    sessionId: string,
+    nodeId: string,
+    answer: string,
+  ): Promise<{ session: ProductTeachingSession; result: ProductPracticeResult }> => {
+    return apiPost<{ session: ProductTeachingSession; result: ProductPracticeResult }>(
+      `/teaching-sessions/sessions/${sessionId}/practice`,
+      { nodeId, answer },
+    );
+  },
+
+  /** Pause the lesson (resumable). */
+  pauseSession: async (sessionId: string): Promise<{ session: ProductTeachingSession }> => {
+    return apiPost<{ session: ProductTeachingSession }>(
+      `/teaching-sessions/sessions/${sessionId}/pause`,
+      {},
+    );
+  },
+
+  /** Resume a paused lesson — returns to the EXACT pending checkpoint. */
+  resumeSession: async (
+    sessionId: string,
+  ): Promise<{ session: ProductTeachingSession; resumeCheckpointNodeId: string | null }> => {
+    return apiPost<{ session: ProductTeachingSession; resumeCheckpointNodeId: string | null }>(
+      `/teaching-sessions/sessions/${sessionId}/resume`,
+      {},
+    );
+  },
+
+  /** The independent performance assessment (the completion path). */
+  submitAssessment: async (
+    sessionId: string,
+    orderedStepIds: string[],
+    semanticsByStep: Record<string, string>,
+  ): Promise<{ session: ProductTeachingSession; outcome: ProductAssessmentOutcome }> => {
+    return apiPost<{ session: ProductTeachingSession; outcome: ProductAssessmentOutcome }>(
+      `/teaching-sessions/sessions/${sessionId}/assessment`,
+      { orderedStepIds, semanticsByStep },
+    );
+  },
+};
+
+export const reverseTeaching = {
+  /**
+   * Create (or converge on) the learner's reverse-teaching session for an
+   * INSTALLED pinned version — the §13 do-it-yourself entry. The tuple is
+   * validated server-side against the V2-002 installation's immutable pin
+   * (a mismatch fails closed) — these identifiers locate the installation,
+   * they never define the pin.
+   */
+  startSession: async (
+    organizationId: string,
+    workflowId: string,
+    versionId: string,
+    installationId: string,
+  ): Promise<{ session: ProductReverseTeachingSession; created: boolean }> => {
+    return apiPost<{ session: ProductReverseTeachingSession; created: boolean }>(
+      `/reverse-teaching/sessions`,
+      { organizationId, workflowId, versionId, installationId },
+    );
+  },
+
+  /** The session read (status, manual-task lesson, progress, evidence). */
+  getSession: async (
+    sessionId: string,
+  ): Promise<{ session: ProductReverseTeachingSession }> => {
+    return apiGet<{ session: ProductReverseTeachingSession }>(
+      `/reverse-teaching/sessions/${sessionId}`,
+    );
+  },
+
+  /** Begin the manual lesson (the authority derives the manual-task view). */
+  beginLesson: async (sessionId: string): Promise<{ session: ProductReverseTeachingSession }> => {
+    return apiPost<{ session: ProductReverseTeachingSession }>(
+      `/reverse-teaching/sessions/${sessionId}/begin-lesson`,
+      {},
+    );
+  },
+
+  /** Acknowledge a safety-gated step's notice (the gate before performance). */
+  acknowledgeStepSafety: async (
+    sessionId: string,
+    nodeId: string,
+  ): Promise<{ session: ProductReverseTeachingSession }> => {
+    return apiPost<{ session: ProductReverseTeachingSession }>(
+      `/reverse-teaching/sessions/${sessionId}/steps/${nodeId}/safety-ack`,
+      {},
+    );
+  },
+
+  /** Perform one manual step (learning, never execution). */
+  performManualStep: async (
+    sessionId: string,
+    nodeId: string,
+    mode: 'performed' | 'acknowledged_disclosure',
+    learnerResult: string,
+  ): Promise<{ session: ProductReverseTeachingSession }> => {
+    return apiPost<{ session: ProductReverseTeachingSession }>(
+      `/reverse-teaching/sessions/${sessionId}/steps/${nodeId}/perform`,
+      { mode, learnerResult },
+    );
+  },
+
+  /** Pause the manual lesson (resumable). */
+  pauseSession: async (sessionId: string): Promise<{ session: ProductReverseTeachingSession }> => {
+    return apiPost<{ session: ProductReverseTeachingSession }>(
+      `/reverse-teaching/sessions/${sessionId}/pause`,
+      {},
+    );
+  },
+
+  /** Resume a paused manual lesson — returns to the EXACT pending step. */
+  resumeSession: async (
+    sessionId: string,
+  ): Promise<{ session: ProductReverseTeachingSession; resumeStepNodeId: string | null }> => {
+    return apiPost<{ session: ProductReverseTeachingSession; resumeStepNodeId: string | null }>(
+      `/reverse-teaching/sessions/${sessionId}/resume`,
+      {},
+    );
+  },
+
+  /** Finalize the completed manual lesson (the completion). */
+  finalizeLesson: async (
+    sessionId: string,
+  ): Promise<{ session: ProductReverseTeachingSession; finalization: unknown }> => {
+    return apiPost<{ session: ProductReverseTeachingSession; finalization: unknown }>(
+      `/reverse-teaching/sessions/${sessionId}/finalize`,
       {},
     );
   },

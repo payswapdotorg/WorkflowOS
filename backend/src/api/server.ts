@@ -59,6 +59,14 @@ import {
   workflowDeploymentsRoutes,
   type WorkflowDeploymentsRouteDeps,
 } from './routes/workflow-deployments.route.js';
+import {
+  teachingSessionsRoutes,
+  type TeachingSessionsRouteDeps,
+} from './routes/teaching-sessions.route.js';
+import {
+  reverseTeachingRoutes,
+  type ReverseTeachingRouteDeps,
+} from './routes/reverse-teaching.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -195,6 +203,15 @@ export interface ServerDeps extends JobsRouteDeps {
    *  manual launch). Backend-authorized; tenant scoping is decided by the
    *  injected WorkflowDeploymentService. Registered when auth is enabled. */
   workflowDeployments?: WorkflowDeploymentsRouteDeps;
+  /** V2-017 T9: teaching-sessions TRANSPORT routes — the consumer Teach Me
+   *  surface over the frozen V2-006 authority (session lifecycle, lesson,
+   *  checkpoints, practice, assessment). Transport only; every teaching
+   *  decision stays the injected service's. Registered when auth is on. */
+  teaching?: TeachingSessionsRouteDeps;
+  /** V2-017 T9: reverse-teaching TRANSPORT routes — the §13 do-it-yourself
+   *  surface over the frozen V2-010 authority (manual-task view, safety
+   *  gates, manual performance). Transport only. Registered when auth is on. */
+  reverseTeaching?: ReverseTeachingRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -332,6 +349,12 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.workflowDeployments) {
     await workflowDeploymentsRoutes(app, deps.workflowDeployments);
+  }
+  if (deps.auth && deps.teaching) {
+    await teachingSessionsRoutes(app, deps.teaching);
+  }
+  if (deps.auth && deps.reverseTeaching) {
+    await reverseTeachingRoutes(app, deps.reverseTeaching);
   }
   return app;
 }
