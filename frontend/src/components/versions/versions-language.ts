@@ -20,7 +20,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-const IR_OBJECT_TYPE = 'workflowos/workflow-ir-v1';
+const IR_OBJECT_TYPE = 'workflowos/workflow-ir/v1';
 
 /** The nodeLabels map from the authoritative V2-003 presentation layer. */
 export function nodeLabelsFromContent(content: unknown): Record<string, string> | null {

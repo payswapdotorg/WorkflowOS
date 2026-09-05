@@ -92,7 +92,7 @@ function version(id: string, versionNumber: number, parentVersionId: string | nu
     versionNumber,
     contentDigest: 'd'.repeat(64),
     content: {
-      objectType: 'workflowos/workflow-ir-v1',
+      objectType: 'workflowos/workflow-ir/v1',
       ir: {
         nodes: [
           { id: 'fetch', executionClass: 'deterministic_api' },
