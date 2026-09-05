@@ -8,7 +8,9 @@ Verified against repository `main` and relevant GitHub PR/CI evidence on 2026-09
 
 PR #194 merged T6 as `52ca783fb927a44889e217117a6569633f14a98b`.
 
-The canonical machine-state reconciliation followed on `main`; this projection is the final human-readable reconciliation record. Before any new implementation dispatch, workers MUST re-read live `main` rather than relying on a stored SHA here.
+PR #198 merged T8 as `63549e02e30c720da45f66e3dd1facc6323da3ed` after exact-head Architect acceptance of `51e41da01a6b010d5287fb698640de8e73c9b274`.
+
+The canonical machine-state reconciliation follows this merge; before any new implementation dispatch, workers MUST re-read live `main` rather than relying on a stored SHA here.
 
 ## Current active program
 
@@ -22,15 +24,14 @@ Status: **READY** at the Work Order level; implementation is proceeding through 
 
 ## Current V2-017 task
 
-**T8 — Scheduling and events**
+**T7 — Failure / recovery / takeover**
 
-T6 is complete by actual Git merge. T8 is already durably dispatched for resident-worker implementation and remains independently eligible from completed T4; it must not depend on the former T6 branch.
+T8 is complete by actual Git merge. T7 is the current durable resident-worker dispatch and is unblocked by the T6 merge; T9, T11 and T14 remain independently eligible.
 
-- Dispatch issue: **#196** — `V2-017 T8 — Resident Z.ai implementation dispatch: Scheduling and events`
-- Original dispatch base: `b58dc58f46bd65b6cf14eb575596f77b9030ffd6`
-- Execution base after T6 reconciliation: the live `main` at time of worker startup (the stale original base is superseded by the durable issue comment)
-- T6 merge: `52ca783fb927a44889e217117a6569633f14a98b`
-- T7 is newly unblocked by T6 completion; T8, T9, T11 and T14 remain eligible.
+- T7 dispatch issue: **#197** — `V2-017 T7 — Resident Z.ai implementation dispatch: Failure, recovery, takeover`
+- T7 execution base: `420cd2a0b0cfafb221e44d9c73bf00b8fbc8ef40` (live `main` verified immediately before dispatch)
+- T8 dispatch issue: **#196** — completed by PR #198
+- T8 merge: `63549e02e30c720da45f66e3dd1facc6323da3ed`
 
 ## Completed tasks
 
@@ -42,24 +43,26 @@ Authoritative task-level machine state records these V2-017 slices COMPLETE:
 - T4 — workflow detail
 - T5 — Tell / Show / Tell + Show creation
 - T6 — Run / approval / where-it-runs
+- T8 — scheduling and events
 - T13 — expert/developer workspace transition
 
-T6 completion is bound to PR #194's actual merge identity `52ca783fb927a44889e217117a6569633f14a98b`; its corrected head was `9f68dbf2721e3eb37fa67405f8d0d922b1f945be`.
+T8 completion is bound to PR #198's actual merge identity `63549e02e30c720da45f66e3dd1facc6323da3ed`; its reviewed head was `51e41da01a6b010d5287fb698640de8e73c9b274`.
 
 ## Eligible frontier
 
 The reconciled canonical task frontier is:
 
-**T7, T8, T9, T11, T14**
+**T7, T9, T11, T14**
 
 Eligibility is derived from the Work Order dependency graph, actual Git merge facts, roadmap constraints, and required evidence. No eligible slice may depend on an unmerged sibling.
 
 ## Open / historical work
 
-- **#196 — V2-017 T8 resident-worker dispatch** — current implementation dispatch; no worker checkpoint or PR yet.
+- **#197 — V2-017 T7 resident-worker dispatch** — current implementation dispatch.
+- **#196 — V2-017 T8 resident-worker dispatch** — completed through PR #198.
 - **#152 — IG-006 — Cross-Device Execution Attestation Composition (W5)** — historical fail-closed gate; not a dependency of the current V2-017 frontier.
 
-PR #194 is **merged** and is no longer an open implementation PR.
+PR #198 is **merged** and is no longer an open implementation PR.
 
 ## Blocked items
 
@@ -70,8 +73,8 @@ PR #194 is **merged** and is no longer an open implementation PR.
 
 ## Required next action
 
-Continue from live `main`. Review/implement the durably dispatched T8 slice on its own branch/PR, beginning only after the worker verifies the current live `main`. T6 requires no further review action unless a new repository regression is found.
+Continue from live `main`. Review/implement the durably dispatched T7 slice on its own branch/PR, beginning only after the worker verifies the current live `main`. T8 requires no further review action unless a new repository regression is found.
 
 ## Reconciliation note
 
-Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #194. Canonical `implementation-state.json` records T6 COMPLETE with its merge identity and the recomputed frontier; this projection is synchronized to that state. The exact live `main` SHA is intentionally not treated as durable navigation state; it must always be fetched from Git before new work.
+Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #198. The current task is now T7, with T7/T9/T11/T14 on the eligible frontier. The exact live `main` SHA is intentionally not treated as durable navigation state; it must always be fetched from Git before new work.
