@@ -16,26 +16,28 @@ This fork is now the active product-development remote. GitHub issue/PR identiti
 
 ## Current task
 
-**T11 — Versions, updates and optimization**
+**T12 — Sharing / marketplace / install**
 
 T9 is complete by actual Git merge as PR #201 -> `99500cf5a51fe593fefbc1380538f0b779f3dfba`.
 
-T11 is durably dispatched on this remote as **Issue #1**.
+T10 is complete by actual Git merge as PR #6 -> `5664eb7995c2594562fcd67e8a0b58408093e80c`.
 
-T14 remains independently eligible and must not become an unmerged dependency of T11.
+T11 is complete by actual Git merge as PR #3 -> `2ece3c32b297421c67935317b79d7ad824db250f`.
+
+T14 is complete by actual Git merge as PR #4 -> `b8493d41c9d256c4016a14de713c24a070e2533d`.
+
+T12 is durably dispatched on this remote as **Issue #7**.
 
 ## Completed tasks
 
-T1, T2, T3, T4, T5, T6, T7, T8, T9 and T13 are complete by actual Git merge.
+T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T13 and T14 are complete by actual Git merge.
 
 ## Eligible frontier
 
-**T11, T14**
+**T12**
 
 ## Blocked items
 
-- T10 — blocked on T6, T7 and T9.
-- T12 — blocked on T3, T4 and T11.
 - T15 — blocked until T2–T14 implementation/verification responsibilities are complete.
 - T16 — blocked on T15.
 
@@ -43,8 +45,8 @@ T1, T2, T3, T4, T5, T6, T7, T8, T9 and T13 are complete by actual Git merge.
 
 Before editing, the resident worker must read the governing repository files and re-read live `main`. Any dispatch SHA is only a point-in-time observation.
 
-T11 must remain one bounded slice on one branch/PR. Corrections stay on the same PR. Do not implement T12 or T14 within T11.
+T12 must remain one bounded slice on one branch/PR. Corrections stay on the same PR. Do not implement T15 or T16 within T12.
 
 ## Next action
 
-Continue T11 from the current live `main` of `payswapdotorg/WorkflowOS`, using **Issue #1** as the durable implementation dispatch. After T11 reaches an Architect-accepted merge, reconcile canonical state and recompute the frontier.
+Continue T12 from the current live `main` of `payswapdotorg/WorkflowOS`, using **Issue #7** as the durable implementation dispatch. After T12 reaches an Architect-accepted merge, reconcile canonical state and recompute the frontier.
