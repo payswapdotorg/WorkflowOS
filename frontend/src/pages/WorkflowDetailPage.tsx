@@ -12,6 +12,7 @@ import {
   type ProductTriggerSubscription,
 } from '../api/client';
 import RunExperience from '../components/run/RunExperience';
+import WhenSection from '../components/when/WhenSection';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -54,6 +55,7 @@ type DetailState =
       installation: ProductInstallationDetail | null;
       deployments: ProductDeployment[];
       subscriptions: ProductTriggerSubscription[];
+      orgWorkflows: ProductWorkflow[];
     };
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as const;
@@ -143,12 +145,15 @@ export default function WorkflowDetailPage() {
         const workflow = await workflowRepository.get(workflowId);
         // The org-scoped reads (the F-T2-001 all-orgs lesson applies to the
         // workflow's OWN organization: the authoritative orgId from the
-        // workflow read scopes every follow-up read).
-        const [versions, runs, installations, deployments] = await Promise.all([
+        // workflow read scopes every follow-up read). The org workflow
+        // list is the T8 name source for the "After another workflow"
+        // When language (and the editor's picker).
+        const [versions, runs, installations, deployments, orgWorkflows] = await Promise.all([
           workflowRepository.listVersionsForWorkflow(workflowId),
           workflowRuns.listForOrganization(workflow.organizationId),
           workflowRepository.listInstallationsForOrganization(workflow.organizationId),
           workflowDeployments.listForOrganization(workflow.organizationId),
+          workflowRepository.listForOrganization(workflow.organizationId),
         ]);
         const subscriptions = (
           await Promise.all(
@@ -158,6 +163,9 @@ export default function WorkflowDetailPage() {
           )
         ).flat();
         if (cancelled) return;
+        const deploymentIds = new Set(
+          deployments.filter((d) => d.workflowId === workflowId).map((d) => d.id),
+        );
         setState({
           kind: 'data',
           workflow,
@@ -166,7 +174,11 @@ export default function WorkflowDetailPage() {
           installation:
             installations.find((i) => i.installation.workflowId === workflowId) ?? null,
           deployments: deployments.filter((d) => d.workflowId === workflowId),
-          subscriptions,
+          // Every configured subscription of THIS workflow's deployments
+          // (enabled and paused alike — the T8 When surface presents the
+          // configured facts; disabled ones are marked honestly).
+          subscriptions: subscriptions.filter((s) => deploymentIds.has(s.deploymentId)),
+          orgWorkflows,
         });
       } catch {
         if (!cancelled) setState({ kind: 'error' });
@@ -201,34 +213,20 @@ export default function WorkflowDetailPage() {
     );
   }
 
-  const { workflow, versions, runs, installation, deployments, subscriptions } = state;
+  const { workflow, versions, runs, installation, deployments, subscriptions, orgWorkflows } = state;
   const headVersion = versions.find((v) => v.id === workflow.headVersionId) ?? null;
   const steps = headVersion ? stepsFromContent(headVersion.content) : null;
   const capabilities = headVersion ? capabilitiesFromContent(headVersion.content) : [];
   const attention = runs.some((r) => r.state === 'failed' || r.state === 'paused');
-  const workflowSubscriptions = subscriptions.filter((s) => {
-    const ids = new Set(deployments.map((d) => d.id));
-    return s.enabled && ids.has(s.deploymentId);
-  });
-  let scheduleLabel = 'Runs when started manually';
-  if (workflowSubscriptions.length > 0) {
-    const first = workflowSubscriptions[0];
-    if (first.kind === 'event') scheduleLabel = 'Runs on events';
-    else {
-      const spec = first.schedule as { kind?: string } | null;
-      if (spec?.kind === 'daily') scheduleLabel = 'Runs daily';
-      else if (spec?.kind === 'weekly') scheduleLabel = 'Runs weekly';
-      else if (spec?.kind === 'one_shot') scheduleLabel = 'Runs once';
-      else scheduleLabel = 'Runs automatically';
-    }
-  }
   const enabledDeployments = deployments.filter((d) => d.enabled);
   const whereLabel =
     enabledDeployments.length === 0
       ? null
       : enabledDeployments.some((d) => DEVICE_PLACEMENTS.has(d.placement.placement.required))
         ? 'This device'
-        : 'Cloud';
+        : enabledDeployments.some((d) => d.placement.placement.required === 'any_supported_node')
+          ? 'Any supported node'
+          : 'Cloud';
   const latestRuns = [...runs]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 5);
@@ -320,11 +318,21 @@ export default function WorkflowDetailPage() {
           )}
         </section>
 
-        {/* When and where it runs. */}
-        <section aria-label="When and where" className="rounded-xl border border-border bg-card p-5">
-          <h2 className="font-medium">When and where</h2>
-          <p className="mt-2 text-sm text-muted-foreground">{scheduleLabel}</p>
-          <p className="mt-1 text-sm text-muted-foreground">
+        {/* When it runs — the T8 human When experience over the V2-009
+            trigger facts (§11 vocabulary, progressive disclosure, the
+            contextual Schedule action, pause/resume). */}
+        <WhenSection
+          workflow={workflow}
+          deployments={deployments}
+          subscriptions={subscriptions}
+          orgWorkflows={orgWorkflows}
+          onChanged={refetch}
+        />
+
+        {/* Where it runs — the placement facts at a human level. */}
+        <section aria-label="Where it runs" className="rounded-xl border border-border bg-card p-5">
+          <h2 className="font-medium">Where it runs</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
             {whereLabel ?? 'Not deployed yet'}
           </p>
         </section>

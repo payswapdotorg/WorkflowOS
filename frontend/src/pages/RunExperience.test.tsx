@@ -295,6 +295,8 @@ function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string
     '/workflow-deployments/deployments': () => jsonResponse(200, { deployments: DEPLOYMENTS_CLOUD }),
     '/workflow-deployments/deployments/dep-1/subscriptions': () =>
       jsonResponse(200, { subscriptions: SUBSCRIPTIONS }),
+    // T8: the detail page's org-workflow read (the When name source).
+    '/workflow-repository/workflows': () => jsonResponse(200, { workflows: [WORKFLOW] }),
     '/workflow-repository/workflows/wf-1': () => jsonResponse(200, { workflow: WORKFLOW }),
     ...overrides,
   };

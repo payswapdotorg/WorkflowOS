@@ -203,6 +203,26 @@ const SUBSCRIPTIONS = [
   },
 ];
 
+// The organization's workflows (V2-002 read) — the name source for the
+// "After another workflow" When language (T8).
+const ORG_WORKFLOWS = [
+  WORKFLOW,
+  {
+    id: 'wf-2',
+    organizationId: 'org-1',
+    ownerUserId: 'user-1',
+    slug: 'expense-sweep',
+    name: 'Expense sweep',
+    description: 'Sweep the weekly expenses.',
+    visibility: 'private',
+    headVersionId: 'ver-9',
+    forkedFromWorkflowId: null,
+    forkedFromVersionId: null,
+    createdAt: '2026-09-01T11:00:00Z',
+    updatedAt: '2026-09-04T09:00:00Z',
+  },
+];
+
 function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
     '/workflow-repository/workflows/wf-1/versions': () => jsonResponse(200, { versions: VERSIONS }),
@@ -211,6 +231,7 @@ function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string
     '/workflow-deployments/deployments': () => jsonResponse(200, { deployments: DEPLOYMENTS }),
     '/workflow-deployments/deployments/dep-1/subscriptions': () =>
       jsonResponse(200, { subscriptions: SUBSCRIPTIONS }),
+    '/workflow-repository/workflows': () => jsonResponse(200, { workflows: ORG_WORKFLOWS }),
     '/workflow-repository/workflows/wf-1': () => jsonResponse(200, { workflow: WORKFLOW }),
     ...overrides,
   };
@@ -264,9 +285,15 @@ describe('V2-017 T4 — workflow detail', () => {
     expect(screen.queryByText(/fetch open tickets/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/send_followup/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/send followup/i)).not.toBeInTheDocument();
-    // When it runs (subscription) and where (placement).
-    expect(screen.getByText('Runs daily')).toBeInTheDocument();
+    // When it runs (T8: the human When language over the subscription
+    // facts) and where (placement).
+    expect(screen.getByText('Runs every day · 9:00 AM UTC')).toBeInTheDocument();
+    expect(screen.getByText('Runs when you start it')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Schedule' })).toBeInTheDocument();
     expect(screen.getByText('Cloud')).toBeInTheDocument();
+    // The canonical vocabulary and identifiers stay out of the primary
+    // When language (progressive disclosure).
+    expect(screen.queryByText(/sub-1/)).not.toBeInTheDocument();
     // Recent activity (the authoritative runs, most recent first).
     const activity = screen.getByRole('list', { name: /recent activity/i });
     const items = within(activity).getAllByRole('listitem');
@@ -437,7 +464,7 @@ describe('V2-017 T4 — workflow detail', () => {
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
     );
-    expect(screen.getByText('Runs when started manually')).toBeInTheDocument();
+    expect(screen.getByText('Runs when you start it')).toBeInTheDocument();
     expect(screen.getByText(/not deployed yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No installs/i)).toBeInTheDocument();
   });

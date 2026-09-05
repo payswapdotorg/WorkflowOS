@@ -455,13 +455,49 @@ export interface ProductTriggerSubscription {
   organizationId: string;
   deploymentId: string;
   kind: string;
-  schedule: unknown;
-  eventPattern: unknown;
-  deliveryPolicy: unknown;
+  schedule: ProductScheduleSpec | null;
+  eventPattern: ProductTriggerEventPattern | null;
+  deliveryPolicy: Partial<ProductDeliveryPolicy> | null;
   enabled: boolean;
   cursor: unknown;
   createdAt: string;
   updatedAt: string;
+}
+
+// T8 (V2-017): the canonical trigger-subscription wire shapes (V2-009's
+// contracts, consumed verbatim — the frontend never re-derives or
+// re-validates them; the backend owns every semantic decision).
+
+/** A schedule spec, exactly as the V2-009 authority validates it. */
+export type ProductScheduleSpec =
+  | { kind: 'one_shot'; at: string }
+  | { kind: 'interval'; everyMs: number }
+  | { kind: 'daily'; timezone: string; timeOfDay: string }
+  | { kind: 'weekly'; timezone: string; timeOfDay: string; daysOfWeek: number[] };
+
+/** An event pattern over the frozen registry vocabulary. */
+export interface ProductTriggerEventPattern {
+  eventType: string;
+  source?: string;
+  match?: { field: string; value: string | number | boolean }[];
+}
+
+/** The delivery policy (partial overrides; the backend owns defaults). */
+export interface ProductDeliveryPolicy {
+  missWindowMs: number;
+  missedWindow: 'skip' | 'catch_up_run_now';
+  maxAttempts: number;
+  backoffBaseMs: number;
+  backoffMaxMs: number;
+}
+
+/** A subscription create input (the V2-009 create-or-converge surface). */
+export interface ProductCreateSubscriptionInput {
+  kind: 'schedule' | 'event';
+  schedule?: ProductScheduleSpec;
+  eventPattern?: ProductTriggerEventPattern;
+  deliveryPolicy?: Partial<ProductDeliveryPolicy>;
+  enabled?: boolean;
 }
 
 export const workflowRepository = {
@@ -530,6 +566,80 @@ export const workflowDeployments = {
       `/workflow-deployments/deployments/${deploymentId}/subscriptions`,
     );
     return body.subscriptions ?? [];
+  },
+
+  // T8 (V2-017): the When experience's mutations — the REAL V2-009 routes,
+  // consumed verbatim (create-or-converge 201/200; typed rejections throw;
+  // the backend owns every semantic decision).
+
+  /**
+   * Create (or converge on) a deployment — the subscription attach point.
+   * Used when a workflow has no deployment yet; the pinned version is the
+   * workflow's head, the placement is the universally-compatible default
+   * (any supported node), and the name carries the create-or-converge
+   * identity (V2-009 semantics, unchanged).
+   */
+  createDeployment: async (
+    organizationId: string,
+    input: {
+      workflowId: string;
+      versionId: string;
+      name: string;
+      installationId?: string | null;
+      description?: string | null;
+      placement: ProductPlacementPolicy;
+      enabled?: boolean;
+    },
+  ): Promise<{ deployment: ProductDeployment; created: boolean }> => {
+    const payload: Record<string, unknown> = {
+      workflowId: input.workflowId,
+      versionId: input.versionId,
+      name: input.name,
+      placement: input.placement,
+    };
+    if (input.installationId !== undefined && input.installationId !== null) {
+      payload.installationId = input.installationId;
+    }
+    if (input.description !== undefined && input.description !== null) {
+      payload.description = input.description;
+    }
+    return apiPost<{ deployment: ProductDeployment; created: boolean }>(
+      `/organizations/${organizationId}/workflow-deployments/deployments`,
+      payload,
+    );
+  },
+
+  /**
+   * Attach a trigger subscription to a deployment (the V2-009
+   * create-or-converge surface — schedule specs, event patterns, and
+   * partial delivery-policy overrides travel verbatim; a duplicate
+   * converges on the existing subscription with created: false).
+   */
+  createSubscription: async (
+    deploymentId: string,
+    input: ProductCreateSubscriptionInput,
+  ): Promise<{ subscription: ProductTriggerSubscription; created: boolean }> => {
+    return apiPost<{ subscription: ProductTriggerSubscription; created: boolean }>(
+      `/workflow-deployments/deployments/${deploymentId}/subscriptions`,
+      input,
+    );
+  },
+
+  /**
+   * Enable or disable one subscription through the real lifecycle route
+   * (a same-state request is a typed 409 — surfaced honestly by the
+   * caller; the backend decides every transition).
+   */
+  setSubscriptionEnabled: async (
+    subscriptionId: string,
+    enabled: boolean,
+  ): Promise<{ subscription: ProductTriggerSubscription }> => {
+    // An empty JSON object keeps the content-type honest for the body-less
+    // lifecycle command (Fastify rejects a bodiless application/json POST).
+    return apiPost<{ subscription: ProductTriggerSubscription }>(
+      `/workflow-deployments/subscriptions/${subscriptionId}/${enabled ? 'enable' : 'disable'}`,
+      {},
+    );
   },
 };
 
