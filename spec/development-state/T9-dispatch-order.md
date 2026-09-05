@@ -1,1 +1,0 @@
-T9 dispatch is durable in GitHub Issue form; this file records only that the ordering point was reached.
