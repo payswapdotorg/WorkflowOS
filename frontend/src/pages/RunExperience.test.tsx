@@ -796,4 +796,103 @@ describe('V2-017 T6 — the run experience', () => {
       expect(within(status).getByText(/manual/)).toBeInTheDocument();
     });
   });
+
+  // T10 (V2-017): the "How do you know?" trust presentation composed into
+  // the run-status surface (the same history read the Waiting-for-you
+  // derivation already consumes — no second evidence authority).
+  describe('T10 — "How do you know?" (the trust disclosure in the run status)', () => {
+    const TRUST_HISTORY = {
+      ...history([]),
+      evidence: [
+        {
+          id: 'ev-1',
+          runId: 'run-3',
+          attemptNumber: 1,
+          stepId: 'send_followup',
+          evidenceClass: 'observation',
+          producerKind: 'executor',
+          producerId: 'node_host_1',
+          contentCommitment: 'sha256:ev-1',
+          description: 'Observed the message-delivery receipt from the mail service.',
+          recordedAt: '2026-09-04T08:20:00Z',
+        },
+      ],
+      attestations: [
+        {
+          attestationId: 'att-1',
+          runId: 'run-3',
+          attemptNumber: 1,
+          stepId: 'send_followup',
+          executionDigest: 'sha256:execution',
+          attesterKeyId: 'key-att-1',
+          assurance: 'software_signed',
+          nonce: 'nonce-1',
+          statement: {
+            objectType: 'workflowos/execution-statement/v1',
+            action: 'Email the weekly digest',
+            outcome: 'succeeded',
+          },
+          verifiedAt: '2026-09-04T08:25:00Z',
+          attachedAt: '2026-09-04T08:25:01Z',
+        },
+      ],
+    };
+
+    it('shows the concise evidence (the records\u2019 own descriptions + the honest "Verified by" wording) inside the run status', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'completed' })] }),
+          '/workflow-runs/runs/run-3/history': () =>
+            jsonResponse(200, TRUST_HISTORY),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Completed')).toBeInTheDocument());
+      const trust = within(status).getByRole('region', { name: 'How do you know?' });
+      expect(
+        within(trust).getByText(/Observed the message-delivery receipt/i),
+      ).toBeInTheDocument();
+      expect(within(trust).getByText(/Verified by/i)).toBeInTheDocument();
+    });
+
+    it('advanced verification discloses the V2-014 attestation facts (statement action, assurance, digest) with the no-physical-proof boundary', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'completed' })] }),
+          '/workflow-runs/runs/run-3/history': () =>
+            jsonResponse(200, TRUST_HISTORY),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      const trust = within(status).getByRole('region', { name: 'How do you know?' });
+      const user = userEvent.setup();
+      await user.click(within(trust).getByText('Advanced verification'));
+      expect(within(trust).getByText(/Email the weekly digest/i)).toBeInTheDocument();
+      expect(within(trust).getByText(/Software-signed/i)).toBeInTheDocument();
+      expect(within(trust).getByText(/sha256:execution/i)).toBeInTheDocument();
+      // The trust boundary: a signature is never automatic physical proof.
+      expect(
+        within(trust).getByText(/can\u2019t by itself prove what happened in the physical world/i),
+      ).toBeInTheDocument();
+    });
+
+    it('no evidence records → the honest no-evidence state (a record fact, never a failed-read mask)', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'running' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, history([])),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      const trust = within(status).getByRole('region', { name: 'How do you know?' });
+      expect(within(trust).getByText(/No evidence records yet/i)).toBeInTheDocument();
+      // No attestations either — the honest absence, not an error.
+      const user = userEvent.setup();
+      await user.click(within(trust).getByText('Advanced verification'));
+      expect(within(trust).getByText(/No attestations attached/i)).toBeInTheDocument();
+    });
+  });
 });
