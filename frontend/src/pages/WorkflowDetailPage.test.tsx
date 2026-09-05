@@ -223,10 +223,34 @@ const ORG_WORKFLOWS = [
   },
 ];
 
+// The execution history of the failed run (the V2-005 crash-recovery
+// projection — the T7 failure-explanation source).
+const RUN_HISTORY = {
+  run: RUNS[0],
+  timeline: [
+    { id: 't1', runId: 'run-1', attemptNumber: 1, stepId: null, eventName: 'workflow.run.requested', occurredAt: '2026-09-04T08:00:00Z', sequence: 1, detail: null },
+    { id: 't2', runId: 'run-1', attemptNumber: 1, stepId: null, eventName: 'workflow.run.started', occurredAt: '2026-09-04T08:01:00Z', sequence: 2, detail: null },
+    { id: 't3', runId: 'run-1', attemptNumber: 1, stepId: null, eventName: 'workflow.run.failed', occurredAt: '2026-09-04T08:30:00Z', sequence: 3, detail: { reason: 'The website had changed.' } },
+  ],
+  attempts: [
+    { id: 'a1', attemptNumber: 1, state: 'interrupted', nodeId: null, pausedAtStepId: null, startedAt: '2026-09-04T08:01:00Z', endedAt: '2026-09-04T08:30:00Z' },
+  ],
+  steps: [
+    { stepId: 'fetch_open_tickets', status: 'completed', outcome: 'succeeded', inputCommitments: [], outputCommitments: [], startedAt: '2026-09-04T08:02:00Z', completedAt: '2026-09-04T08:10:00Z' },
+    { stepId: 'send_followup', status: 'failed', outcome: 'failed', inputCommitments: [], outputCommitments: [], startedAt: '2026-09-04T08:11:00Z', completedAt: '2026-09-04T08:30:00Z' },
+  ],
+  invocations: [],
+  evidence: [],
+  attestations: [],
+  attestationRejections: [],
+  commands: [],
+};
+
 function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
     '/workflow-repository/workflows/wf-1/versions': () => jsonResponse(200, { versions: VERSIONS }),
     '/workflow-runs/runs': () => jsonResponse(200, { runs: RUNS }),
+    '/workflow-runs/runs/run-1/history': () => jsonResponse(200, RUN_HISTORY),
     '/workflow-repository/installations': () => jsonResponse(200, { installations: INSTALLATIONS }),
     '/workflow-deployments/deployments': () => jsonResponse(200, { deployments: DEPLOYMENTS }),
     '/workflow-deployments/deployments/dep-1/subscriptions': () =>
@@ -299,6 +323,22 @@ describe('V2-017 T4 — workflow detail', () => {
     const items = within(activity).getAllByRole('listitem');
     expect(items.length).toBe(2);
     expect(within(items[0]).getByText('failed')).toBeInTheDocument();
+    // T7: the failed latest run surfaces the §18 recovery panel — the
+    // sentence, the recorded reason, the known facts (presentation
+    // labels, never internal step IDs), and the admissible actions.
+    const recovery = screen.getByRole('region', { name: 'Recovery' });
+    expect(within(recovery).getByText('I couldn\u2019t finish this.')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(recovery).getByText('It stopped: The website had changed.')).toBeInTheDocument(),
+    );
+    const known = within(recovery).getByRole('list', { name: 'What I know' });
+    expect(within(known).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      '\u2713 Collect the open tickets',
+      '\u2717 Email the weekly digest',
+    ]);
+    expect(within(recovery).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(within(recovery).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+    expect(within(recovery).queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
     // Version facts: the head version is immutable; the installed pin is
     // shown verbatim (never implying an update).
     expect(screen.getByText('Version 2 — immutable')).toBeInTheDocument();

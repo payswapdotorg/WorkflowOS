@@ -13,6 +13,7 @@ import {
 } from '../api/client';
 import RunExperience from '../components/run/RunExperience';
 import WhenSection from '../components/when/WhenSection';
+import RecoveryExperience from '../components/recovery/RecoveryExperience';
 
 /**
  * WorkflowDetailPage — the workflow detail experience (V2-017 Task 4).
@@ -297,6 +298,23 @@ export default function WorkflowDetailPage() {
           {actionNote}
         </p>
       )}
+
+      {/* T7: the §18 failure / recovery / takeover surface — rendered
+          when the latest run needs recovery (failed, paused, or
+          cancelled). Composed over the existing V2-005 history read and
+          lifecycle commands; Run identity and authority preserved. */}
+      {latestRun &&
+        (latestRun.state === 'failed' ||
+          latestRun.state === 'paused' ||
+          latestRun.state === 'cancelled') && (
+          <RecoveryExperience
+            workflow={workflow}
+            versions={versions}
+            installation={installation}
+            latestRun={latestRun}
+            onRunsChanged={refetch}
+          />
+        )}
 
       <div className="grid gap-4 md:grid-cols-2">
         {/* What it does — steps from the authoritative V2-003

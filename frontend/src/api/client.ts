@@ -390,6 +390,42 @@ export const workflowRuns = {
       correlationId: crypto.randomUUID(),
     });
   },
+
+  // T7 (V2-017): the recovery lifecycle commands — the REAL V2-005
+  // routes with the deterministic envelope. The backend owns every
+  // transition decision (resume is legal only from paused; cancel ends
+  // the run terminally); typed rejections (RUN_TERMINAL 409, state
+  // transition 409) surface verbatim — never as state.
+
+  /**
+   * Resume a paused run (paused → running: the same attempt continues
+   * at the recorded step, or a crash-retry new attempt — the backend
+   * decides and reports).
+   */
+  resume: async (runId: string): Promise<{ run: ProductWorkflowRun; executed: boolean }> => {
+    return apiPost<{ run: ProductWorkflowRun; executed: boolean }>(
+      `/workflow-runs/runs/${runId}/resume`,
+      {
+        commandId: crypto.randomUUID(),
+        correlationId: crypto.randomUUID(),
+      },
+    );
+  },
+
+  /**
+   * Cancel a non-terminal run (requested/running/paused → cancelled,
+   * terminal). A consequential action: the caller carries the §2.4
+   * explicit choice before sending.
+   */
+  cancel: async (runId: string): Promise<{ run: ProductWorkflowRun; executed: boolean }> => {
+    return apiPost<{ run: ProductWorkflowRun; executed: boolean }>(
+      `/workflow-runs/runs/${runId}/cancel`,
+      {
+        commandId: crypto.randomUUID(),
+        correlationId: crypto.randomUUID(),
+      },
+    );
+  },
 };
 
 // T3 (V2-017): the workflow library reads the tenant's installations with
