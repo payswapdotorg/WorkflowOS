@@ -302,10 +302,10 @@ function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string
   };
 }
 
-function renderDetail(routes: Record<string, RouteHandler>) {
+function renderDetail(routes: Record<string, RouteHandler>, initialEntry = '/workflows/wf-1') {
   vi.stubGlobal('fetch', mockApi(routes));
   return render(
-    <MemoryRouter initialEntries={['/workflows/wf-1']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/workflows/:workflowId" element={<WorkflowDetailPage />} />
         <Route path="/expert" element={<div>Expert workspace</div>} />
@@ -893,6 +893,72 @@ describe('V2-017 T6 — the run experience', () => {
       const user = userEvent.setup();
       await user.click(within(trust).getByText('Advanced verification'));
       expect(within(trust).getByText(/No attestations attached/i)).toBeInTheDocument();
+    });
+  });
+
+  // T10 F02 (V2-017): the run-level direct link — a ?run= param on the
+  // EXISTING workflow route selects the run the run-status surface
+  // presents (the Activity entries' "Open the run" link). The
+  // authoritative runs read governs: an unknown id presents the newest
+  // run (never a fabricated run), and an earlier run is disclosed as
+  // such (never mistaken for the current status).
+  describe('T10 F02 — the run-level navigation (?run= selects the presented run)', () => {
+    const RUNS_TWO = () =>
+      jsonResponse(200, {
+        runs: [
+          run({ state: 'completed', updatedAt: '2026-09-04T08:30:00Z' }),
+          run({
+            id: 'run-2',
+            state: 'failed',
+            createdAt: '2026-09-04T06:00:00Z',
+            updatedAt: '2026-09-04T07:00:00Z',
+          }),
+        ],
+      });
+    const ROUTES_TWO: Record<string, RouteHandler> = fullRoutes({
+      '/organizations/org-1/workflow-runs/runs': RUNS_TWO,
+      '/workflow-runs/runs/run-3/history': () => jsonResponse(200, history([])),
+      '/workflow-runs/runs/run-2/history': () =>
+        jsonResponse(200, {
+          ...history([]),
+          run: run({ id: 'run-2', state: 'failed' }),
+        }),
+    });
+
+    it('presents the SELECTED run with the honest earlier-run note — never the newest run status', async () => {
+      renderDetail(ROUTES_TWO, '/workflows/wf-1?run=run-2');
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      // The SELECTED run's human state (run-2 failed → Couldn't complete).
+      await waitFor(() =>
+        expect(within(status).getByText("Couldn\u2019t complete")).toBeInTheDocument(),
+      );
+      // The newest run's status is NOT presented for this run.
+      expect(within(status).queryByText(/^Completed$/)).not.toBeInTheDocument();
+      // The honest disclosure: an earlier run, never the current status.
+      expect(within(status).getByText(/An earlier run/i)).toBeInTheDocument();
+    });
+
+    it('an unknown ?run= id presents the newest run (the runs read governs — no fabricated run)', async () => {
+      renderDetail(ROUTES_TWO, '/workflows/wf-1?run=run-ghost');
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Completed')).toBeInTheDocument());
+      expect(within(status).queryByText(/An earlier run/i)).not.toBeInTheDocument();
+    });
+
+    it('no ?run= param presents the newest run (the T6 default, unchanged)', async () => {
+      renderDetail(ROUTES_TWO);
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Completed')).toBeInTheDocument());
+      expect(within(status).queryByText(/An earlier run/i)).not.toBeInTheDocument();
     });
   });
 });

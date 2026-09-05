@@ -340,6 +340,14 @@ test.describe('V2-017 T10 — the universal Activity + trust over the real autho
     });
     expect(failRes.ok()).toBeTruthy();
 
+    // Run D (F01): pause at a NON-approval step — a paused run the user
+    // is NOT needed for must never be upgraded into the Needs-me bucket.
+    const runD = await startRun();
+    const pauseDRes = await page.request.post(`/api/workflow-runs/runs/${runD}/pause`, {
+      data: { ...envelope(), atStepId: 'send_digest' },
+    });
+    expect(pauseDRes.ok()).toBeTruthy();
+
     // Run C (the completed event WITH trust): step started → REAL evidence
     // records → a REAL V2-014 Ed25519 attestation attached at the Run
     // boundary → complete.
@@ -448,10 +456,13 @@ test.describe('V2-017 T10 — the universal Activity + trust over the real autho
     await expect(timeline.getByText('Completed')).toBeVisible();
     await expect(timeline.getByText('Couldn\u2019t complete')).toBeVisible();
     await expect(timeline.getByText('New version')).toBeVisible();
-    // 4 events: 3 runs + the V1 version record.
-    expect(await timeline.getByRole('listitem').count()).toBe(4);
+    // 5 events: 4 runs (paused-at-approval / failed / paused-not-approval
+    // / completed) + the V1 version record.
+    expect(await timeline.getByRole('listitem').count()).toBe(5);
     // Newest first: the completed run (driven last) is the first entry.
     await expect(timeline.getByRole('listitem').first()).toContainText('Completed');
+    // The non-approval paused run (Run D) honestly shows "Paused".
+    await expect(timeline.getByText('Paused')).toBeVisible();
     // Internal state words never render on the primary timeline.
     await expect(timeline.getByText(/^paused$/)).toHaveCount(0);
     await expect(timeline.getByText(/^failed$/)).toHaveCount(0);
@@ -459,14 +470,17 @@ test.describe('V2-017 T10 — the universal Activity + trust over the real autho
     // The filters are presentation-only over the record states.
     const filters = page.getByRole('group', { name: 'Activity filters' });
     await filters.getByRole('button', { name: 'Needs me' }).click();
+    // F01: ONLY the approval-derived waiting run — the paused run the
+    // user is NOT needed for (Run D) never enters the Needs-me bucket.
     await expect(timeline.getByRole('listitem')).toHaveCount(1);
     await expect(timeline.getByText('Waiting for you')).toBeVisible();
+    await expect(timeline.getByText('Paused')).toHaveCount(0);
     await filters.getByRole('button', { name: 'Completed' }).click();
     await expect(timeline.getByRole('listitem')).toHaveCount(1);
     await filters.getByRole('button', { name: 'Failed' }).click();
     await expect(timeline.getByRole('listitem')).toHaveCount(1);
     await filters.getByRole('button', { name: 'All' }).click();
-    await expect(timeline.getByRole('listitem')).toHaveCount(4);
+    await expect(timeline.getByRole('listitem')).toHaveCount(5);
 
     // A FAILED history read stays visibly Unavailable with Try again —
     // injected as a REAL HTTP 500 the browser actually receives; the
@@ -505,6 +519,26 @@ test.describe('V2-017 T10 — the universal Activity + trust over the real autho
     await expect(
       trust.getByText(/can\u2019t by itself prove what happened in the physical world/i),
     ).toBeVisible();
+
+    // §16 direct links (F02): the run entry reaches the SPECIFIC run —
+    // "Open the run" navigates to the workflow's run-status surface with
+    // that run selected (?run=). Here: the earlier paused-at-approval
+    // run, whose status is presented — never the newest run's status.
+    const waitingItem = timeline.getByRole('listitem').filter({ hasText: 'Waiting for you' });
+    await waitingItem.getByRole('link', { name: 'Open the run' }).click();
+    const selectedStatus = page.getByRole('region', { name: 'Run status' });
+    await expect(selectedStatus.getByText('Waiting for you')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(selectedStatus.getByText(/^Completed$/)).toHaveCount(0);
+    // The honest earlier-run note — an earlier run is never mistaken for
+    // the current status.
+    await expect(selectedStatus.getByText(/An earlier run/i)).toBeVisible();
+
+    // Back to Activity for the workflow-name link (the same surface's
+    // newest-run default, without the ?run= param).
+    await page.goto('/activity');
+    await expect(timeline.getByText('Completed')).toBeVisible({ timeout: 15_000 });
 
     // §16: the entry reaches the related Workflow (and its Run surface).
     await completedItem.getByRole('link', { name: 'Weekly ticket digest' }).click();

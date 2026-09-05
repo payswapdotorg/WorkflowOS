@@ -116,6 +116,57 @@ const VERSIONS: RouteHandler = () =>
     ],
   });
 
+/** IR content whose review_gate node IS an approval node (the
+ *  authoritative consent facts the needs-you derivation consumes). */
+const APPROVAL_IR_CONTENT = {
+  objectType: 'workflowos/workflow-ir/v1',
+  ir: {
+    start: 'review_gate',
+    nodes: [
+      {
+        id: 'review_gate',
+        executionClass: 'human',
+        spec: { class: 'human', human: { kind: 'approval', instruction: 'Approve.' } },
+        capabilityRequirements: [],
+        placement: 'cloud_allowed',
+      },
+    ],
+    edges: [],
+    defaultPlacement: 'cloud_allowed',
+  },
+  presentation: { title: 'Weekly invoice digest', nodeLabels: { review_gate: 'Your approval' } },
+};
+
+/** Version records carrying the approval IR (F01: the Needs-me
+ *  derivation's version facts). */
+const APPROVAL_VERSIONS: RouteHandler = () =>
+  jsonResponse(200, {
+    versions: [
+      {
+        id: 'ver-1',
+        workflowId: 'wf-1',
+        versionNumber: 1,
+        contentDigest: 'sha256:v1',
+        content: APPROVAL_IR_CONTENT,
+        protocol: { irSchemaVersion: 'workflowos-workflow-ir-v1' },
+        parentVersionId: null,
+        createdByUserId: 'user-1',
+        createdAt: '2026-09-01T10:00:00Z',
+      },
+      {
+        id: 'ver-2',
+        workflowId: 'wf-1',
+        versionNumber: 2,
+        contentDigest: 'sha256:v2',
+        content: APPROVAL_IR_CONTENT,
+        protocol: { irSchemaVersion: 'workflowos-workflow-ir-v1' },
+        parentVersionId: 'ver-1',
+        createdByUserId: 'user-1',
+        createdAt: '2026-09-04T09:00:00Z',
+      },
+    ],
+  });
+
 /** A run row factory (the V2-005 list shape). */
 function runRow(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -400,16 +451,22 @@ describe('V2-017 T10 — the universal Activity timeline', () => {
   });
 
   it('filters are presentation-only over the authoritative record states', async () => {
-    renderActivity(FULL);
+    renderActivity({
+      ...FULL,
+      '/workflow-repository/workflows/wf-1/versions': APPROVAL_VERSIONS,
+    });
     await screen.findByRole('list', { name: 'Activity timeline' });
     const user = userEvent.setup();
     const group = screen.getByRole('group', { name: 'Activity filters' });
 
-    // Needs me: only the paused run's event.
+    // Needs me (F01): ONLY the approval-derived waiting run — the same
+    // authoritative derivation as the state word, never the raw pause.
     await user.click(within(group).getByRole('button', { name: 'Needs me' }));
-    let list = screen.getByRole('list', { name: 'Activity timeline' });
+    let list = await screen.findByRole('list', { name: 'Activity timeline' });
+    await waitFor(() => {
+      expect(within(list).getByText('Waiting for you')).toBeInTheDocument();
+    });
     expect(within(list).getAllByRole('listitem').length).toBe(1);
-    expect(within(list).getByText('Paused')).toBeInTheDocument();
 
     // Completed: only the completed run's event.
     await user.click(within(group).getByRole('button', { name: 'Completed' }));
@@ -427,6 +484,59 @@ describe('V2-017 T10 — the universal Activity timeline', () => {
     await user.click(within(group).getByRole('button', { name: 'All' }));
     list = screen.getByRole('list', { name: 'Activity timeline' });
     expect(within(list).getAllByRole('listitem').length).toBe(5);
+  });
+
+  it('F01: a paused run NOT at an approval step is never upgraded into the Needs-me bucket', async () => {
+    renderActivity({
+      ...FULL,
+      '/workflow-repository/workflows/wf-1/versions': APPROVAL_VERSIONS,
+      '/workflow-runs/runs/run-3/history': RUN3_HISTORY_NOT_APPROVAL,
+    });
+    await screen.findByRole('list', { name: 'Activity timeline' });
+    const user = userEvent.setup();
+    const group = screen.getByRole('group', { name: 'Activity filters' });
+    await user.click(within(group).getByRole('button', { name: 'Needs me' }));
+    // The paused-but-unproven run is EXCLUDED: without the authoritative
+    // approval fact the page has no evidence the user is needed.
+    await waitFor(() => {
+      expect(screen.getByText(/No activity yet/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
+    // Under All the same run honestly shows "Paused" (never hidden).
+    await user.click(within(group).getByRole('button', { name: 'All' }));
+    const list = await screen.findByRole('list', { name: 'Activity timeline' });
+    await waitFor(() => {
+      expect(within(list).getByText('Paused')).toBeInTheDocument();
+    });
+  });
+
+  it('F01: a paused run whose history read FAILED is never upgraded into the Needs-me bucket (facts unavailable)', async () => {
+    renderActivity({
+      ...FULL,
+      '/workflow-repository/workflows/wf-1/versions': APPROVAL_VERSIONS,
+      '/workflow-runs/runs/run-3/history': () => jsonResponse(500, { error: 'boom' }),
+    });
+    await screen.findByRole('list', { name: 'Activity timeline' });
+    const user = userEvent.setup();
+    const group = screen.getByRole('group', { name: 'Activity filters' });
+    await user.click(within(group).getByRole('button', { name: 'Needs me' }));
+    // The history facts are unavailable → no evidence → no Needs-me claim.
+    await waitFor(() => {
+      expect(screen.getByText(/No activity yet/i)).toBeInTheDocument();
+    });
+  });
+
+  it('F02: each run event carries an explicit run-level link to the specific run (§16 direct links)', async () => {
+    renderActivity(FULL);
+    const list = await screen.findByRole('list', { name: 'Activity timeline' });
+    // Every run entry reaches BOTH its Workflow (the name link) and its
+    // Run (the explicit "Open the run" link on the run-status surface).
+    const runLinks = within(list).getAllByRole('link', { name: 'Open the run' });
+    expect(runLinks.length).toBe(3);
+    const hrefs = runLinks.map((a) => a.getAttribute('href'));
+    expect(hrefs).toContain('/workflows/wf-1?run=run-1');
+    expect(hrefs).toContain('/workflows/wf-1?run=run-2');
+    expect(hrefs).toContain('/workflows/wf-1?run=run-3');
   });
 
   it('teaching sessions are NOT fabricated: the honest not-shown-here-yet disclosure', async () => {
