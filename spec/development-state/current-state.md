@@ -2,11 +2,13 @@
 
 > **This file is a convenience projection only. Git and canonical machine state remain authoritative.**
 
-Verified against repository `main` and relevant GitHub PR/CI evidence on 2026-09-04.
+Verified against repository `main` and relevant GitHub PR/CI evidence on 2026-09-05.
 
 ## Current main SHA
 
-`d23ec531edd37876320347c42928bd3ed5033dab`
+`20cbc23af8e6f3646d1284c56a00a9986261bdfb`
+
+The immediately preceding product merge is PR #194, merged as `52ca783fb927a44889e217117a6569633f14a98b`. The current SHA above is the post-merge canonical-state reconciliation commit.
 
 ## Current active program
 
@@ -20,16 +22,14 @@ Status: **READY** at the Work Order level; implementation is proceeding through 
 
 ## Current V2-017 task
 
-**T6 — Run / approval / where-it-runs**
+**T8 — Scheduling and events**
 
-An implementation PR is currently open:
+T6 is complete by actual Git merge. T8 is already durably dispatched for resident-worker implementation and remains independently eligible from completed T4; it must not depend on the former T6 branch.
 
-- PR: **#194** — `V2-017 T6 — Run / approval / where-it-runs`
-- Base SHA: `d23ec531edd37876320347c42928bd3ed5033dab`
-- Head SHA: `202ee951cb69fea27c32bc2accd96f344a87ee1b`
-- State: **OPEN / awaiting Architect review**
-
-Exact-head GitHub Actions results observed for `202ee951cb69fea27c32bc2accd96f344a87ee1b`: Architecture Governance, frontend, e2e, work-026, work-027, work-048, work-049, work-050, and companion-extension workflows completed successfully; backend and deploy workflows reported failure on that head. The PR's detailed interpretation of those failures is evidence to inspect, not authority.
+- Dispatch issue: **#196** — `V2-017 T8 — Resident Z.ai implementation dispatch: Scheduling and events`
+- Required base at dispatch: `b58dc58f46bd65b6cf14eb575596f77b9030ffd6`
+- T6 merge now on main: `52ca783fb927a44889e217117a6569633f14a98b`
+- T7 is newly unblocked by T6 completion; T8, T9, T11 and T14 remain eligible.
 
 ## Completed tasks
 
@@ -40,26 +40,28 @@ Authoritative task-level machine state records these V2-017 slices COMPLETE:
 - T3 — workflow library
 - T4 — workflow detail
 - T5 — Tell / Show / Tell + Show creation
+- T6 — Run / approval / where-it-runs
 - T13 — expert/developer workspace transition
 
-Completion is established only by the corresponding Git merge identities recorded in canonical machine state, not by task prose.
+T6 completion is bound to PR #194's actual merge identity `52ca783fb927a44889e217117a6569633f14a98b`; its corrected head was `9f68dbf2721e3eb37fa67405f8d0d922b1f945be`.
 
 ## Eligible frontier
 
-The canonical machine-state projection currently lists:
+The reconciled canonical task frontier is:
 
-**T6, T8, T9, T11, T14**
+**T7, T8, T9, T11, T14**
 
-This is a derived navigation value. Eligibility must be recomputed from Work Order dependencies, actual Git merge facts, roadmap constraints, and required evidence whenever the projection is stale.
+Eligibility is derived from the Work Order dependency graph, actual Git merge facts, roadmap constraints, and required evidence. No eligible slice may depend on an unmerged sibling.
 
-## Open PRs
+## Open / historical work
 
-- **#194 — V2-017 T6 — Run / approval / where-it-runs** — active implementation slice.
-- **#152 — IG-006 — Cross-Device Execution Attestation Composition (W5)** — historical blocked gate; it is not a dependency for the current T6 branch and remains fail-closed pending its declared corrective path.
+- **#196 — V2-017 T8 resident-worker dispatch** — current implementation dispatch.
+- **#152 — IG-006 — Cross-Device Execution Attestation Composition (W5)** — historical fail-closed gate; not a dependency of the current V2-017 frontier.
+
+PR #194 is **merged** and is no longer an open implementation PR.
 
 ## Blocked items
 
-- **T7** — blocked on T6.
 - **T10** — blocked on T6, T7, and T9.
 - **T12** — blocked on T3, T4, and T11.
 - **T15** — blocked until the required T2–T14 implementation/verification responsibilities are complete.
@@ -67,10 +69,8 @@ This is a derived navigation value. Eligibility must be recomputed from Work Ord
 
 ## Required next action
 
-**Architect review of PR #194 at exact head `202ee951cb69fea27c32bc2accd96f344a87ee1b`.**
+Continue from live `main`. Review/implement the durably dispatched T8 slice on its own branch/PR, or another frontier slice when explicitly dispatched. T6 requires no further review action unless a new repository regression is found.
 
-Review the actual base/head, diff, authority ownership, frozen-boundary compliance, UX truthfulness, unavailable/unknown states, regression coverage, and exact-head CI/evidence. Merge only if the declared V2-017/T6 gates are satisfied. After merge, reconcile canonical state from the actual merge commit and recompute the frontier.
+## Reconciliation note
 
-## Projection warning
-
-The canonical `implementation-state.json` currently contains a navigation `nextAction` referring to a fresh T6 dispatch. That field is stale relative to the actual repository state because PR #194 already exists from the verified current `main`. This file intentionally records the **verified current reality** rather than repeating that stale instruction. The machine-state value must be repaired through normal post-merge/governance reconciliation; this convenience file does not do that and does not authorize any action.
+Post-merge reconciliation completed 2026-09-05 after Architect acceptance and actual merge of PR #194. Canonical `implementation-state.json` now records T6 COMPLETE with its merge identity and the recomputed frontier; this projection is synchronized to that state.
