@@ -1,1 +1,0 @@
-This temporary governance placeholder exists only to preserve atomic dispatch ordering and will be removed after the durable Issue # dispatch is created.
