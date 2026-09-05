@@ -246,7 +246,9 @@ export default function WorkflowDetailPage() {
 
       <header>
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <h1 className="text-3xl font-semibold tracking-tight">{workflow.name}</h1>
+          {/* T14: the title scales for mobile (text-2xl below sm, the
+              desktop scale from sm up). */}
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{workflow.name}</h1>
           {attention && (
             <span className="rounded bg-destructive/15 px-2 py-0.5 text-xs font-medium text-destructive">
               Needs attention
@@ -271,7 +273,9 @@ export default function WorkflowDetailPage() {
           experience over the V2-006/V2-010 authorities. Edit enters the
           EXISTING expert workspace. */}
       <section aria-label="Primary actions" className="space-y-3">
-        <div className="flex flex-wrap gap-3">
+        {/* T14: the primary actions stack full-width below sm (platform-
+            appropriate touch targets) and keep the desktop row from sm. */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           <button
             type="button"
             onClick={() => {
