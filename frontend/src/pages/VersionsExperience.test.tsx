@@ -275,6 +275,51 @@ describe('V2-017 T11 — version history (§19 "addressable and inspectable")', 
     expect(within(first).queryByText('do')).not.toBeInTheDocument();
   });
 
+  it('REGRESSION (architect finding T11-F02): missing or malformed presentation labels stay VISIBLY unavailable — never a successful empty steps list', async () => {
+    // A read whose presentation labels are MISSING (no presentation field)
+    // and one whose labels are MALFORMED (nodeLabels is not a record) —
+    // both are failed reads (nodeLabelsFromContent → null), and the V2-017
+    // rule keeps failed reads distinct from successful empty results.
+    const missingLabels = version('ver-2', 2, 'ver-1');
+    missingLabels.content = { objectType: 'workflowos/workflow-ir/v1' };
+    const malformedLabels = version('ver-3', 3, 'ver-2');
+    malformedLabels.content = {
+      objectType: 'workflowos/workflow-ir/v1',
+      presentation: { nodeLabels: 'not-a-record' },
+    };
+    const { user } = renderVersions({
+      workflow: { ...WORKFLOW, headVersionId: 'ver-3' },
+      versions: [version('ver-1', 1, null), missingLabels, malformedLabels],
+      installation: null,
+      routes: defaultRoutes(),
+    });
+    const history = await screen.findByRole('region', { name: 'Version history' });
+
+    // the MISSING-labels version: the failed read renders the explicit
+    // unavailable state …
+    const second = within(history).getByText('Version 2').closest('li') as HTMLElement;
+    await user.click(within(second).getByRole('button', { name: /view steps/i }));
+    expect(
+      within(second).getByText(/this version's steps aren't available right now/i),
+    ).toBeInTheDocument();
+    // … never a successful (empty) steps list.
+    expect(within(second).queryByRole('list', { name: /version 2 steps/i })).not.toBeInTheDocument();
+
+    // the MALFORMED-labels version: the same explicit unavailable state.
+    const third = within(history).getByText('Version 3').closest('li') as HTMLElement;
+    await user.click(within(third).getByRole('button', { name: /view steps/i }));
+    expect(
+      within(third).getByText(/this version's steps aren't available right now/i),
+    ).toBeInTheDocument();
+    expect(within(third).queryByRole('list', { name: /version 3 steps/i })).not.toBeInTheDocument();
+
+    // The healthy version on the same page still renders its real steps
+    // (the unavailable state never contaminates successful reads).
+    const first = within(history).getByText('Version 1').closest('li') as HTMLElement;
+    await user.click(within(first).getByRole('button', { name: /view steps/i }));
+    expect(within(first).getByText('Collect the open tickets')).toBeInTheDocument();
+  });
+
   it('no versions → the honest unavailable state (never an empty success)', async () => {
     renderVersions({
       workflow: { ...WORKFLOW, headVersionId: 'ver-1' },

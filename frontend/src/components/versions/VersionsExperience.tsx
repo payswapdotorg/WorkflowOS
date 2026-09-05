@@ -299,16 +299,24 @@ export default function VersionsExperience({
                       {isOpen ? 'Hide steps' : 'View steps'}
                     </button>
                   </div>
-                  {isOpen && (
-                    <ol
-                      aria-label={`Version ${v.versionNumber} steps`}
-                      className="mt-2 list-decimal space-y-1 pl-5 text-sm text-muted-foreground"
-                    >
-                      {versionLabels.map((label) => (
-                        <li key={label}>{label}</li>
-                      ))}
-                    </ol>
-                  )}
+                  {isOpen &&
+                    (versionLabels === null ? (
+                      // The failed presentation-label read stays VISIBLY
+                      // unavailable — never a successful empty steps list
+                      // (the V2-017 rule; the architect finding T11-F02).
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        This version's steps aren't available right now.
+                      </p>
+                    ) : (
+                      <ol
+                        aria-label={`Version ${v.versionNumber} steps`}
+                        className="mt-2 list-decimal space-y-1 pl-5 text-sm text-muted-foreground"
+                      >
+                        {versionLabels.map((label) => (
+                          <li key={label}>{label}</li>
+                        ))}
+                      </ol>
+                    ))}
                 </li>
               );
             })}
@@ -524,9 +532,14 @@ function ProposalDetail({
   );
 }
 
-/** The step labels of one version (the presentation layer — F-T4-001). */
-function labelsOf(content: unknown): string[] {
+/**
+ * The step labels of one version (the presentation layer — F-T4-001).
+ * `null` = the V2-003 presentation-label read FAILED for that version —
+ * the V2-017 rule: a failed read must remain distinct from a successful
+ * empty result (it renders visibly unavailable, never an empty list).
+ */
+function labelsOf(content: unknown): string[] | null {
   const labels = nodeLabelsFromContent(content);
-  if (labels === null) return [];
+  if (labels === null) return null;
   return Object.values(labels);
 }
