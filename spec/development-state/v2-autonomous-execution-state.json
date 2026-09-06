@@ -6,7 +6,7 @@
   "executionManifest": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md",
   "agentInstructions": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-AGENT-INSTRUCTIONS.md",
   "activeWave": "PRE-DEPLOY-REALITY-REPAIR",
-  "updatedAt": "2026-09-06T23:45:00Z",
+  "updatedAt": "2026-09-06T23:47:37Z",
   "scheduler": {"maxConcurrentSpecialists":3,"mergeAuthority":"ARCHITECT_ONLY","dependencyBarrier":"MERGED_OR_COMPLETE_ONLY","reviewAuthority":"ARCHITECT_ONLY","userRoutinePromptsRequired":false,"manualRebasePromptsRequired":false},
   "reviewTrigger": {"statusValues":["IMPLEMENTING","VERIFYING","SYNCHRONIZING","READY_FOR_ARCHITECT_REVIEW","AWAITING_ARCHITECT_REVIEW","CHANGES_REQUESTED","BLOCKED_GOVERNANCE","MERGED"],"readyConditions":["workOrderImplementationComplete","deterministicVerificationPassing","requiredDogfoodingEvidencePersisted","requiredBrowserEvidencePersistedWhenApplicable","branchFreshAgainstCurrentMain","noPendingSynchronizationOrRepair","scopeAndArchitectureBoundariesUnchanged"],"invalidators":["prHeadChanged","mainAdvancedWithoutSuccessfulSynchronization","architectRequestedChanges","materialEvidenceChanged","scopeChanged"],"userTriggerTemplate":"ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>"},
   "branchSynchronization": {"owner":"PERSISTENT_ZAI_ORCHESTRATOR","policy":"NO_MANUAL_REBASE_TAX","mechanicalConflicts":"AUTO_RESOLVE_ON_SAME_PR_BRANCH_AND_REVERIFY","semanticOrAuthorityConflicts":"BLOCK_AND_SURFACE_TO_ARCHITECT","siblingDependency":"FORBIDDEN","sameWorkOrderMultipleBranches":"FORBIDDEN","reviewHeadRequiresCurrentMain":true},
@@ -38,5 +38,5 @@
     {"workOrder":"REALITY-REPAIR-008","pr":35,"head":"04a501e95a74d1ea03e54d00d58829ee281d73d6","mergeCommit":"3ee3e22b2a1cff2b3a04905a67620a159d25736b","mainAfterMerge":"3ee3e22b2a1cff2b3a04905a67620a159d25736b","date":"2026-09-06T23:42:01Z"},
     {"workOrder":"REALITY-REPAIR-009","pr":36,"head":"883a6f7cc40008f1ce5ef88c540834b3cdd1d476","mergeCommit":"cbbcacfc9936e19091b0ce26d010f5744eeee781","mainAfterMerge":"cbbcacfc9936e19091b0ce26d010f5744eeee781","date":"2026-09-06T23:43:33Z"}
   ],
-  "lastEvent": {"type":"REALITY_REPAIRS_COMPLETE_R6_AUTHORIZED","summary":"REALITY-REPAIR-001 through REALITY-REPAIR-009 are Architect-merged. The only eligible successor is V2-REALITY-AUDIT-001-R6, the required repeat real-browser audit; R7 and all production deployment Work Orders remain gated until R6 passes and Architect accepts the repeat-audit exit criteria.","date":"2026-09-06T23:45:00Z","main":"cbbcacfc9936e19091b0ce26d010f5744eeee781"}
+  "lastEvent": {"type":"REALITY_REPAIRS_COMPLETE_R6_AUTHORIZED","summary":"REALITY-REPAIR-001 through REALITY-REPAIR-009 are Architect-merged. The only eligible successor is V2-REALITY-AUDIT-001-R6, the required repeat real-browser audit; R7 and all production deployment Work Orders remain gated until R6 passes and Architect accepts the repeat-audit exit criteria.","date":"2026-09-06T23:47:37Z","main":"cbbcacfc9936e19091b0ce26d010f5744eeee781","stateReconciliationCommit":"502ad4ab4e367e891a95e49c9e30f18f8aea25de"}
 }
