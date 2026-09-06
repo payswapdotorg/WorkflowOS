@@ -1,0 +1,122 @@
+{
+  "run": "REALITY-REPAIR-006 real-deployment browser smoke",
+  "startedAt": "2026-09-06T17:38:06.813Z",
+  "finishedAt": "2026-09-06T17:38:18.191Z",
+  "durationMs": 11378,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T17:38:06.813Z",
+      "label": "REALITY-REPAIR-006 real-deployment browser smoke starting at 2026-09-06T17:38:06.813Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T17:38:06.814Z",
+      "label": "artifacts dir: /home/z/workflowos/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T17:38:11.933Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 5112
+    },
+    {
+      "at": "2026-09-06T17:38:11.946Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 13
+    },
+    {
+      "at": "2026-09-06T17:38:11.975Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 29
+    },
+    {
+      "at": "2026-09-06T17:38:12.308Z",
+      "label": "seed: publisher register → login → org → public workflow → listing → publish (REAL routes; the consumer gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 333
+    },
+    {
+      "at": "2026-09-06T17:38:14.878Z",
+      "label": "LEG1 the consumer signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2361
+    },
+    {
+      "at": "2026-09-06T17:38:15.083Z",
+      "label": "LEG2 the consumer creates their organization through the real Home onboarding (the RR-002 composed precondition)",
+      "status": "PASS",
+      "ms": 205
+    },
+    {
+      "at": "2026-09-06T17:38:15.683Z",
+      "label": "LEG3 Explore → the listing → the entitled free decision → Install pins version 1 into the CONSUMER organization",
+      "status": "PASS",
+      "ms": 485
+    },
+    {
+      "at": "2026-09-06T17:38:16.287Z",
+      "label": "LEG4 the library Installed tab displays the REAL workflow name (the F-007 repair) — never the generic fallback",
+      "status": "PASS",
+      "ms": 494
+    },
+    {
+      "at": "2026-09-06T17:38:16.359Z",
+      "label": "LEG4b the EXISTING PUBLIC workflow read was issued for the missing workflow id; the caller-org installation read still drives the section",
+      "status": "PASS",
+      "ms": 12
+    },
+    {
+      "at": "2026-09-06T17:38:16.630Z",
+      "label": "LEG5 the Open link still opens the cross-org detail against caller-org reads (the RR-003 regression): heading, description, Public line, steps, the consumer pin, Not run yet — no honest-error state",
+      "status": "PASS",
+      "ms": 271
+    },
+    {
+      "at": "2026-09-06T17:38:16.759Z",
+      "label": "LEG5b the detail load issued ZERO publisher-org requests; the caller-org reads are present (the browser network capture)",
+      "status": "PASS",
+      "ms": 9
+    },
+    {
+      "at": "2026-09-06T17:38:18.191Z",
+      "label": "LEG6 the publisher opens their own library (a second real browser session): the own-org card name comes from THEIR org listing — ZERO public reads — and Installed keeps its honest empty",
+      "status": "PASS",
+      "ms": 1432
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/01-consumer-org-created.png",
+      "sha256": "772e408c777826f33bb8061a8a10c6dd121f6b62d1d78e50e7a554fbf40a2333",
+      "bytes": 96826
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/02-listing-installed.png",
+      "sha256": "82dc713d694716c6cf6e2f193c5346464fb704ab35e48dab1c9d7330e3103be9",
+      "bytes": 116818
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/03-installed-real-name.png",
+      "sha256": "232eae524c402d1c3f8fdb293f8301026171c935301e53a9bbacee2c5b416cdc",
+      "bytes": 52722
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/04-consumer-detail-opens.png",
+      "sha256": "0648385d744596a0fe5e823369c52fa36082e50dbb804c282dba53b982893037",
+      "bytes": 97086
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/05-publisher-own-org-library.png",
+      "sha256": "fc4bec85b343eb34b93edd044778f37f5005db49a91427a2249b4b62330a4921",
+      "bytes": 48491
+    }
+  ]
+}

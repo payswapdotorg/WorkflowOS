@@ -670,3 +670,218 @@ describe('REALITY-REPAIR-002 — the fresh-user library shows the installation (
     );
   });
 });
+
+/**
+ * REALITY-REPAIR-006 — installed workflow naming (F-007 regression).
+ *
+ * Governing Work Order: spec/architecture/v2/work-orders/REALITY-REPAIR-006.md
+ * (parent gate V2-REALITY-AUDIT-001, Architect disposition F-007 ACCEPT;
+ * GitHub dispatch Issue #27).
+ *
+ * The F-007 defect this pins: the Installed card resolved its name ONLY from
+ * the org-scoped listing read. A cross-org marketplace install's workflow
+ * lives in the PUBLISHER's organization, so the caller-org listing (the
+ * library's own authority) never contains it — and every such card degraded
+ * to the generic 'Installed workflow' fallback even though the real name is
+ * ONE EXISTING PUBLIC read away: GET /workflow-repository/workflows/:id, the
+ * same visibility-checked read the card's own Open target consumes (proven
+ * cross-org by REALITY-REPAIR-003).
+ *
+ * The repair contract: resolve the real name for the installation cards
+ * whose workflow is NOT in the org-scoped listing — ONE deduplicated public
+ * read per missing workflow id; loading/failed resolution degrades to the
+ * honest 'Installed workflow' fallback (never an error state, never a
+ * fabricated name); an own-org installation (workflow in the listing) never
+ * triggers a public read; the Open link still targets the workflow detail.
+ */
+describe('REALITY-REPAIR-006 — the Installed card resolves the real workflow name (F-007)', () => {
+  beforeEach(() => {
+    auth.handleUnauthorized();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** The PUBLISHER's public workflow record (the public read's answer). */
+  const publicWorkflow: RouteHandler = () =>
+    jsonResponse(200, {
+      workflow: {
+        id: 'wf-external',
+        organizationId: 'org-publisher',
+        ownerUserId: 'user-publisher',
+        slug: 'cross-org-weekly-digest',
+        name: 'Cross-org weekly digest',
+        description: 'The publisher public workflow.',
+        visibility: 'public',
+        headVersionId: 'ver-external-1',
+        forkedFromWorkflowId: null,
+        forkedFromVersionId: null,
+        createdAt: '2026-09-05T10:00:00Z',
+        updatedAt: '2026-09-05T10:00:00Z',
+      },
+    });
+
+  /**
+   * The cross-org marketplace consumer's read set: one org whose INSTALLATION
+   * pins the publisher's public workflow (wf-external — absent from the
+   * caller-org listing, exactly the F-007 case). `publicRead` answers the
+   * existing public workflow read (or its failure).
+   */
+  function crossOrgRoutes(publicRead: RouteHandler): Record<string, RouteHandler> {
+    return {
+      '/auth/session': session,
+      '/organizations': () =>
+        jsonResponse(200, {
+          organizations: [{ id: 'org-market', name: 'Market Co', roleId: 'owner' }],
+        }),
+      '/organizations/org-market/workflow-repository/workflows': () =>
+        jsonResponse(200, { workflows: [] }),
+      '/organizations/org-market/workflow-runs/runs': emptyRuns,
+      '/organizations/org-market/workflow-repository/installations': () =>
+        jsonResponse(200, {
+          installations: [
+            {
+              installation: {
+                id: 'inst-market-1',
+                organizationId: 'org-market',
+                workflowId: 'wf-external',
+                versionId: 'ver-external-1',
+                installedByUserId: 'user-1',
+                status: 'enabled',
+                installedAt: '2026-09-07T09:00:00Z',
+                updatedAt: '2026-09-07T09:00:00Z',
+              },
+              pinnedVersion: {
+                id: 'ver-external-1',
+                workflowId: 'wf-external',
+                versionNumber: 1,
+                contentDigest: 'sha256:ext',
+                protocol: { name: 'workflowos.workflow.ir', version: 1 },
+              },
+            },
+          ],
+        }),
+      '/organizations/org-market/workflow-deployments/deployments': emptyDeployments,
+      '/workflow-repository/workflows/wf-external': publicRead,
+    };
+  }
+
+  /** The fetch URLs issued during the render (the stub's call log). */
+  function issuedUrls(): string[] {
+    return (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+  }
+
+  it('the cross-org installation card resolves and displays the REAL name through the public workflow read (ONE deduplicated read)', async () => {
+    await renderLibrary(crossOrgRoutes(publicWorkflow));
+    const installed = await openTab('Installed');
+    const item = await within(installed).findByRole('listitem');
+    // The real name from the authoritative PUBLIC read — never the fallback.
+    await waitFor(() =>
+      expect(
+        within(item).getByRole('heading', { name: 'Cross-org weekly digest' }),
+      ).toBeInTheDocument(),
+    );
+    expect(within(item).queryByText('Installed workflow')).not.toBeInTheDocument();
+    // The read WAS issued — exactly once, for the missing workflow id.
+    const publicReads = issuedUrls().filter((u) =>
+      u.includes('/workflow-repository/workflows/wf-external'),
+    );
+    expect(publicReads).toHaveLength(1);
+    // The Open link still carries the authoritative workflow id forward
+    // (the RR-003 caller-org detail surface it opens is untouched).
+    expect(within(item).getByRole('link', { name: 'Open' })).toHaveAttribute(
+      'href',
+      '/workflows/wf-external',
+    );
+    // The pinned facts remain verbatim from the installation read.
+    expect(within(item).getByText(/Version 1/i)).toBeInTheDocument();
+    expect(within(item).getByText(/pinned/i)).toBeInTheDocument();
+    expect(within(item).getByText('Enabled')).toBeInTheDocument();
+  });
+
+  it('a FAILED public read degrades to the honest fallback — never an error state, never a fabricated name', async () => {
+    await renderLibrary(
+      crossOrgRoutes(() => jsonResponse(500, { error: 'public read boom' })),
+    );
+    const installed = await openTab('Installed');
+    const item = await within(installed).findByRole('listitem');
+    // The read WAS attempted (once, for the missing workflow id)…
+    await waitFor(() => {
+      const publicReads = issuedUrls().filter((u) =>
+        u.includes('/workflow-repository/workflows/wf-external'),
+      );
+      expect(publicReads).toHaveLength(1);
+    });
+    // …and its failure leaves the honest fallback in place.
+    await waitFor(() =>
+      expect(within(item).getByText('Installed workflow')).toBeInTheDocument(),
+    );
+    // NEVER an error state: the card stays honest data, not an alert.
+    expect(within(installed).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(item).getByText(/Version 1/i)).toBeInTheDocument();
+    expect(within(item).getByRole('link', { name: 'Open' })).toHaveAttribute(
+      'href',
+      '/workflows/wf-external',
+    );
+  });
+
+  it('an OWN-ORG installation (the workflow in the org-scoped listing) triggers NO public read', async () => {
+    await renderLibrary(orgOneRoutes());
+    const installed = await openTab('Installed');
+    const item = await within(installed).findByRole('listitem');
+    // The name comes from the caller-org listing (its own authority)…
+    expect(within(item).getByText(/Lead follow-up/)).toBeInTheDocument();
+    // …so the bare public read for wf-b is NEVER issued (the org-scoped
+    // listing URL is a different path — no false positive in this filter).
+    const publicReads = issuedUrls().filter((u) =>
+      u.includes('/workflow-repository/workflows/wf-b'),
+    );
+    expect(publicReads).toHaveLength(0);
+  });
+
+  it('TWO installations of the SAME missing workflow trigger ONE deduplicated public read — both cards show the real name', async () => {
+    const install = (id: string, versionId: string, versionNumber: number) => ({
+      installation: {
+        id,
+        organizationId: 'org-market',
+        workflowId: 'wf-external',
+        versionId,
+        installedByUserId: 'user-1',
+        status: 'enabled',
+        installedAt: '2026-09-07T09:00:00Z',
+        updatedAt: '2026-09-07T09:00:00Z',
+      },
+      pinnedVersion: {
+        id: versionId,
+        workflowId: 'wf-external',
+        versionNumber,
+        contentDigest: `sha256:${id}`,
+        protocol: { name: 'workflowos.workflow.ir', version: 1 },
+      },
+    });
+    const routes = crossOrgRoutes(publicWorkflow);
+    routes['/organizations/org-market/workflow-repository/installations'] = () =>
+      jsonResponse(200, {
+        installations: [
+          install('inst-market-1', 'ver-external-1', 1),
+          install('inst-market-2', 'ver-external-2', 2),
+        ],
+      });
+    await renderLibrary(routes);
+    const installed = await openTab('Installed');
+    await waitFor(() => {
+      expect(
+        within(installed).getAllByRole('heading', { name: 'Cross-org weekly digest' }),
+      ).toHaveLength(2);
+    });
+    // ONE public read for the shared missing workflow id — deduplicated.
+    const publicReads = issuedUrls().filter((u) =>
+      u.includes('/workflow-repository/workflows/wf-external'),
+    );
+    expect(publicReads).toHaveLength(1);
+  });
+});
