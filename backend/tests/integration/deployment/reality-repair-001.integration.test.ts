@@ -46,7 +46,11 @@
  * writes, no second authority.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import {
+  spawn,
+  type ChildProcessByStdio,
+} from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -133,7 +137,7 @@ async function spawnRealEntry(): Promise<SpawnedEntry> {
     probe.on('error', () => resolve(false));
     probe.on('exit', (code) => resolve(code === 0));
   });
-  const child: ChildProcessWithoutNullStreams = useBun
+  const child: ChildProcessByStdio<null, Readable, Readable> = useBun
     ? spawn('bun', ['src/index.ts'], {
         cwd: BACKEND_ROOT,
         env: entryEnv(port, dataDir),

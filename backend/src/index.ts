@@ -13,10 +13,148 @@
  * The shared composition lives in {@link buildApp}; this entrypoint only wires
  * the Fastify server when the role requires it.
  */
-import { buildApp } from './app.js';
-import { buildServer } from './api/server.js';
+import { buildApp, type AppDeps } from './app.js';
+import { buildServer, type ServerDeps } from './api/server.js';
 import { loadConfig } from './config.js';
 import { SessionAuthProvider } from './modules/auth/internal/session-auth-provider.js';
+// REALITY-REPAIR-001 (V2-REALITY-AUDIT-001 / F-001): the frozen V2 product
+// authorities, imported through their public barrels so the deployment
+// composition can construct them over the shared database.
+import { DefaultWorkflowRepositoryService } from './workflow-repository/index.js';
+import { DefaultWorkflowRunService } from './workflow-runs/index.js';
+import {
+  DefaultWorkflowDeploymentService,
+  formatUtcTimestamp,
+} from './workflow-deployments/index.js';
+import { DefaultNodeCapabilityService } from './node-capability/index.js';
+import {
+  DefaultTeachingSessionService,
+  InMemoryTeachingSessionStore,
+} from './teaching-sessions/index.js';
+import {
+  DefaultReverseTeachingSessionService,
+  InMemoryReverseTeachingSessionStore,
+} from './reverse-teaching/index.js';
+
+/**
+ * REALITY-REPAIR-001 — the seven V2 product route-deps groups the real
+ * deployment composition must pass to {@link buildServer}.
+ */
+type V2ProductRouteDeps = Pick<
+  ServerDeps,
+  | 'workflowRepository'
+  | 'workflowRuns'
+  | 'workflowDeployments'
+  | 'teaching'
+  | 'reverseTeaching'
+  | 'workflowOptimization'
+  | 'marketplace'
+>;
+
+/**
+ * REALITY-REPAIR-001 (V2-REALITY-AUDIT-001 / F-001): compose the seven V2
+ * product route-deps groups over the EXISTING shared database client + the
+ * identity authority's membership facts — the exact service union the
+ * V2-017 dogfooding runner and the V2 E2E compositions prove — so the real
+ * deployment entry (`src/index.ts`, the docker-compose CMD `bun
+ * src/index.ts`) SERVES the V2 product route groups instead of answering
+ * 404 behind the universal shell (the audit's release blocker).
+ *
+ * COMPOSITION ONLY (the Work Order's boundary): every service below is a
+ * frozen existing authority constructed with its published deps — NO new
+ * route, NO authority redesign, NO V2-002..V2-012 semantic change. The
+ * V2-011 optimization and V2-012 marketplace transport routes compose their
+ * own services from the V2-002 repository + the membership resolver (the
+ * integration-test recipe, including the module's OWN deterministic
+ * reference payment adapter — no real provider, ever).
+ *
+ * Honest boundaries carried by the reference implementations (surfaced, not
+ * concealed): the V2-004 node directory, the V2-006/V2-010 session stores and
+ * the V2-011/V2-012 reference stores are the modules' in-memory reference
+ * stores — durable persistence for those surfaces is a separately-owned
+ * concern, exactly as in the proven compositions. The V2-002/V2-005/V2-009
+ * facts are PostgreSQL-authoritative through the shared client.
+ *
+ * Returns undefined when no database is configured — the groups then stay
+ * unregistered exactly as before (fail-closed composition; the caller logs
+ * the degraded state).
+ */
+function composeV2ProductRouteDeps(deps: AppDeps): V2ProductRouteDeps | undefined {
+  const db = deps.database;
+  const membershipRepository = deps.membershipRepository;
+  if (!db || !membershipRepository) return undefined;
+
+  // The identity authority's membership fact source — the consumed port
+  // every V2 service takes (the same resolver shape the test compositions
+  // build over the same repository).
+  const memberships = {
+    isMember: async (userId: string, organizationId: string) =>
+      (await membershipRepository.findByUserAndOrganization(userId, organizationId)) !== null,
+  };
+
+  const clock = () => Date.now();
+  const utcClock = { now: () => formatUtcTimestamp(clock()) };
+
+  // V2-002 — the workflow repository authority (workflows, immutable
+  // versions, forks, installations/pins; also the version-reader port the
+  // teaching, optimization and marketplace surfaces consume).
+  const workflowRepositoryService = new DefaultWorkflowRepositoryService({
+    db,
+    memberships,
+  });
+
+  // V2-005 — the run command/history authority over the same database + the
+  // repository's pin resolution. currentEpoch 1 is this deployment's
+  // attestation-freshness protocol epoch (the dogfooding composition
+  // precedent; a production epoch bump is a governed protocol change, never
+  // a silent composition decision).
+  const workflowRunService = new DefaultWorkflowRunService({
+    db,
+    memberships,
+    workflowRepository: workflowRepositoryService,
+    clock: utcClock,
+    currentEpoch: 1,
+  });
+
+  // V2-004 node directory — the ONLY placement matcher V2-009 consumes,
+  // with the module's default in-memory key/record stores.
+  const nodes = new DefaultNodeCapabilityService({ clock });
+
+  // V2-009 — the trigger-layer authority (deployments, subscriptions, the
+  // event inbox, the engine tick, manual launch).
+  const workflowDeploymentService = new DefaultWorkflowDeploymentService({
+    db,
+    memberships,
+    workflowRepository: workflowRepositoryService,
+    runs: workflowRunService,
+    nodes,
+    clock: utcClock,
+  });
+
+  // V2-006 — the teaching authority (Teach Me sessions over pinned versions).
+  const teachingSessionService = new DefaultTeachingSessionService({
+    idFactory: () => `ts_${crypto.randomUUID()}`,
+    clock,
+    store: new InMemoryTeachingSessionStore(),
+  });
+
+  // V2-010 — the reverse-teaching authority (the §13 do-it-yourself surface).
+  const reverseTeachingService = new DefaultReverseTeachingSessionService({
+    idFactory: () => `rt_${crypto.randomUUID()}`,
+    clock,
+    store: new InMemoryReverseTeachingSessionStore(),
+  });
+
+  return {
+    workflowRepository: { workflowRepositoryService },
+    workflowRuns: { workflowRunService },
+    workflowDeployments: { workflowDeploymentService },
+    teaching: { teachingSessionService, workflowRepositoryService },
+    reverseTeaching: { reverseTeachingService, workflowRepositoryService },
+    workflowOptimization: { workflowRepositoryService },
+    marketplace: { workflowRepositoryService, memberships },
+  };
+}
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -25,6 +163,16 @@ async function main(): Promise<void> {
   let server: Awaited<ReturnType<typeof buildServer>> | undefined;
 
   if (config.role === 'api' || config.role === 'all') {
+    // REALITY-REPAIR-001 (V2-REALITY-AUDIT-001 / F-001): compose the V2
+    // product route groups over the shared database so the deployment
+    // topology serves them; without a database they stay unregistered
+    // (fail-closed — the honest degraded state, never a silent substitute).
+    const v2ProductRoutes = composeV2ProductRouteDeps(app.deps);
+    if (!v2ProductRoutes) {
+      app.deps.logger.warn('app.api.v2_product_routes.unregistered', {
+        reason: 'no shared database configured (DATABASE_URL or the dev runtime); the V2 product route groups are NOT registered',
+      });
+    }
     server = await buildServer({
       queue: app.deps.queue,
       logger: app.deps.logger,
@@ -796,6 +944,16 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // REALITY-REPAIR-001 (V2-REALITY-AUDIT-001 / F-001): the V2 product
+      // route groups (V2-002 workflow repository, V2-005 workflow runs,
+      // V2-009 workflow deployments, V2-006 teaching, V2-010 reverse
+      // teaching, V2-011 optimization, V2-012 marketplace) composed over
+      // the shared database — the release-blocking composition gap the
+      // reality audit recorded (every V2 product route 404'd on the real
+      // deployment entry). Present whenever the shared database + the
+      // identity membership repository are configured; the docker-compose
+      // topology (CMD bun src/index.ts) inherits this wiring unchanged.
+      ...(v2ProductRoutes ?? {}),
     });
     await server.listen({ host: config.host, port: config.port });
     app.deps.logger.info('app.api.listening', {

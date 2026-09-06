@@ -456,6 +456,14 @@ export interface AppDeps {
   worker: WorkerHost;
   /** Shared infrastructure (PostgreSQL, Redis extensions, object storage). May be undefined when no DATABASE_URL/OBJECT_STORAGE_DIR is configured. */
   infrastructure?: Infrastructure;
+  /** REALITY-REPAIR-001 (V2-REALITY-AUDIT-001 / F-001): the shared database
+   *  client. Present when a database is configured (DATABASE_URL or the
+   *  WORK-071 pglite dev runtime) — the SAME one-DatabaseClient authority
+   *  buildApp already wires for every repository. Exposed so the deployment
+   *  composition (src/index.ts) can construct the V2 product services
+   *  (V2-002/V2-005/V2-009 route deps) without a second client; unlike
+   *  `infrastructure`, it does NOT depend on Redis being configured. */
+  database?: DatabaseClient;
   /** WORK-002: auth provider(s). Present when a database is configured. */
   authProvider?: AuthProvider;
   /** WORK-002: reusable backend authorization service. Present when a database is configured. */
@@ -2336,6 +2344,7 @@ export async function buildApp(
       handlers,
       worker,
       infrastructure,
+      database,
       authProvider,
       authorizationService,
       apiKeyProvisioner,
