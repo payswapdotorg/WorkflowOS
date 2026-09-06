@@ -70,7 +70,11 @@ export default function TeachExperience({ workflow, versions, installation }: Te
   const [sessionState, setSessionState] = useState<SessionState>({ kind: 'loading' });
   const [practiceQuestions, setPracticeQuestions] = useState<ProductPracticeQuestion[]>([]);
   const [selectedAnswer, setSelectedAnswer] = useState<Record<string, string>>({});
-  const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
+  // REALITY-REPAIR-008 (F-009): the practice feedback is scoped to the
+  // question whose attempt produced it (keyed by the authority's own
+  // question id) — the feedback under a question always names the step
+  // THAT question assesses, verbatim from the teaching authority.
+  const [practiceFeedback, setPracticeFeedback] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orderPicks, setOrderPicks] = useState<Record<string, string>>({});
@@ -168,7 +172,7 @@ export default function TeachExperience({ workflow, versions, installation }: Te
     run(async () => {
       const result = await teaching.attemptPractice(sessionId, question.nodeId, selectedAnswer[question.id]);
       setSessionState({ kind: 'data', session: result.session });
-      setPracticeFeedback(result.result.feedback);
+      setPracticeFeedback((prev) => ({ ...prev, [question.id]: result.result.feedback }));
     });
 
   const pause = () =>
@@ -435,8 +439,8 @@ export default function TeachExperience({ workflow, versions, installation }: Te
                 >
                   Check
                 </button>
-                {practiceFeedback && (
-                  <p className="text-xs text-muted-foreground">{practiceFeedback}</p>
+                {practiceFeedback[question.id] && (
+                  <p className="text-xs text-muted-foreground">{practiceFeedback[question.id]}</p>
                 )}
               </section>
             ))}
