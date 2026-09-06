@@ -269,13 +269,36 @@ function authorApprovalWorkflow(): WorkflowIrDocument {
     failurePolicy: { strategy: 'fail_workflow' },
     completionEvidence: 'observation',
   };
+  // The human approval node's declared outcomes are approved AND rejected;
+  // the IR parser fail-closes an uncovered outcome (IR_HUMAN_OUTCOME_UNCOVERED
+  // — ambiguous control semantics), so the rejected continuation must exist
+  // exactly as the RR-005 family's proven seed authors it.
+  const logRejection: WorkflowNode = {
+    id: 'log_rejection',
+    executionClass: 'deterministic_api',
+    spec: { class: 'deterministic_api', capability: 'github.repository.read' },
+    capabilityRequirements: ['github.repository.read'],
+    placement: 'cloud_allowed',
+    inputs: [
+      {
+        name: 'text',
+        type: { kind: 'string' },
+        binding: { kind: 'literal', value: 'digest rejected' },
+      },
+    ],
+    outputs: [{ name: 'logged', type: { kind: 'string' } }],
+    failurePolicy: { strategy: 'fail_workflow' },
+    completionEvidence: 'observation',
+  };
   return createWorkflowIrBuilder()
     .withStart('fetch_tickets')
     .addNode(fetchTickets)
     .addNode(reviewGate)
     .addNode(sendDigest)
+    .addNode(logRejection)
     .addEdge({ from: 'fetch_tickets', to: 'review_gate', on: 'success' })
     .addEdge({ from: 'review_gate', to: 'send_digest', on: { outcome: 'approved' } })
+    .addEdge({ from: 'review_gate', to: 'log_rejection', on: { outcome: 'rejected' } })
     .addWorkflowOutput({
       name: 'messageId',
       type: { kind: 'string' },
@@ -289,6 +312,7 @@ function authorApprovalWorkflow(): WorkflowIrDocument {
         fetch_tickets: 'Collect the open tickets',
         review_gate: 'Your approval before sending',
         send_digest: 'Email the digest',
+        log_rejection: 'Log the rejection',
       },
     })
     .build();
@@ -575,14 +599,6 @@ async function runHistory(token: string, runId: string): Promise<{
 }
 
 async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Promise<number> {
-  // The consumer's organization (resolved from the REAL entry after onboarding).
-  const token = await sessionToken(context);
-  expect(token).not.toBe('');
-  const orgs = await api(token, 'GET', '/organizations');
-  expect(orgs.status).toBe(200);
-  const consumerOrgId = (orgs.json.organizations as Array<{ id: string; name: string }>)[0]?.id ?? '';
-  expect(consumerOrgId).not.toBe('');
-
   // ============ LEG 1 — SIGNUP (the real register surface) ====================
   await step('LEG1 the consumer signs up through the real register UI (Create one → Create account) and lands on Home', async () => {
     await page.goto(`${FRONTEND_URL}/`);
@@ -603,6 +619,16 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     ).toHaveCount(0);
   });
   await shot(page, '01-consumer-org-created.png');
+
+  // The consumer's session + organization (resolved from the REAL browser
+  // context AFTER signup + onboarding — the session cookie exists only then;
+  // the RR-005 family resolves it at the same journey point).
+  const token = await sessionToken(context);
+  expect(token).not.toBe('');
+  const orgs = await api(token, 'GET', '/organizations');
+  expect(orgs.status).toBe(200);
+  const consumerOrgId = (orgs.json.organizations as Array<{ id: string; name: string }>)[0]?.id ?? '';
+  expect(consumerOrgId).not.toBe('');
 
   // ============ LEG 3 — MARKETPLACE: entitled → install =======================
   await step('LEG3 Explore → the listing → the entitled free decision → Install pins the approval-gated version 1 into the CONSUMER organization', async () => {
@@ -656,7 +682,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
 
     const status = page.getByRole('region', { name: 'Run status' });
     await expect(status).toBeVisible({ timeout: 20_000 });
-    await expect(status.getByText('Running')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Running', { exact: true })).toBeVisible({ timeout: 20_000 });
 
     // The command network capture: the request targeted the CONSUMER org.
     const requestCall = runRequests.find(
@@ -681,7 +707,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     const status = page.getByRole('region', { name: 'Run status' });
     await status.getByRole('button', { name: 'Pause' }).click();
     // The state word derives from the AUTHORITATIVE refetched record.
-    await expect(status.getByText('Paused')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Paused', { exact: true })).toBeVisible({ timeout: 20_000 });
     // The run record (the API read) + the timeline entry (the history read).
     const record = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(record.id).toBe(run1Id);
@@ -697,7 +723,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
   await step('LEG7 the user clicks Resume (the generic label — not at an approval gate) → the REAL V2-005 resume command → the run returns to execution', async () => {
     const status = page.getByRole('region', { name: 'Run status' });
     await status.getByRole('button', { name: 'Resume' }).click();
-    await expect(status.getByText('Running')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Running', { exact: true })).toBeVisible({ timeout: 20_000 });
     const record = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(record.id).toBe(run1Id);
     expect(record.state).toBe('running');
@@ -722,7 +748,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
   await step('LEG9 THE F-008 CORE: the user clicks Approve in the browser → the REAL V2-005 resume command (the resume-with-human-confirmation semantics) → the run returns to execution (verified through the history + runs reads)', async () => {
     const status = page.getByRole('region', { name: 'Run status' });
     await status.getByRole('button', { name: 'Approve' }).click();
-    await expect(status.getByText('Running')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Running', { exact: true })).toBeVisible({ timeout: 20_000 });
     // The authoritative runs read: THIS run is running again.
     const record = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(record.id).toBe(run1Id);
@@ -761,7 +787,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     await status.getByRole('button', { name: 'Stop it' }).click();
 
     // The authoritative terminal record.
-    await expect(status.getByText('Cancelled')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Cancelled', { exact: true })).toBeVisible({ timeout: 20_000 });
     const record = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(record.id).toBe(run1Id);
     expect(record.state).toBe('cancelled');
@@ -782,7 +808,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     await preview.getByRole('button', { name: 'Run' }).click();
     await expect(preview).toHaveCount(0, { timeout: 20_000 });
     const status = page.getByRole('region', { name: 'Run status' });
-    await expect(status.getByText('Running')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Running', { exact: true })).toBeVisible({ timeout: 20_000 });
     const run2 = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(run2.id).not.toBe(run1Id);
     expect(run2.state).toBe('running');
@@ -807,11 +833,11 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     await expect(alert).toContainText("Couldn't continue this run");
     await expect(alert).toContainText('workflow-run-terminal');
     // No fabricated Running on the stale surface.
-    await expect(status.getByText('Running')).toHaveCount(0);
+    await expect(status.getByText('Running', { exact: true })).toHaveCount(0);
 
     // The re-read record is the honest terminal state.
     await page.reload();
-    await expect(status.getByText('Cancelled')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Cancelled', { exact: true })).toBeVisible({ timeout: 20_000 });
     const record = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(record.id).toBe(run2.id);
     expect(record.state).toBe('cancelled');
@@ -827,7 +853,7 @@ async function journey(page: Page, seed: SeedFacts, context: BrowserContext): Pr
     await preview.getByRole('button', { name: 'Run' }).click();
     await expect(preview).toHaveCount(0, { timeout: 20_000 });
     const status = page.getByRole('region', { name: 'Run status' });
-    await expect(status.getByText('Running')).toBeVisible({ timeout: 20_000 });
+    await expect(status.getByText('Running', { exact: true })).toBeVisible({ timeout: 20_000 });
     const run3 = await newestRun(token, consumerOrgId, seed.workflowId);
     expect(run3.id).not.toBe(run1Id);
     expect(run3.state).toBe('running');
