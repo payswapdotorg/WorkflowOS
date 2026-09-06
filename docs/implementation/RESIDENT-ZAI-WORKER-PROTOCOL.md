@@ -75,9 +75,29 @@ The worker must create a durable checkpoint when the implementation reaches a me
 
 The PR is the durable implementation checkpoint. The worker must not create a replacement PR merely because its session changed, context was exhausted, or a review iteration occurred.
 
+## Architect review emission
+
+When the exact PR head satisfies the complete Architect review prerequisites, the persistent Z.ai orchestrator must emit the review event to the **same GitHub PR conversation**. This is an operational requirement, not an optional notification.
+
+Use the repository helper:
+
+```text
+scripts/emit-architect-review-trigger.sh
+```
+
+The helper verifies the PR is open, targets `main`, the supplied PR head SHA is still exact, and the supplied `main` SHA is still current. It de-duplicates the same Work Order/head pair. Z.ai must not report the Architect as notified until the GitHub comment succeeds.
+
+The comment contains the durable machine-readable event and the exact trigger line:
+
+```text
+ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>
+```
+
+After successful emission, the worker may enter `WAITING_FOR_ARCHITECT`. If emission fails or the exact head has moved, the worker remains active/non-awaiting, re-verifies, and retries or escalates according to the failure cause.
+
 ## Resident waiting mode
 
-After submitting a review-ready checkpoint, the worker enters resident `WAITING_FOR_ARCHITECT` mode rather than treating a textual response as termination.
+After submitting a review-ready checkpoint and successfully emitting the GitHub review trigger, the worker enters resident `WAITING_FOR_ARCHITECT` mode rather than treating a textual response as termination.
 
 While resident:
 
