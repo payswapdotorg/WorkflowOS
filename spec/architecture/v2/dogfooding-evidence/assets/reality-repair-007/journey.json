@@ -1,0 +1,161 @@
+{
+  "run": "REALITY-REPAIR-007 real-deployment browser smoke",
+  "startedAt": "2026-09-06T18:18:39.818Z",
+  "finishedAt": "2026-09-06T18:18:56.681Z",
+  "durationMs": 16863,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T18:18:39.819Z",
+      "label": "REALITY-REPAIR-007 real-deployment browser smoke starting at 2026-09-06T18:18:39.818Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:18:39.820Z",
+      "label": "artifacts dir: /home/z/wt-rr007/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:18:45.699Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 5865
+    },
+    {
+      "at": "2026-09-06T18:18:45.716Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 17
+    },
+    {
+      "at": "2026-09-06T18:18:45.754Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 38
+    },
+    {
+      "at": "2026-09-06T18:18:46.081Z",
+      "label": "seed: publisher register → login → org → public approval-gated workflow → listing → publish (REAL routes; the consumer gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 327
+    },
+    {
+      "at": "2026-09-06T18:18:48.867Z",
+      "label": "LEG1 the consumer signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2501
+    },
+    {
+      "at": "2026-09-06T18:18:49.057Z",
+      "label": "LEG2 the consumer creates their organization through the real Home onboarding (the RR-002 composed precondition)",
+      "status": "PASS",
+      "ms": 190
+    },
+    {
+      "at": "2026-09-06T18:18:49.784Z",
+      "label": "LEG3 Explore → the listing → the entitled free decision → Install pins the approval-gated version 1 into the CONSUMER organization",
+      "status": "PASS",
+      "ms": 581
+    },
+    {
+      "at": "2026-09-06T18:18:50.672Z",
+      "label": "LEG4 the library Installed tab → Open: the cross-org approval-gated workflow detail loads (the RR-003 composed precondition — the existing run journey base)",
+      "status": "PASS",
+      "ms": 776
+    },
+    {
+      "at": "2026-09-06T18:18:51.000Z",
+      "label": "LEG5 the EXISTING run journey: the real Run preview → confirm → the REAL V2-005 request+start commands → the run-status surface renders Running",
+      "status": "PASS",
+      "ms": 328
+    },
+    {
+      "at": "2026-09-06T18:18:51.434Z",
+      "label": "LEG6 SAFE PAUSE: the user clicks Pause in the run-status surface → the REAL V2-005 pause command → Paused (verified through the history read)",
+      "status": "PASS",
+      "ms": 264
+    },
+    {
+      "at": "2026-09-06T18:18:51.879Z",
+      "label": "LEG7 the user clicks Resume (the generic label — not at an approval gate) → the REAL V2-005 resume command → the run returns to execution",
+      "status": "PASS",
+      "ms": 273
+    },
+    {
+      "at": "2026-09-06T18:18:52.601Z",
+      "label": "LEG8 the run reaches the waiting-for-user/approval state: the consumer's own session drives the REAL pause AT the IR approval node (atStepId = review_gate) → reload → \"Waiting for you\"",
+      "status": "PASS",
+      "ms": 722
+    },
+    {
+      "at": "2026-09-06T18:18:52.982Z",
+      "label": "LEG9 THE F-008 CORE: the user clicks Approve in the browser → the REAL V2-005 resume command (the resume-with-human-confirmation semantics) → the run returns to execution (verified through the history + runs reads)",
+      "status": "PASS",
+      "ms": 245
+    },
+    {
+      "at": "2026-09-06T18:18:54.195Z",
+      "label": "LEG10 SAFE CANCEL: the waiting run → the user clicks Stop → the §2.4 explicit choice → Stop it → the REAL V2-005 cancel command → Cancelled with NO lifecycle control remaining",
+      "status": "PASS",
+      "ms": 969
+    },
+    {
+      "at": "2026-09-06T18:18:56.121Z",
+      "label": "LEG11 BOUNDARY: a concurrently-cancelled waiting run → the user's stale Approve → the envelope's typed 409 workflow-run-terminal rejection rendered VERBATIM (never a fabricated success)",
+      "status": "PASS",
+      "ms": 1754
+    },
+    {
+      "at": "2026-09-06T18:18:56.681Z",
+      "label": "LEG12 IDEMPOTENCY: the SAME pause envelope re-delivered through the REAL route converges (executed: false, the same run identity) and the timeline records the pause ONCE",
+      "status": "PASS",
+      "ms": 387
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/01-consumer-org-created.png",
+      "sha256": "57341bbf9ad45ecbcf99a34d64a0714350638aa92af8737f88078528158d322c",
+      "bytes": 97863
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/02-listing-installed.png",
+      "sha256": "e8a8872c51e7eb7c0985aad872ae395d1025c730ddc20cb1bbb27081d5b9a799",
+      "bytes": 118241
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/03-run-running.png",
+      "sha256": "c3c7c68c666ef53acd456e78f975f8be297b0f2ac231f46b67273d0de5e4ecc1",
+      "bytes": 122900
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/04-user-pause-paused.png",
+      "sha256": "b59df74b701014eccba3838649afa2c6f83ef4bc430d3a445259ad33f2b01e14",
+      "bytes": 134675
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/05-waiting-for-you.png",
+      "sha256": "285f5f8bf9a54d4fb558603f5ca05ebd236aaf2d1da4e23f7020bc2be13fa111",
+      "bytes": 138860
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/06-approve-returned-to-execution.png",
+      "sha256": "3c1b61591a7aeeee79d142788b71dc8ff1ee38e568a546cdc3c33cb3307a288a",
+      "bytes": 123094
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/07-cancelled-no-controls.png",
+      "sha256": "8c015add6769101cd24629365698179b2e349b0b8b5dbb74a207fe3c33abc0c4",
+      "bytes": 132008
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/08-typed-rejection-honest.png",
+      "sha256": "f145657f59ab0c9c1ceb58713ed512680f87a8394e1300e4864f7780a92d87c4",
+      "bytes": 138711
+    }
+  ]
+}
