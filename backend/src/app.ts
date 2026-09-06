@@ -402,6 +402,18 @@ import {
   InMemoryEngineeringSignalRepository,
 } from './engineering-signals/index.js';
 import type { EngineeringSignalService } from './engineering-signals/index.js';
+// WORK-068: the feedback→governed-Work-Item conversion layer — the
+// conversion model (assessment / deduplication / priority / provenance)
+// over the WORK-067 advisory signal source, submitting PROPOSED Work Items
+// through the EXISTING /work-items WorkItemRepository.create intake (the
+// single creation path; metadata.feedbackConversion embedded; NO new
+// tables, NO parallel work-item store, NO second planning/workflow
+// authority, NO silent autonomous creation — the mutation requires an
+// explicit governed decision and always re-derives the assessment).
+import {
+  DefaultFeedbackConversionService,
+} from './feedback-conversion/index.js';
+import type { FeedbackConversionService } from './feedback-conversion/index.js';
 // WORK-069: the progressive-release decision layer (the FEEDBACK BINDING
 // LAYER over the WORK-064 validation authority, the WORK-067 signal
 // authority, the /runtime deployment observation authority, and the /audit
@@ -578,6 +590,16 @@ export interface AppDeps {
    *  (the validation-originated source). Future consumers: WORK-068
    *  (governed Work Item conversion), WORK-070 (architecture fitness). */
   engineeringSignalService?: EngineeringSignalService;
+  /** WORK-068: the feedback→governed-Work-Item conversion service (the
+   *  conversion layer over the WORK-067 advisory signal source + the
+   *  EXISTING /work-items intake — assessment, deduplication against open
+   *  Work Items, backlog-relative priority, provenance preservation, and
+   *  the governed-decision boundary). Present when DB configured. NOT an
+   *  authority: Work Items are created ONLY through the existing
+   *  WorkItemRepository.create (metadata.feedbackConversion embedded); the
+   *  domain owns NO tables. Future consumers: WORK-070 (architecture
+   *  fitness). */
+  feedbackConversionService?: FeedbackConversionService;
   /** WORK-069: the progressive-release decision layer (the feedback binding
    *  layer: continue/halt/recover over the WORK-064 validation runs + the
    *  /runtime deployment observations + the WORK-067 signal channel + the
@@ -942,6 +964,8 @@ export async function buildApp(
   let validationScheduler: ValidationScheduler | undefined;
   // WORK-067: the engineering signal correlation service (the advisory layer).
   let engineeringSignalService: EngineeringSignalService | undefined;
+  // WORK-068: the feedback→governed-Work-Item conversion service.
+  let feedbackConversionService: FeedbackConversionService | undefined;
   let progressiveReleaseService: ProgressiveReleaseService | undefined;
   let reviewService: ReviewService | undefined;
   let ciEvidenceIngestionService: CiEvidenceIngestionService | undefined;
@@ -1239,6 +1263,24 @@ export async function buildApp(
     engineeringSignalService = new DefaultEngineeringSignalService({
       signalRepository: new InMemoryEngineeringSignalRepository(),
       continuousValidationService: continuousValidationService!,
+      logger,
+      now: () => new Date(),
+    });
+    // WORK-068: the feedback→governed-Work-Item conversion service — the
+    // conversion layer composed over the WORK-067 advisory signal service
+    // (read-only consumption: listSignalsForProject/findSignal) and the
+    // EXISTING /work-items WorkItemRepository (PgWorkItemRepository — the
+    // authoritative intake). Work Items are created ONLY through
+    // WorkItemRepository.create with the conversion evidence embedded in
+    // the existing metadata JSONB (metadata.feedbackConversion); the domain
+    // owns NO tables (NO migration is authorized by WORK-068). The
+    // mutation requires an explicit governed decision and ALWAYS re-derives
+    // the assessment in the mutation path (no silent autonomous creation).
+    // The deterministic FB- proposal id + the existing
+    // UNIQUE(architecture_version_id, work_item_id) constraint fence
+    // concurrent conversion runs (the WORK-040 convergence model). The
+    // clock is INJECTED (deterministic decidedAt records).
+    feedbackConversionService = new DefaultFeedbackConversionService({
       logger,
       now: () => new Date(),
     });
@@ -2452,6 +2494,15 @@ export async function buildApp(
       // verification / review state, NEVER starts execution, NEVER selects a
       // provider.
       developmentPlannerService: developmentPlannerServiceRef,
+      // WORK-068: the feedback→governed-Work-Item conversion service
+      // (present when DB + the engineering-signal service + the
+      // /work-items repository are configured). NOT an authority; submits
+      // proposed Work Items ONLY through the existing
+      // WorkItemRepository.create intake (the governed-decision boundary;
+      // assessment re-derived in the mutation path; dedup against open
+      // Work Items; backlog-relative priority; signal provenance
+      // preserved in metadata.feedbackConversion).
+      feedbackConversionService,
       // WORK-032: benchmark service (present when DB + execution configured).
       benchmarkService,
       // WORK-033: execution-policy service (present when DB + benchmark +

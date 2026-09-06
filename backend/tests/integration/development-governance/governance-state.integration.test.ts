@@ -533,10 +533,14 @@ describe('WORK-052 — repository source of truth (fresh-checkout reconstruction
       // WORK-066) is stripped with them — the fixture reconstructs the
       // pre-WORK-069-activation baseline (a record over a stripped
       // dependency is invalid fixture state).
-      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066' && w.id !== 'WORK-067' && w.id !== 'WORK-069');
-      // …and the WORK-067/WORK-069 activation handoffs are stripped with it (the
+      program.workOrders = program.workOrders.filter((w) => w.id !== 'WORK-065' && w.id !== 'WORK-066' && w.id !== 'WORK-067' && w.id !== 'WORK-068' && w.id !== 'WORK-069');
+      // …and the WORK-067/WORK-068/WORK-069 activation handoffs are stripped with it (the
       // fixture reconstructs the pre-activation baseline; a handoff
       // referencing a stripped work order would be invalid fixture state).
+      // WORK-068 (in_flight since its 2026-09-06 Issue #12 activation,
+      // depending on the stripped WORK-067) is stripped with them — the
+      // same rule: a record over a stripped dependency is invalid fixture
+      // state (the pre-WORK-068-activation baseline).
       program.resumption.activeHandoffs = [];
       const w050 = program.workOrders.find((w) => w.id === 'WORK-050')!;
       w050.status = 'in_flight';
