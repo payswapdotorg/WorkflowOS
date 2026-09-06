@@ -137,7 +137,7 @@ the borrow is disclosed here per the dispatch).
 | `bunx eslint tests/integration/deployment/run-reality-repair-009-browser-smoke.ts` (backend) | **0 errors / 9 warnings** — the `no-console`/`no-explicit-any` runner family the RR-003/RR-004 runners record identically |
 | Boundary: `git diff 9cbfd12..HEAD -- backend/ spec/development-state/ frontend/src/api/` | **empty (0 bytes)** — no backend change, no development-state change, no client wire change |
 | Backend battery / e2e-browser sweep | **NOT RUN by this worker** — zero backend surface changed (backend/src byte-identical to base); recorded honestly, never claimed |
-| Real-topology browser smoke (this slice's required evidence) | **commit a24ed39, NOT RUN — PENDING ORCHESTRATOR RUN** (port discipline: :3001/:5188 belong to the orchestrator) — §5 |
+| Real-topology browser smoke (this slice's required evidence) | **PASS — 13/13 legs, exit code 0, 11581ms** — run by the orchestrator at the exact head `f550b3b` (2026-09-06T18:23:42Z; §5) |
 
 ## 5. Real-topology browser proof (the smoke leg design)
 
@@ -152,8 +152,12 @@ exactly as deployed), and a REAL headless Chromium (Playwright, 1280×800).
 `step()/shot()/journey.json` with sha-256 digests; artifacts under
 `assets/reality-repair-009/`.
 
-**Exit code: PENDING ORCHESTRATOR RUN** (this worker never executed the
-runner — port discipline). The runner compiles clean (§4).
+**Exit code: 0 — RUN BY THE ORCHESTRATOR at the exact head `f550b3b`**
+(2026-09-06T18:23:42.553Z → 18:23:54Z, duration 11581ms, 13 legs passed /
+0 failed; `journey.json` + the four screenshots regenerated at that head and
+committed by the run-evidence commit; clean on the first execution, zero
+corrections needed. The implementation worker never executed the runner —
+port discipline.) The runner compiles clean (§4).
 
 The **publisher** is seeded through the REAL HTTP routes only (register →
 login → org → public workflow v1 with presentation labels → free listing →
@@ -204,8 +208,9 @@ this branch (this worker made NO GitHub API calls of any kind — no push,
 no PR, no `gh`; delivery is the orchestrator's). Missing CI runs are
 recorded as the external condition; they are never claimed as a pass. All
 verification above was executed locally in the development sandbox at the
-exact heads recorded, and the smoke run's exit code is honestly PENDING
-the orchestrator's execution.
+exact heads recorded, and the smoke run's exit code is now the
+orchestrator's actually-run result at the exact head (exit 0, 13/13 legs —
+`journey.json`).
 
 ## 8. Completion criteria mapping (the Work Order's own list)
 
@@ -216,7 +221,7 @@ the orchestrator's execution.
 | "…and explicit non-equivalence statement" | the `Not equivalent` verdict line renders verbatim on every non-equivalent payload (deterministic tests + smoke LEG8) |
 | "No optimization authority or comparison semantics change" | derivation only — the payload is parsed, never recomputed; zero backend/src changes (git-diff-verified); zero client wire changes; the estimates/adoption/approval gates untouched |
 | Deterministic tests first | RED commit `0268d63` at base before any implementation (§3) |
-| Real-topology browser proof | the committed runner (§5) — the run itself is the orchestrator's (PENDING) |
+| Real-topology browser proof | §5 — **RUN: exit 0, 13/13 legs at `f550b3b`** |
 
 **Worker conclusion:** REALITY-REPAIR-009 is implemented within its
 declared boundary — a frontend presentation repair that derives the
@@ -225,9 +230,9 @@ payload (names through the V2-003 presentation labels, values readable,
 the honest non-equivalence statement preserved, equivalence untouched),
 with no comparison-semantics, optimization-authority, backend, wire, or
 governance changes — deterministically verified (RED at base → GREEN at
-head, full battery 398/398, typecheck clean, lint clean) and armed with
-the real-topology browser smoke for the orchestrator to run. The gate now
-rests with the orchestrator (the smoke execution + the exact-head
-review-trigger delivery) and then the Architect: exact-head review and
+head, full battery 398/398, typecheck clean, lint clean) and the
+real-topology browser smoke RUN BY THE ORCHESTRATOR at the exact head
+(exit 0, 13/13 legs, clean on the first execution). The gate now
+rests with the Architect: exact-head review and
 merge before R6; deployment remains locked until the serialized repairs +
 the R6 repeat audit + the R7 release decision succeed.
