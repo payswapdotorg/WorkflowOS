@@ -1,0 +1,199 @@
+# REALITY-REPAIR-006 — Installed Workflow Naming (F-007)
+
+**Work Order:** `spec/architecture/v2/work-orders/REALITY-REPAIR-006.md`
+**Parent gate:** V2-REALITY-AUDIT-001 (Architect disposition F-007 ACCEPT)
+**Dispatch:** GitHub Issue #27 (authorized by the REALITY-REPAIR-003 merge at
+`a9933da`, reconciled by `c6e7825` + `9cbfd12`)
+**Base:** `main` at worker start — `9cbfd12` (`basePolicy:
+current-main-at-worker-start`; the dispatch's merge head `a9933da` had been
+advanced by the governance reconciliation `c6e7825` + `9cbfd12` — both
+zero-overlap with this slice's surface)
+**Branch:** `feat/REALITY-REPAIR-006-installed-workflow-naming`
+**Code head:** `6ab9792` (commit sequence: RED tests `dc6d5e8` → the repair
+`2ebb942` → the browser smoke runner `6ab9792`)
+**Files:** frontend composition only — `frontend/src/pages/WorkflowsPage.tsx`
+(+91/−5) + `frontend/src/pages/WorkflowsPage.test.tsx` (+215) + the smoke
+runner `backend/tests/integration/deployment/run-reality-repair-006-browser-smoke.ts`
+(+721); **zero backend/src changes, zero route changes, zero client-surface
+(wire) changes, zero spec-authority changes** (git-diff-verified against base
+`9cbfd12`)
+
+## 1. The defect (F-007, the audit's MINOR naming defect)
+
+The Installed card resolved its name ONLY from the org-scoped listing read
+(`workflow?.name ?? 'Installed workflow'`, `WorkflowsPage.tsx`). A
+cross-org marketplace install's workflow lives ONLY in the publisher's
+organization, so the caller-org listing — the library's own authority —
+never contains it: every such card degraded to the generic
+**"Installed workflow"** fallback (the audit's LIB-2 journey: "card renders
+but title falls back to generic 'Installed workflow'"; the RR-002 evidence's
+Installed-tab leg recorded that fallback as the honest interim state).
+
+The authoritative name was never far away: the EXISTING PUBLIC workflow read
+— `GET /workflow-repository/workflows/:id` (visibility-checked, proven
+cross-org by REALITY-REPAIR-003's consumer detail legs) — is the same read
+the card's own Open target consumes. The backend authority was never at
+fault; the library simply never consumed the read it links to.
+
+## 2. The repair (composition only — no new route, no aggregate authority)
+
+Per the Work Order ("Resolve installed-card names using the existing public
+workflow read when the org-scoped listing lacks the workflow name. No new
+route or aggregate authority") and the Issue #27 authority boundary:
+
+1. **`frontend/src/pages/WorkflowsPage.tsx`** — a new presentation-level
+   derivation, `useUnlistedWorkflowNames(library)`: for every installation
+   whose workflow is NOT in the caller-org listing, ONE deduplicated
+   `workflowRepository.get(workflowId)` (the existing public read; the
+   missing-id set is a stable sorted key, and a cross-run `requested` ref
+   guarantees an id is never re-requested — two installations of the same
+   missing workflow share the single read). The `InstallationCard` resolves
+   its name in authority order: **the caller-org listing first** (the
+   own-org case — never a public read), **then the public read's record**
+   (the cross-org marketplace case), **then the generic fallback** — only
+   while that resolution is loading or has failed. A failed read degrades
+   honestly: the fallback stays, never an error state, never a fabricated
+   name (a loading/failed public read can never kill the card — the library
+   read remains the card's own authority).
+2. **No other surface changed.** The pinned-version/status facts stay
+   verbatim from the installation read; the card's run/schedule/environment
+   facts stay derived from the caller-org reads alone; the Open link
+   (`/workflows/:id`) and the RR-003 caller-org detail surface it opens are
+   UNCHANGED (LEG5/LEG5b of the browser smoke re-prove them);
+   `frontend/src/api/client.ts` is untouched — no new client function was
+   needed (`workflowRepository.get` suffices).
+
+**Non-goals honored:** no new workflow-scoped aggregate route, no batch
+name-resolution endpoint, no backend change of any kind, no authorization
+change (the public read's visibility check remains the only authority
+consulted, exactly as the detail page already consumes it).
+
+## 3. Deterministic regression (RED at base → GREEN at head)
+
+The RED commit (`dc6d5e8`) lands the failing tests first. **At base
+`9cbfd12`** (run before any implementation): `WorkflowsPage.test.tsx` —
+**3 failed / 19 passed (22 tests)**; each failure renders the F-007 defect's
+own visible state (the cross-org card stuck on the generic fallback while
+the public read that names it is never issued):
+
+- the cross-org resolve test (the real-name heading never appears; the
+  public read is never issued for the missing workflow id);
+- the failed-read degradation test (the public read is never even attempted
+  at base, so its issue-once assertion fails);
+- the deduplication test (two installations of the same missing workflow
+  share neither a read nor a resolved name).
+
+The fixtures reproduce the cross-org topology faithfully: the consumer org
+holds the installation of the publisher's public workflow (`wf-external`)
+while its own listing is empty, and the public read answers the publisher's
+workflow record (or its failure). The own-org regression (an installation
+whose workflow IS in the listing triggers NO public read) and the honest
+fallback are pinned as the boundary (green at base and at head — the
+boundary contract, not the defect).
+
+**At head — GREEN:** **22/22** in the suite — the real name renders through
+exactly one public read, the fallback is gone on the resolved card, the
+degradation and own-org legs hold, the Open link still targets
+`/workflows/wf-external`, and the pinned facts are unchanged.
+
+## 4. Verification matrix at the exact code head `6ab9792`
+
+| Check | Result |
+| --- | --- |
+| Frontend suite (`frontend/`) | **384/384 PASS (38 files)** — the 380 at the REALITY-REPAIR-003 merge + 4 new (the F-007 block) |
+| `tsc --noEmit` (frontend) | **clean** (exit 0) |
+| `eslint .` (frontend) | **0 errors / 1 inherited warning** (ArchitecturePage `react-hooks/exhaustive-deps`, untouched — the documented family) |
+| `backend/src` changes | **NONE** — git-diff-verified byte-empty against base `9cbfd12` |
+| `spec/development-state/` changes | **NONE** — git-diff-verified byte-empty against base |
+| Backend battery / typecheck / lint | **not run by this worker** — the backend `node_modules` is intentionally not installed in this worktree; this slice's diff is frontend composition + a committed (unrun) smoke runner, so there is no backend surface to verify beyond the byte-identical diff above. Recorded honestly, not claimed. |
+| Real-topology browser smoke (this slice's required evidence) | **script committed, run PENDING the orchestrator** — §5 |
+
+## 5. Real-topology browser proof (the Work Order's required evidence)
+
+Runner: `backend/tests/integration/deployment/run-reality-repair-006-browser-smoke.ts`
+— modeled exactly on the RR-003 runner: the REAL deployment entry spawned as
+a process (`bun src/index.ts`, the docker-compose CMD, on the WORK-071
+pglite dev runtime — real PostgreSQL-WASM DatabaseClient + the SAME
+migrations as production — `WORKFLOWOS_ROLE=all`, fresh temp data dir,
+`:3001`), the ACTUAL product SPA via the Vite dev server (its `/api` proxy
+targets `:3001` exactly as deployed), and a REAL headless Chromium
+(Playwright, 1280×800).
+
+**Status: PENDING ORCHESTRATOR RUN.** The implementation worker did NOT run
+it (real-deployment port discipline — a sibling specialist and the port
+collisions make the run the orchestrator's job). The smoke exit code and the
+journey.json transcript under `assets/reality-repair-006/` will be recorded
+by that run; nothing is claimed here beyond the committed leg design.
+
+The **publisher** is seeded through the REAL HTTP routes only (register →
+login → org → public workflow → free listing → publish). **The consumer gets
+NOTHING pre-seeded** and does everything through the real browser UI:
+
+| Leg | Proof |
+| --- | --- |
+| LEG1 | the consumer **signs up through the real register surface** (Create one → Create account) and lands on Home |
+| LEG2 | the consumer creates their organization through the real Home onboarding (the RR-002 composed precondition) |
+| LEG3 | Explore → the listing → the entitled free decision → **the EXISTING V2-002 install pins version 1 into the CONSUMER organization** (screenshot `02`) |
+| LEG4 | **the library's Installed tab displays the REAL workflow name** — the heading, `Version 1 — pinned`, `Enabled`, the Open route — and the generic `Installed workflow` fallback NEVER renders (the F-007 repair; screenshot `03`) |
+| LEG4b | the browser's own network capture: **the EXISTING PUBLIC workflow read fired for the missing workflow id**; the caller-org installation read still drives the section; ZERO publisher-org requests during the library load |
+| LEG5 | **the Open link still opens the cross-org detail against caller-org reads** (the RR-003 regression): heading, description, Public line, presentation-label steps, `Installed: Version 1 — pinned · Enabled`, `Not run yet`, `not deployed yet`, NO honest-error state (screenshot `04`) |
+| LEG5b | the browser's own network capture: **ZERO publisher-org requests during the detail load**; the caller-org runs/installation reads present; the unchanged public workflow read present |
+| LEG6 | the publisher (a second real browser session, real sign-in) opens their own library: **the own-org card name comes from THEIR org-scoped listing** (ZERO public reads) and the Installed tab keeps its honest empty (screenshot `05`) |
+
+**The required regression, verbatim:** "an installed marketplace workflow
+displays its real name" (LEG4/LEG4b) "and still opens against caller-org
+detail reads" (LEG5/LEG5b — the RR-003 surface, unchanged). 5 screenshots +
+journey.json with sha-256 digests land under
+`spec/architecture/v2/dogfooding-evidence/assets/reality-repair-006/` when
+the orchestrator runs the script.
+
+## 6. Out-of-boundary observations (recorded for serialized successors)
+
+- The resolved public record is consumed for the NAME only, by design (the
+  Work Order's wording is installed-card *names*). The cross-org card's
+  description/slug/schedule/environment facts still honestly derive from the
+  caller-org reads alone (empty for a fresh consumer) — extending the card's
+  cross-org presentation beyond the name would be a successor UX decision,
+  not this slice.
+- The RR-002 fresh-user deterministic fixture (no public-read mock) now
+  exercises the honest degradation path — the failed public read leaves the
+  fallback in place — and still passes, pinning the boundary from the other
+  side.
+- A failed name resolution is never retried within a page lifetime (the
+  refetch path re-renders from the library read; a fresh navigation re-runs
+  the resolution). Retry-on-failure semantics were not requested and were
+  not invented.
+- The smoke's LEG4b asserts the public read FIRED (≥1) rather than an exact
+  count: the exact one-read-per-id dedup is pinned deterministically in the
+  component suite (the browser's StrictMode remounts make an exact-count
+  assertion a framework-version-dependent flake, not an honest leg).
+
+## 7. CI honesty
+
+The repository's GitHub Actions has had zero executions in this program's
+history (REST-checked and recorded by RR-002/RR-003). This worker touched
+no GitHub surface (no push, no PR — the orchestrator owns delivery). All
+verification above was executed locally in the development sandbox at the
+exact heads recorded; the browser smoke is committed and honestly recorded
+as pending the orchestrator's run.
+
+## 8. Completion criteria mapping (the Work Order's own list)
+
+| Work Order requirement | Evidence |
+| --- | --- |
+| Resolve installed-card names using the existing public workflow read when the org-scoped listing lacks the workflow name | the composition change (§2) + the RED→GREEN resolve test (§3: the real name renders through exactly one `workflowRepository.get` per missing id) |
+| No new route | `backend/src` and `frontend/src/api/client.ts` byte-identical to base (git-diff-verified; §4) |
+| No aggregate authority | one public read per missing workflow id, deduplicated; the caller-org listing remains the library's authority and is consulted FIRST (§2, §3) |
+| Required regression: an installed marketplace workflow displays its real name | §3 (deterministic) + LEG4/LEG4b (committed browser proof, pending the orchestrator run) |
+| Required regression: … and still opens against caller-org detail reads | §3 (the Open link unchanged) + LEG5/LEG5b (the RR-003 surface re-proven in the committed smoke) |
+| Deterministic tests plus real browser proof | §3 (RED 3-failed/19-passed at base → GREEN 22/22; 384/384 full battery, typecheck clean, lint 0 errors) + §5 (the committed runner) |
+
+**Worker conclusion:** REALITY-REPAIR-006 is implemented within its declared
+boundary (frontend composition only, over the existing public workflow read;
+no new route, no aggregate authority, no backend change, no authorization
+change), deterministically verified (RED at base → GREEN at head), with the
+real-topology browser smoke committed for the orchestrator's run. The F-007
+naming defect is repaired. The gate now rests with the orchestrator/
+Architect: the smoke run, exact-head review, and merge before the serialized
+successors activate; deployment remains locked until the serialized repairs
++ the R6 repeat audit + the R7 release decision succeed.
