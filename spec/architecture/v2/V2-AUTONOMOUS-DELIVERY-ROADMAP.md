@@ -6,10 +6,13 @@
 ## Authority order
 
 1. Architecture constitution and frozen V2 contracts.
-2. `spec/development-state/v2-work-order-state.json` for canonical eligibility/completion.
-3. Individual Work Orders in `spec/architecture/v2/work-orders/` for bounded scope and acceptance.
-4. This manifest for execution topology, packet dependencies, safe parallelism, automatic branch synchronization, and review readiness.
-5. GitHub PR/Issue state and evidence for actual execution state.
+2. `spec/development-state/v2-work-order-state.json` for canonical historical completion and dependency facts.
+3. `spec/development-state/v2-autonomous-execution-state.json` for current orchestration resume state, three-slot scheduling, branch synchronization, and review queue state.
+4. Individual Work Orders in `spec/architecture/v2/work-orders/` for bounded scope and acceptance.
+5. This manifest for execution topology, packet dependencies, safe parallelism, automatic branch synchronization, and review readiness.
+6. GitHub PR/Issue state and evidence for actual execution state.
+
+The execution overlay may not contradict an architectural or merged-history fact in the canonical base state. When they disagree, recompute the overlay from Git history and Work Orders; never reinterpret architecture to fit the overlay.
 
 ## Three-agent execution limit
 
