@@ -10,7 +10,7 @@ import {
   type ProductRunHistory,
 } from '../../api/client';
 import { humanRunState, humanRunStateSentence } from '../activity/run-state-language';
-import { approvalStepIdsFromContent } from '../activity/workflow-ir-facts';
+import { approvalStepIdsFromContent, lastPauseAtApprovalStep } from '../activity/workflow-ir-facts';
 import TrustDisclosure from '../activity/TrustDisclosure';
 
 /**
@@ -316,19 +316,12 @@ export default function RunExperience({
 
   // The Waiting-for-you derivation: paused at an approval step. The pause
   // timeline entry carries the executor-reported pause point in
-  // detail.atStepId (the authoritative wire shape) — never guessed.
+  // detail.atStepId (the authoritative wire shape) — never guessed. The
+  // derivation itself is the SHARED one (workflow-ir-facts — the same
+  // source the Activity timeline and Home's Pending approvals consume).
   let stateWord = run ? humanState(run) : null;
   if (run && run.state === 'paused' && historyState.kind === 'data') {
-    const approvalIds = content ? approvalStepIdsFromContent(content) : new Set<string>();
-    const pauses = historyState.history.timeline
-      .filter((e) => e.eventName === 'workflow.run.paused')
-      .sort((a, b) => a.sequence - b.sequence);
-    const last = pauses[pauses.length - 1];
-    const atStepId =
-      (last?.detail && typeof last.detail.atStepId === 'string'
-        ? (last.detail.atStepId as string)
-        : null) ?? last?.stepId ?? null;
-    if (atStepId && approvalIds.has(atStepId)) {
+    if (lastPauseAtApprovalStep(historyState.history.timeline, content)) {
       stateWord = 'Waiting for you';
     }
   }

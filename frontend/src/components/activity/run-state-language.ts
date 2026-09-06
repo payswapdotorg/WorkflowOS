@@ -6,9 +6,10 @@
  * The words derive ONLY from the authoritative run record's state field —
  * never guessed, never fabricated; an unknown authoritative state renders
  * as the state itself (the honest word). The "Waiting for you" derivation
- * (paused at an approval step) stays with each surface because it needs the
- * history + version-content facts; this module owns only the record-state
- * mapping.
+ * (paused at an approval step) lives in workflow-ir-facts
+ * (lastPauseAtApprovalStep — ONE shared derivation for every surface that
+ * holds the history + version-content facts); this module owns only the
+ * record-state mapping.
  */
 import type { ProductWorkflowRun } from '../../api/client';
 

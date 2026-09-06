@@ -200,7 +200,11 @@ describe('V2-017 T2 — workflow-first Home', () => {
         release = resolve;
       });
       renderHome({ '/organizations': () => gate });
-      expect(screen.getAllByRole('status', { name: /loading/i }).length).toBe(2);
+      // Four reads gate on the organizations read: recent workflows,
+      // needs attention, and the two REALITY-REPAIR-005 composed surfaces
+      // (Pending approvals and Updates aggregate the same org-scoped
+      // reads). The orgs read itself has no visible loading state.
+      expect(screen.getAllByRole('status', { name: /loading/i }).length).toBe(4);
       release(jsonResponse(200, { organizations: [] }));
       await waitFor(() =>
         expect(screen.queryAllByRole('status', { name: /loading/i }).length).toBe(0),
@@ -438,20 +442,21 @@ describe('V2-017 T2 — workflow-first Home', () => {
   });
 
   describe('surfaces without an exposed read stay honestly Unavailable', () => {
-    it('marks pending approvals, updates, and device issues Unavailable — never fake-empty', async () => {
+    // REALITY-REPAIR-005 narrowed this contract to Device issues (F-006:
+    // no public device-status read exists — an explicit deferral). Pending
+    // approvals and Updates are COMPOSED surfaces now (the F-005 repair
+    // above) — their honest states are pinned in the REALITY-REPAIR-005
+    // block.
+    it('marks device issues Unavailable — never fake-empty (the F-006 deferral preserved)', async () => {
       renderHome({
         '/workflow-repository/workflows': workflows,
         '/workflow-runs/runs': runs,
         '/organizations': orgsOne,
       });
-      const approvals = await screen.findByRole('region', { name: 'Pending approvals' });
-      const updates = await screen.findByRole('region', { name: 'Updates' });
       const devices = await screen.findByRole('region', { name: 'Device issues' });
-      for (const section of [approvals, updates, devices]) {
-        expect(within(section).getByRole('status', { name: 'Unavailable' })).toBeInTheDocument();
-        expect(within(section).queryByText(/no items yet/i)).not.toBeInTheDocument();
-        expect(within(section).queryByText(/nothing yet/i)).not.toBeInTheDocument();
-      }
+      expect(within(devices).getByRole('status', { name: 'Unavailable' })).toBeInTheDocument();
+      expect(within(devices).queryByText(/no items yet/i)).not.toBeInTheDocument();
+      expect(within(devices).queryByText(/nothing yet/i)).not.toBeInTheDocument();
     });
   });
 });
@@ -1162,11 +1167,11 @@ describe('REALITY-REPAIR-005 — Home approvals/updates composition (F-005)', ()
     for (const section of [approvals, updates]) {
       // The FALSE unavailability claims are gone (approvals and updates ARE
       // part of the product — V2-005 approval gates; the V2-002 versions).
-      expect(within(section).queryByText(/become part of the product/i)).not.toBeInTheDocument();
+      expect(within(section).queryByText(/becomes? part of the product/i)).not.toBeInTheDocument();
       expect(within(section).queryByRole('status', { name: 'Unavailable' })).not.toBeInTheDocument();
     }
     // Device issues keeps its TRUE deferral copy (F-006 as-is).
     const devices = screen.getByRole('region', { name: 'Device issues' });
-    expect(within(devices).getByText(/become part of the product/i)).toBeInTheDocument();
+    expect(within(devices).getByText(/becomes? part of the product/i)).toBeInTheDocument();
   });
 });
