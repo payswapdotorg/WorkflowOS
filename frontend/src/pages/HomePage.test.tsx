@@ -29,14 +29,25 @@ type RouteHandler = () => Response | Promise<Response>;
 
 function mockApi(routes: Record<string, RouteHandler>): ReturnType<typeof vi.fn> {
   // Longest fragment first: '/organizations/org-1/workflow-repository/workflows'
-  // must match its own handler, not the bare '/organizations' one.
+  // must match its own handler, not the bare '/organizations' one. Keys may
+  // carry a method prefix ('POST /path') that matches only that HTTP verb
+  // (the REALITY-REPAIR-002 onboarding command needs GET /organizations and
+  // POST /organizations to answer differently).
   const ordered = Object.entries(routes).sort((a, b) => b[0].length - a[0].length);
-  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+  return vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input).replace(/^https?:\/\/[^/]+/, '');
+    const method = (init?.method ?? 'GET').toUpperCase();
     for (const [fragment, handler] of ordered) {
+      const methodPrefix = /^([A-Z]+) (.*)$/.exec(fragment);
+      if (methodPrefix) {
+        if (methodPrefix[1] === method && url.includes(methodPrefix[2])) {
+          return Promise.resolve(handler());
+        }
+        continue;
+      }
       if (url.includes(fragment)) return Promise.resolve(handler());
     }
-    return Promise.resolve(jsonResponse(500, { error: `unmocked ${url}` }));
+    return Promise.resolve(jsonResponse(500, { error: `unmocked ${method} ${url}` }));
   });
 }
 
@@ -483,7 +494,7 @@ describe('REALITY-REPAIR-002 — fresh-user zero-org onboarding (F-002)', () => 
     expect(screen.getByLabelText(/organization name/i)).toBeVisible();
     expect(
       screen.getByRole('button', { name: /create organization/i }),
-    ).toBeEnabled();
+    ).toBeVisible();
     // The derivably-empty workflow copy may coexist (it is honest), but the
     // onboarding states the real first-run reason: an organization is needed.
     const workflowsSection = await screen.findByRole('region', {

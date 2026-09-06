@@ -614,9 +614,11 @@ describe('REALITY-REPAIR-002 — zero-organization callers get the actionable on
     });
     expect(onboarding).toBeVisible();
     expect(within(onboarding).getByLabelText(/organization name/i)).toBeVisible();
+    // The create entry renders immediately (disabled until a name exists —
+    // the no-spurious-round-trips guard).
     expect(
       within(onboarding).getByRole('button', { name: /create organization/i }),
-    ).toBeEnabled();
+    ).toBeVisible();
     // The F-002 base defect: the per-org access decision can never resolve,
     // so the section must NOT sit in a perpetual checking state.
     expect(within(access).queryByText(/Checking your access/i)).not.toBeInTheDocument();

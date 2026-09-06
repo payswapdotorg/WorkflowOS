@@ -88,7 +88,11 @@ describe('REALITY-REPAIR-002 — the organization onboarding card (F-002)', () =
       screen.getByText(/workflows you install and buy belong to an organization/i),
     ).toBeVisible();
     expect(screen.getByLabelText(/organization name/i)).toBeVisible();
-    expect(screen.getByRole('button', { name: /create organization/i })).toBeEnabled();
+    // The create entry renders immediately (the guard: it stays disabled
+    // until a non-blank name exists — no spurious authority round-trips).
+    const createButton = screen.getByRole('button', { name: /create organization/i });
+    expect(createButton).toBeVisible();
+    expect(createButton).toBeDisabled();
   });
 
   it('submits the trimmed name through the EXISTING POST /organizations authority and hands the authoritative created record to the parent', async () => {
