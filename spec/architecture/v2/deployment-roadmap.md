@@ -6,7 +6,7 @@
 
 ## Mandatory pre-deployment gate
 
-Productionization is **LOCKED** until `V2-REALITY-AUDIT-001 — Product Reality, Journey, and Architecture Reconciliation` is accepted by the Architect.
+Productionization is **LOCKED** until `V2-REALITY-AUDIT-001` completes its full repeat audit and the Architect accepts `V2-REALITY-AUDIT-001-R7`.
 
 The audit must complete its repository-defined exit criteria: real-browser exercise of the reachable V2 journeys, UX-to-operational route/service/authority tracing, durable worker report, Architect dispositions, bounded accepted repairs where required, and a repeat audit showing no critical UX-to-operational architecture mismatch. A browser-observed defect must not be “fixed” by inventing a second workflow, execution, verification, evidence, authorization, scheduling, or governance authority.
 
@@ -16,9 +16,11 @@ Canonical audit artifacts:
 - `spec/architecture/v2/V2-REALITY-AUDIT-001-CANONICAL-DISPATCH.md`
 - `docs/v2/V2-REALITY-AUDIT-001-WORKER-REPORT-TEMPLATE.md`
 - `docs/v2/V2-REALITY-AUDIT-001-ARCHITECT-DISPOSITION.md`
-- `spec/development-state/v2-work-order-state.json`
+- `spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R6.md`
+- `spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R7.md`
+- `spec/development-state/v2-autonomous-execution-state.json`
 
-No DEP item may activate before this gate is satisfied. Deployment is downstream of product reality, not an alternative path around it.
+No DEP item may activate before R7 ACCEPT. Deployment is downstream of product reality, not an alternative path around it.
 
 ## Product baseline
 
@@ -73,13 +75,16 @@ GitHub App remains the repository/webhook integration authority.
 
 ## Bounded implementation sequence
 
-The DEP names below are independent governed Work Orders, not one implementation task. Their dependency and parallelism model is defined in `spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md`.
+The DEP names below are independent governed Work Orders, not one implementation task. Their exact dependency and parallelism model is defined in `spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md` and `spec/development-state/v2-autonomous-execution-state.json`.
 
 ```text
 V2-REALITY-AUDIT-001
        │
        ▼
 R6 repeat audit PASS
+       │
+       ▼
+R7 ARCHITECT ACCEPT
        │
        ▼
 DEP-001  deployment architecture foundation
