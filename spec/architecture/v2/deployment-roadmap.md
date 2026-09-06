@@ -71,6 +71,53 @@ GitHub Actions controls build → verify → deploy → smoke test.
 GitHub App remains the repository/webhook integration authority.
 ```
 
+## Bounded implementation sequence
+
+The DEP names below are independent governed Work Orders, not one implementation task. Their dependency and parallelism model is defined in `spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md`.
+
+```text
+V2-REALITY-AUDIT-001
+       │
+       ▼
+R6 repeat audit PASS
+       │
+       ▼
+DEP-001  deployment architecture foundation
+       │
+       ▼
+DEP-002  environment / secrets / configuration
+   ┌───┼──────┬──────┐
+   ▼   ▼      ▼      ▼
+ DEP-003 DEP-004 DEP-005 DEP-007
+  Neon   Redis    R2    Vercel
+   │      │      │       │
+   └──────┴──────┘       │
+          │              │
+          ▼              │
+       DEP-006           │
+      API + Worker       │
+          │              │
+       ┌──┼────┐         │
+       ▼  ▼    ▼         │
+   DEP-008 DEP-009 DEP-010
+     Edge    CI/CD  Observability
+       └────┬────┬────┘
+            │    │
+            └────┴──────────┐
+                            ▼
+                         DEP-011
+                   production dogfooding
+                            │
+                            ▼
+                         DEP-012
+                   Architect acceptance
+                            │
+                            ▼
+                          V2 LIVE
+```
+
+Each DEP item is a bounded implementation slice with its own evidence and exact-head review. Later slices depend on merged outputs only. Independent packets may execute concurrently while a different PR is awaiting Architect review.
+
 ## Authority boundaries
 
 - PostgreSQL is authoritative application state.
@@ -103,39 +150,6 @@ Production
 ```
 
 Production and staging credentials must never be shared. Preview environments must not access production state.
-
-## Implementation sequence
-
-```text
-V2-REALITY-AUDIT-001
-   │  hard pre-deployment gate
-   ▼
-DEP-001  Lock deployment architecture + provider interfaces
-   ↓
-DEP-002  Environment/secrets/config contract
-   ↓
-DEP-003  Neon staging + production databases
-   ↓
-DEP-004  Upstash Redis staging + production
-   ↓
-DEP-005  R2 object-storage adapter + migration-safe configuration
-   ↓
-DEP-006  Railway API + Worker deployment
-   ↓
-DEP-007  Vercel production delivery
-   ↓
-DEP-008  Cloudflare DNS/TLS/edge/Turnstile
-   ↓
-DEP-009  GitHub Actions CI/CD + migration + rollback controls
-   ↓
-DEP-010  Observability + alerting + cost controls
-   ↓
-DEP-011  Full production smoke test + V2 dogfooding
-   ↓
-DEP-012  Architect production acceptance
-```
-
-Each DEP item is a bounded implementation slice with its own evidence and exact-head review. Later slices depend on merged outputs only.
 
 ## Cost principles
 
