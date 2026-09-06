@@ -544,16 +544,18 @@ async function journey(page: Page, context: BrowserContext): Promise<number> {
     await expect(done.getByText(/born with immutable version 1/i)).toBeVisible();
     await expect(done.getByText(WORKFLOW_NAME)).toBeVisible();
     await expect(done.getByText(WORKFLOW_SLUG)).toBeVisible();
-    // The durable library links.
+    // The durable library links (the REAL V2-002 route's workflow ids are
+    // `wfw_…`-prefixed — the component fixtures' `wf-` prefix is a test-only
+    // convention, never the wire shape).
     await expect(done.getByRole('link', { name: /open in your workflows library/i })).toHaveAttribute(
       'href',
-      /^\/workflows\/wf-/,
+      /^\/workflows\//,
     );
 
     createdWorkflowId =
       (await done.getByRole('link', { name: /open in your workflows library/i }).getAttribute('href'))
         ?.replace('/workflows/', '') ?? '';
-    expect(createdWorkflowId).toMatch(/^wf-/);
+    expect(createdWorkflowId).toMatch(/^wfw_/);
 
     // The version surface carries the created workflow forward.
     const versionSurface = page.getByRole('region', { name: 'Create a new version' });
