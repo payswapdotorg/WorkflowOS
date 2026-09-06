@@ -972,4 +972,270 @@ describe('V2-017 T6 — the run experience', () => {
       expect(within(status).queryByText(/An earlier run/i)).not.toBeInTheDocument();
     });
   });
+
+  // REALITY-REPAIR-007 (F-008, CRITICAL): the run lifecycle controls.
+  // The audit's defect: a run that pauses at an approval gate can NEVER
+  // be resumed through the product — RunExperience derives and renders
+  // "Waiting for you" but it is display-only; there is no
+  // Approve/Resume/Pause/Stop control anywhere in the run UX (the
+  // command side was left to executor fixtures). The repair composes the
+  // EXISTING V2-005 lifecycle commands (pause/resume/cancel) through
+  // their command envelope:
+  //   - "Approve" is the user-facing LABEL for the existing
+  //     resume-with-human-confirmation semantics at an approval gate —
+  //     V2-005 has NO separate approval command and none is invented
+  //     (verified against the route/service surface);
+  //   - the offered actions only FOLLOW the frozen transition table
+  //     (running → Pause; paused → Approve/Resume; non-terminal → Stop;
+  //     terminal → nothing) — idempotency and forbidden transitions stay
+  //     enforced SERVER-SIDE by the command envelopes; typed rejections
+  //     render verbatim, never as state, never as a fabricated success.
+  describe('REALITY-REPAIR-007 — the run lifecycle controls (F-008)', () => {
+    /** The POST-body envelope assertion (commandId + correlationId). */
+    function expectEnvelope(url: string): Record<string, unknown> {
+      const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => ({
+        url: String(c[0]),
+        body: (c[1] as RequestInit | undefined)?.body,
+      }));
+      const call = calls.find((c) => c.url.includes(url));
+      expect(call, `no POST to ${url}`).toBeDefined();
+      const body = JSON.parse(String(call?.body)) as Record<string, unknown>;
+      expect(typeof body.commandId).toBe('string');
+      expect(typeof body.correlationId).toBe('string');
+      return body;
+    }
+
+    function countPosts(url: string): number {
+      return (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c) => String(c[0]).includes(url),
+      ).length;
+    }
+
+    it('the waiting-for-you state offers the Approve control (the F-008 defect: display-only)', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'paused' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, PAUSED_AT_REVIEW),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Waiting for you')).toBeInTheDocument());
+      // THE F-008 assertion: the human can act on the waiting state.
+      expect(within(status).getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+      // Safe stop is offered where the state permits cancellation.
+      expect(within(status).getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+    });
+
+    it('Approve sends the REAL V2-005 resume command (the envelope), then the refetched record shows Running', async () => {
+      let resumed = false;
+      const routes = fullRoutes({
+        'POST /workflow-runs/runs/run-3/resume': () => {
+          resumed = true;
+          return jsonResponse(200, {
+            run: run({ state: 'running' }),
+            attempt: null,
+            resumedAtStepId: 'review_gate',
+            newAttempt: false,
+            executed: true,
+          });
+        },
+        '/organizations/org-1/workflow-runs/runs': () =>
+          jsonResponse(200, { runs: [run({ state: resumed ? 'running' : 'paused' })] }),
+        '/workflow-runs/runs/run-3/history': () =>
+          jsonResponse(200, resumed ? history([]) : PAUSED_AT_REVIEW),
+      });
+      renderDetail(routes);
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Waiting for you')).toBeInTheDocument());
+      const user = userEvent.setup();
+      await user.click(within(status).getByRole('button', { name: 'Approve' }));
+      // The REAL lifecycle command fired with the deterministic envelope.
+      await waitFor(() => expect(resumed).toBe(true));
+      expectEnvelope('/workflow-runs/runs/run-3/resume');
+      // The run returns to execution — from the AUTHORITATIVE refetched
+      // record, never from the command's echo.
+      await waitFor(() => expect(within(status).getByText('Running')).toBeInTheDocument());
+    });
+
+    it('a typed resume rejection renders verbatim — never a fabricated success (the envelope stays the authority)', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'paused' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, PAUSED_AT_REVIEW),
+          // The run was cancelled concurrently: the envelope rejects the
+          // stale Approve with the typed terminal decision (409).
+          'POST /workflow-runs/runs/run-3/resume': () =>
+            jsonResponse(409, {
+              error: 'workflow-run-terminal',
+              code: 'RUN_TERMINAL',
+              message: 'the run is in terminal state "cancelled" — the lifecycle is immutable',
+            }),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Waiting for you')).toBeInTheDocument());
+      const user = userEvent.setup();
+      await user.click(within(status).getByRole('button', { name: 'Approve' }));
+      // The typed authority decision renders verbatim — the UI never
+      // fakes the success the backend refused.
+      await waitFor(() => expect(within(status).getByRole('alert')).toBeInTheDocument());
+      expect(within(status).getByText(/couldn't continue this run/i)).toBeInTheDocument();
+      expect(within(status).getByText(/workflow-run-terminal/i)).toBeInTheDocument();
+      // No fabricated Running appeared.
+      expect(within(status).queryByText('Running')).not.toBeInTheDocument();
+    });
+
+    it('a running run offers Pause where the state permits it, and Pause sends the REAL command', async () => {
+      let paused = false;
+      const routes = fullRoutes({
+        'POST /workflow-runs/runs/run-3/pause': () => {
+          paused = true;
+          return jsonResponse(200, { run: run({ state: 'paused' }), attempt: null, executed: true });
+        },
+        '/organizations/org-1/workflow-runs/runs': () =>
+          jsonResponse(200, { runs: [run({ state: paused ? 'paused' : 'running' })] }),
+        '/workflow-runs/runs/run-3/history': () =>
+          jsonResponse(200, paused ? PAUSED_AT_SEND : history([])),
+      });
+      renderDetail(routes);
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Running')).toBeInTheDocument());
+      const user = userEvent.setup();
+      await user.click(within(status).getByRole('button', { name: 'Pause' }));
+      await waitFor(() => expect(paused).toBe(true));
+      expectEnvelope('/workflow-runs/runs/run-3/pause');
+      // The authoritative record now shows the paused state.
+      await waitFor(() => expect(within(status).getByText('Paused')).toBeInTheDocument());
+    });
+
+    it('a paused run NOT at an approval gate offers the generic Resume label (the same real command)', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'paused' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, PAUSED_AT_SEND),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Paused')).toBeInTheDocument());
+      expect(within(status).getByRole('button', { name: 'Resume' })).toBeInTheDocument();
+      // The approval label never appears without the approval fact.
+      expect(within(status).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    });
+
+    it('Stop requires the §2.4 explicit choice, then sends the REAL cancel command; the terminal state offers nothing', async () => {
+      let cancelled = false;
+      const routes = fullRoutes({
+        'POST /workflow-runs/runs/run-3/cancel': () => {
+          cancelled = true;
+          return jsonResponse(200, {
+            run: run({ state: 'cancelled' }),
+            attempt: null,
+            executed: true,
+          });
+        },
+        '/organizations/org-1/workflow-runs/runs': () =>
+          jsonResponse(200, { runs: [run({ state: cancelled ? 'cancelled' : 'paused' })] }),
+        '/workflow-runs/runs/run-3/history': () =>
+          jsonResponse(200, cancelled ? history([]) : PAUSED_AT_REVIEW),
+      });
+      renderDetail(routes);
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Waiting for you')).toBeInTheDocument());
+      const user = userEvent.setup();
+      // No command before the explicit choice.
+      await user.click(within(status).getByRole('button', { name: 'Stop' }));
+      expect(countPosts('/workflow-runs/runs/run-3/cancel')).toBe(0);
+      expect(
+        within(status).getByText(/This ends the run — it can't be restarted/i),
+      ).toBeInTheDocument();
+      await user.click(within(status).getByRole('button', { name: 'Stop it' }));
+      await waitFor(() => expect(cancelled).toBe(true));
+      expectEnvelope('/workflow-runs/runs/run-3/cancel');
+      // The authoritative terminal record + terminal honesty: no
+      // lifecycle control remains on a cancelled run.
+      await waitFor(() => expect(within(status).getByText('Cancelled')).toBeInTheDocument());
+      await waitFor(() =>
+        expect(within(status).queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument(),
+      );
+      expect(within(status).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+    });
+
+    it('a requested (Ready) run offers Stop only — pause is not a legal transition from requested (the frozen table)', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'requested' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, history([])),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Ready')).toBeInTheDocument());
+      expect(within(status).getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    });
+
+    it('terminal runs (completed) offer no lifecycle controls — the lifecycle is immutable', async () => {
+      renderDetail(
+        fullRoutes({
+          '/organizations/org-1/workflow-runs/runs': () =>
+            jsonResponse(200, { runs: [run({ state: 'completed' })] }),
+          '/workflow-runs/runs/run-3/history': () => jsonResponse(200, history([])),
+        }),
+      );
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Completed')).toBeInTheDocument());
+      expect(within(status).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+      expect(within(status).queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    });
+
+    it('while a lifecycle command is in flight the control disables — no double command', async () => {
+      let resolveResume: ((r: Response) => void) | undefined;
+      let resumed = false;
+      const routes = fullRoutes({
+        'POST /workflow-runs/runs/run-3/resume': () =>
+          new Promise<Response>((resolve) => {
+            resolveResume = resolve;
+          }),
+        '/organizations/org-1/workflow-runs/runs': () =>
+          jsonResponse(200, { runs: [run({ state: resumed ? 'running' : 'paused' })] }),
+        '/workflow-runs/runs/run-3/history': () =>
+          jsonResponse(200, resumed ? history([]) : PAUSED_AT_REVIEW),
+      });
+      renderDetail(routes);
+      const status = await screen.findByRole('region', { name: 'Run status' });
+      await waitFor(() => expect(within(status).getByText('Waiting for you')).toBeInTheDocument());
+      const user = userEvent.setup();
+      await user.click(within(status).getByRole('button', { name: 'Approve' }));
+      // In flight: disabled, honestly labeled, ONE command.
+      await waitFor(() =>
+        expect(within(status).getByRole('button', { name: 'Approving…' })).toBeDisabled(),
+      );
+      expect(countPosts('/workflow-runs/runs/run-3/resume')).toBe(1);
+      // A second click on the disabled control sends nothing.
+      await user.click(within(status).getByRole('button', { name: 'Approving…' })).catch(() => undefined);
+      expect(countPosts('/workflow-runs/runs/run-3/resume')).toBe(1);
+      // The authority answers; the refetched record shows Running.
+      resumed = true;
+      resolveResume?.(
+        jsonResponse(200, {
+          run: run({ state: 'running' }),
+          attempt: null,
+          resumedAtStepId: 'review_gate',
+          newAttempt: false,
+          executed: true,
+        }),
+      );
+      await waitFor(() => expect(within(status).getByText('Running')).toBeInTheDocument());
+      expect(countPosts('/workflow-runs/runs/run-3/resume')).toBe(1);
+    });
+  });
 });
