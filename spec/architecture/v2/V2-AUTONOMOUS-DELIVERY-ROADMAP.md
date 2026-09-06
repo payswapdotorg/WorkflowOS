@@ -36,7 +36,7 @@ Parallelism is not considered successful if the human must issue follow-up promp
 
 ### Sibling independence
 
-Independent Work Orders must be selected so that their **authoritative change surfaces are disjoint** or their shared surface is explicitly governed as an integration gate. One sibling may never depend on another sibling's unmerged branch, files, commits, generated artifacts, or implementation details.
+Independent Work Orders must be selected so that their authoritative change surfaces are disjoint or their shared surface is explicitly governed as an integration gate. One sibling may never depend on another sibling's unmerged branch, files, commits, generated artifacts, or implementation details.
 
 ### Automatic base synchronization
 
@@ -50,7 +50,7 @@ When `main` advances while an eligible PR is in progress or awaiting review, the
 6. record the new exact head SHA; and
 7. return the PR to `READY_FOR_ARCHITECT_REVIEW` only when the review prerequisites are again satisfied.
 
-The orchestrator must never ask the user to perform this synchronization. A semantic conflict, authority conflict, or scope-expanding conflict is a **governance stop**, not a conflict-resolution invitation.
+The orchestrator must never ask the user to perform this synchronization. A semantic conflict, authority conflict, or scope-expanding conflict is a governance stop, not a conflict-resolution invitation.
 
 ### Merge ordering
 
@@ -82,40 +82,40 @@ V2-REALITY-AUDIT-001
   R0–R4 COMPLETE
       │
       ▼
-REALITY-REPAIR-001  F-001 deployment composition
+REALITY-REPAIR-001
       │
       ▼
-REALITY-REPAIR-002  F-002 organization onboarding
+REALITY-REPAIR-002
       │
       ▼
-REALITY-REPAIR-003  F-003 caller-org detail reads
+REALITY-REPAIR-003
       │
-      ├────────────────┬────────────────┬────────────────┬────────────────┐
-      ▼                ▼                ▼                ▼
-REALITY-REPAIR-004  REALITY-REPAIR-005  REALITY-REPAIR-006  REALITY-REPAIR-007
-F-004a + F-004b     F-005               F-007               F-008
-copy + expert IR    Home attention      installed naming   lifecycle UX
-      │                │                 │                 │
-      ├────────────────┼─────────────────┼─────────────────┤
-      ▼                ▼                 ▼                 ▼
-REALITY-REPAIR-008  REALITY-REPAIR-009
-F-009 teaching copy F-010 human diff
-      └─────────────────────┬─────────────────────────────┘
-                            ▼
-                     R6 FULL RE-AUDIT
-                            │
-                            ▼
-                    R7 RELEASE READINESS
-                            │
-                            ▼
-                       DEPLOYMENT
+      ├──────────────────────────────┬──────────────────────────────┬──────────────────────────────┐
+      ▼                              ▼                              ▼                              ▼
+REPAIR-004                      REPAIR-005                     REPAIR-006                     REPAIR-007
+F-004a + F-004b                 F-005                           F-007                           F-008
+copy + expert IR                Home attention                  installed naming                lifecycle UX
+      ├──────────────────────────────┬──────────────────────────────┐
+      ▼                              ▼                              ▼
+REPAIR-008                    REPAIR-009                  (same parallel frontier)
+F-009 teaching copy           F-010 human diff
+      └──────────────────────────────┴──────────────────────────────┘
+                                     │
+                                     ▼
+                              R6 FULL RE-AUDIT
+                                     │
+                                     ▼
+                             R7 RELEASE READINESS
+                                     │
+                                     ▼
+                                DEPLOYMENT
 ```
 
 ## Product-repair topology
 
 - `REALITY-REPAIR-001 → 002 → 003` is intentionally serialized because each establishes the runtime/user substrate required by the next critical journey.
 - `REALITY-REPAIR-004`, `REALITY-REPAIR-005`, `REALITY-REPAIR-006`, and `REALITY-REPAIR-007` become eligible after `REALITY-REPAIR-003` merges. The orchestrator may run at most three of them at once.
-- `REALITY-REPAIR-008` and `REALITY-REPAIR-009` are also independent bounded packets once their stated predecessor (`REALITY-REPAIR-003`) is merged. They compete for the same three slots rather than forming artificial serial chains.
+- `REALITY-REPAIR-008` and `REALITY-REPAIR-009` are also independent bounded packets once `REALITY-REPAIR-003` is merged. They compete for the same three slots rather than forming artificial serial chains. They do not require 004–007 to merge first.
 - `REALITY-REPAIR-004` is the single canonical F-004 Work Order. It includes the copy correction and composition-only expert WorkflowIR authoring surface. Natural-language capture→WorkflowIR generation remains deferred and would require a governed architecture change.
 - Device-status F-006 has no implementation packet because the Architect accepted the existing honest-unavailable behavior.
 - R6 is a full repeat audit; R7 is an explicit release-readiness decision gate. Neither may be treated as ordinary implementation work.
@@ -171,7 +171,7 @@ When no synchronization or Architect repair is pending, all three slots may be f
 
 ## Architect review trigger
 
-The orchestrator must create a durable review-request event only when all conditions below hold for the **same exact PR head SHA**:
+The orchestrator must create a durable review-request event only when all conditions below hold for the same exact PR head SHA:
 
 1. the governed Work Order's implementation is complete;
 2. the Work Order's deterministic verification is complete and passing;
