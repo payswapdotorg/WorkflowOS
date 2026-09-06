@@ -9,7 +9,8 @@
 **Branch:** `feat/REALITY-REPAIR-008-teaching-feedback-step-reference`
 **Code head:** the commit sequence on this branch — `5f3fed5` (RED tests) →
 `dfcc41b` (the repair) → `c8113be` (the browser smoke runner) → the evidence
-commit (this document)
+commit `acc89f5` → the orchestrator's run evidence (this commit: the
+regenerated journey.json + the four screenshots at the exact head)
 **Files:** 2 frontend files (the component + its test) + the smoke runner +
 this evidence + the assets README; **zero backend/src changes, zero route
 changes, zero client.ts wire changes, zero teaching-authority or protocol
@@ -160,11 +161,12 @@ NOTHING pre-seeded and does everything through the real browser UI:
 | LEG7 | **THE KNOWN CASE (the Work Order's required regression):** the learner answers the `collect_posts` question itself — the feedback under the `collect_posts` question names **`collect_posts`** (the authority's own string for THAT attempt, verbatim: `Correct: the workflow declares exactly this semantics for step "collect_posts".`) and **NOT `send_report`**; the `send_report` question **keeps its OWN feedback**; the network capture proves the practice POST carried `nodeId: 'collect_posts'` — the step actually being assessed (screenshot `03`) |
 | LEG8 | **all lesson/assessment evidence unchanged:** the assessment surface ("Show you know it") renders as before → the learner submits the real assessment (order + declared-semantics recall) → **Lesson complete** (terminal; no lifecycle commands) → the teaching-evidence surface renders with its §12 separation vocabulary (`Kept separate from run evidence — learning never counts as execution`) → **zero runs** in the learner org (learning never executed the workflow) (screenshot `04`) |
 
-**Run at the code head: PENDING ORCHESTRATOR RUN** (the exit code, duration,
-and per-leg timings will be recorded in
-`assets/reality-repair-008/journey.json` when the orchestrator executes it —
-port discipline: `:3001`/`:5188` belong to the orchestrator; this worker
-never started a dev server and never ran the smoke).
+**Run at the code head `acc89f5`: EXECUTED BY THE ORCHESTRATOR — exit code
+0, 12/12 legs PASS, duration 11909ms** (2026-09-06T18:21:58Z; `journey.json`
++ the four screenshots regenerated at that head and committed by the
+run-evidence commit; clean on the first execution, zero corrections needed.
+Port discipline held: `:3001`/`:5188` belong to the orchestrator; the
+implementation worker never started a dev server and never ran the smoke).
 
 ## 6. Out-of-boundary observations (recorded for serialized successors)
 
@@ -194,8 +196,9 @@ orchestrator's to verify at delivery. The repository's GitHub Actions has
 had zero executions at every prior recorded checkpoint (the RR-003/RR-004
 evidence) — missing CI runs remain an external condition, never claimed as
 a pass. Every number in §3/§4 is from a command actually run at the
-recorded heads in this worktree; the smoke exit code is honestly PENDING
-(§5).
+recorded heads in this worktree; the smoke exit code is now the
+orchestrator's actually-run result at the exact head (exit 0, 12/12 legs —
+`journey.json`, §5).
 
 ## 8. Completion criteria mapping (the Work Order's own list)
 
@@ -203,10 +206,10 @@ recorded heads in this worktree; the smoke exit code is honestly PENDING
 | --- | --- |
 | "Correct the practice-feedback step reference so feedback names the actual checkpoint/step being assessed" | §2 (the per-question scoping — the feedback under a question is the authority's string for THAT question's own attempt) + §3 test 1 + LEG7 |
 | "No teaching authority or protocol changes" | §4 (backend/src byte-identical to base; zero route/service/wire changes; the V2-006 templates untouched) |
-| Required regression: "the known `collect_posts` feedback case names `collect_posts`, not `send_report`" | §3 test 1 (deterministic, GREEN) + LEG6/LEG7 (the real-DOM proof, pending the orchestrator's run) |
+| Required regression: "the known `collect_posts` feedback case names `collect_posts`, not `send_report`" | §3 test 1 (deterministic, GREEN) + LEG6/LEG7 — **RUN: PASS at `acc89f5`** (the real-DOM proof) |
 | "…while all lesson/assessment evidence remains unchanged" | §3 (13/13 pre-existing tests green — the assessment, completion, evidence-separation, and practice tests) + LEG8 + the full battery 383/383 |
 | Deterministic tests (the RED-first discipline) | §3 (RED 3 failed / 13 passed at base `9cbfd12` → GREEN 16/16 at head) |
-| Real-browser proof through the real teaching flow | §5 (the committed runner: learner signup → org → install → Teach Me → lesson → the practice moment → the known case → unchanged assessment/evidence) — **PENDING ORCHESTRATOR RUN** |
+| Real-browser proof through the real teaching flow | §5 (the committed runner: learner signup → org → install → Teach Me → lesson → the practice moment → the known case → unchanged assessment/evidence) — **RUN: exit 0, 12/12 legs at `acc89f5`** |
 | "Architect merge after exact-head verification. Required before R6." | the gate rests with the orchestrator (the smoke run + delivery) and then the Architect |
 
 **Worker conclusion:** REALITY-REPAIR-008 is implemented within its declared
@@ -214,11 +217,12 @@ boundary (a 3-line frontend presentation-state scoping; no teaching
 authority, protocol, backend, wire, or governance change), deterministically
 verified (RED 3 failed / 13 passed at base → GREEN 16/16 touched suite;
 full battery 383/383; typecheck clean; lint 0 errors), with the
-real-topology browser smoke committed and armed for the orchestrator (its
-exit code honestly pending). The F-009 copy defect is repaired at its root:
+real-topology browser smoke RUN BY THE ORCHESTRATOR at the exact head
+(exit 0, 12/12 legs, clean on the first execution). The F-009 copy
+defect is repaired at its root:
 the feedback template is bound to the question being assessed, so the
 `collect_posts` question's feedback names `collect_posts` — never
-`send_report`. The gate now rests with the orchestrator (the smoke run +
-the exact-head review-trigger delivery) and then the Architect: exact-head
-review and merge before R6; deployment remains locked until the serialized
+`send_report`. The gate now rests with the Architect: exact-head
+review and merge of the delivered PR before R6; deployment remains
+locked until the serialized
 repairs + the R6 repeat audit + the R7 release decision succeed.
