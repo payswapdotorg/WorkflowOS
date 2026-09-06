@@ -16,30 +16,33 @@ This fork is now the active product-development remote. GitHub issue/PR identiti
 
 ## Current task
 
-**T16 — Sole Architect gate and finalization**
+**None — V2-017 is COMPLETE.**
 
 T15 is complete by actual Git merge as PR #10 -> `798afe523ded8d749b3c045e32dd32b14091523b`.
+T16 is complete by final Architect reconciliation on `main`.
 
 ## Completed tasks
 
-T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14 and T15 are complete by actual Git merge.
+T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15 and T16 are complete.
 
 ## Eligible frontier
 
-**T16**
+**None within V2-017.**
 
 ## Blocked items
 
-None within V2-017 beyond the T16 gate itself.
+None within V2-017. No successor task is authorized under this program.
+
+## Final gate record
+
+T15 persisted the exact-head verification matrix, real-browser product dogfooding evidence, screenshot/transcript hashes, inherited-failure record, and all 16 V2-017 acceptance-criteria verdicts. T15 merged as PR #10 -> `798afe523ded8d749b3c045e32dd32b14091523b`.
+
+T16 verified the post-T15 live tree, canonical task state, human roadmap projection, persisted T15 evidence, authority-boundary/scope audit, and open-PR frontier. The final live main has no open PRs and no unimplemented V2-017 successor. GitHub Actions remains absent (zero workflow runs at the final SHA) and is recorded as an external CI blocker, not a pass.
 
 ## Worker rule
 
-Before editing, the resident worker must read the governing repository files and re-read live `main`. Any dispatch SHA is only a point-in-time observation.
+Resident workers must read the governing repository files and re-read live `main` before editing. Worker sessions are disposable; repository state, GitHub issues/PRs, exact SHAs, and persisted evidence are durable.
 
-T15 was the bounded verification/product-dogfooding slice and is now merged. It persisted the exact-head verification matrix, 26/26 real-product dogfooding twice on fresh stacks, screenshots/transcript hashes, inherited-failure record, and all 16 acceptance-criteria verdicts.
+## Final state
 
-T16 is a governance/finalization gate only. Do not implement a new product feature or invent a successor work item under V2-017.
-
-## Next action
-
-Execute **Issue #11** as the sole Architect gate: verify the exact live main after T15 merge, reconcile T1–T15 with canonical machine/human state and persisted evidence, verify no unmerged T16 implementation exists, preserve the honest CI blocker state, run the repository-defined governance/finalization checks, and finalize V2-017 only when those conditions are satisfied.
+V2-017 is fully finalized. Do not create or dispatch T17, V2-018, or another successor under V2-017 without a separately governed architectural/program decision.
