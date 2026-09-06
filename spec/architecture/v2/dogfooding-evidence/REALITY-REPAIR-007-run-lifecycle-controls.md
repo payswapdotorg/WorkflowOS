@@ -9,7 +9,13 @@
 (the exact live main at dispatch; no rebase, no merge, no sibling reads)
 **Branch:** `feat/REALITY-REPAIR-007-run-lifecycle-controls`
 **Commit sequence:** `1872ecc` (RED tests) → `9596acf` (the repair) →
-`20bba8e` (the browser smoke runner) → this evidence commit
+`20bba8e` (the browser smoke runner) → the evidence commit `db9a40c` → the
+orchestrator's three smoke corrections `fd014fa` (the seed's uncovered
+`rejected` outcome — IR_HUMAN_OUTCOME_UNCOVERED fail-closed by the parser;
+the session-token resolution moved after signup; exact-match state-word
+assertions under Playwright strict mode — see §5) → the orchestrator's run
+evidence (this commit: the regenerated journey.json + the eight screenshots
+at the exact head)
 **Files:** 3 frontend files (`frontend/src/api/client.ts` +19 lines,
 `frontend/src/components/run/RunExperience.tsx` +146,
 `frontend/src/pages/RunExperience.test.tsx` +266) + the smoke runner
@@ -154,7 +160,7 @@ provisions no installs of its own):
 | `git diff 9cbfd12..HEAD -- backend/` | **ONLY the new smoke runner** under `backend/tests/integration/deployment/` (+862, a new file — the dispatch's own mandated path); zero src/route/config/manifest/package changes |
 | `git diff 9cbfd12..HEAD -- frontend/src/api/client.ts` | **ONLY the added `pause` typed consumer** (+19 lines, pure addition — the RR-004 "client consumers added, zero wire invention" precedent) |
 | Backend full battery / e2e-browser (t6/t7 real-browser journeys) | **honestly NOT RUN by this worker** — the e2e specs and the smoke spawn the `:3001` backend and dev servers, which belong to the orchestrator under this dispatch's port discipline; never claimed as a pass. The deterministic journey suites above are green and the static checks prove zero backend surface changed |
-| Real-topology browser smoke (this slice's required evidence) | **committed, NOT RUN — §5, PENDING ORCHESTRATOR RUN** |
+| Real-topology browser smoke (this slice's required evidence) | **PASS — 16/16 legs, exit code 0, 16863ms** — run by the orchestrator at the corrected head `fd014fa` (2026-09-06T18:18:39Z; §5) |
 
 ## 5. Real-topology browser proof (the Work Order's required evidence)
 
@@ -170,13 +176,17 @@ through the REAL HTTP routes only (register → login → org → public
 approval-gated workflow → free listing → publish); **the consumer gets
 NOTHING pre-seeded** and does everything through the real browser UI.
 
-**Run: PENDING ORCHESTRATOR RUN** (port discipline — `:3001`/`:5188`
-belong to the orchestrator, who owns the smoke execution and the
-delivery). The runner is committed, compiles clean (backend `tsc`: only
-the 2 documented inherited errors; eslint: 0 errors), and writes its
-transcript + sha-256 digests to
-`spec/architecture/v2/dogfooding-evidence/assets/reality-repair-007/journey.json`
-on its run. The designed legs:
+**Run: EXECUTED BY THE ORCHESTRATOR — exit code 0, 16/16 legs PASS, duration
+16863ms** (2026-09-06T18:18:39Z; `journey.json` + the eight screenshots
+regenerated at the corrected head `fd014fa` and committed by the run-evidence
+commit). The orchestrator's first run surfaced three mechanical corrections
+in the committed runner itself (committed as `fd014fa` — the RR-004
+pin-correction pattern; zero product-code changes): the seed's WorkflowIR
+left the approval node's declared `rejected` outcome uncovered (the IR
+parser fail-closes it — the marketplace publish refused the document), the
+journey resolved the session token before the signup leg, and the
+state-word assertions were ambiguous under Playwright strict mode. After
+the corrections the run passed clean: 16/16.
 
 | Leg | Proof |
 | --- | --- |
@@ -242,7 +252,7 @@ in the development sandbox at the exact heads recorded.
 | "Browser proof of safe cancel/pause where applicable" | LEG6 (the user's Pause → the real command → Paused) + LEG10 (Stop → the §2.4 choice → the real cancel → Cancelled, no controls remain) |
 | "Idempotency and forbidden-transition behavior remain enforced by V2-005 command envelopes" | LEG11 (the typed 409 `workflow-run-terminal` rendered verbatim — never a fabricated success) + LEG12 (the converged re-delivery, `executed: false`, one timeline entry); the UI only FOLLOWS the frozen transition table for presentation — legality stays server-side |
 | "Existing run/start/recovery/failure journeys remain green" | the deterministic run/start journey 38/38 (incl. the 29 pre-existing T6/T10 tests) + the recovery/failure suite green in the full battery **389/389**; the e2e-browser family honestly not run by this worker (port discipline, §4/§6) |
-| "Deterministic tests plus real browser proof" | §3 (RED 8-failed/30-passed at base → GREEN 38/38) + §5 (the real-topology runner committed; its RUN is the orchestrator's — the exit line is honestly PENDING) |
+| "Deterministic tests plus real browser proof" | §3 (RED 8-failed/30-passed at base → GREEN 38/38) + §5 — **RUN: exit 0, 16/16 legs at the corrected head `fd014fa`** |
 | "Approve / Resume ... implemented through the existing V2-005 resume command/envelope; no separate approval authority" | verified against the route/service surface first (no approve command exists); Approve IS the resume label (§2) — LEG9 proves the real resume command |
 | "Do not alter V2-005 lifecycle rules" | `backend/src` byte-identical to base (git-diff-verified, §4); the frozen transition table is only FOLLOWED for presentation |
 
@@ -253,13 +263,12 @@ command routes with their command envelope; no new authority, no
 approval command, no state machine, no backend change), deterministically
 verified (RED at base → GREEN at head; the full frontend battery
 389/389; typecheck clean; lint 0 errors). The real-topology browser
-smoke runner is committed and armed for the orchestrator (exit code
-pending its run — port discipline). The human approval loop is now
+smoke is RUN BY THE ORCHESTRATOR at the corrected head: exit 0, 16/16
+legs. The human approval loop is now
 closable by the human: the waiting surface offers Approve (the resume
 label), the running surface offers Pause, and the non-terminal states
 offer Stop behind the explicit choice — with the envelope's typed
-rejections rendered honestly. The gate now rests with the orchestrator
-(the smoke run + the exact-head review-trigger delivery) and then the
-Architect: exact-head review and merge before REALITY-REPAIR-008..009
-activate; deployment remains locked until the serialized repairs + the
-R6 repeat audit + the R7 release decision succeed.
+rejections rendered honestly. The gate now rests with the
+Architect: exact-head review and merge of the delivered PR;
+deployment remains locked until the serialized repairs + the R6 repeat
+audit + the R7 release decision succeed.
