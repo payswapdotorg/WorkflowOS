@@ -1,0 +1,123 @@
+{
+  "run": "REALITY-REPAIR-009 real-deployment browser smoke",
+  "startedAt": "2026-09-06T18:23:42.553Z",
+  "finishedAt": "2026-09-06T18:23:54.134Z",
+  "durationMs": 11581,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T18:23:42.554Z",
+      "label": "REALITY-REPAIR-009 real-deployment browser smoke starting at 2026-09-06T18:23:42.553Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:23:42.554Z",
+      "label": "artifacts dir: /home/z/wt-rr009/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-009",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:23:48.666Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 6105
+    },
+    {
+      "at": "2026-09-06T18:23:48.680Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 13
+    },
+    {
+      "at": "2026-09-06T18:23:48.720Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 39
+    },
+    {
+      "at": "2026-09-06T18:23:49.010Z",
+      "label": "seed: publisher register → login → org → public workflow (v1) → listing → publish (REAL routes; the consumer gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 290
+    },
+    {
+      "at": "2026-09-06T18:23:51.472Z",
+      "label": "LEG1 the consumer signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2177
+    },
+    {
+      "at": "2026-09-06T18:23:51.666Z",
+      "label": "LEG2 the consumer creates their organization through the real Home onboarding (the RR-002 composed precondition)",
+      "status": "PASS",
+      "ms": 194
+    },
+    {
+      "at": "2026-09-06T18:23:52.362Z",
+      "label": "LEG3 Explore → the listing → the entitled free decision → Install pins version 1 into the CONSUMER organization",
+      "status": "PASS",
+      "ms": 562
+    },
+    {
+      "at": "2026-09-06T18:23:52.508Z",
+      "label": "LEG4 the publisher creates version 2 through the REAL owner-only createVersion route (the task-text change — task-surface EQUIVALENT)",
+      "status": "PASS",
+      "ms": 24
+    },
+    {
+      "at": "2026-09-06T18:23:53.026Z",
+      "label": "LEG5 the consumer opens the workflow detail: \"An update is available\" (Version 2) + the verbatim installed pin + the no-silent-change promise",
+      "status": "PASS",
+      "ms": 518
+    },
+    {
+      "at": "2026-09-06T18:23:53.298Z",
+      "label": "LEG6 Review update → What changed: \"Task-for-task equivalent - verified\" (the authority's equivalent result, UNCHANGED by this repair — no divergence block, no raw JSON)",
+      "status": "PASS",
+      "ms": 272
+    },
+    {
+      "at": "2026-09-06T18:23:53.315Z",
+      "label": "LEG7 the publisher creates version 3 through the REAL owner-only createVersion route (the step-input literal change — task-surface NON-equivalent)",
+      "status": "PASS",
+      "ms": 17
+    },
+    {
+      "at": "2026-09-06T18:23:54.126Z",
+      "label": "LEG8 the consumer re-opens the detail → Review update → What changed renders the HUMAN-READABLE diff (F-010): the verdict, the step NAME, the field, the readable values — NO raw internal JSON envelope",
+      "status": "PASS",
+      "ms": 811
+    },
+    {
+      "at": "2026-09-06T18:23:54.134Z",
+      "label": "LEG9 the browser network capture: the REAL V2-011 compare route answered (the payload itself carries the raw internal envelope + equivalent:false) while the rendered DOM never shows it",
+      "status": "PASS",
+      "ms": 7
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-009/01-consumer-org-created.png",
+      "sha256": "72e0e2336993249f0e16cb91bdfc82009d8f086e66fa51d7bc6f05f28fbfc48f",
+      "bytes": 97920
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-009/02-listing-installed.png",
+      "sha256": "d2714aa61ebe37969c2c5f2286dc572f8dd395ee8e810252471acf2097f07218",
+      "bytes": 115908
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-009/03-equivalent-what-changed.png",
+      "sha256": "7285704fa35cde4d2e4cc735587d54cca6d1b35f781723df4a8b7aa9c8481969",
+      "bytes": 159076
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-009/04-human-readable-what-changed.png",
+      "sha256": "c95d29d9d1e3695b38c23ed238d8fcc5dd6aeae31fa1295c26e88949dbee7d95",
+      "bytes": 185282
+    }
+  ]
+}
