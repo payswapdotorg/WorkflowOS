@@ -6,7 +6,7 @@
   "executionManifest": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md",
   "agentInstructions": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-AGENT-INSTRUCTIONS.md",
   "activeWave": "PRE-DEPLOY-REALITY-REPAIR",
-  "updatedAt": "2026-09-06",
+  "updatedAt": "2026-09-06T12:01:00Z",
   "scheduler": {
     "maxConcurrentSpecialists": 3,
     "mergeAuthority": "ARCHITECT_ONLY",
@@ -16,32 +16,9 @@
     "manualRebasePromptsRequired": false
   },
   "reviewTrigger": {
-    "statusValues": [
-      "IMPLEMENTING",
-      "VERIFYING",
-      "SYNCHRONIZING",
-      "READY_FOR_ARCHITECT_REVIEW",
-      "AWAITING_ARCHITECT_REVIEW",
-      "CHANGES_REQUESTED",
-      "BLOCKED_GOVERNANCE",
-      "MERGED"
-    ],
-    "readyConditions": [
-      "workOrderImplementationComplete",
-      "deterministicVerificationPassing",
-      "requiredDogfoodingEvidencePersisted",
-      "requiredBrowserEvidencePersistedWhenApplicable",
-      "branchFreshAgainstCurrentMain",
-      "noPendingSynchronizationOrRepair",
-      "scopeAndArchitectureBoundariesUnchanged"
-    ],
-    "invalidators": [
-      "prHeadChanged",
-      "mainAdvancedWithoutSuccessfulSynchronization",
-      "architectRequestedChanges",
-      "materialEvidenceChanged",
-      "scopeChanged"
-    ],
+    "statusValues": ["IMPLEMENTING","VERIFYING","SYNCHRONIZING","READY_FOR_ARCHITECT_REVIEW","AWAITING_ARCHITECT_REVIEW","CHANGES_REQUESTED","BLOCKED_GOVERNANCE","MERGED"],
+    "readyConditions": ["workOrderImplementationComplete","deterministicVerificationPassing","requiredDogfoodingEvidencePersisted","requiredBrowserEvidencePersistedWhenApplicable","branchFreshAgainstCurrentMain","noPendingSynchronizationOrRepair","scopeAndArchitectureBoundariesUnchanged"],
+    "invalidators": ["prHeadChanged","mainAdvancedWithoutSuccessfulSynchronization","architectRequestedChanges","materialEvidenceChanged","scopeChanged"],
     "userTriggerTemplate": "ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>"
   },
   "branchSynchronization": {
@@ -54,42 +31,15 @@
     "reviewHeadRequiresCurrentMain": true
   },
   "frontier": {
-    "nextEligible": ["REALITY-REPAIR-001"],
-    "serialized": [
-      "REALITY-REPAIR-001",
-      "REALITY-REPAIR-002",
-      "REALITY-REPAIR-003"
-    ],
-    "parallelAfterREALITY-REPAIR-003": [
-      "REALITY-REPAIR-004",
-      "REALITY-REPAIR-005",
-      "REALITY-REPAIR-006",
-      "REALITY-REPAIR-007",
-      "REALITY-REPAIR-008",
-      "REALITY-REPAIR-009"
-    ],
-    "gatesAfterRepairs": [
-      "V2-REALITY-AUDIT-001-R6",
-      "V2-REALITY-AUDIT-001-R7"
-    ],
-    "deploymentAfterR7": [
-      "DEP-001",
-      "DEP-002",
-      "DEP-003",
-      "DEP-004",
-      "DEP-005",
-      "DEP-006",
-      "DEP-007",
-      "DEP-008",
-      "DEP-009",
-      "DEP-010",
-      "DEP-011",
-      "DEP-012"
-    ]
+    "nextEligible": ["REALITY-REPAIR-002"],
+    "serialized": ["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003"],
+    "parallelAfterREALITY-REPAIR-003": ["REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],
+    "gatesAfterRepairs": ["V2-REALITY-AUDIT-001-R6","V2-REALITY-AUDIT-001-R7"],
+    "deploymentAfterR7": ["DEP-001","DEP-002","DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010","DEP-011","DEP-012"]
   },
   "workOrders": {
-    "REALITY-REPAIR-001": {"status":"AUTHORIZED","dependencies":[]},
-    "REALITY-REPAIR-002": {"status":"PLANNED","dependencies":["REALITY-REPAIR-001"]},
+    "REALITY-REPAIR-001": {"status":"COMPLETE","dependencies":[],"mergedAs":{"pr":18,"mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
+    "REALITY-REPAIR-002": {"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-001"],"dispatch":{"issue":19,"baseSha":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
     "REALITY-REPAIR-003": {"status":"PLANNED","dependencies":["REALITY-REPAIR-002"]},
     "REALITY-REPAIR-004": {"status":"PLANNED","dependencies":["REALITY-REPAIR-003"]},
     "REALITY-REPAIR-005": {"status":"PLANNED","dependencies":["REALITY-REPAIR-003"]},
@@ -114,10 +64,10 @@
   },
   "activeSpecialists": [],
   "reviewQueue": [],
-  "mergeHistory": [],
+  "mergeHistory": [{"workOrder":"REALITY-REPAIR-001","pr":18,"head":"e7d172f08f71daa546db6c59dd9c04cb1c5e2c2f","mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076","mainAfterMerge":"915ed1d046be4b01bcb3b53badad2f892963d076","date":"2026-09-06T11:59:48Z"}],
   "lastEvent": {
-    "type": "ROADMAP_GOVERNANCE_HARDENING",
-    "summary": "Three-slot orchestration, automatic branch synchronization, and exact-head Architect review gating are now explicitly governed.",
-    "date": "2026-09-06"
+    "type": "WORK_ORDER_MERGED_AND_FRONTIER_ADVANCED",
+    "summary": "Architect accepted and merged REALITY-REPAIR-001 PR #18 at exact head e7d172f; main advanced to 915ed1d; REALITY-REPAIR-002 is now the sole eligible frontier and is durably dispatched as Issue #19.",
+    "date": "2026-09-06T12:01:00Z"
   }
 }
