@@ -54,7 +54,7 @@ import {
 } from '../api/client';
 import TrustDisclosure from '../components/activity/TrustDisclosure';
 import { humanRunState } from '../components/activity/run-state-language';
-import { approvalStepIdsFromContent } from '../components/activity/workflow-ir-facts';
+import { lastPauseAtApprovalStep } from '../components/activity/workflow-ir-facts';
 import { formatRelative } from '../lib/format';
 
 type SourceState<T> =
@@ -86,7 +86,8 @@ type ActivityEvent =
     };
 
 /**
- * The needs-you derivation (the same derivation as the run-status surface):
+ * The needs-you derivation (the SHARED approval-waiting source — the same
+ * derivation as the run-status surface and Home's Pending approvals):
  * a PAUSED run whose last pause rides detail.atStepId at an IR approval
  * node. Never guessed; if the history or the version facts are unavailable,
  * the honest word stays "Paused".
@@ -100,18 +101,9 @@ function needsYouWord(
   const entry = histories[run.id];
   if (!entry || entry.kind !== 'data') return null;
   const version = versions?.find((v) => v.id === run.versionId) ?? null;
-  const approvalIds = version
-    ? approvalStepIdsFromContent(version.content)
-    : new Set<string>();
-  const pauses = entry.value.timeline
-    .filter((e) => e.eventName === 'workflow.run.paused')
-    .sort((a, b) => a.sequence - b.sequence);
-  const last = pauses[pauses.length - 1];
-  const atStepId =
-    (last?.detail && typeof last.detail.atStepId === 'string'
-      ? (last.detail.atStepId as string)
-      : null) ?? last?.stepId ?? null;
-  return atStepId && approvalIds.has(atStepId) ? 'Waiting for you' : null;
+  return lastPauseAtApprovalStep(entry.value.timeline, version?.content ?? null)
+    ? 'Waiting for you'
+    : null;
 }
 
 export default function ProductActivityPage() {
