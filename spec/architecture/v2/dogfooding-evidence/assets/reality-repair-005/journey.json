@@ -1,0 +1,144 @@
+{
+  "run": "REALITY-REPAIR-005 real-deployment browser smoke",
+  "startedAt": "2026-09-06T17:36:37.565Z",
+  "finishedAt": "2026-09-06T17:36:50.968Z",
+  "durationMs": 13403,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T17:36:37.566Z",
+      "label": "REALITY-REPAIR-005 real-deployment browser smoke starting at 2026-09-06T17:36:37.565Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T17:36:37.566Z",
+      "label": "artifacts dir: /home/z/workflowos/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T17:36:42.911Z",
+      "label": "LEG0a the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001) and a V2 product route answers (401-not-404)",
+      "status": "PASS",
+      "ms": 5338
+    },
+    {
+      "at": "2026-09-06T17:36:42.957Z",
+      "label": "LEG0b the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 46
+    },
+    {
+      "at": "2026-09-06T17:36:43.258Z",
+      "label": "seed: publisher register → login → org → public APPROVAL-GATED workflow → listing → publish (REAL routes only; the consumer gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 300
+    },
+    {
+      "at": "2026-09-06T17:36:45.956Z",
+      "label": "LEG1 the consumer signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2485
+    },
+    {
+      "at": "2026-09-06T17:36:46.133Z",
+      "label": "LEG2 the consumer creates their organization through the real Home onboarding (the RR-002 composed precondition)",
+      "status": "PASS",
+      "ms": 177
+    },
+    {
+      "at": "2026-09-06T17:36:46.692Z",
+      "label": "LEG3 Explore → the listing → the entitled free decision → the EXISTING V2-002 install pins version 1 into the CONSUMER organization",
+      "status": "PASS",
+      "ms": 559
+    },
+    {
+      "at": "2026-09-06T17:36:47.554Z",
+      "label": "LEG4 the consumer RUNS the installed workflow through the real browser Run flow (the real V2-005 request + start commands; the status surface derives Running)",
+      "status": "PASS",
+      "ms": 742
+    },
+    {
+      "at": "2026-09-06T17:36:47.792Z",
+      "label": "LEG5 the REAL V2-005 pause command (the t6 e2e pattern) parks the run at the IR approval step through the consumer’s own session",
+      "status": "PASS",
+      "ms": 48
+    },
+    {
+      "at": "2026-09-06T17:36:48.506Z",
+      "label": "LEG6 F-005 (a): Home — the approval-waiting run APPEARS in Pending approvals (\"Waiting for you\", the workflow name, the Open-the-run link) — no Unavailable claim, no false \"not part of the product\" copy",
+      "status": "PASS",
+      "ms": 714
+    },
+    {
+      "at": "2026-09-06T17:36:48.873Z",
+      "label": "LEG7 the Open-the-run link navigates to /workflows/:id?run=:runId and the run-status surface derives \"Waiting for you\" (the T10 F02 direct link, end-to-end)",
+      "status": "PASS",
+      "ms": 277
+    },
+    {
+      "at": "2026-09-06T17:36:49.064Z",
+      "label": "LEG8 the publisher creates the NEW HEAD VERSION through the REAL owner-only createVersion route (POST /workflow-repository/workflows/:id/versions)",
+      "status": "PASS",
+      "ms": 25
+    },
+    {
+      "at": "2026-09-06T17:36:49.719Z",
+      "label": "LEG9 F-005 (b): Home (reloaded) — the installed-behind-head workflow APPEARS in Updates (\"Update available\", Version 2, the pinned-never-auto-updated vocabulary, the Open-the-workflow link) — and NO adoption action on Home",
+      "status": "PASS",
+      "ms": 655
+    },
+    {
+      "at": "2026-09-06T17:36:50.059Z",
+      "label": "LEG10 the Open-the-workflow link navigates to the workflow detail — where the REAL adoption action lives (the detail’s own §19 update surface; Home never duplicated it)",
+      "status": "PASS",
+      "ms": 244
+    },
+    {
+      "at": "2026-09-06T17:36:50.873Z",
+      "label": "LEG11 F-006 preserved: the Device issues panel still renders its honest Unavailable state on Home (the TRUE deferral copy — unlike the two repaired false claims)",
+      "status": "PASS",
+      "ms": 628
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/01-consumer-installed-v1.png",
+      "sha256": "99669648661ba79bce3ff540ebef5d17cd81bf0b3aee534f7e511131dc2ec5de",
+      "bytes": 116800
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/02-consumer-run-running.png",
+      "sha256": "d01eaf1d22b6259790422126f4659129e91357985a6307b79d985c74eaf23386",
+      "bytes": 120110
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/03-home-pending-approvals.png",
+      "sha256": "555a6a2216327736fb0734bfd1bf771d6e3658420584adc92f322a557602d5aa",
+      "bytes": 103945
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/04-run-detail-waiting-for-you.png",
+      "sha256": "589db4edeec2d706d8871484e328538304029ffa948284b199433628e690f2ac",
+      "bytes": 135813
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/05-home-updates.png",
+      "sha256": "f288b641dbc5b71299237ea7a580237150d93e21c5102858d4fb1722dc1c7caa",
+      "bytes": 110500
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/06-workflow-detail-adoption-action.png",
+      "sha256": "484afe8eb6e4103f30aefebbcfc2b8450e9c63871a9c19a972219c020571e23c",
+      "bytes": 155323
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-005/07-home-device-issues-honest.png",
+      "sha256": "f288b641dbc5b71299237ea7a580237150d93e21c5102858d4fb1722dc1c7caa",
+      "bytes": 110500
+    }
+  ]
+}

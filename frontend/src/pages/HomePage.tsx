@@ -4,10 +4,16 @@ import {
   organizations,
   workflowRepository,
   workflowRuns,
+  type ProductInstallationDetail,
   type ProductWorkflow,
   type ProductWorkflowRun,
+  type ProductWorkflowVersion,
 } from '../api/client';
 import OrganizationOnboarding from '../components/onboarding/OrganizationOnboarding';
+import {
+  humanRunStateSentence,
+} from '../components/activity/run-state-language';
+import { lastPauseAtApprovalStep } from '../components/activity/workflow-ir-facts';
 
 /**
  * HomePage — the workflow-first Home (V2-017 Task 2).
@@ -23,9 +29,9 @@ import OrganizationOnboarding from '../components/onboarding/OrganizationOnboard
  *   empty   — the read succeeded and the items are derivably absent
  *             (e.g. no organization ⇒ no workflows can exist);
  *   data    — real records from the existing public reads;
- *   Unavailable — the surface has no exposed read yet (approvals,
- *             updates, device issues) — an honest "not shown here yet",
- *             never a fabricated empty list.
+ *   Unavailable — the surface has no exposed read yet (device issues)
+ *             — an honest "not shown here yet", never a fabricated empty
+ *             list.
  *
  * The reads are consume-only: the V2-002 workflow list and the V2-005 run
  * list, aggregated across EVERY organization of the session user (F-T2-001:
@@ -42,6 +48,14 @@ import OrganizationOnboarding from '../components/onboarding/OrganizationOnboard
  * on success every surface refetches so the org-scoped reads target the
  * created organization. A failed organizations read stays an honest error
  * (the surfaces' own error states) — never a fake onboarding-empty.
+ *
+ * REALITY-REPAIR-005 (F-005): Pending approvals and Updates are COMPOSED
+ * surfaces (below) — derived from the existing V2-005/V2-002 reads and the
+ * SAME derivations the workflow detail already uses. No aggregate
+ * authority, no duplicated attention state: Home links to where the real
+ * actions live (the run on the workflow detail; the adoption action there).
+ * Device issues stays the honest Unavailable surface (F-006: an explicit
+ * product deferral — no public device-status read exists).
  */
 
 type ReadState<T> =
@@ -106,6 +120,146 @@ async function fetchAttentionRuns(): Promise<ProductWorkflowRun[]> {
   return perOrg
     .flat()
     .filter((run) => run.state === 'failed' || run.state === 'paused');
+}
+
+/**
+ * One Pending-approvals item (REALITY-REPAIR-005, F-005) — a presentation
+ * record derived from the existing reads, never an authority of its own.
+ */
+interface PendingApprovalItem {
+  run: ProductWorkflowRun;
+  workflowName: string | null;
+}
+
+/**
+ * Pending approvals (REALITY-REPAIR-005, F-005): a paused run waiting at an
+ * IR approval step — the approval gates that ARE part of the product. The
+ * composition reuses ONLY the existing reads and derivations (the same
+ * ones the RunExperience status surface and the Activity timeline hold):
+ *   - the paused runs of EVERY caller organization (the V2-005 run read,
+ *     F-T2-001 all-or-error);
+ *   - each paused run's reconstructed history (the V2-005 read whose
+ *     workflow.run.paused entry carries the executor-reported pause point
+ *     detail.atStepId — never guessed);
+ *   - the run-pinned version's WorkflowIR (the public versions read) for
+ *     the SHARED approval-waiting derivation (lastPauseAtApprovalStep);
+ *   - the public workflow read for the item's name (the V2-002 read the
+ *     detail page itself consumes).
+ *
+ * All-or-error: any failed read errors the surface (a failed read is NEVER
+ * a successful empty). A paused run without approval evidence is simply
+ * not an item (no evidence, no claim — it stays in Needs attention as
+ * Paused); the successful empty means no paused run provably waits at an
+ * approval step.
+ */
+async function fetchPendingApprovals(): Promise<PendingApprovalItem[]> {
+  const orgs = await organizations.listForUser();
+  if (orgs.length === 0) return [];
+  const perOrg = await Promise.all(
+    orgs.map((org) => workflowRuns.listForOrganization(org.id)),
+  );
+  const paused = perOrg.flat().filter((run) => run.state === 'paused');
+  if (paused.length === 0) return [];
+  const histories = await Promise.all(
+    paused.map((run) => workflowRuns.getHistory(run.id)),
+  );
+  const workflowIds = [...new Set(paused.map((run) => run.workflowId))];
+  const [versionLists, workflows] = await Promise.all([
+    Promise.all(workflowIds.map((id) => workflowRepository.listVersionsForWorkflow(id))),
+    Promise.all(workflowIds.map((id) => workflowRepository.get(id))),
+  ]);
+  const items: PendingApprovalItem[] = [];
+  paused.forEach((run, i) => {
+    const idx = workflowIds.indexOf(run.workflowId);
+    const workflow = workflows[idx] ?? null;
+    // Fail closed: an authoritative read that yields no usable record is
+    // the honest error surface — never a fabricated item.
+    if (!workflow) throw new Error('The workflow read returned no record.');
+    const version = (versionLists[idx] ?? []).find((v) => v.id === run.versionId) ?? null;
+    if (!lastPauseAtApprovalStep(histories[i].timeline, version?.content ?? null)) return;
+    items.push({ run, workflowName: workflow.name });
+  });
+  return items;
+}
+
+/**
+ * One Updates item (REALITY-REPAIR-005, F-005) — an installed workflow
+ * whose pinned version is behind the workflow's head version (the §19
+ * update semantics), presented as a link to where adoption actually lives.
+ */
+interface WorkflowUpdateItem {
+  installation: ProductInstallationDetail;
+  headVersion: ProductWorkflowVersion;
+  workflowName: string | null;
+}
+
+/**
+ * Updates (REALITY-REPAIR-005, F-005): the installed workflows behind their
+ * head version — the version updates that ARE part of the product. The
+ * composition reuses ONLY the existing reads and the §19 derivation
+ * semantics the VersionsExperience update banner already holds:
+ *   - the installations of EVERY caller organization (the V2-002 read,
+ *     F-T2-001 all-or-error), bound per (workflow, org) by the SAME rule
+ *     the detail page uses (the enabled installation is the caller's live
+ *     pin — after an explicit adoption there can be a retired row too);
+ *   - the public versions read: an installation whose
+ *     pinnedVersion.versionNumber is behind the workflow's head version
+ *     number (the highest number — versions are immutable and append-only)
+ *     is the update item;
+ *   - the public workflow read for the item's name.
+ *
+ * The honest §19 vocabulary travels with the item (the pin is verbatim and
+ * never auto-updated; nothing changes until the user approves the update).
+ * Home NEVER duplicates the adoption action — the item links to the
+ * workflow detail, where the real action lives. All-or-error throughout.
+ */
+async function fetchWorkflowUpdates(): Promise<WorkflowUpdateItem[]> {
+  const orgs = await organizations.listForUser();
+  if (orgs.length === 0) return [];
+  const perOrg = await Promise.all(
+    orgs.map((org) => workflowRepository.listInstallationsForOrganization(org.id)),
+  );
+  const installations = perOrg.flat();
+  if (installations.length === 0) return [];
+  // The detail page's binding rule (T11 adoption): per (workflow, org) the
+  // ENABLED installation is the live pin; only when every row is retired
+  // does the first row stand in — a retired pin must never fabricate an
+  // update the caller already adopted.
+  const bound = new Map<string, ProductInstallationDetail>();
+  for (const installation of installations) {
+    const key = `${installation.installation.workflowId}:${installation.installation.organizationId}`;
+    const current = bound.get(key) ?? null;
+    if (
+      current === null ||
+      (current.installation.status !== 'enabled' &&
+        installation.installation.status === 'enabled')
+    ) {
+      bound.set(key, installation);
+    }
+  }
+  const workflowIds = [...new Set([...bound.values()].map((i) => i.installation.workflowId))];
+  const [versionLists, workflows] = await Promise.all([
+    Promise.all(workflowIds.map((id) => workflowRepository.listVersionsForWorkflow(id))),
+    Promise.all(workflowIds.map((id) => workflowRepository.get(id))),
+  ]);
+  const items: WorkflowUpdateItem[] = [];
+  for (const installation of bound.values()) {
+    const idx = workflowIds.indexOf(installation.installation.workflowId);
+    const workflow = workflows[idx] ?? null;
+    // Fail closed: an authoritative read that yields no usable record is
+    // the honest error surface — never a fabricated item.
+    if (!workflow) throw new Error('The workflow read returned no record.');
+    const versions = versionLists[idx] ?? [];
+    const head = versions.reduce<ProductWorkflowVersion | null>(
+      (max, v) => (max === null || v.versionNumber > max.versionNumber ? v : max),
+      null,
+    );
+    // No head version fact ⇒ no claim; the pin is at head ⇒ no update.
+    if (!head) continue;
+    if (installation.pinnedVersion.versionNumber >= head.versionNumber) continue;
+    items.push({ installation, headVersion: head, workflowName: workflow.name });
+  }
+  return items;
 }
 
 function formatDate(iso: string): string {
@@ -210,16 +364,22 @@ export default function HomePage() {
   // zero-org onboarding condition (loading/error/empty/data, same honesty
   // contract as the other surfaces).
   const orgs = useHomeRead(organizations.listForUser);
+  // REALITY-REPAIR-005 (F-005): the two composed attention surfaces —
+  // each with the same honesty contract as its siblings.
+  const approvals = useHomeRead(fetchPendingApprovals);
+  const updates = useHomeRead(fetchWorkflowUpdates);
   const [goal, setGoal] = useState('');
 
   const onOrganizationCreated = useCallback(() => {
     // The authoritative record exists now (POST /organizations responded
-    // 201): re-read the collection AND both attention surfaces so every
+    // 201): re-read the collection AND every attention surface so every
     // org-scoped aggregation targets the created organization.
     orgs.refetch();
     workflows.refetch();
     attention.refetch();
-  }, [orgs, workflows, attention]);
+    approvals.refetch();
+    updates.refetch();
+  }, [orgs, workflows, attention, approvals, updates]);
 
   const recentWorkflows =
     workflows.state.kind === 'data'
@@ -355,14 +515,98 @@ export default function HomePage() {
           />
         </SurfaceFrame>
 
-        <UnavailableSurface
-          title="Pending approvals"
-          copy="Approvals aren’t shown here yet — they’ll appear once approvals become part of the product."
-        />
-        <UnavailableSurface
-          title="Updates"
-          copy="Workflow and version updates aren’t shown here yet — they’ll appear once updates become part of the product."
-        />
+        {/* REALITY-REPAIR-005 (F-005): the COMPOSED approval surface — the
+            existing reads + the shared approval-waiting derivation (never
+            an Unavailable claim: the V2-005 approval gates are the
+            product). The item links to the run on the workflow detail
+            (the T10 F02 direct link); the approval action itself is NOT
+            duplicated here. */}
+        <SurfaceFrame title="Pending approvals">
+          <ReadStates
+            state={approvals.state}
+            refetch={approvals.refetch}
+            emptyCopy="No run is waiting at an approval step right now."
+            renderItems={(items) => (
+              <ul className="space-y-3">
+                {items.map((item) => (
+                  <li key={item.run.id} className="text-sm">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <p>
+                        <span className="mr-2 rounded bg-accent px-1.5 py-0.5 text-xs font-medium text-accent-foreground">
+                          Waiting for you
+                        </span>
+                        <span className="font-medium">{item.workflowName}</span>
+                      </p>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {formatDate(item.run.updatedAt)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      {humanRunStateSentence('Waiting for you')}{' '}
+                      <Link
+                        to={`/workflows/${item.run.workflowId}?run=${item.run.id}`}
+                        className="text-foreground underline-offset-4 transition-colors hover:underline"
+                      >
+                        Open the run
+                      </Link>
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          />
+        </SurfaceFrame>
+
+        {/* REALITY-REPAIR-005 (F-005): the COMPOSED updates surface — the
+            installation read + the public versions read + the §19
+            installed-behind-head derivation (never an Unavailable claim:
+            the V2-002 versions are the product). The item carries the
+            honest pin vocabulary and links to the workflow detail, where
+            the real adoption action lives — NEVER duplicated here. */}
+        <SurfaceFrame title="Updates">
+          <ReadStates
+            state={updates.state}
+            refetch={updates.refetch}
+            emptyCopy="No updates available right now — an installed workflow stays pinned until you approve its update."
+            renderItems={(items) => (
+              <ul className="space-y-3">
+                {items.map((item) => (
+                  <li
+                    key={`${item.installation.installation.organizationId}:${item.installation.installation.id}`}
+                    className="text-sm"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <p>
+                        <span className="mr-2 rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
+                          Update available
+                        </span>
+                        <span className="font-medium">{item.workflowName}</span>
+                      </p>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {formatDate(item.headVersion.createdAt)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      Version {item.headVersion.versionNumber} is available — your installed
+                      Version {item.installation.pinnedVersion.versionNumber} stays pinned (it
+                      never auto-updates).
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Nothing changes until you approve the update.{' '}
+                      <Link
+                        to={`/workflows/${item.installation.installation.workflowId}`}
+                        className="text-foreground underline-offset-4 transition-colors hover:underline"
+                      >
+                        Open the workflow
+                      </Link>
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          />
+        </SurfaceFrame>
+
         <UnavailableSurface
           title="Device issues"
           copy="Device and connectivity problems aren’t shown here yet — they’ll appear once device status becomes part of the product."
