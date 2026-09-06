@@ -55,6 +55,8 @@ After a review-ready checkpoint, the worker remains in resident `WAITING_FOR_ARC
 
 Every `REQUEST_CHANGES` packet must identify the exact reviewed head and carry stable finding IDs, affected paths, acceptance criteria, and concrete required changes.
 
+When all review prerequisites hold, the persistent Z.ai orchestrator must emit the review packet to the **same GitHub PR conversation** using `scripts/emit-architect-review-trigger.sh`. It must verify the exact PR head and current `main` before emission, and it must not claim Architect notification until the GitHub comment succeeds.
+
 The worker may not merge, self-approve, create a replacement PR, mutate frozen authority, invent a successor task, fabricate evidence, or treat its session state as authoritative.
 
 See `docs/implementation/RESIDENT-ZAI-WORKER-PROTOCOL.md` for the normative resident-worker procedure.
