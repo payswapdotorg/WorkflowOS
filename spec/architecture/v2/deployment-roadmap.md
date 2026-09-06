@@ -4,9 +4,25 @@
 **Purpose:** deploy the completed WorkflowOS V2 product as a low-cost, production-capable service using provider-neutral interfaces and free-tier-first infrastructure.
 **Scope:** deployment/runtime infrastructure only. This document does not redefine WorkflowOS semantics, authorities, workflow behavior, or the V2 product model.
 
+## Mandatory pre-deployment gate
+
+Productionization is **LOCKED** until `V2-REALITY-AUDIT-001 — Product Reality, Journey, and Architecture Reconciliation` is accepted by the Architect.
+
+The audit must complete its repository-defined exit criteria: real-browser exercise of the reachable V2 journeys, UX-to-operational route/service/authority tracing, durable worker report, Architect dispositions, bounded accepted repairs where required, and a repeat audit showing no critical UX-to-operational architecture mismatch. A browser-observed defect must not be “fixed” by inventing a second workflow, execution, verification, evidence, authorization, scheduling, or governance authority.
+
+Canonical audit artifacts:
+
+- `spec/architecture/v2/V2-REALITY-AUDIT-001.md`
+- `spec/architecture/v2/V2-REALITY-AUDIT-001-CANONICAL-DISPATCH.md`
+- `docs/v2/V2-REALITY-AUDIT-001-WORKER-REPORT-TEMPLATE.md`
+- `docs/v2/V2-REALITY-AUDIT-001-ARCHITECT-DISPOSITION.md`
+- `spec/development-state/v2-work-order-state.json`
+
+No DEP item may activate before this gate is satisfied. Deployment is downstream of product reality, not an alternative path around it.
+
 ## Product baseline
 
-V2-017 Universal Product UX is complete. T1–T16 are closed and the product baseline is the current `main` tree. Productionization begins from that merged baseline and must not reopen the V2-017 UX graph.
+V2-017 Universal Product UX is complete. The product baseline is the current `main` tree. The post-UX reality audit is a separate pre-deployment gate and does not reopen the V2-017 UX graph unless the Architect explicitly authorizes a bounded corrective Work Order from audit evidence.
 
 ## Provider strategy
 
@@ -91,6 +107,9 @@ Production and staging credentials must never be shared. Preview environments mu
 ## Implementation sequence
 
 ```text
+V2-REALITY-AUDIT-001
+   │  hard pre-deployment gate
+   ▼
 DEP-001  Lock deployment architecture + provider interfaces
    ↓
 DEP-002  Environment/secrets/config contract
@@ -128,18 +147,7 @@ Each DEP item is a bounded implementation slice with its own evidence and exact-
 
 ## Current provider facts
 
-The initial selections are based on provider-published current pricing:
-
-- Vercel Hobby is $0/month and includes automatic CI/CD, HTTPS/SSL, previews, CDN delivery and documented usage allowances; it is intended for personal/non-commercial use, so commercial operation may require Pro. 
-- Neon Free is $0 with 100 CU-hours per project/month, 0.5 GB storage/project, scale-to-zero and branching.
-- Cloudflare R2 Free includes 10 GB-month storage, 1M Class A requests, 10M Class B requests and free Internet egress each month.
-- Upstash Redis Free includes 256 MB data, 10 GB monthly bandwidth and 500K commands/month.
-- Railway's post-trial Free plan provides $1/month of credit, so Railway is an initial compute choice rather than a claim of indefinitely-free production hosting.
-- Cloudflare Turnstile's Free plan supports most production applications with unlimited challenges and up to 20 widgets/account.
-- Better Stack's Free plan includes uptime/heartbeat monitoring plus limited logs, traces, metrics and exception/session-replay allowances.
-- Resend Free includes 3,000 emails/month and a 100/day sending limit.
-
-Provider limits must be rechecked at implementation time; this document is a deployment baseline, not a promise that provider pricing will remain unchanged.
+The initial selections are based on provider-published current pricing and must be rechecked immediately before implementation because provider terms may change.
 
 ## Non-goals
 
@@ -148,4 +156,4 @@ Provider limits must be rechecked at implementation time; this document is a dep
 - Replacing PostgreSQL with a hosted proprietary state model.
 - Making Redis authoritative.
 - Replacing GitHub as the repository/PR integration authority.
-- Reopening V2-017 product UX scope.
+- Reopening V2-017 product UX scope merely because productionization is next.
