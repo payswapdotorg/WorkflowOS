@@ -640,7 +640,7 @@ describe('V2-017 T9 — the Teach Me experience', () => {
                 String(input).includes('/teaching-sessions/sessions/ts_1/practice') &&
                 (init?.method ?? 'GET') === 'POST',
             )
-            .map(([input, init]) => init?.body)
+            .map(([, init]) => init?.body)
             .find((body) => body !== undefined && JSON.parse(String(body)).nodeId === 'collect_posts'),
         ),
       );
