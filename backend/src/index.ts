@@ -617,6 +617,37 @@ async function main(): Promise<void> {
             },
           }
         : {}),
+      // WORK-068: Feedback → Governed Work Items routes (the governed
+      // convert mutation + the read-only assessment preview). Backend-
+      // authorized (project.read / project.write). The conversion submits
+      // proposed Work Items ONLY through the existing /work-items
+      // WorkItemRepository.create intake (the single creation path;
+      // metadata.feedbackConversion embedded); the public route constructs
+      // the governed decision server-side (decidedBy = the authenticated
+      // principal — never caller-supplied). The service re-derives the
+      // assessment in the mutation path (no silent conversion),
+      // deduplicates against the existing OPEN Work Items, and preserves
+      // the signal provenance.
+      ...(app.deps.authorizationService &&
+      app.deps.projectRepository &&
+      app.deps.architectureRepository &&
+      app.deps.architectureVersionRepository &&
+      app.deps.workItemRepository &&
+      app.deps.engineeringSignalService &&
+      app.deps.feedbackConversionService
+        ? {
+            feedbackConversion: {
+              authorizationService: app.deps.authorizationService,
+              projectRepository: app.deps.projectRepository,
+              architectureVersionRepository: app.deps.architectureVersionRepository,
+              architectureRepository: app.deps.architectureRepository,
+              workItemRepository: app.deps.workItemRepository,
+              engineeringSignalService: app.deps.engineeringSignalService,
+              conversionService: app.deps.feedbackConversionService,
+              logger: app.deps.logger,
+            },
+          }
+        : {}),
       ...(app.deps.authorizationService &&
       app.deps.projectRepository &&
       app.deps.architectureRepository &&
