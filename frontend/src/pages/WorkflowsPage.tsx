@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import {
@@ -112,6 +112,77 @@ function useLibraryRead() {
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
   return { state, refetch };
+}
+
+// --- REALITY-REPAIR-006 (F-007): installed-card name resolution -----------------
+
+/**
+ * Resolves the workflow NAMES the org-scoped listing cannot see.
+ *
+ * A cross-org marketplace install's workflow lives ONLY in the publisher's
+ * organization, so the caller-org listing (the library's own authority)
+ * never contains it — the F-007 defect had every such Installed card
+ * degrading to the generic 'Installed workflow' fallback. The real name is
+ * resolved through the EXISTING PUBLIC read — the same
+ * `workflowRepository.get(workflowId)` (GET /workflow-repository/workflows/:id)
+ * the card's own Open target consumes, proven cross-org by
+ * REALITY-REPAIR-003. No new route, no aggregate authority.
+ *
+ * Honesty rules:
+ *   - ONE public read per MISSING workflow id, deduplicated — a workflow
+ *     present in the caller-org listing (the own-org case) never triggers
+ *     one, and two installations of the same missing workflow share the
+ *     single read;
+ *   - loading and failed resolution degrade to the honest fallback
+ *     ('Installed workflow') — never an error state, never a fabricated
+ *     name;
+ *   - the resolved record is a PRESENTATION-LEVEL fact only (the card's
+ *     name); the library's other card facts stay derived from the
+ *     caller-org reads alone.
+ */
+function useUnlistedWorkflowNames(
+  library: Pick<LibraryData, 'workflows' | 'installations'>,
+): ReadonlyMap<string, string> {
+  // The missing ids as a stable key (sorted, so an identical set never
+  // re-triggers the effect — deduplication across re-renders).
+  const missingKey = useMemo(() => {
+    const listed = new Set(library.workflows.map((w) => w.id));
+    const missing = new Set<string>();
+    for (const detail of library.installations) {
+      if (!listed.has(detail.installation.workflowId)) {
+        missing.add(detail.installation.workflowId);
+      }
+    }
+    return Array.from(missing).sort().join('\n');
+  }, [library.workflows, library.installations]);
+
+  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map());
+  // Cross-run deduplication: an id already requested is never re-requested
+  // (survives effect re-runs and StrictMode's double invocation).
+  const requested = useRef<ReadonlySet<string>>(new Set());
+
+  useEffect(() => {
+    const missing = missingKey === '' ? [] : missingKey.split('\n');
+    for (const workflowId of missing) {
+      if (requested.current.has(workflowId)) continue;
+      requested.current = new Set([...requested.current, workflowId]);
+      workflowRepository
+        .get(workflowId)
+        .then((workflow) => {
+          setNames((current) => {
+            const next = new Map(current);
+            next.set(workflowId, workflow.name);
+            return next;
+          });
+        })
+        .catch(() => {
+          // The honest degradation: a failed public read leaves the fallback
+          // in place — never an error state, never a fabricated name.
+        });
+    }
+  }, [missingKey]);
+
+  return names;
 }
 
 // --- honest derivations (presentation-level filters over authoritative reads) --
@@ -325,17 +396,24 @@ function WorkflowCard({
 function InstallationCard({
   detail,
   workflow,
+  unlistedName,
   library,
 }: {
   detail: ProductInstallationDetail;
   workflow: ProductWorkflow | undefined;
+  /** REALITY-REPAIR-006 (F-007): the name resolved through the existing
+   *  public workflow read when the org-scoped listing lacks the workflow. */
+  unlistedName: string | undefined;
   library: LibraryData;
 }) {
   // The installation read pins an EXACT immutable version (never
-  // auto-updates); the card preserves those semantics verbatim. When the
-  // pinned workflow is not in the visible repository read, the card stays
-  // honest: the authoritative name simply is not available here.
-  const name = workflow?.name ?? 'Installed workflow';
+  // auto-updates); the card preserves those semantics verbatim. The name
+  // resolves honestly, in authority order: the caller-org listing first
+  // (the library's own read), then the EXISTING PUBLIC read's record for
+  // the cross-org marketplace case (REALITY-REPAIR-006, F-007), and the
+  // generic fallback only while that resolution is loading or has failed —
+  // never an error state, never a fabricated name.
+  const name = workflow?.name ?? unlistedName ?? 'Installed workflow';
   const facts = workflow ? filterFactsFor(library, workflow) : null;
   const lastRun = latestRunFor(library.runs, detail.installation.workflowId);
   return (
@@ -397,6 +475,13 @@ export default function WorkflowsPage() {
   const { user } = useAuth();
   const [activeSection, setActiveSection] = useState<SectionKey>('mine');
   const [filters, setFilters] = useState<ReadonlySet<FilterKey>>(new Set());
+
+  // REALITY-REPAIR-006 (F-007): the cross-org installation cards' real names
+  // through the existing public workflow read (one deduplicated read per
+  // missing workflow id; honest fallback while loading or failed).
+  const unlistedNames = useUnlistedWorkflowNames(
+    state.kind === 'data' ? state.library : EMPTY_LIBRARY,
+  );
 
   const toggleFilter = useCallback((key: FilterKey) => {
     setFilters((current) => {
@@ -602,6 +687,7 @@ export default function WorkflowsPage() {
                     workflow={state.library.workflows.find(
                       (w) => w.id === detail.installation.workflowId,
                     )}
+                    unlistedName={unlistedNames.get(detail.installation.workflowId)}
                     library={state.library}
                   />
                 ))}
