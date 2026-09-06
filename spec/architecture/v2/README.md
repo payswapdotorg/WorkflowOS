@@ -21,7 +21,10 @@ Read these as the repository-resident source of truth:
 - `V2-CTRL-001-conformance-checklist.md` — mandatory implementation/verification/dogfooding checks.
 - `V2-CTRL-002-roadmap-lock.md` — canonical original V2 wave graph and no-rebase lock through W6.
 - `dogfooding-protocol.md` — mandatory feature- and integration-boundary experiments.
-- `spec/development-state/v2-work-order-state.json` — canonical machine-readable V2 Work Order progress/eligibility/state.
+- `spec/development-state/v2-work-order-state.json` — canonical historical machine-readable V2 Work Order progress and merged dependency facts.
+- `spec/development-state/v2-autonomous-execution-state.json` — current long-running execution frontier, three-agent scheduler state, branch synchronization policy, and Architect review queue.
+- `spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md` — complete post-V2-017 execution/deployment graph and safe parallelism model.
+- `spec/architecture/v2/V2-ARCHITECT-REVIEW-PROTOCOL.md` — deterministic exact-head review trigger and invalidation rules.
 - `spec/architecture/v2/architecture-change-requests/V2-ACR-003-post-w6-universal-product-ux.md` — governed post-W6 product-layer evolution authority.
 - `spec/architecture/v2/post-w6-product-roadmap.md` — authoritative V2-017 product program decomposition and sequencing.
 - `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md` — repository-only bootstrap, execution, recovery and handoff contract for V2-017.
@@ -36,7 +39,7 @@ The product sequence is an index, not the execution order:
 
 `V2-001 → V2-002 → V2-003 → V2-004 → V2-006/V2-007/V2-014 → V2-005 → V2-008 → V2-009/V2-010/V2-011 → IG-006 → V2-012/V2-015 → V2-013`
 
-The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `spec/development-state/v2-work-order-state.json` through W6, followed by any explicitly governed post-W6 evolution such as `V2-017` in `spec/architecture/v2/post-w6-product-roadmap.md`**.
+The **canonical execution order is the wave graph in `V2-CTRL-002-roadmap-lock.md` and `spec/development-state/v2-work-order-state.json` through W6, followed by any explicitly governed post-W6 evolution such as `V2-017` and the current reality-repair/deployment graph in `V2-AUTONOMOUS-DELIVERY-ROADMAP.md`**.
 
 ## Current wave model
 
@@ -45,23 +48,29 @@ The original V2 roadmap concludes at W6; post-W6 evolution is separately governe
 ```text
 W0   V2-001 COMPLETE
         ↓
-W1   V2-002   V2-003   V2-004             ← same base, parallel, no rebase
+W1   V2-002   V2-003   V2-004             ← same base, parallel, no sibling dependency
         ↓
-W2A  V2-006   V2-007   V2-014             ← same base, parallel, no rebase
+W2A  V2-006   V2-007   V2-014             ← same base, parallel, no sibling dependency
         ↓
 W2B  V2-005                              ← Run/evidence consumes V2-014 contract
         ↓
 W3   IG-001 + IG-002 → V2-008
         ↓
-W4   V2-009   V2-010   V2-011              ← parallel, no rebase
+W4   V2-009   V2-010   V2-011              ← parallel, no sibling dependency
         ↓
      IG-006                                ← cross-device attestation composition
         ↓
-W5   V2-012   V2-015                      ← parallel, no rebase
+W5   V2-012   V2-015                      ← parallel, no sibling dependency
         ↓
 W6   V2-013
         ↓
 POST-W6-PRODUCT   V2-017                  ← separately governed under V2-ACR-003
+        ↓
+REALITY REPAIRS   001 → 002 → 003 → {004,005,006,007,008,009}
+        ↓
+R6 → R7
+        ↓
+PRODUCTIONIZATION DEP-001 … DEP-012
 ```
 
 Integration gates are first-class repository work: they start from current `main` after their inputs are complete and never require sibling branch rebasing.
@@ -141,9 +150,29 @@ read authorization + constitution + registry + state + Work Order
 → next eligible wave
 ```
 
+For parallel Work Orders, this additionally means:
+
+```text
+parallel branches
+   ↓
+independent implementation
+   ↓
+one branch merges
+   ↓
+main advances
+   ↓
+persistent orchestrator auto-synchronizes remaining PRs
+   ↓
+rerun verification/evidence
+   ↓
+exact-head review readiness
+```
+
+The user is never the branch-synchronization mechanism. Mechanical conflicts stay within the existing Work Order scope and are absorbed by the orchestrator; semantic or authority conflicts stop for Architect governance.
+
 For V2-017, the same control loop is applied to T1–T16 through `post-w6-product-roadmap.md`; task status is derived from repository state and actual Git history, not from conversation or unchecked plan boxes.
 
-Parallel Work Orders are independently mergeable and never depend on another sibling's unmerged branch. When interaction requires integration, use an `IG-*` Work Order instead of rebasing siblings.
+Parallel Work Orders are independently mergeable and never depend on another sibling's unmerged branch. When interaction requires integration, use an `IG-*` Work Order instead of rebasing siblings together.
 
 ## Quality and dogfooding
 
