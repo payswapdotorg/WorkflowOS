@@ -287,8 +287,19 @@ const TEACH_SESSION = {
 
 const TEACH_PRACTICE_QUESTIONS: unknown[] = [];
 
+// REALITY-REPAIR-003 (F-003): the caller's organizations — the
+// organizations.listForUser read the detail page now composes (the same
+// selection the product shell consumes). The existing fixtures make the
+// session user a member of the workflow's own organization (the own-org
+// regression path).
+const CALLER_ORGS = () =>
+  jsonResponse(200, {
+    organizations: [{ id: 'org-1', name: 'Bay Logistics', roleId: 'owner' }],
+  });
+
 function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
+    '/organizations': CALLER_ORGS,
     '/workflow-repository/workflows/wf-1/versions': () => jsonResponse(200, { versions: VERSIONS }),
     '/workflow-runs/runs': () => jsonResponse(200, { runs: RUNS }),
     '/workflow-runs/runs/run-1/history': () => jsonResponse(200, RUN_HISTORY),
@@ -604,5 +615,356 @@ describe('V2-017 T12 — Share on the workflow detail (Issue #7)', () => {
     await waitFor(() =>
       expect(screen.queryByRole('region', { name: 'Share' })).not.toBeInTheDocument(),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REALITY-REPAIR-003 (F-003) — the consumer-organization workflow detail.
+//
+// The cross-org journey: a PUBLIC marketplace workflow owned by the
+// PUBLISHER organization, opened by a consumer whose ONLY organization is
+// the CONSUMER org (where their installation / run / deployment facts
+// live). The org-scoped reads must resolve against the CALLER'S
+// organizations — the same organizations.listForUser aggregation the
+// product shell consumes — never the workflow's owning organization: the
+// publisher's member-only org-scoped reads correctly 403 a non-member,
+// and at base they killed the entire detail for the consumer.
+// ---------------------------------------------------------------------------
+
+/** The publisher's public workflow (the marketplace artifact). */
+const PUBLISHER_WORKFLOW = {
+  id: 'wf-pub',
+  organizationId: 'org-publisher',
+  ownerUserId: 'user-publisher',
+  slug: 'public-invoice-digest',
+  name: 'Public invoice digest',
+  description: 'The marketplace public workflow.',
+  visibility: 'public',
+  headVersionId: 'ver-pub-2',
+  forkedFromWorkflowId: null,
+  forkedFromVersionId: null,
+  createdAt: '2026-09-01T10:00:00Z',
+  updatedAt: '2026-09-04T09:00:00Z',
+};
+
+/** The public workflow's versions (the unchanged public version read). */
+const PUB_VERSIONS = [
+  {
+    id: 'ver-pub-1',
+    workflowId: 'wf-pub',
+    versionNumber: 1,
+    contentDigest: 'sha256:pub-old',
+    content: IR_CONTENT,
+    protocol: { irSchemaVersion: 'workflowos-workflow-ir-v1' },
+    parentVersionId: null,
+    createdByUserId: 'user-publisher',
+    createdAt: '2026-09-01T10:00:00Z',
+  },
+  {
+    id: 'ver-pub-2',
+    workflowId: 'wf-pub',
+    versionNumber: 2,
+    contentDigest: 'sha256:pub-new',
+    content: IR_CONTENT,
+    protocol: { irSchemaVersion: 'workflowos-workflow-ir-v1' },
+    parentVersionId: 'ver-pub-1',
+    createdByUserId: 'user-publisher',
+    createdAt: '2026-09-04T09:00:00Z',
+  },
+];
+
+/** The consumer's installation of the public workflow (in THEIR org). */
+const CONSUMER_INSTALLATIONS = [
+  {
+    installation: {
+      id: 'inst-consumer-1',
+      organizationId: 'org-consumer',
+      workflowId: 'wf-pub',
+      versionId: 'ver-pub-2',
+      installedByUserId: 'user-consumer',
+      status: 'enabled',
+      installedAt: '2026-09-05T09:00:00Z',
+      updatedAt: '2026-09-05T09:00:00Z',
+    },
+    pinnedVersion: {
+      id: 'ver-pub-2',
+      workflowId: 'wf-pub',
+      versionNumber: 2,
+      contentDigest: 'sha256:pub-new',
+      protocol: { irSchemaVersion: 'workflowos-workflow-ir-v1' },
+    },
+  },
+];
+
+/** The consumer's run of the installed workflow (in THEIR org). */
+const CONSUMER_RUNS = [
+  {
+    id: 'run-consumer-1',
+    organizationId: 'org-consumer',
+    workflowId: 'wf-pub',
+    versionId: 'ver-pub-2',
+    installationId: 'inst-consumer-1',
+    trigger: { type: 'manual' },
+    triggeredByUserId: 'user-consumer',
+    inputCommitments: [],
+    inputDigest: 'sha256:in',
+    state: 'completed',
+    createdAt: '2026-09-05T10:00:00Z',
+    updatedAt: '2026-09-05T10:30:00Z',
+  },
+];
+
+/**
+ * The consumer-journey route set. The publisher's org-scoped reads answer
+ * the member-only 403 (the faithful rejection a non-member consumer
+ * receives); the consumer's org-scoped reads answer the caller's facts.
+ */
+function consumerRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
+  const forbidden = () => jsonResponse(403, { error: 'not-organization-member' });
+  return {
+    // The caller's organizations (the product-shell selection).
+    '/organizations': () =>
+      jsonResponse(200, {
+        organizations: [{ id: 'org-consumer', name: 'Cove Consumer Co', roleId: 'owner' }],
+      }),
+    // The unchanged PUBLIC reads (workflow + versions).
+    '/workflow-repository/workflows/wf-pub/versions': () =>
+      jsonResponse(200, { versions: PUB_VERSIONS }),
+    '/workflow-repository/workflows/wf-pub': () =>
+      jsonResponse(200, { workflow: PUBLISHER_WORKFLOW }),
+    // The CONSUMER org-scoped reads (the caller's facts).
+    '/organizations/org-consumer/workflow-runs/runs': () =>
+      jsonResponse(200, { runs: CONSUMER_RUNS }),
+    '/organizations/org-consumer/workflow-repository/installations': () =>
+      jsonResponse(200, { installations: CONSUMER_INSTALLATIONS }),
+    '/organizations/org-consumer/workflow-deployments/deployments': () =>
+      jsonResponse(200, { deployments: [] }),
+    '/organizations/org-consumer/workflow-repository/workflows': () =>
+      jsonResponse(200, { workflows: [] }),
+    // The PUBLISHER org-scoped reads: member-only, the consumer is not a
+    // member — the honest 403 (the F-003 defect had the page reading HERE).
+    '/organizations/org-publisher/workflow-runs/runs': forbidden,
+    '/organizations/org-publisher/workflow-repository/installations': forbidden,
+    '/organizations/org-publisher/workflow-deployments/deployments': forbidden,
+    '/organizations/org-publisher/workflow-repository/workflows': forbidden,
+    ...overrides,
+  };
+}
+
+describe('REALITY-REPAIR-003 (F-003) — consumer-organization workflow detail', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('loads the public workflow detail for the consumer WITHOUT any publisher-org read — no 403 kills the page', async () => {
+    renderDetail('wf-pub', consumerRoutes());
+    // The detail loads (at base the publisher-org 403 killed the whole
+    // page — the F-003 defect).
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Public invoice digest' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText('The marketplace public workflow.')).toBeInTheDocument();
+    expect(screen.getByText(/Public — any signed-in user/i)).toBeInTheDocument();
+    // The consumer's installation pin (from the CALLER's org read).
+    expect(screen.getByText(/Installed: Version 2 — pinned · Enabled/)).toBeInTheDocument();
+    // The consumer's run (the caller-org facts, isolated to their org).
+    const activity = screen.getByRole('list', { name: /recent activity/i });
+    const items = within(activity).getAllByRole('listitem');
+    expect(items.length).toBe(1);
+    expect(within(items[0]).getByText('completed')).toBeInTheDocument();
+    // Steps still render from the unchanged public version read.
+    expect(screen.getByText('Collect the open tickets')).toBeInTheDocument();
+    // NO publisher-org read was ever issued.
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(calls.some((c) => c.includes('/organizations/org-publisher/'))).toBe(false);
+    // The caller-org reads WERE issued (runs + installations at minimum).
+    expect(calls.some((c) => c.includes('/organizations/org-consumer/workflow-runs/runs'))).toBe(
+      true,
+    );
+    expect(
+      calls.some((c) => c.includes('/organizations/org-consumer/workflow-repository/installations')),
+    ).toBe(true);
+  });
+
+  it('the Run command operates in the CONSUMER organization (the installation org) — never the publisher org', async () => {
+    let runRequested = false;
+    renderDetail(
+      'wf-pub',
+      consumerRoutes({
+        'POST /organizations/org-consumer/workflow-runs/runs': () => {
+          runRequested = true;
+          return jsonResponse(201, {
+            run: { ...CONSUMER_RUNS[0], id: 'run-consumer-2', state: 'requested' },
+            created: true,
+            executed: true,
+          });
+        },
+        '/organizations/org-consumer/workflow-runs/runs': () =>
+          jsonResponse(200, {
+            runs: runRequested
+              ? [{ ...CONSUMER_RUNS[0], id: 'run-consumer-2', state: 'requested' }]
+              : CONSUMER_RUNS,
+          }),
+        '/workflow-runs/runs/run-consumer-2/start': () =>
+          jsonResponse(200, { run: { ...CONSUMER_RUNS[0], state: 'running' }, attempt: null, executed: true }),
+        '/workflow-runs/runs/run-consumer-2/history': () =>
+          jsonResponse(200, { run: { ...CONSUMER_RUNS[0] }, timeline: [], attempts: [], steps: [], invocations: [], evidence: [], attestations: [], attestationRejections: [], commands: [] }),
+        // The publisher-org run command 403s (the member-only rejection —
+        // at base the Run action posted HERE and the consumer could never
+        // run their installed workflow).
+        'POST /organizations/org-publisher/workflow-runs/runs': () =>
+          jsonResponse(403, { error: 'not-organization-member' }),
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Public invoice digest' })).toBeInTheDocument(),
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: 'Run preview' })).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole('button', { name: 'Run' }));
+    // The run request + the re-read + the start all landed in the
+    // CONSUMER org.
+    await waitFor(() => {
+      const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+      expect(
+        calls.some(
+          ([input, init]) =>
+            String(input).includes('/organizations/org-consumer/workflow-runs/runs') &&
+            (init?.method ?? 'GET') === 'POST',
+        ),
+      ).toBe(true);
+    });
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.some(
+        ([input, init]) =>
+          String(input).includes('/organizations/org-publisher/workflow-runs/runs') &&
+          (init?.method ?? 'GET') === 'POST',
+      ),
+    ).toBe(false);
+    // The preview closes after the successful command sequence.
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Run preview' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('the Schedule action creates the deployment in the CONSUMER organization', async () => {
+    renderDetail(
+      'wf-pub',
+      consumerRoutes({
+        'POST /organizations/org-consumer/workflow-deployments/deployments': () =>
+          jsonResponse(201, {
+            deployment: {
+              id: 'dep-consumer-1',
+              organizationId: 'org-consumer',
+              workflowId: 'wf-pub',
+              versionId: 'ver-pub-2',
+              installationId: 'inst-consumer-1',
+              name: 'Public invoice digest',
+              description: null,
+              placement: { placement: { required: 'any_supported_node' }, privacy: { localOnly: false } },
+              enabled: true,
+              enabledAt: '2026-09-05T11:00:00Z',
+              disabledAt: null,
+              createdByUserId: 'user-consumer',
+              createdAt: '2026-09-05T11:00:00Z',
+              updatedAt: '2026-09-05T11:00:00Z',
+            },
+            created: true,
+          }),
+        'POST /workflow-deployments/deployments/dep-consumer-1/subscriptions': () =>
+          jsonResponse(201, {
+            subscription: {
+              id: 'sub-consumer-1',
+              organizationId: 'org-consumer',
+              deploymentId: 'dep-consumer-1',
+              kind: 'schedule',
+              schedule: { kind: 'daily', timezone: 'UTC', timeOfDay: '09:00' },
+              eventPattern: null,
+              deliveryPolicy: { missedWindow: 'skip' },
+              enabled: true,
+              cursor: null,
+              createdAt: '2026-09-05T11:00:00Z',
+              updatedAt: '2026-09-05T11:00:00Z',
+            },
+            created: true,
+          }),
+        'POST /organizations/org-publisher/workflow-deployments/deployments': () =>
+          jsonResponse(403, { error: 'not-organization-member' }),
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Public invoice digest' })).toBeInTheDocument(),
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Schedule' }));
+    await user.click(screen.getByRole('radio', { name: 'On a schedule' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    // The deployment create landed in the CONSUMER org (at base it posted
+    // to the publisher org and 403'd — the consumer could never schedule
+    // their installed workflow).
+    await waitFor(() => {
+      const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+      expect(
+        calls.some(
+          ([input, init]) =>
+            String(input).includes(
+              '/organizations/org-consumer/workflow-deployments/deployments',
+            ) &&
+            (init?.method ?? 'GET') === 'POST',
+        ),
+      ).toBe(true);
+    });
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.some(
+        ([input, init]) =>
+          String(input).includes(
+            '/organizations/org-publisher/workflow-deployments/deployments',
+          ) &&
+          (init?.method ?? 'GET') === 'POST',
+      ),
+    ).toBe(false);
+  });
+
+  it('a zero-organization caller still sees the public detail honestly (no facts, never an error)', async () => {
+    renderDetail(
+      'wf-pub',
+      consumerRoutes({
+        '/organizations': () => jsonResponse(200, { organizations: [] }),
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Public invoice digest' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/No installs — run it from the library/i)).toBeInTheDocument();
+    expect(screen.getByText(/Not run yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/not deployed yet/i)).toBeInTheDocument();
+  });
+
+  it('own-org regression: the workflow org remains the read target when it IS a caller organization', async () => {
+    // The own-org path (the pre-repair behavior, now through the caller
+    // aggregation): the session user is a member of org-1, the workflow
+    // lives in org-1, and every fact renders exactly as before.
+    renderDetail('wf-1', fullRoutes());
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Weekly invoice digest' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Installed: Version 2 — pinned · Enabled/)).toBeInTheDocument();
+    const activity = screen.getByRole('list', { name: /recent activity/i });
+    expect(within(activity).getAllByRole('listitem').length).toBe(2);
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(calls.some((c) => c.includes('/organizations'))).toBe(true);
   });
 });

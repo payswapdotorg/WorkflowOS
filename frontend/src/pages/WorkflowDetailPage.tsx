@@ -4,6 +4,7 @@ import {
   workflowRepository,
   workflowRuns,
   workflowDeployments,
+  organizations,
   type ProductWorkflow,
   type ProductWorkflowVersion,
   type ProductWorkflowRun,
@@ -133,6 +134,53 @@ function capabilitiesFromContent(content: unknown): string[] {
 
 const DEVICE_PLACEMENTS: ReadonlySet<string> = new Set(['device_local', 'device_preferred']);
 
+/**
+ * REALITY-REPAIR-003 (F-003): the caller-organization facts.
+ *
+ * The org-scoped reads — runs, installations, deployments, and the When
+ * picker's org workflows — resolve against EVERY organization of the
+ * session user (the organizations.listForUser selection the product shell
+ * already consumes; F-T2-001, all-or-error: any failed per-organization
+ * read errors the surface, a partial collection is never presented as a
+ * success), NEVER the workflow's owning organization. A marketplace
+ * consumer's installation / run / deployment facts live in the CONSUMER's
+ * organizations; the publisher's member-only org-scoped reads correctly
+ * 403 a non-member (the F-003 defect had this page reading there and the
+ * 403 killed the entire consumer detail).
+ *
+ * The public reads (the workflow + its versions) stay unchanged.
+ */
+interface CallerOrgFacts {
+  runs: ProductWorkflowRun[];
+  installations: ProductInstallationDetail[];
+  deployments: ProductDeployment[];
+  orgWorkflows: ProductWorkflow[];
+}
+
+async function fetchCallerOrganizationFacts(): Promise<CallerOrgFacts> {
+  const orgs = await organizations.listForUser();
+  if (orgs.length === 0) {
+    return { runs: [], installations: [], deployments: [], orgWorkflows: [] };
+  }
+  const perOrg = await Promise.all(
+    orgs.map(async (org) => {
+      const [runs, installations, deployments, orgWorkflows] = await Promise.all([
+        workflowRuns.listForOrganization(org.id),
+        workflowRepository.listInstallationsForOrganization(org.id),
+        workflowDeployments.listForOrganization(org.id),
+        workflowRepository.listForOrganization(org.id),
+      ]);
+      return { runs, installations, deployments, orgWorkflows };
+    }),
+  );
+  return {
+    runs: perOrg.flatMap((o) => o.runs),
+    installations: perOrg.flatMap((o) => o.installations),
+    deployments: perOrg.flatMap((o) => o.deployments),
+    orgWorkflows: perOrg.flatMap((o) => o.orgWorkflows),
+  };
+}
+
 export default function WorkflowDetailPage() {
   const { workflowId } = useParams<{ workflowId: string }>();
   // T10 F02 (§16 direct links): the Activity entries' "Open the run"
@@ -153,19 +201,23 @@ export default function WorkflowDetailPage() {
     setState({ kind: 'loading' });
     (async () => {
       try {
+        // The PUBLIC reads (unchanged): the workflow and its versions.
         const workflow = await workflowRepository.get(workflowId);
-        // The org-scoped reads (the F-T2-001 all-orgs lesson applies to the
-        // workflow's OWN organization: the authoritative orgId from the
-        // workflow read scopes every follow-up read). The org workflow
-        // list is the T8 name source for the "After another workflow"
-        // When language (and the editor's picker).
-        const [versions, runs, installations, deployments, orgWorkflows] = await Promise.all([
+        // Fail closed: an authoritative read that yields no usable
+        // workflow record is the honest error surface — never a
+        // fabricated detail and never an undefined record flowing into
+        // the render.
+        if (!workflow) throw new Error('The workflow read returned no record.');
+        // REALITY-REPAIR-003 (F-003): the org-scoped reads resolve against
+        // the CALLER's organizations (the product-shell selection) — never
+        // the workflow's owning organization. The consumer's
+        // installation/run/deployment facts live in their organizations;
+        // the publisher's member-only reads 403 a non-member.
+        const [versions, callerFacts] = await Promise.all([
           workflowRepository.listVersionsForWorkflow(workflowId),
-          workflowRuns.listForOrganization(workflow.organizationId),
-          workflowRepository.listInstallationsForOrganization(workflow.organizationId),
-          workflowDeployments.listForOrganization(workflow.organizationId),
-          workflowRepository.listForOrganization(workflow.organizationId),
+          fetchCallerOrganizationFacts(),
         ]);
+        const { runs, installations, deployments, orgWorkflows } = callerFacts;
         const subscriptions = (
           await Promise.all(
             deployments.map((d) =>
@@ -234,6 +286,19 @@ export default function WorkflowDetailPage() {
   }
 
   const { workflow, versions, runs, installation, deployments, subscriptions, orgWorkflows } = state;
+  /**
+   * REALITY-REPAIR-003 (F-003): the organization the org-scoped commands
+   * on this page operate in — the INSTALLATION's organization (the
+   * authoritative org of the pinned target: the backend run command
+   * validates the installation's organization against the request org, so
+   * the consumer's run lands in THEIR org where their installation
+   * lives). Without an installation the workflow's own organization is
+   * the owner/member path (unchanged). Run/Recovery resolve the same rule
+   * from their own props; the When editor receives it here.
+   */
+  const commandOrganizationId = installation
+    ? installation.installation.organizationId
+    : workflow.organizationId;
   const headVersion = versions.find((v) => v.id === workflow.headVersionId) ?? null;
   const steps = headVersion ? stepsFromContent(headVersion.content) : null;
   const capabilities = headVersion ? capabilitiesFromContent(headVersion.content) : [];
@@ -406,6 +471,7 @@ export default function WorkflowDetailPage() {
           deployments={deployments}
           subscriptions={subscriptions}
           orgWorkflows={orgWorkflows}
+          commandOrganizationId={commandOrganizationId}
           onChanged={refetch}
         />
 

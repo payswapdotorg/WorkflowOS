@@ -289,6 +289,12 @@ const PAUSED_AT_SEND = history([
 /** The full route set (overrides win). */
 function fullRoutes(overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
+    // REALITY-REPAIR-003 (F-003): the caller's organizations (the
+    // product-shell selection the detail page composes).
+    '/organizations': () =>
+      jsonResponse(200, {
+        organizations: [{ id: 'org-1', name: 'Bay Logistics', roleId: 'owner' }],
+      }),
     '/workflow-repository/workflows/wf-1/versions': () => jsonResponse(200, { versions: VERSIONS }),
     '/organizations/org-1/workflow-runs/runs': () => jsonResponse(200, { runs: [] }),
     '/workflow-repository/installations': () => jsonResponse(200, { installations: INSTALLATIONS }),
