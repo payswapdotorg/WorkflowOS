@@ -360,11 +360,15 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
         within(update).getByText(/task-for-task equivalent - verified/i),
       ).toBeInTheDocument(),
     );
-    // The modeled rubric deltas render as ESTIMATES (never measurements).
-    expect(within(update).getByText(/speed score 7 to 5/i)).toBeInTheDocument();
-    expect(within(update).getByText(/cost score 6 to 3/i)).toBeInTheDocument();
-    expect(within(update).getByText(/reliability score 0\.29 to 0\.16/i)).toBeInTheDocument();
-    expect(within(update).getByText(/maintenance score 6 to 5/i)).toBeInTheDocument();
+    // The modeled rubric deltas render as ESTIMATES (never measurements) —
+    // the frozen §20 wording pins the per-criterion "estimated score"
+    // phrasing (versions-language.ts scoreLine); the T15 correction aligns
+    // these regexes to that pinned language (they previously omitted the
+    // honest "estimated" qualifier and failed against the real output).
+    expect(within(update).getByText(/speed estimated score 7 to 5/i)).toBeInTheDocument();
+    expect(within(update).getByText(/cost estimated score 6 to 3/i)).toBeInTheDocument();
+    expect(within(update).getByText(/reliability estimated score 0\.29 to 0\.16/i)).toBeInTheDocument();
+    expect(within(update).getByText(/maintenance estimated score 6 to 5/i)).toBeInTheDocument();
     expect(within(update).getByText(/estimates, not measurements/i)).toBeInTheDocument();
     expect(within(update).getByRole('button', { name: /approve update/i })).toBeInTheDocument();
   });
@@ -380,7 +384,7 @@ describe('V2-017 T11 — the update banner + explicit adoption (§19)', () => {
     const update = await screen.findByRole('region', { name: 'Update available' });
     await user.click(within(update).getByRole('button', { name: /review update/i }));
     await waitFor(() =>
-      expect(within(update).getByText(/reliability score 0\.18 to 0\.19/i)).toBeInTheDocument(),
+      expect(within(update).getByText(/reliability estimated score 0\.18 to 0\.19/i)).toBeInTheDocument(),
     );
   });
 
@@ -528,7 +532,7 @@ describe('V2-017 T11 — improvements as NEW versions (§20)', () => {
     );
     expect(within(improvements).getByText(/task-for-task equivalent - verified/i)).toBeInTheDocument();
     // The trade-offs (estimates).
-    expect(within(improvements).getByText(/speed score 7 to 5/i)).toBeInTheDocument();
+    expect(within(improvements).getByText(/speed estimated score 7 to 5/i)).toBeInTheDocument();
     expect(within(improvements).getByText(/estimates, not measurements/i)).toBeInTheDocument();
     // The approval gate: status Proposed + the Approve action.
     expect(within(improvements).getByText(/proposed/i)).toBeInTheDocument();

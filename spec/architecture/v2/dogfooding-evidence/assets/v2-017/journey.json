@@ -1,0 +1,236 @@
+{
+  "run": "V2-017 T15 real product dogfooding",
+  "startedAt": "2026-09-06T03:48:54.908Z",
+  "finishedAt": "2026-09-06T03:49:07.806Z",
+  "durationMs": 12898,
+  "exitCode": 0,
+  "transcript": [
+    {
+      "at": "2026-09-06T03:48:54.909Z",
+      "label": "V2-017 T15 product dogfooding run starting at 2026-09-06T03:48:54.908Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T03:48:54.909Z",
+      "label": "artifacts dir: /home/z/workflowos/spec/architecture/v2/dogfooding-evidence/assets/v2-017",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T03:48:58.630Z",
+      "label": "REAL backend topology up: Fastify :3001 (identity + V2-002 repository + V2-005 runs + deployments + teaching + optimization)",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T03:48:59.195Z",
+      "label": "ACTUAL product frontend up: Vite dev server http://localhost:5199",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T03:49:01.535Z",
+      "label": "LEG1 goto the product",
+      "status": "PASS",
+      "ms": 2140
+    },
+    {
+      "at": "2026-09-06T03:49:01.819Z",
+      "label": "LEG1 real signup through the product UI",
+      "status": "PASS",
+      "ms": 285
+    },
+    {
+      "at": "2026-09-06T03:49:02.285Z",
+      "label": "LEG1 the universal Create entry in Tell mode (goal pre-filled)",
+      "status": "PASS",
+      "ms": 374
+    },
+    {
+      "at": "2026-09-06T03:49:02.346Z",
+      "label": "LEG1 the understanding preview: the captured goal echoed VERBATIM + correction fields",
+      "status": "PASS",
+      "ms": 61
+    },
+    {
+      "at": "2026-09-06T03:49:02.364Z",
+      "label": "LEG1 F-T5-001 the honest fail-closed durable boundary (NO fabricated WorkflowIR commit)",
+      "status": "PASS",
+      "ms": 18
+    },
+    {
+      "at": "2026-09-06T03:49:02.451Z",
+      "label": "LEG2 create the organization through the REAL route",
+      "status": "PASS",
+      "ms": 23
+    },
+    {
+      "at": "2026-09-06T03:49:02.470Z",
+      "label": "LEG2 author the digest workflow through the REAL V2-002 route (v1 immutable)",
+      "status": "PASS",
+      "ms": 19
+    },
+    {
+      "at": "2026-09-06T03:49:02.484Z",
+      "label": "LEG2 install v1 (the immutable pin) through the REAL V2-002 installation route",
+      "status": "PASS",
+      "ms": 14
+    },
+    {
+      "at": "2026-09-06T03:49:02.497Z",
+      "label": "LEG2 author the practice workflow through the REAL V2-002 route (for the teaching leg)",
+      "status": "PASS",
+      "ms": 13
+    },
+    {
+      "at": "2026-09-06T03:49:02.973Z",
+      "label": "LEG2 the product Workflows library lists both workflows",
+      "status": "PASS",
+      "ms": 476
+    },
+    {
+      "at": "2026-09-06T03:49:03.489Z",
+      "label": "LEG2 the workflow detail page: purpose + presentation-layer steps + version + access/safety + primary actions",
+      "status": "PASS",
+      "ms": 516
+    },
+    {
+      "at": "2026-09-06T03:49:03.612Z",
+      "label": "LEG3 Run opens the consequential-action preview (presentation steps, approval, access, honest not-set-up)",
+      "status": "PASS",
+      "ms": 71
+    },
+    {
+      "at": "2026-09-06T03:49:03.805Z",
+      "label": "LEG3 Run sends the REAL V2-005 commands (request → start) → Running",
+      "status": "PASS",
+      "ms": 193
+    },
+    {
+      "at": "2026-09-06T03:49:03.837Z",
+      "label": "LEG3 the executor pauses AT the approval step (the REAL pause command with atStepId)",
+      "status": "PASS",
+      "ms": 32
+    },
+    {
+      "at": "2026-09-06T03:49:04.477Z",
+      "label": "LEG3 reload → the history-derived \"Waiting for you\" (the internal paused state stays in Advanced details)",
+      "status": "PASS",
+      "ms": 640
+    },
+    {
+      "at": "2026-09-06T03:49:04.637Z",
+      "label": "LEG3 the executor records REAL evidence + a REAL V2-014 attestation, then completes (the REAL lifecycle commands)",
+      "status": "PASS",
+      "ms": 99
+    },
+    {
+      "at": "2026-09-06T03:49:05.178Z",
+      "label": "LEG3 reload → Completed + the \"How do you know?\" trust disclosure (concise evidence first, advanced verification on demand)",
+      "status": "PASS",
+      "ms": 541
+    },
+    {
+      "at": "2026-09-06T03:49:05.788Z",
+      "label": "LEG4 Teach Me: the lesson entry beside Run, bound to the immutable version",
+      "status": "PASS",
+      "ms": 545
+    },
+    {
+      "at": "2026-09-06T03:49:06.136Z",
+      "label": "LEG4 the lesson: checkpoints → pause → resume → all steps confirmed",
+      "status": "PASS",
+      "ms": 348
+    },
+    {
+      "at": "2026-09-06T03:49:06.370Z",
+      "label": "LEG4 practice (the authority's own question) + assessment → Lesson complete (terminal)",
+      "status": "PASS",
+      "ms": 234
+    },
+    {
+      "at": "2026-09-06T03:49:06.378Z",
+      "label": "LEG4 the teaching evidence surface stays VISIBLY DISTINCT from execution evidence",
+      "status": "PASS",
+      "ms": 8
+    },
+    {
+      "at": "2026-09-06T03:49:06.471Z",
+      "label": "LEG5 v2 authored through the REAL V2-002 route (an explicit NEW immutable version)",
+      "status": "PASS",
+      "ms": 14
+    },
+    {
+      "at": "2026-09-06T03:49:06.963Z",
+      "label": "LEG5 the update banner: an update is available, the verbatim installed pin, \"Nothing changes until you approve the update.\"",
+      "status": "PASS",
+      "ms": 492
+    },
+    {
+      "at": "2026-09-06T03:49:07.009Z",
+      "label": "LEG5 Review update → What changed (the V2-011 comparison over the transport route, honest modeled estimates)",
+      "status": "PASS",
+      "ms": 46
+    },
+    {
+      "at": "2026-09-06T03:49:07.256Z",
+      "label": "LEG5 Approve update = the EXISTING V2-002 commands → the new pin (v2, Enabled), the honest newest state",
+      "status": "PASS",
+      "ms": 182
+    },
+    {
+      "at": "2026-09-06T03:49:07.750Z",
+      "label": "LEG6 the Activity timeline: the run entries + the workflow links",
+      "status": "PASS",
+      "ms": 427
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/01-home.png",
+      "sha256": "0ef26e30c07caa28d6c34853258c9dce67b7f7674dbcd9dcc585ccc8de846ef1",
+      "bytes": 83888
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/02-creation-honest-boundary.png",
+      "sha256": "e75e13185ec90197d1f8b00bb3cd7f72292d2e514b9b075753857d078a62b552",
+      "bytes": 99664
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/03-workflow-detail.png",
+      "sha256": "d19508fbcc967c886c98f6d7f1739f97dd40a7cafea4d25de0f1649f874dc4d2",
+      "bytes": 72559
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/04-run-waiting-for-you.png",
+      "sha256": "61d7feee505cc09b97845ba086556775f0fee668d08ba8303c38a6419668c33d",
+      "bytes": 72517
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/05-run-completed-trust.png",
+      "sha256": "4191b1faffe44beabc43905293ce6ee3a34b088f862f5966cf0611ab9350f6c0",
+      "bytes": 93905
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/06-teach-me-lesson-complete.png",
+      "sha256": "34547f7384fc7fa2bc4d3fb2a636cbafc63b954176fb438ba1cb88a59aa6461e",
+      "bytes": 78423
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/07-update-what-changed.png",
+      "sha256": "511ab1a972d9564285469328a7d150887000880da7a83b4a83c40d354941e49a",
+      "bytes": 77466
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/08-update-adopted.png",
+      "sha256": "c8e31ef02cbb3bd22d489f6515a821178a7b2702254a86028864e5de6cce5d21",
+      "bytes": 77314
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/v2-017/09-activity-timeline.png",
+      "sha256": "bef190bd3df18bec593de543fd3ba68850a933b186f1217516dfb85b492d8812",
+      "bytes": 66798
+    }
+  ]
+}
