@@ -6,7 +6,7 @@
   "executionManifest": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md",
   "agentInstructions": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-AGENT-INSTRUCTIONS.md",
   "activeWave": "PRE-DEPLOY-REALITY-REPAIR",
-  "updatedAt": "2026-09-06T12:23:00Z",
+  "updatedAt": "2026-09-06T12:24:00Z",
   "scheduler": {
     "maxConcurrentSpecialists": 3,
     "mergeAuthority": "ARCHITECT_ONLY",
@@ -39,7 +39,7 @@
   },
   "workOrders": {
     "REALITY-REPAIR-001": {"status":"COMPLETE","dependencies":[],"mergedAs":{"pr":18,"mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
-    "REALITY-REPAIR-002": {"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-001"],"dispatch":{"issue":19,"baseSha":"de7edb9896003aad92b160e2e786eeac6c14197d"}},
+    "REALITY-REPAIR-002": {"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-001"],"dispatch":{"issue":19,"basePolicy":"current-main-at-worker-start"}},
     "REALITY-REPAIR-003": {"status":"PLANNED","dependencies":["REALITY-REPAIR-002"]},
     "REALITY-REPAIR-004": {"status":"PLANNED","dependencies":["REALITY-REPAIR-003"]},
     "REALITY-REPAIR-005": {"status":"PLANNED","dependencies":["REALITY-REPAIR-003"]},
@@ -67,7 +67,7 @@
   "mergeHistory": [{"workOrder":"REALITY-REPAIR-001","pr":18,"head":"e7d172f08f71daa546db6c59dd9c04cb1c5e2c2f","mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076","mainAfterMerge":"915ed1d046be4b01bcb3b53badad2f892963d076","date":"2026-09-06T11:59:48Z"}],
   "lastEvent": {
     "type": "MAIN_ADVANCED_GOVERNANCE_RECONCILED",
-    "summary": "Architect merged the Z.ai GitHub review-trigger governance at de7edb9; REALITY-REPAIR-002 remains the sole eligible frontier and its exact dispatch base is now the current main.",
-    "date": "2026-09-06T12:23:00Z"
+    "summary": "Z.ai GitHub Architect-review emission is governed and REALITY-REPAIR-002 remains the sole eligible frontier; workers resolve the implementation base from live GitHub main at start.",
+    "date": "2026-09-06T12:24:00Z"
   }
 }
