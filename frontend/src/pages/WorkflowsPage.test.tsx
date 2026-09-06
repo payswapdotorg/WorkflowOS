@@ -557,3 +557,116 @@ describe('V2-017 T3 — workflow library', () => {
     });
   });
 });
+
+/**
+ * REALITY-REPAIR-002 — the fresh-user library (F-002 regression on the
+ * org-scoped read surface).
+ *
+ * Governing Work Order: spec/architecture/v2/work-orders/REALITY-REPAIR-002.md
+ * (parent gate V2-REALITY-AUDIT-001, Architect disposition F-002 ACCEPT).
+ *
+ * The F-002 blind spot this pins: a fresh user who just onboarded and
+ * INSTALLED a workflow into their created organization opens the library —
+ * the org has ZERO AUTHORED workflows, so the page-level
+ * `noWorkflowsAnywhere` gate rendered the generic "No workflows yet" copy on
+ * EVERY section, silently hiding the real installation behind the copy that
+ * literally says "the ones you create or install will appear here." The
+ * org-scoped product action's result was invisible — the same silent-no-op
+ * class the audit recorded, now on the library surface.
+ *
+ * The repair: the Installed section renders from the INSTALLATION read (its
+ * own org-scoped authority), independent of the authored-workflows read; the
+ * generic empty copy no longer swallows real installations.
+ */
+describe('REALITY-REPAIR-002 — the fresh-user library shows the installation (F-002)', () => {
+  beforeEach(() => {
+    auth.handleUnauthorized();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** The fresh-user read set: one org, ZERO authored workflows, one
+   *  installation of an EXTERNAL workflow (the publisher's — not in the
+   *  org-scoped workflow read, exactly the marketplace install case). */
+  function freshUserRoutes(): Record<string, RouteHandler> {
+    return {
+      '/auth/session': session,
+      '/organizations': () =>
+        jsonResponse(200, {
+          organizations: [{ id: 'org-fresh', name: 'Fresh Co', roleId: 'owner' }],
+        }),
+      '/organizations/org-fresh/workflow-repository/workflows': () =>
+        jsonResponse(200, { workflows: [] }),
+      '/organizations/org-fresh/workflow-runs/runs': () =>
+        jsonResponse(200, { runs: [] }),
+      '/organizations/org-fresh/workflow-repository/installations': () =>
+        jsonResponse(200, {
+          installations: [
+            {
+              installation: {
+                id: 'inst-fresh-1',
+                organizationId: 'org-fresh',
+                workflowId: 'wf-external',
+                versionId: 'ver-external-1',
+                installedByUserId: 'user-1',
+                status: 'enabled',
+                installedAt: '2026-09-06T09:00:00Z',
+                updatedAt: '2026-09-06T09:00:00Z',
+              },
+              pinnedVersion: {
+                id: 'ver-external-1',
+                workflowId: 'wf-external',
+                versionNumber: 1,
+                contentDigest: 'sha256:ext',
+                protocol: { name: 'workflowos.workflow.ir', version: 1 },
+              },
+            },
+          ],
+        }),
+      '/organizations/org-fresh/workflow-deployments/deployments': emptyDeployments,
+    };
+  }
+
+  it('the Installed tab lists the real installation — never the generic empty copy that hides it', async () => {
+    await renderLibrary(freshUserRoutes());
+    const installed = await openTab('Installed');
+    const item = await within(installed).findByRole('listitem');
+    // The pinned version fact from the authoritative installation read.
+    expect(within(item).getByText(/Version 1/i)).toBeInTheDocument();
+    expect(within(item).getByText(/pinned/i)).toBeInTheDocument();
+    expect(within(item).getByText('Enabled')).toBeInTheDocument();
+    // The external workflow's name is NOT in the org-scoped read — the honest
+    // fallback renders, never a fabricated name.
+    expect(within(item).getByText('Installed workflow')).toBeInTheDocument();
+    expect(within(installed).queryByText(/No workflows yet/i)).not.toBeInTheDocument();
+    expect(
+      within(installed).queryByText(/Nothing installed yet/i),
+    ).not.toBeInTheDocument();
+    // The card opens the pinned workflow's detail (the product route).
+    expect(within(item).getByRole('link', { name: 'Open' })).toHaveAttribute(
+      'href',
+      '/workflows/wf-external',
+    );
+  });
+
+  it('My Workflows keeps its honest empty copy for the fresh user (no unrelated UX change)', async () => {
+    await renderLibrary(freshUserRoutes());
+    await waitFor(() =>
+      expect(screen.getByRole('tabpanel')).toHaveTextContent(/No workflows yet/i),
+    );
+  });
+
+  it('an EMPTY Installed tab (no installations) keeps the honest per-section copy', async () => {
+    const routes = freshUserRoutes();
+    routes['/organizations/org-fresh/workflow-repository/installations'] = () =>
+      jsonResponse(200, { installations: [] });
+    await renderLibrary(routes);
+    const installed = await openTab('Installed');
+    await waitFor(() =>
+      expect(within(installed).getByText(/Nothing installed yet/i)).toBeInTheDocument(),
+    );
+  });
+});

@@ -7,6 +7,7 @@ import {
   type ProductWorkflow,
   type ProductWorkflowRun,
 } from '../api/client';
+import OrganizationOnboarding from '../components/onboarding/OrganizationOnboarding';
 
 /**
  * HomePage — the workflow-first Home (V2-017 Task 2).
@@ -32,6 +33,15 @@ import {
  * Home scope is the full organization collection, so dropping any of them
  * would silently discard authoritative records). The frontend owns no
  * workflow/run/approval state of its own.
+ *
+ * REALITY-REPAIR-002 (F-002): a fresh signup with ZERO organizations lands
+ * here FIRST, so this is where the first-run organization onboarding lives.
+ * When the organizations read succeeds and is empty, the explicit onboarding
+ * card renders above the attention surfaces — creation consumes ONLY the
+ * existing POST /organizations authority (the user becomes the owner), and
+ * on success every surface refetches so the org-scoped reads target the
+ * created organization. A failed organizations read stays an honest error
+ * (the surfaces' own error states) — never a fake onboarding-empty.
  */
 
 type ReadState<T> =
@@ -196,7 +206,20 @@ export default function HomePage() {
   const navigate = useNavigate();
   const workflows = useHomeRead(fetchRecentWorkflows);
   const attention = useHomeRead(fetchAttentionRuns);
+  // REALITY-REPAIR-002: the organization-collection read that owns the
+  // zero-org onboarding condition (loading/error/empty/data, same honesty
+  // contract as the other surfaces).
+  const orgs = useHomeRead(organizations.listForUser);
   const [goal, setGoal] = useState('');
+
+  const onOrganizationCreated = useCallback(() => {
+    // The authoritative record exists now (POST /organizations responded
+    // 201): re-read the collection AND both attention surfaces so every
+    // org-scoped aggregation targets the created organization.
+    orgs.refetch();
+    workflows.refetch();
+    attention.refetch();
+  }, [orgs, workflows, attention]);
 
   const recentWorkflows =
     workflows.state.kind === 'data'
@@ -267,6 +290,14 @@ export default function HomePage() {
           ))}
         </div>
       </section>
+
+      {/* REALITY-REPAIR-002 (F-002): the explicit first-run onboarding — ONLY
+          when the organizations read succeeded and the fresh user has zero
+          organizations. Creation consumes the existing POST /organizations
+          authority; afterwards every surface re-reads for the created org. */}
+      {orgs.state.kind === 'empty' && (
+        <OrganizationOnboarding onCreated={onOrganizationCreated} />
+      )}
 
       {/* The attention surfaces. */}
       <section className="grid gap-4 md:grid-cols-2" aria-label="Home attention surfaces">

@@ -555,3 +555,158 @@ describe('the organization context (entitlement is per organization)', () => {
     });
   });
 });
+
+/**
+ * REALITY-REPAIR-002 — the zero-organization caller on the marketplace path
+ * (F-002 regression: the purchase/install no-op).
+ *
+ * Governing Work Order: spec/architecture/v2/work-orders/REALITY-REPAIR-002.md
+ * (parent gate V2-REALITY-AUDIT-001, Architect disposition F-002 ACCEPT).
+ *
+ * F-002 at base on this surface: a fresh signup with zero organizations opens
+ * a listing and the "Your access" section silently dead-ends — the access
+ * decision never resolves for an organization (it is per-organization), the
+ * offer/install/fork actions early-return without feedback, and the fork
+ * panel's only signal is the dead sentence "Your organization is needed to
+ * create the copy." There is NO path to establish the organization.
+ *
+ * The repair: when the organizations read succeeds and is empty, the section
+ * renders the actionable organization onboarding (the EXISTING
+ * POST /organizations authority); the created organization immediately
+ * becomes the selection, so the access decision runs for it and the
+ * offer/accept + install flows are reachable — the marketplace path no
+ * longer silently no-ops.
+ */
+describe('REALITY-REPAIR-002 — zero-organization callers get the actionable onboarding (F-002)', () => {
+  const NO_ORGS = () => jsonResponse(200, { organizations: [] });
+
+  function renderZeroOrgListing(routes: Record<string, RouteHandler> = {}) {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        '/marketplace/listings/lst-1': LISTING_DETAIL,
+        '/organizations': NO_ORGS,
+        ...routes,
+      }),
+    );
+    return render(
+      <MemoryRouter initialEntries={['/explore/lst-1']}>
+        <Routes>
+          <Route path="/explore/:listingId" element={<MarketplaceListingDetail />} />
+          <Route path="/explore" element={<div>Explore</div>} />
+          <Route path="/workflows/:workflowId" element={<div>Workflow detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('replaces the silent dead end with the actionable onboarding — never a perpetual "Checking your access…"', async () => {
+    renderZeroOrgListing();
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: 'Weekly social media report' }),
+      ).toBeVisible();
+    });
+    const access = await screen.findByRole('region', { name: 'Your access' });
+    const onboarding = within(access).getByRole('region', {
+      name: 'Organization onboarding',
+    });
+    expect(onboarding).toBeVisible();
+    expect(within(onboarding).getByLabelText(/organization name/i)).toBeVisible();
+    // The create entry renders immediately (disabled until a name exists —
+    // the no-spurious-round-trips guard).
+    expect(
+      within(onboarding).getByRole('button', { name: /create organization/i }),
+    ).toBeVisible();
+    // The F-002 base defect: the per-org access decision can never resolve,
+    // so the section must NOT sit in a perpetual checking state.
+    expect(within(access).queryByText(/Checking your access/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your organization is needed to create the copy/i)).not.toBeInTheDocument();
+  });
+
+  it('establishes the selection after onboarding — the access decision runs for the CREATED organization and install is reachable', async () => {
+    let created = false;
+    const orgsHandler = () =>
+      jsonResponse(
+        200,
+        created
+          ? { organizations: [{ id: 'org-fresh', name: 'Fresh Buyer Co', roleId: 'owner' }] }
+          : { organizations: [] },
+      );
+    const urlsSeen: string[] = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input).replace(/^https?:\/\/[^/]+/, '');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        urlsSeen.push(`${method} ${url}`);
+        if (url === '/api/organizations' && method === 'GET') {
+          return Promise.resolve(orgsHandler());
+        }
+        if (url === '/api/organizations' && method === 'POST') {
+          created = true;
+          return Promise.resolve(
+            jsonResponse(201, {
+              organization: { id: 'org-fresh', name: 'Fresh Buyer Co' },
+              roleId: 'owner',
+            }),
+          );
+        }
+        if (url.includes('/api/marketplace/listings/lst-1') && method === 'GET' && !url.includes('version-access')) {
+          return Promise.resolve(LISTING_DETAIL());
+        }
+        if (url.includes('/version-access')) {
+          return Promise.resolve(DENIED());
+        }
+        return Promise.resolve(jsonResponse(500, { error: `unmocked ${method} ${url}` }));
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/explore/lst-1']}>
+        <Routes>
+          <Route path="/explore/:listingId" element={<MarketplaceListingDetail />} />
+          <Route path="/explore" element={<div>Explore</div>} />
+          <Route path="/workflows/:workflowId" element={<div>Workflow detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const access = await screen.findByRole('region', { name: 'Your access' });
+    const onboarding = within(access).getByRole('region', {
+      name: 'Organization onboarding',
+    });
+    await userEvent.type(
+      within(onboarding).getByLabelText(/organization name/i),
+      'Fresh Buyer Co',
+    );
+    await userEvent.click(
+      within(onboarding).getByRole('button', { name: /create organization/i }),
+    );
+
+    // The exact existing command: POST /organizations { name }.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/organizations',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Fresh Buyer Co' }),
+      }),
+    );
+    // The created organization becomes the selection: the per-org access
+    // decision runs for org-fresh (the silent no-op is repaired).
+    await waitFor(() => {
+      expect(
+        screen.getByText("Your organization doesn't have access to this version."),
+      ).toBeVisible();
+    });
+    expect(
+      urlsSeen.some((u) => u.includes('/organizations/org-fresh/marketplace/listings/lst-1/version-access')),
+    ).toBe(true);
+    // The onboarding leaves the section once the organization exists.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('region', { name: 'Organization onboarding' }),
+      ).not.toBeInTheDocument();
+    });
+  });
+});

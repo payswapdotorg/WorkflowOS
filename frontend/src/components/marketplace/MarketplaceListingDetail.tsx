@@ -9,6 +9,7 @@ import {
   type ProductListingRevision,
   type ProductVersionAccessDecision,
 } from '../../api/client';
+import OrganizationOnboarding from '../onboarding/OrganizationOnboarding';
 import {
   basisLine,
   denialLine,
@@ -127,6 +128,30 @@ export default function MarketplaceListingDetail() {
       cancelled = true;
     };
   }, []);
+
+  // REALITY-REPAIR-002 (F-002): when the organizations read succeeds and the
+  // caller has ZERO organizations, the actionable onboarding replaces the
+  // silent dead end (the perpetual "Checking your access…" with no
+  // organization for the decision to resolve against). The created
+  // organization — from the authoritative 201 response of the EXISTING
+  // POST /organizations authority — immediately becomes the selection, so
+  // the per-org access decision runs for it and the offer-accept / install /
+  // fork flows become reachable: the marketplace path no longer silently
+  // no-ops for a fresh signup.
+  const onOrganizationCreated = useCallback(
+    (created: { id: string; name: string }) => {
+      setOrgs((current) =>
+        current && current.some((o) => o.id === created.id)
+          ? current
+          : [...(current ?? []), { id: created.id, name: created.name }],
+      );
+      setSelectedOrgId(created.id);
+      setInstallState({ kind: 'idle' });
+      setForkedWorkflowId(null);
+    },
+    [],
+  );
+  const zeroOrgs = orgs !== null && orgs.length === 0;
 
   const revision =
     listingState.kind === 'data' ? listingState.revision : null;
@@ -411,6 +436,14 @@ export default function MarketplaceListingDetail() {
                 Your organizations are unavailable right now.
               </p>
             )}
+            {/* REALITY-REPAIR-002 (F-002): the zero-org actionable state — the
+                fresh-signup onboarding (existing POST /organizations
+                authority) instead of the silent dead end. */}
+            {zeroOrgs && (
+              <div className="mt-3">
+                <OrganizationOnboarding onCreated={onOrganizationCreated} />
+              </div>
+            )}
             {orgs && orgs.length > 1 && (
               <div className="mt-3">
                 <label
@@ -439,7 +472,10 @@ export default function MarketplaceListingDetail() {
             )}
 
             <div className="mt-3">
-              {accessState.kind === 'checking' && (
+              {/* With ZERO organizations the per-org decision can never
+                  resolve — the onboarding above is the actionable state, so
+                  the perpetual "checking" line is suppressed (F-002). */}
+              {accessState.kind === 'checking' && !zeroOrgs && (
                 <p role="status" className="text-sm text-muted-foreground">
                   Checking your access…
                 </p>

@@ -569,7 +569,14 @@ export default function WorkflowsPage() {
         )}
         {DATA_SECTIONS.has(activeSection) && state.kind === 'data' && sectionItems && (
           <>
-            {noWorkflowsAnywhere ? (
+            {/* REALITY-REPAIR-002 (F-002): the generic no-workflows copy must
+                NEVER swallow the Installed section — a fresh user's org has
+                zero AUTHORED workflows while holding real installations (the
+                marketplace install path), and the installation read is its
+                own org-scoped authority. The copy itself says "the ones you
+                create or install will appear here" — hiding an existing
+                install behind it was the silent no-op. */}
+            {noWorkflowsAnywhere && activeSection !== 'installed' ? (
               <p className="text-sm text-muted-foreground">
                 No workflows yet — the ones you create or install will appear here.
               </p>

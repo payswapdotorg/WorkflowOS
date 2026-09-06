@@ -271,6 +271,23 @@ export const organizations = {
     const body = await apiGet<{ organizations: Organization[] }>(`/organizations`);
     return body.organizations ?? [];
   },
+
+  /**
+   * REALITY-REPAIR-002 (F-002): create an organization through the EXISTING
+   * `POST /organizations` authority (authenticated humans; the creator
+   * becomes its `owner` — WORK-074). The 201 response is the authoritative
+   * created record: the caller hands it onward verbatim, never a
+   * client-fabricated organization. No new authority, no new persistence
+   * model, no authorization-semantics change — this is the one command the
+   * first-run onboarding composes.
+   */
+  create: async (
+    name: string,
+  ): Promise<{ organization: Organization; roleId: string }> => {
+    return apiPost<{ organization: Organization; roleId: string }>('/organizations', {
+      name,
+    });
+  },
 };
 
 // --- V2 product reads (consume-only: existing public routes) ---
