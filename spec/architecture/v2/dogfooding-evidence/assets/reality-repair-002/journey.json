@@ -1,0 +1,116 @@
+{
+  "run": "REALITY-REPAIR-002 real-deployment browser smoke",
+  "startedAt": "2026-09-06T13:19:35.001Z",
+  "finishedAt": "2026-09-06T13:19:46.084Z",
+  "durationMs": 11083,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T13:19:35.002Z",
+      "label": "REALITY-REPAIR-002 real-deployment browser smoke starting at 2026-09-06T13:19:35.001Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T13:19:35.003Z",
+      "label": "artifacts dir: /home/z/workflowos/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T13:19:40.878Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 5867
+    },
+    {
+      "at": "2026-09-06T13:19:40.891Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 13
+    },
+    {
+      "at": "2026-09-06T13:19:40.961Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 70
+    },
+    {
+      "at": "2026-09-06T13:19:41.375Z",
+      "label": "seed: publisher register → login → org → public workflow → listing → publish (REAL routes; the fresh user gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 414
+    },
+    {
+      "at": "2026-09-06T13:19:44.172Z",
+      "label": "LEG1 the fresh user signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2366
+    },
+    {
+      "at": "2026-09-06T13:19:44.323Z",
+      "label": "LEG2 Home renders the explicit first-run organization onboarding for the zero-org fresh user (F-002 repaired)",
+      "status": "PASS",
+      "ms": 151
+    },
+    {
+      "at": "2026-09-06T13:19:44.537Z",
+      "label": "LEG3 the organization is created through the real browser UI only (type the name → Create organization)",
+      "status": "PASS",
+      "ms": 89
+    },
+    {
+      "at": "2026-09-06T13:19:44.720Z",
+      "label": "LEG4 GET /organizations resolves the created organization for the browser session (the REAL entry, same cookie)",
+      "status": "PASS",
+      "ms": 11
+    },
+    {
+      "at": "2026-09-06T13:19:45.227Z",
+      "label": "LEG4b the product selection uses the created organization (the per-org access decision resolves — no perpetual checking)",
+      "status": "PASS",
+      "ms": 507
+    },
+    {
+      "at": "2026-09-06T13:19:45.389Z",
+      "label": "LEG5 the EXISTING V2-002 install command installs the exact published version into the created organization",
+      "status": "PASS",
+      "ms": 60
+    },
+    {
+      "at": "2026-09-06T13:19:46.022Z",
+      "label": "LEG6 the Workflows library lists the installed workflow (the org-scoped read across the created — and only — organization)",
+      "status": "PASS",
+      "ms": 524
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002/01-fresh-signup-home-zero-org.png",
+      "sha256": "972f62fc90424a5992e35b944bd223f525d304b10fe54bec69ea28c027c70d01",
+      "bytes": 119543
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002/02-home-after-org-creation.png",
+      "sha256": "3a66d56a3c1d012578f1340ac19053eaf85c4f5bcf10ddcd72d9cf0b9155face",
+      "bytes": 96715
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002/03-listing-detail-created-org.png",
+      "sha256": "8b69dcee35f4da76eb8d3bd02301de89f041c7be0b88ba90089c2be738b8fb86",
+      "bytes": 108922
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002/04-listing-detail-installed.png",
+      "sha256": "3bc931333a662cfd689d890dfa552da5a1c7f5cb0f74f3355397b63d40560f74",
+      "bytes": 115891
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-002/05-workflows-installed.png",
+      "sha256": "e29715f50d904771914977c287903f2e654e24039d1828f4654242318c03069c",
+      "bytes": 50969
+    }
+  ]
+}
