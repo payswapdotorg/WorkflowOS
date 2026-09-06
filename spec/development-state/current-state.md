@@ -16,30 +16,30 @@ This fork is now the active product-development remote. GitHub issue/PR identiti
 
 ## Current task
 
-**T15 — Full verification and real product dogfooding**
+**T16 — Sole Architect gate and finalization**
 
-T10, T11, T12 and T14 are complete by actual Git merge; T12 merged as PR #8 -> `1cc6a95b559a4bbd9acf46e96dd1f1fd45c43ccd`.
-
-T15 is durably dispatched on this remote as **Issue #9**.
+T15 is complete by actual Git merge as PR #10 -> `798afe523ded8d749b3c045e32dd32b14091523b`.
 
 ## Completed tasks
 
-T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13 and T14 are complete by actual Git merge.
+T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14 and T15 are complete by actual Git merge.
 
 ## Eligible frontier
 
-**T15**
+**T16**
 
 ## Blocked items
 
-- T16 — blocked on T15.
+None within V2-017 beyond the T16 gate itself.
 
 ## Worker rule
 
 Before editing, the resident worker must read the governing repository files and re-read live `main`. Any dispatch SHA is only a point-in-time observation.
 
-T15 is one bounded verification/product-dogfooding slice. It must verify the merged T2–T14 product surfaces together, record inherited failures honestly, and leave architecture/implementation authority unchanged. Do not implement T16 inside T15.
+T15 was the bounded verification/product-dogfooding slice and is now merged. It persisted the exact-head verification matrix, 26/26 real-product dogfooding twice on fresh stacks, screenshots/transcript hashes, inherited-failure record, and all 16 acceptance-criteria verdicts.
+
+T16 is a governance/finalization gate only. Do not implement a new product feature or invent a successor work item under V2-017.
 
 ## Next action
 
-Continue T15 from the current live `main` of `payswapdotorg/WorkflowOS`, using **Issue #9** as the durable verification/product-dogfooding dispatch. After T15 reaches an Architect-accepted gate, reconcile canonical state and advance to T16.
+Execute **Issue #11** as the sole Architect gate: verify the exact live main after T15 merge, reconcile T1–T15 with canonical machine/human state and persisted evidence, verify no unmerged T16 implementation exists, preserve the honest CI blocker state, run the repository-defined governance/finalization checks, and finalize V2-017 only when those conditions are satisfied.
