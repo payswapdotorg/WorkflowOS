@@ -653,3 +653,184 @@ describe('V2-017 T11 — improvements as NEW versions (§20)', () => {
     );
   });
 });
+
+// --- REALITY-REPAIR-009 (F-010): the human-readable version diff ------------
+//
+// The audit's VER-2 finding: the "What changed" surface rendered the V2-011
+// comparison payload VERBATIM — `Not equivalent: node collect_posts inputs:
+// [{…}] != [{…}]` — an internal transport shape shown to end users. The
+// repair boundary (Work Order REALITY-REPAIR-009): render the SAME payload
+// as a human-readable node/field summary (names + values), keep the honest
+// non-equivalence statement, change NO comparison semantics (the payload is
+// the input; the frontend re-presents, never re-derives).
+//
+// The fixtures below reproduce the payload's OWN divergence grammar exactly
+// as the comparison authority emits it (backend
+// workflow-optimization/internal/comparison.ts firstTaskSurfaceDivergence):
+// `<surface>: <baseline JSON> != <candidate JSON>` — the raw internal JSON
+// envelope that must never reach the rendered DOM.
+
+const NODE_INPUTS_DIVERGENCE =
+  'node fetch inputs: [{"name":"repository","type":{"kind":"string"},"binding":{"kind":"literal","value":"payswapdotorg/WorkflowOS"}}] != [{"name":"repository","type":{"kind":"string"},"binding":{"kind":"literal","value":"pectoraux/WorkflowOS"}},{"name":"limit","type":{"kind":"number"},"binding":{"kind":"literal","value":10}}]';
+
+const WORKFLOW_INPUTS_DIVERGENCE =
+  'workflow inputs: [{"name":"topic","type":{"kind":"string"}}] != [{"name":"topic","type":{"kind":"string"}},{"name":"depth","type":{"kind":"number"}}]';
+
+describe('REALITY-REPAIR-009 (F-010) — the human-readable version diff', () => {
+  it('a non-equivalent comparison renders the node/field summary — the step NAME, the field, readable values, the honest verdict; NEVER the raw internal JSON envelope', async () => {
+    const { user } = renderVersions({
+      routes: defaultRoutes({
+        'POST /workflow-optimization/compare': () =>
+          jsonResponse(200, {
+            comparison: {
+              ...COMPARISON,
+              correctness: { equivalent: false, firstDivergence: NODE_INPUTS_DIVERGENCE },
+            },
+          }),
+      }),
+    });
+    const update = await screen.findByRole('region', { name: 'Update available' });
+    await user.click(within(update).getByRole('button', { name: /review update/i }));
+
+    // The honest verdict first: the authority's own non-equivalence result,
+    // stated explicitly (never buried, never softened).
+    await waitFor(() => expect(within(update).getByText('Not equivalent')).toBeInTheDocument());
+
+    // The node/field NAMES: the divergent step renders through its
+    // presentation label (never the raw node id — F-T4-001) and the
+    // divergent field renders as consumer words.
+    const headline = within(update).getByText(/where the versions differ/i);
+    expect(headline).toHaveTextContent('the step "Collect the open tickets" — its inputs');
+
+    // The two values, readable: names and values, side by side — not JSON.
+    expect(within(update).getByText(/^installed version:/i)).toHaveTextContent(
+      'name: repository, type (kind: string), binding (kind: literal, value: payswapdotorg/WorkflowOS)',
+    );
+    expect(within(update).getByText(/^new version:/i)).toHaveTextContent(
+      'name: repository, type (kind: string), binding (kind: literal, value: pectoraux/WorkflowOS)',
+    );
+    expect(within(update).getByText(/^new version:/i)).toHaveTextContent('name: limit');
+
+    // NO raw internal JSON envelope anywhere in the surface: no `!=` blob,
+    // no JSON.stringify'd payload, no raw node-id+field transport head.
+    const text = update.textContent ?? '';
+    expect(text).not.toContain('!=');
+    expect(text).not.toContain('node fetch inputs:');
+    expect(text).not.toContain('"kind"');
+    expect(text).not.toContain('"literal"');
+    // The internal node id never renders (the presentation label is the name).
+    expect(text).not.toMatch(/\bfetch\b/);
+
+    // Correctness first, then the estimates — and the explicit adoption
+    // gate still hangs off the comparison (no semantics change).
+    expect(within(update).getByText(/estimates, not measurements/i)).toBeInTheDocument();
+    expect(within(update).getByRole('button', { name: /approve update/i })).toBeInTheDocument();
+  });
+
+  it('a workflow-level divergence renders its surface and its values readably (the same payload, still no raw envelope)', async () => {
+    const { user } = renderVersions({
+      routes: defaultRoutes({
+        'POST /workflow-optimization/compare': () =>
+          jsonResponse(200, {
+            comparison: {
+              ...COMPARISON,
+              correctness: { equivalent: false, firstDivergence: WORKFLOW_INPUTS_DIVERGENCE },
+            },
+          }),
+      }),
+    });
+    const update = await screen.findByRole('region', { name: 'Update available' });
+    await user.click(within(update).getByRole('button', { name: /review update/i }));
+    await waitFor(() => expect(within(update).getByText('Not equivalent')).toBeInTheDocument());
+    expect(within(update).getByText(/where the versions differ/i)).toHaveTextContent(
+      "the workflow's inputs",
+    );
+    expect(within(update).getByText(/^installed version:/i)).toHaveTextContent('name: topic');
+    expect(within(update).getByText(/^new version:/i)).toHaveTextContent('name: depth');
+    const text = update.textContent ?? '';
+    expect(text).not.toContain('!=');
+    expect(text).not.toContain('"kind"');
+  });
+
+  it('the improvement proposal card renders the same human-readable diff for its non-equivalent comparison — never the raw envelope', async () => {
+    const { user } = renderVersions({
+      routes: defaultRoutes({
+        'POST /workflow-optimization/proposals': () =>
+          jsonResponse(201, {
+            proposal: proposal({
+              comparison: {
+                ...COMPARISON,
+                correctness: { equivalent: false, firstDivergence: NODE_INPUTS_DIVERGENCE },
+              },
+            }),
+          }),
+      }),
+    });
+    const improvements = await screen.findByRole('region', { name: 'Improvements' });
+    await waitFor(() =>
+      expect(within(improvements).getByText(/workflowos found 1 improvement/i)).toBeInTheDocument(),
+    );
+    await user.click(within(improvements).getByRole('button', { name: /review/i }));
+    await waitFor(() => expect(within(improvements).getByText('Not equivalent')).toBeInTheDocument());
+    expect(within(improvements).getByText(/where the versions differ/i)).toHaveTextContent(
+      'the step "Collect the open tickets" — its inputs',
+    );
+    expect(within(improvements).getByText(/^current version:/i)).toHaveTextContent(
+      'payswapdotorg/WorkflowOS',
+    );
+    expect(within(improvements).getByText(/^proposed version:/i)).toHaveTextContent(
+      'pectoraux/WorkflowOS',
+    );
+    const text = improvements.textContent ?? '';
+    expect(text).not.toContain('!=');
+    expect(text).not.toContain('"kind"');
+    // The §20 gate is unchanged: the estimates + the owner approval action.
+    expect(within(improvements).getByText(/estimates, not measurements/i)).toBeInTheDocument();
+    expect(
+      within(improvements).getByRole('button', { name: /approve improvement/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('a divergence the payload grammar does not describe degrades honestly — no raw envelope, no fabricated equivalence', async () => {
+    const { user } = renderVersions({
+      routes: defaultRoutes({
+        'POST /workflow-optimization/compare': () =>
+          jsonResponse(200, {
+            comparison: {
+              ...COMPARISON,
+              correctness: {
+                equivalent: false,
+                firstDivergence: 'future-shape: {"opaque":true} != {"opaque":false}',
+              },
+            },
+          }),
+      }),
+    });
+    const update = await screen.findByRole('region', { name: 'Update available' });
+    await user.click(within(update).getByRole('button', { name: /review update/i }));
+    // The verdict stays the authority's own; the undescribed detail renders
+    // the honest unavailable state — never the raw internals, never an
+    // invented equivalence.
+    await waitFor(() => expect(within(update).getByText('Not equivalent')).toBeInTheDocument());
+    expect(
+      within(update).getByText(/isn't available in a readable form right now/i),
+    ).toBeInTheDocument();
+    const text = update.textContent ?? '';
+    expect(text).not.toContain('!=');
+    expect(text).not.toContain('future-shape');
+    expect(text).not.toContain('"opaque"');
+  });
+
+  it('REGRESSION (semantics preserved): equivalence stays equivalence — the verified verdict, no divergence block, no raw payload', async () => {
+    const { user } = renderVersions({ routes: defaultRoutes() });
+    const update = await screen.findByRole('region', { name: 'Update available' });
+    await user.click(within(update).getByRole('button', { name: /review update/i }));
+    await waitFor(() =>
+      expect(within(update).getByText(/task-for-task equivalent - verified/i)).toBeInTheDocument(),
+    );
+    expect(within(update).queryByText(/where the versions differ/i)).not.toBeInTheDocument();
+    expect(within(update).queryByText('Not equivalent')).not.toBeInTheDocument();
+    const text = update.textContent ?? '';
+    expect(text).not.toContain('!=');
+  });
+});

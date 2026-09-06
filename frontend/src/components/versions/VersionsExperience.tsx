@@ -18,7 +18,9 @@
  *     "trust feature");
  *   - "What changed" comes ONLY from the V2-011 comparison (correctness
  *     first; the modeled rubric deltas render as ESTIMATES — a worse
- *     score renders verbatim);
+ *     score renders verbatim). REALITY-REPAIR-009 (F-010): the payload's
+ *     own divergence re-presents as a human-readable node/field summary
+ *     (names + values) — never the raw internal JSON envelope;
  *   - improvements are recommendations that become NEW versions only
  *     through the owner's explicit approval + materialization — never a
  *     silent mutation of the installed version;
@@ -48,6 +50,8 @@ import {
   tradeOffLines,
   ESTIMATES_NOTE,
   proposalStatusWord,
+  versionDiffSummary,
+  type VersionDiffSummary,
 } from './versions-language';
 
 interface VersionsExperienceProps {
@@ -376,7 +380,7 @@ export default function VersionsExperience({
                 {adoptError}
               </p>
             )}
-            {reviewing && <ComparisonDetail state={comparisonState} />}
+            {reviewing && <ComparisonDetail state={comparisonState} labels={labels} />}
           </div>
         ) : (
           <p className="mt-2 text-sm text-muted-foreground">
@@ -416,6 +420,7 @@ export default function VersionsExperience({
                   {record?.proposal ? (
                     <ProposalDetail
                       proposal={record.proposal}
+                      labels={labels}
                       error={record.error}
                       onApprove={() => void actOnProposal(nodeId, 'approve')}
                       onMaterialize={() => void actOnProposal(nodeId, 'materialize')}
@@ -450,7 +455,13 @@ export default function VersionsExperience({
 }
 
 /** The §19/§20 comparison detail (correctness first, then the estimates). */
-function ComparisonDetail({ state }: { state: ComparisonState }): React.ReactNode {
+function ComparisonDetail({
+  state,
+  labels,
+}: {
+  state: ComparisonState;
+  labels: Record<string, string> | null;
+}): React.ReactNode {
   if (state.kind === 'idle' || state.kind === 'loading') {
     return <p className="text-sm text-muted-foreground">Comparing the versions…</p>;
   }
@@ -466,6 +477,14 @@ function ComparisonDetail({ state }: { state: ComparisonState }): React.ReactNod
     <div className="rounded-lg border border-border p-3">
       <p className="text-sm font-medium">What changed</p>
       <p className="mt-1 text-sm">{correctnessLine(comparison)}</p>
+      {/* REALITY-REPAIR-009 (F-010): the divergence summary derived OVER the
+          V2-011 payload (names + readable values — never the raw internal
+          JSON envelope the transport carries). */}
+      <DivergenceBlock
+        diff={versionDiffSummary(comparison, labels)}
+        baselineWord="Installed version"
+        candidateWord="New version"
+      />
       <p className="mt-1 text-sm text-muted-foreground">{compatibilityLine(comparison)}</p>
       <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
         {tradeOffLines(comparison).map((line) => (
@@ -477,14 +496,53 @@ function ComparisonDetail({ state }: { state: ComparisonState }): React.ReactNod
   );
 }
 
+/**
+ * The REALITY-REPAIR-009 (F-010) human-readable divergence block — a pure
+ * re-presentation of the comparison payload's own divergence (names through
+ * the V2-003 presentation labels, values readable). The verdict line above
+ * stays the authority's own; this block only answers "where do they
+ * differ", and an undescribable divergence degrades honestly.
+ */
+function DivergenceBlock({
+  diff,
+  baselineWord,
+  candidateWord,
+}: {
+  diff: VersionDiffSummary;
+  baselineWord: string;
+  candidateWord: string;
+}): React.ReactNode {
+  if (diff.kind === 'none') return null;
+  if (diff.kind === 'undescribed') {
+    return (
+      <p className="mt-1 text-sm text-muted-foreground">
+        The specific difference isn't available in a readable form right now.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2 space-y-1 rounded-md bg-muted/40 p-2">
+      <p className="text-sm">Where the versions differ: {diff.headline}</p>
+      <p className="text-sm text-muted-foreground">
+        {baselineWord}: {diff.baseline}
+      </p>
+      <p className="text-sm text-muted-foreground">
+        {candidateWord}: {diff.candidate}
+      </p>
+    </div>
+  );
+}
+
 /** The §20 proposal card (the approval gate → the new version). */
 function ProposalDetail({
   proposal,
+  labels,
   error,
   onApprove,
   onMaterialize,
 }: {
   proposal: ProductOptimizationProposal;
+  labels: Record<string, string> | null;
   error?: string;
   onApprove: () => void;
   onMaterialize: () => void;
@@ -493,6 +551,13 @@ function ProposalDetail({
     <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3">
       <p className="text-sm">{proposal.rationale}</p>
       <p className="mt-1 text-sm">{correctnessLine(proposal.comparison)}</p>
+      {/* REALITY-REPAIR-009 (F-010): the same payload-derived summary on the
+          proposal card (the task-surface proof detail, readably). */}
+      <DivergenceBlock
+        diff={versionDiffSummary(proposal.comparison, labels)}
+        baselineWord="Current version"
+        candidateWord="Proposed version"
+      />
       <p className="mt-1 text-sm text-muted-foreground">
         {compatibilityLine(proposal.comparison)}
       </p>
