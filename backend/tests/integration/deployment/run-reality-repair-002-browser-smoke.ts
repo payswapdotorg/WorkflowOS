@@ -77,10 +77,7 @@ import {
   type WorkflowIrDocument,
   type WorkflowNode,
 } from '../../../src/workflow-ir/index.js';
-import {
-  authorNotifyDocument,
-  versionContentOf,
-} from '../workflow-deployments/trigger-test-support.js';
+import { versionContentOf } from '../workflow-deployments/trigger-test-support.js';
 import type { Page } from '@playwright/test';
 
 expect.configure({ timeout: 20_000 });
