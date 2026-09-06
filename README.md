@@ -20,23 +20,25 @@ planning notes to determine what to implement next.
 6. [`spec/development-state/program-state.json`](spec/development-state/program-state.json) — V1/V1.1 Work Order operational state
 7. [`spec/architecture-lock.md`](spec/architecture-lock.md) — frozen architecture invariants
 8. [`spec/architecture.md`](spec/architecture.md) — architecture description
-9. [`spec/requirements.md`](spec/requirements.md) — requirements
-10. applicable Work Order and dependency artifacts under [`spec/`](spec/)
-11. [`docs/implementation/IMPLEMENTATION-GUIDE.md`](docs/implementation/IMPLEMENTATION-GUIDE.md) — implementation protocol
+9. applicable Work Order and dependency artifacts under [`spec/`](spec/)
+10. [`docs/implementation/IMPLEMENTATION-GUIDE.md`](docs/implementation/IMPLEMENTATION-GUIDE.md) — implementation protocol
 
 ### Active program
 
-V2-017 Universal Product UX is **complete**. The current V2 implementation
-frontier is **V2-DEPLOY-001 — WorkflowOS V2 Productionization**.
+V2-017 Universal Product UX is **complete**. Before production deployment, the
+current V2 implementation frontier is **V2-REALITY-AUDIT-001 — Product Reality,
+Journey, and Architecture Reconciliation**.
 
 Read:
-- [`spec/architecture/v2/deployment-roadmap.md`](spec/architecture/v2/deployment-roadmap.md) — V2 productionization sequence and provider strategy
-- [`spec/architecture/v2/work-orders/V2-DEPLOY-001.md`](spec/architecture/v2/work-orders/V2-DEPLOY-001.md) — governing productionization Work Order
-- [`docs/deployment/V2-PRODUCTIONIZATION.md`](docs/deployment/V2-PRODUCTIONIZATION.md) — deployment baseline
+- [`spec/architecture/v2/V2-REALITY-AUDIT-001.md`](spec/architecture/v2/V2-REALITY-AUDIT-001.md) — pre-deployment audit and UX↔operational reconciliation program
+- [`spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001.md`](spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001.md) — governing audit Work Order
+- [`spec/architecture/v2/deployment-roadmap.md`](spec/architecture/v2/deployment-roadmap.md) — subsequent V2 productionization sequence and provider strategy
+- [`spec/architecture/v2/work-orders/V2-DEPLOY-001.md`](spec/architecture/v2/work-orders/V2-DEPLOY-001.md) — subsequent deployment Work Order
 
 The completed V2-017 roadmap remains authoritative for its historical task
-sequence; it must not be reopened merely because productionization is now in
-progress.
+sequence; it must not be reopened merely because the reality audit is now in
+progress. Deployment MUST NOT proceed until V2-REALITY-AUDIT-001 satisfies its
+exit criteria.
 
 ## Implementation rule
 
@@ -64,7 +66,8 @@ frozen architecture inside ordinary Work Orders.
 V2-017 Universal Product UX is complete through T16. Exact V2-017 task status
 must be re-read from GitHub and
 `spec/development-state/implementation-state.json` when historical UX evidence
-is required. The current forward implementation frontier is V2-DEPLOY-001.
+is required. The current forward V2 frontier is V2-REALITY-AUDIT-001; deployment
+follows only after the audit gate closes.
 
 ## Quick start
 
@@ -93,7 +96,7 @@ with the dev database persisted under
 `backend/.workflowos-dev-data/pglite` (override with
 `WORKFLOWOS_DEV_DATABASE_DIR`). No Redis server is required either: the
 dev runtime substitutes the non-authoritative Redis layer (locks/cache) and
- the queue with in-memory dev implementations.
+the queue with in-memory dev implementations.
 
 This path is dev-only. Production always uses a networked PostgreSQL via
 `DATABASE_URL` (see `.env.example` and
