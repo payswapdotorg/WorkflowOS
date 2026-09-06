@@ -25,6 +25,38 @@ The event is valid only when:
 | Work Order scope unchanged | Yes |
 | Frozen architecture/authority unchanged | Yes |
 
+## GitHub emission contract
+
+The **persistent Z.ai orchestrator is the emitter** of the review trigger. A local conversation, CI job, or user prompt is not the review notification mechanism.
+
+Once every review prerequisite is satisfied for one exact PR head, Z.ai must publish the review event to the **GitHub PR conversation** for that same PR. The emission must use:
+
+```text
+scripts/emit-architect-review-trigger.sh
+```
+
+The helper verifies that the PR is still open, targets `main`, still has the exact expected head SHA, and that the supplied `main` SHA is still current. It de-duplicates an identical Work Order/head pair.
+
+The GitHub comment must contain both the machine-readable review event and the exact user-facing trigger line:
+
+```yaml
+workflowos_review_event: READY_FOR_ARCHITECT_REVIEW/v1
+work_order: <WO>
+pr: <N>
+head_sha: <exact PR head>
+base_sha: <exact current main>
+verification: <passing result summary>
+evidence:
+  - <repository evidence path>
+status: READY_FOR_ARCHITECT_REVIEW
+```
+
+```text
+ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>
+```
+
+Only after the GitHub comment succeeds may the orchestrator enter `AWAITING_ARCHITECT_REVIEW` / treat the Architect as notified. A failed emission keeps the packet non-awaiting and requires retry or escalation.
+
 ## Exact-head rule
 
 The review request must identify:
@@ -47,7 +79,7 @@ The only user-facing Architect review prompt is:
 ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>
 ```
 
-The user does not need to prompt for review during implementation, synchronization, test repair, or review waiting. A PR in `AWAITING_ARCHITECT_REVIEW` has already emitted its trigger.
+The canonical delivery surface is the GitHub PR conversation, emitted by Z.ai. The user does not need to prompt for review during implementation, synchronization, test repair, or review waiting. A PR in `AWAITING_ARCHITECT_REVIEW` has already emitted its trigger.
 
 ## Review lifecycle
 
