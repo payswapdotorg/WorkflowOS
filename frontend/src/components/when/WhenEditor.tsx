@@ -42,6 +42,10 @@ interface WhenEditorProps {
   workflow: ProductWorkflow;
   deployments: ProductDeployment[];
   orgWorkflows: ProductWorkflow[];
+  /** REALITY-REPAIR-003 (F-003): the org the deployment create operates
+   *  in — the INSTALLATION's organization (the caller's local org for a
+   *  marketplace consumer; the workflow's own org on the owner path). */
+  commandOrganizationId: string;
   /** Success: the note to surface + the page refresh. */
   onDone: (note: string) => void;
   onCancel: () => void;
@@ -57,7 +61,7 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
   { value: 'after-workflow', label: 'After another workflow', hint: 'Runs when another workflow finishes.' },
 ];
 
-export default function WhenEditor({ workflow, deployments, orgWorkflows, onDone, onCancel }: WhenEditorProps) {
+export default function WhenEditor({ workflow, deployments, orgWorkflows, commandOrganizationId, onDone, onCancel }: WhenEditorProps) {
   const [mode, setMode] = useState<Mode>('run-now');
   const [date, setDate] = useState('');
   const [time, setTime] = useState('09:00');
@@ -161,7 +165,13 @@ export default function WhenEditor({ workflow, deployments, orgWorkflows, onDone
           setError('This workflow has no version to schedule yet.');
           return;
         }
-        const created = await workflowDeployments.createDeployment(workflow.organizationId, {
+        // REALITY-REPAIR-003 (F-003): the deployment is created in the
+        // CALLER's organization (commandOrganizationId — the
+        // installation's org for a marketplace consumer), so its
+        // subscriptions deliver runs as the caller's local facts — never
+        // in the publisher's organization (whose member-only command
+        // 403s the consumer).
+        const created = await workflowDeployments.createDeployment(commandOrganizationId, {
           workflowId: workflow.id,
           versionId: workflow.headVersionId,
           name: workflow.name,

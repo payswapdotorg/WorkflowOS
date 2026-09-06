@@ -807,7 +807,9 @@ describe('REALITY-REPAIR-003 (F-003) — consumer-organization workflow detail',
         },
         '/organizations/org-consumer/workflow-runs/runs': () =>
           jsonResponse(200, {
-            runs: runRequested ? [{ ...CONSUMER_RUNS[0], state: 'requested' }] : CONSUMER_RUNS,
+            runs: runRequested
+              ? [{ ...CONSUMER_RUNS[0], id: 'run-consumer-2', state: 'requested' }]
+              : CONSUMER_RUNS,
           }),
         '/workflow-runs/runs/run-consumer-2/start': () =>
           jsonResponse(200, { run: { ...CONSUMER_RUNS[0], state: 'running' }, attempt: null, executed: true }),

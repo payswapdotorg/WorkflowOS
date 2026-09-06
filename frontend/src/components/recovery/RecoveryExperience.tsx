@@ -140,7 +140,16 @@ export default function RecoveryExperience({
     setSubmitting(true);
     setCommandError(null);
     try {
-      const requested = await workflowRuns.request(workflow.organizationId, {
+      // REALITY-REPAIR-003 (F-003): the org the run commands operate in —
+      // the INSTALLATION's organization (the authoritative org of the
+      // pinned target; the backend validates the installation's org
+      // against the request org, so the consumer's retry lands in THEIR
+      // org, never the publisher's). Without an installation the
+      // workflow's own org is the owner/member path (unchanged).
+      const commandOrganizationId = installation
+        ? installation.installation.organizationId
+        : workflow.organizationId;
+      const requested = await workflowRuns.request(commandOrganizationId, {
         workflowId: workflow.id,
         versionId: pinnedVersionId,
         installationId: installation ? installation.installation.id : null,
@@ -148,7 +157,7 @@ export default function RecoveryExperience({
       // The mandated re-read: locate the EXACT run this command created
       // (a concurrent sibling run must never be started by mistake);
       // fail closed if the authoritative run is absent.
-      const runs = await workflowRuns.listForOrganization(workflow.organizationId);
+      const runs = await workflowRuns.listForOrganization(commandOrganizationId);
       const exact = runs.find((r) => r.id === requested.run.id);
       if (!exact) {
         setCommandError(

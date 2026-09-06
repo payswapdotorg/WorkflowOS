@@ -49,10 +49,14 @@ interface WhenSectionProps {
   deployments: ProductDeployment[];
   subscriptions: ProductTriggerSubscription[];
   orgWorkflows: ProductWorkflow[];
+  /** REALITY-REPAIR-003 (F-003): the org the deployment create operates
+   *  in — the INSTALLATION's organization (the caller's local org for a
+   *  marketplace consumer; the workflow's own org on the owner path). */
+  commandOrganizationId: string;
   onChanged: () => void;
 }
 
-export default function WhenSection({ workflow, deployments, subscriptions, orgWorkflows, onChanged }: WhenSectionProps) {
+export default function WhenSection({ workflow, deployments, subscriptions, orgWorkflows, commandOrganizationId, onChanged }: WhenSectionProps) {
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -155,6 +159,7 @@ export default function WhenSection({ workflow, deployments, subscriptions, orgW
           workflow={workflow}
           deployments={deployments}
           orgWorkflows={orgWorkflows}
+          commandOrganizationId={commandOrganizationId}
           onDone={handleDone}
           onCancel={() => setEditing(false)}
         />

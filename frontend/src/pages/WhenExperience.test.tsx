@@ -166,6 +166,9 @@ function renderWhen(
           deployments={props.deployments ?? [DEPLOYMENT]}
           subscriptions={props.subscriptions ?? []}
           orgWorkflows={props.orgWorkflows ?? [WORKFLOW, OTHER_WORKFLOW]}
+          commandOrganizationId={
+            props.commandOrganizationId ?? (props.workflow ?? WORKFLOW).organizationId
+          }
           onChanged={onChanged}
         />
       </MemoryRouter>,

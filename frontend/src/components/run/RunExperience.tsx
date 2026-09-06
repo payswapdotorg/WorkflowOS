@@ -338,10 +338,19 @@ export default function RunExperience({
     setSubmitting(true);
     setCommandError(null);
     try {
+      // REALITY-REPAIR-003 (F-003): the org the run commands operate in —
+      // the INSTALLATION's organization (the authoritative org of the
+      // pinned target; the backend validates the installation's org
+      // against the request org, so the consumer's run lands in THEIR
+      // org, never the publisher's). Without an installation the
+      // workflow's own org is the owner/member path (unchanged).
+      const commandOrganizationId = installation
+        ? installation.installation.organizationId
+        : workflow.organizationId;
       // The request succeeds (the backend owns every decision) and returns
       // the authoritative run id — the create-or-converge identity of THIS
       // command.
-      const requested = await workflowRuns.request(workflow.organizationId, {
+      const requested = await workflowRuns.request(commandOrganizationId, {
         workflowId: workflow.id,
         versionId: pinnedVersionId,
         installationId: installation ? installation.installation.id : null,
@@ -350,7 +359,7 @@ export default function RunExperience({
       // command created/converged (never a workflowId + newest heuristic:
       // a concurrent sibling run must never be started by mistake). Fail
       // closed if the authoritative run is absent from the list.
-      const runs = await workflowRuns.listForOrganization(workflow.organizationId);
+      const runs = await workflowRuns.listForOrganization(commandOrganizationId);
       const exact = runs.find((r) => r.id === requested.run.id);
       if (!exact) {
         setCommandError(

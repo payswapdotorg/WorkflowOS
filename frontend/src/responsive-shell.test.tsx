@@ -356,6 +356,12 @@ const VERSIONS = [
 
 function detailRoutes(): Record<string, RouteHandler> {
   return {
+    // REALITY-REPAIR-003 (F-003): the caller's organizations (the
+    // product-shell selection the detail page composes).
+    '/organizations': () =>
+      jsonResponse(200, {
+        organizations: [{ id: 'org-1', name: 'Bay Logistics', roleId: 'owner' }],
+      }),
     '/workflow-repository/workflows/wf-1/versions': () =>
       jsonResponse(200, { versions: VERSIONS }),
     '/workflow-runs/runs': () => jsonResponse(200, { runs: [] }),
