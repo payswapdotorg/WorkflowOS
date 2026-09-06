@@ -1,0 +1,117 @@
+{
+  "run": "REALITY-REPAIR-008 real-deployment teaching-feedback smoke",
+  "startedAt": "2026-09-06T18:21:58.381Z",
+  "finishedAt": "2026-09-06T18:22:10.290Z",
+  "durationMs": 11909,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T18:21:58.382Z",
+      "label": "REALITY-REPAIR-008 real-deployment teaching-feedback smoke starting at 2026-09-06T18:21:58.381Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:21:58.382Z",
+      "label": "artifacts dir: /home/z/wt-rr008/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-008",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T18:22:04.494Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 6105
+    },
+    {
+      "at": "2026-09-06T18:22:04.516Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 22
+    },
+    {
+      "at": "2026-09-06T18:22:04.547Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 31
+    },
+    {
+      "at": "2026-09-06T18:22:04.811Z",
+      "label": "seed: publisher register → login → org → public workflow (collect_posts → send_report) → free listing → publish (REAL routes; the learner gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 264
+    },
+    {
+      "at": "2026-09-06T18:22:07.406Z",
+      "label": "LEG1 the learner signs up through the real register UI (Create one → Create account) and lands on Home",
+      "status": "PASS",
+      "ms": 2310
+    },
+    {
+      "at": "2026-09-06T18:22:07.582Z",
+      "label": "LEG2 the learner creates their organization through the real Home onboarding (the RR-002 composed precondition)",
+      "status": "PASS",
+      "ms": 176
+    },
+    {
+      "at": "2026-09-06T18:22:08.209Z",
+      "label": "LEG3 Explore → the listing → the entitled free decision → Install pins version 1 into the LEARNER organization",
+      "status": "PASS",
+      "ms": 626
+    },
+    {
+      "at": "2026-09-06T18:22:09.126Z",
+      "label": "LEG4 the library Installed tab → Open: the cross-org detail loads → Teach Me opens; the session create-or-converges bound to the pinned version",
+      "status": "PASS",
+      "ms": 802
+    },
+    {
+      "at": "2026-09-06T18:22:09.385Z",
+      "label": "LEG5 Start lesson → the REAL derived lesson (Step 1 of 2 — the presentation label) → \"I've done it\" × 2 → All steps confirmed",
+      "status": "PASS",
+      "ms": 260
+    },
+    {
+      "at": "2026-09-06T18:22:09.520Z",
+      "label": "LEG6 the practice moment: after the send_report attempt, the collect_posts question carries NO send_report feedback in the real DOM (the send_report question shows its own verbatim feedback)",
+      "status": "PASS",
+      "ms": 134
+    },
+    {
+      "at": "2026-09-06T18:22:09.814Z",
+      "label": "LEG7 the known case: the collect_posts answer feedback names collect_posts (the authority own string for THAT attempt); the send_report question keeps its OWN feedback; the wire carries nodeId collect_posts",
+      "status": "PASS",
+      "ms": 122
+    },
+    {
+      "at": "2026-09-06T18:22:10.140Z",
+      "label": "LEG8 the assessment → Lesson complete (terminal) → the teaching evidence separation vocabulary — all lesson/assessment evidence unchanged",
+      "status": "PASS",
+      "ms": 161
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-008/01-learner-installed.png",
+      "sha256": "7385aaf59fdac0314e78e6d6eca172daf27d4268caa818dae071db7eaac8f194",
+      "bytes": 117072
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-008/02-practice-scoped-feedback.png",
+      "sha256": "bf4ed2b9fed7f4da4213bc76a226f51d43b22be81e36ca53007e54572659646e",
+      "bytes": 190059
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-008/03-collect-feedback-names-collect.png",
+      "sha256": "6fd8ec664c1963bb4dc7de771fa66d62a05e35b7ac3b189c77057e5e71791cf4",
+      "bytes": 197515
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-008/04-lesson-complete.png",
+      "sha256": "fbd84199f20f8ad97ce918fc2804d01178aa5666c07a8d765b3942bab09612c4",
+      "bytes": 135453
+    }
+  ]
+}
