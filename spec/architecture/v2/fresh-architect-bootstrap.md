@@ -21,12 +21,14 @@ The GitHub repository is the only source of truth for architecture, Work Orders,
 11. `spec/development-state/governance-model.json`
 12. `spec/development-state/program-state.json`
 13. the V2 canonical machine-state artifact referenced by `spec/architecture/v2/README.md` plus its derived `dependency-state.json`, `frontier-state.json`, and `checkpoint-state.json` only as projections; regenerate/validate derived projections when they disagree with underlying facts
-14. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
-15. the relevant Architecture Change Request in `spec/architecture/v2/architecture-change-requests/`
-16. if the assigned Work Order is `V2-017`, read `spec/architecture/v2/post-w6-product-roadmap.md` and `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`
-17. `docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md` and the approved V2-017 UX design when V2-017 is assigned
-18. supporting V2 product specifications relevant to the Work Order
-19. relevant existing V1 public contracts before reusing any V1 capability
+14. `spec/development-state/v2-autonomous-execution-state.json` for active long-running orchestration, three-slot scheduling, branch synchronization, and Architect review queue state
+15. `spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md` and `V2-ARCHITECT-REVIEW-PROTOCOL.md`
+16. the assigned Work Order in `spec/architecture/v2/work-orders/` (and its machine-state entry)
+17. the relevant Architecture Change Request in `spec/architecture/v2/architecture-change-requests/`
+18. if the assigned Work Order is `V2-017`, read `spec/architecture/v2/post-w6-product-roadmap.md` and `docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md`
+19. `docs/superpowers/plans/2026-09-03-v2-017-universal-product-ux.md` and the approved V2-017 UX design when V2-017 is assigned
+20. supporting V2 product specifications relevant to the Work Order
+21. relevant existing V1 public contracts before reusing any V1 capability
 
 ## Status interpretation
 
@@ -124,20 +126,33 @@ A digest is a canonical commitment, not execution truth. A signature authenticat
 
 ## Parallel implementation
 
-Parallel means independently mergeable:
+Parallel means independently mergeable, not user-managed rebasing:
 
-- same stable merged main base;
-- disjoint authoritative surfaces;
-- no sibling branch dependency;
-- no rebase onto sibling branches;
-- complete tests and dogfooding per item;
+- sibling Work Orders have satisfied merged dependencies;
+- authoritative change surfaces are disjoint unless an integration gate explicitly governs composition;
+- no worker consumes an unmerged sibling branch;
+- multiple siblings may originate from the same observed `main` SHA;
+- after any merge changes `main`, the persistent orchestrator automatically refreshes affected PR branches;
+- synchronization agents may perform mechanical rebase/merge operations on the same PR branch and must rerun verification;
+- semantic, authority, or scope conflicts stop and surface to the Architect;
+- complete tests and dogfooding per Work Order;
 - integration Work Order when composition itself needs proof.
 
-Integration gates consume merged capabilities and begin from current `main`.
+There is no manual rebase workflow for the user.
+
+## Architect review trigger
+
+A review is requested only when the exact PR head is reviewable under `V2-ARCHITECT-REVIEW-PROTOCOL.md`. The canonical trigger is:
+
+```text
+ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>
+```
+
+Do not trigger review merely because implementation finished. The branch must also be fresh against current `main`, verification/evidence must be complete, and no synchronization or repair can be pending.
 
 ## Recovery
 
-Resume from current GitHub state, the canonical Work Order operational state, and repository-resident verification/dogfooding evidence. Recompute the eligible frontier from authoritative facts when convenience projections disagree. Do not trust conversational memory, unchecked plan boxes, stale navigation fields such as `nextEligible`/`nextAction`, agent-generated summaries, or PR prose when they conflict with underlying repository facts.
+Resume from current GitHub state, the canonical Work Order operational state, the autonomous execution overlay, and repository-resident verification/dogfooding evidence. Recompute the eligible frontier from authoritative facts when convenience projections disagree. Do not trust conversational memory, unchecked plan boxes, stale navigation fields such as `nextEligible`/`nextAction`, agent-generated summaries, or PR prose when they conflict with underlying repository facts.
 
 For V2-017 specifically, recover through:
 
@@ -145,6 +160,8 @@ For V2-017 specifically, recover through:
 current main
   ↓
 V2 canonical state
+  ↓
+autonomous execution overlay
   ↓
 V2-017 Work Order
   ↓
@@ -181,4 +198,5 @@ Stop and raise a governed architecture change when implementation would:
 - activate an integration gate before every listed input is actually COMPLETE;
 - treat a derived governance projection as an authority source;
 - record completion without authoritative Git merge evidence;
-- require conversation history to determine the next implementation step.
+- require conversation history to determine the next implementation step;
+- require the user to manually rebase or synchronize a routine parallel PR.
