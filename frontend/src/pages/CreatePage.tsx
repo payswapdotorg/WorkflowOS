@@ -27,6 +27,12 @@ import { Link, useSearchParams } from 'react-router-dom';
  *     honestly and never sends a create POST (a fabricated/non-WorkflowIR
  *     irSchemaVersion on a durable WorkflowVersion is the blocking
  *     violation); nothing renders as committed;
+ *   - REALITY-REPAIR-004 Slice A (F-004a): the boundary copy states the
+ *     fail-closed fact truthfully (natural-language capture is NOT
+ *     converted into executable WorkflowIR) and points to the REAL expert
+ *     authoring entry (/expert — Slice B's bounded surface over the
+ *     existing V2-002 create commands); it no longer implies captured
+ *     input becomes a durable workflow;
  *   - conversation/demonstration is INPUT, never a second durable workflow
  *     representation.
  */
@@ -258,12 +264,18 @@ export default function CreatePage() {
             )}
           </section>
 
-          {/* The honest limitation — uncertainty surfaced, never invented. */}
+          {/* The honest limitation (REALITY-REPAIR-004 Slice A — F-004a
+              correction): natural-language capture is NOT converted into
+              executable WorkflowIR, and NOTHING is created from this page.
+              The previous copy promised "the durable workflow is created
+              with immutable Version 1, and executable authoring happens
+              later from the workflow surface" — false on both counts. */}
           <p className="rounded-md bg-accent/50 p-3 text-sm text-muted-foreground">
             WorkflowOS can't yet turn your description into executable
-            steps. Your captured input is recorded as the starting content:
-            the durable workflow is created with immutable Version 1, and
-            executable authoring happens later from the workflow surface.
+            steps. Natural-language capture isn't converted into
+            executable WorkflowIR — no generation authority exists — so
+            nothing is created from this page. Your captured input stays
+            here, never recorded as durable workflow content.
           </p>
 
           <div className="space-y-3">
@@ -336,29 +348,45 @@ export default function CreatePage() {
 
           </div>
 
-          {/* The fail-closed durable boundary (F-T5-001): the frozen V2-002
-              contract requires a version's irSchemaVersion to truthfully
-              declare WorkflowIR compatibility; the WorkflowIR requires at
-              least one authored node; no public authoring authority accepts
-              captured input. The missing-authority dependency is surfaced —
-              NO create POST (with any fabricated/non-WorkflowIR
-              irSchemaVersion) is ever sent. */}
+          {/* The fail-closed durable boundary (F-T5-001), copy corrected
+              by REALITY-REPAIR-004 Slice A (F-004a): the frozen V2-002
+              contract requires a version's protocol declaration to
+              truthfully declare WorkflowIR compatibility, and NO public
+              authority converts natural-language capture into a
+              WorkflowIR document — the generation authority is missing
+              (deferred to a governed architecture change). NO create POST
+              (with any fabricated/non-WorkflowIR irSchemaVersion) is ever
+              sent from this page. What EXISTS (Slice B): the bounded
+              expert authoring surface — workflows are created by experts
+              authoring truthful WorkflowIR directly in the expert
+              workspace, so the boundary points there instead of implying
+              no authoring path exists. */}
           <div className="rounded-md border border-border bg-accent/30 p-4">
             <p
               role="status"
               aria-label="Durable creation unavailable"
               className="text-sm font-medium"
             >
-              Durable creation isn't available yet
+              Durable creation isn't available for captured input
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               The workflow authority accepts WorkflowIR content only — a
               version's protocol declaration must truthfully declare
-              WorkflowIR compatibility, and WorkflowOS can't yet turn your
-              captured input into a WorkflowIR document. A captured-input
-              authoring authority is missing (surfaced to the architect).
-              Nothing is committed; your captured input stays on this page.
+              WorkflowIR compatibility, and WorkflowOS can't convert your
+              captured input into a WorkflowIR document: the
+              natural-language generation authority is missing. Nothing is
+              committed; your captured input stays on this page.
             </p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Workflows are still created — by experts authoring truthful
+              WorkflowIR directly in the expert workspace.
+            </p>
+            <Link
+              to="/expert"
+              className="mt-3 inline-flex rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+            >
+              Author a workflow in the expert workspace
+            </Link>
           </div>
 
           <div className="flex flex-wrap gap-3">

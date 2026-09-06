@@ -167,7 +167,11 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
     expect(
       screen.getByText(/can't yet turn your description into executable steps/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/starting content/i)).toBeInTheDocument();
+    // REALITY-REPAIR-004 Slice A: the captured input is NEVER recorded as
+    // durable workflow content (the corrected copy).
+    expect(
+      screen.getByText(/never recorded as durable workflow content/i),
+    ).toBeInTheDocument();
     // Correction fields exist: the structured facts the user owns.
     expect(screen.getByRole('textbox', { name: /workflow name/i })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: /workflow slug/i })).toBeInTheDocument();
@@ -188,8 +192,8 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
       'Rename the file',
     ]);
     // The honest provenance note (UX spec §7: captures are never the durable
-    // workflow itself).
-    expect(screen.getByText(/recorded as the starting content/i)).toBeInTheDocument();
+    // workflow itself — the REALITY-REPAIR-004 corrected copy).
+    expect(screen.getByText(/never recorded as durable workflow content/i)).toBeInTheDocument();
   });
 
   it('Tell + Show: the preview shows both the description and the steps', async () => {
@@ -222,9 +226,12 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
         throw new Error('F-T5-001 violation: the create route must never be called from the captured-input flow');
       },
     });
-    // The honest missing-authority state.
-    expect(screen.getByText(/durable creation isn't available yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/WorkflowIR/i)).toBeInTheDocument();
+    // The honest missing-authority state (REALITY-REPAIR-004 Slice A: the
+    // heading is scoped to captured input — the truthful boundary).
+    expect(
+      screen.getByText(/durable creation isn't available for captured input/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/accepts workflowir content only/i)).toBeInTheDocument();
     expect(screen.getByText(/missing/i)).toBeInTheDocument();
     expect(screen.getByText(/nothing is committed/i)).toBeInTheDocument();
     // The deterministic no-fabricated-descriptor proof: no POST (no call of
