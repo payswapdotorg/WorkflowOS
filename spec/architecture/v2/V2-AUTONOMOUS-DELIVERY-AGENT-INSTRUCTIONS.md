@@ -43,7 +43,7 @@ AUTO-SYNCHRONIZE STALE PRs ON THE SAME BRANCH
   ↓
 REVERIFY AFTER ANY HEAD CHANGE
   ↓
-WHEN ALL REVIEW PREREQUISITES HOLD → EMIT REVIEW EVENT
+WHEN ALL REVIEW PREREQUISITES HOLD → EMIT REVIEW EVENT ON GITHUB
   ↓
 IF ARCHITECT REQUESTS CHANGES → REPAIR SAME PR → REVERIFY
   ↓
@@ -78,7 +78,7 @@ A conflict that is semantic, authority-affecting, or scope-expanding is a govern
 
 ## Architect review protocol
 
-Architect review is triggered by a durable machine-readable review event, not by an arbitrary timing decision.
+Architect review is triggered by a durable machine-readable review event and a corresponding GitHub PR conversation comment, not by an arbitrary timing decision.
 
 Create `READY_FOR_ARCHITECT_REVIEW` only when the same exact PR head SHA satisfies all of these:
 
@@ -92,13 +92,23 @@ Create `READY_FOR_ARCHITECT_REVIEW` only when the same exact PR head SHA satisfi
 
 The review event must record Work Order ID, PR number, exact head SHA, current `main` SHA, verification result, evidence locations, and event status.
 
-The review event becomes invalid immediately when the PR head changes, `main` advances without a successful refresh, Architect requests changes, evidence changes materially, or scope changes.
+After those conditions hold, the persistent Z.ai orchestrator must immediately emit the event on the same GitHub PR using:
 
-The user-facing review trigger is therefore deterministic:
+```text
+scripts/emit-architect-review-trigger.sh
+```
+
+The helper is guarded: it confirms the PR is open, targets `main`, and still has the expected exact head SHA and expected current `main` SHA. It de-duplicates the same Work Order/head pair. The orchestrator must not use a chat message, local-only state, or CI status as the review notification substitute.
+
+The emitted GitHub PR comment must contain the machine-readable review packet and the exact user-facing trigger:
 
 ```text
 ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>
 ```
+
+Only after the GitHub comment succeeds may the orchestrator mark the packet `AWAITING_ARCHITECT_REVIEW`. If GitHub emission fails, keep it non-awaiting and retry/escalate; never claim that the Architect was notified.
+
+The review event becomes invalid immediately when the PR head changes, `main` advances without a successful refresh, Architect requests changes, evidence changes materially, or scope changes.
 
 Do not emit that trigger before all prerequisites hold. Do not delay it once they hold.
 
@@ -112,7 +122,7 @@ Never create a sibling PR to address review comments on an existing Work Order.
 
 A PR can be `IMPLEMENTING`, `VERIFYING`, `READY_FOR_ARCHITECT_REVIEW`, `AWAITING_ARCHITECT_REVIEW`, `CHANGES_REQUESTED`, `SYNCHRONIZING`, `BLOCKED_GOVERNANCE`, or `MERGED`.
 
-Only `READY_FOR_ARCHITECT_REVIEW` produces the user-facing review trigger. `AWAITING_ARCHITECT_REVIEW` means the trigger has already been emitted and no user action beyond review is expected. Independent eligible packets continue during this state.
+Only `READY_FOR_ARCHITECT_REVIEW` produces the GitHub review trigger. `AWAITING_ARCHITECT_REVIEW` means the GitHub trigger has already been emitted successfully and no user action beyond review is expected. Independent eligible packets continue during this state.
 
 ## Terminal behavior
 
