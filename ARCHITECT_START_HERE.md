@@ -12,8 +12,10 @@ This file is a navigation aid for a fresh Architect with zero conversation histo
 
 1. Read `ARCHITECT_START_HERE.md`.
 2. Read `spec/development-state/README.md`.
-3. Read the canonical machine state, especially `spec/development-state/v2-work-order-state.json` and `spec/development-state/implementation-state.json`.
-4. Verify the live `main` ref and current commit SHA from GitHub.
+3. Verify the live `main` ref and current commit SHA from GitHub.
+4. Read the V2 canonical/base Work Order state and the post-W6 autonomous execution state:
+   - `spec/development-state/v2-work-order-state.json`
+   - `spec/development-state/v2-autonomous-execution-state.json`
 5. Read the governing V2 bootstrap, constitution, control plane, registry, conformance checklist, and roadmap lock.
 6. Inspect the active Work Order and its program/dependency map.
 7. Inspect open and recently merged PRs relevant to the active Work Order; verify base/head/merge identities from GitHub rather than relying on PR prose.
@@ -21,9 +23,9 @@ This file is a navigation aid for a fresh Architect with zero conversation histo
 9. Recompute the eligible frontier from authoritative repository facts when any navigation field disagrees.
 10. Continue only from repository evidence.
 
-### V2-017 direct path
+### Current V2 execution path
 
-For the current V2-017 program, the minimum continuation path is:
+V2-017 is complete. The current post-W6 execution path is:
 
 ```text
 live main
@@ -32,17 +34,31 @@ spec/development-state/README.md
   ↓
 spec/development-state/v2-work-order-state.json
   ↓
-spec/development-state/implementation-state.json
+spec/development-state/v2-autonomous-execution-state.json
   ↓
-spec/architecture/v2/work-orders/V2-017.md
+spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md
   ↓
-spec/architecture/v2/post-w6-product-roadmap.md
+active V2 Work Order in spec/architecture/v2/work-orders/
   ↓
-docs/superpowers/plans/2026-09-04-v2-017-repository-only-execution.md
+actual PR / commits / CI / persisted verification + dogfooding evidence
+```
+
+The autonomous execution state is the governed post-W6 operational extension. Work Order documents remain scope/acceptance authority and Git merge remains completion authority.
+
+### V2-017 historical path
+
+For historical V2-017 reconstruction:
+
+```text
+v2-work-order-state.json
   ↓
-actual V2-017 PRs / commits / CI / persisted evidence
+implementation-state.json
   ↓
-recompute the T1–T16 frontier
+V2-017.md
+  ↓
+post-w6-product-roadmap.md
+  ↓
+repository-resident V2-017 evidence
 ```
 
 ## Forbidden assumptions
@@ -64,14 +80,22 @@ Use these only as clues to locate repository evidence, then verify the underlyin
 
 ## Authority rules
 
-Architecture meaning belongs to the governed architecture artifacts. Work authorization and scope belong to Work Orders. Implementation facts belong to Git branches/PRs and governed operational state. Verification and dogfooding belong to their persisted evidence. Git merge history is the completion authority. Dependency/frontier/navigation artifacts are derived and cannot authorize work.
+Architecture meaning belongs to governed architecture artifacts. Work authorization and scope belong to Work Orders. Post-W6 execution scheduling/resume state belongs to `v2-autonomous-execution-state.json` within the Work Order graph. Verification and dogfooding belong to persisted evidence. Git merge history is the completion authority. Purely derived frontier/checkpoint/navigation projections cannot authorize work.
 
 Do not redesign frozen architecture, create a second workflow protocol or engine, introduce alternate protocol names, weaken evidence truth, hide unavailable capability/data states, or depend on an unmerged sibling implementation.
 
+## Autonomous execution and review
+
+The persistent Z.ai orchestrator may run at most three specialist agents concurrently. Parallel siblings never consume one another's unmerged branches. Routine branch synchronization is orchestrator-owned; the user/operator is never asked to perform a normal rebase/sync.
+
+An Architect review is triggered only by a durable `READY_FOR_ARCHITECT_REVIEW` event for the exact PR head after verification, evidence, browser proof where applicable, and current-main synchronization are all satisfied.
+
+The review trigger is:
+
+`ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>`
+
+A changed PR head or changed `main` invalidates the review event until synchronization and re-verification produce a new exact-head event. See `spec/architecture/v2/V2-ARCHITECT-REVIEW-PROTOCOL.md`.
+
 ## Current-state convenience snapshot
 
-For a compact human-readable projection of the verified repository state, see [`spec/development-state/current-state.md`](spec/development-state/current-state.md). It is informational only; canonical state and Git remain authoritative.
-
-## Architect review loop
-
-For PR review, use [`docs/architecture/ARCHITECT-REVIEW-PROTOCOL.md`](docs/architecture/ARCHITECT-REVIEW-PROTOCOL.md). The review protocol is procedural guidance and does not supersede any architecture, Work Order, or evidence authority.
+For a compact human-readable projection of the verified repository state, see `spec/development-state/current-state.md`. It is informational only; canonical state and Git remain authoritative.
