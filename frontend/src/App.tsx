@@ -27,6 +27,7 @@ import HomePage from './pages/HomePage';
 import WorkflowsPage from './pages/WorkflowsPage';
 import WorkflowDetailPage from './pages/WorkflowDetailPage';
 import ExplorePage from './pages/ExplorePage';
+import MarketplaceListingDetail from './components/marketplace/MarketplaceListingDetail';
 import ProductActivityPage from './pages/ProductActivityPage';
 import CreatePage from './pages/CreatePage';
 import ExpertPage from './pages/ExpertPage';
@@ -105,6 +106,14 @@ export default function App() {
         element={
           <UniversalProductShell>
             <ExplorePage />
+          </UniversalProductShell>
+        }
+      />
+      <Route
+        path="/explore/:listingId"
+        element={
+          <UniversalProductShell>
+            <MarketplaceListingDetail />
           </UniversalProductShell>
         }
       />

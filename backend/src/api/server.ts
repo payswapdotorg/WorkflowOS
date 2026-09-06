@@ -71,6 +71,10 @@ import {
   workflowOptimizationRoutes,
   type WorkflowOptimizationRouteDeps,
 } from './routes/workflow-optimization.route.js';
+import {
+  marketplaceRoutes,
+  type MarketplaceRouteDeps,
+} from './routes/marketplace.route.js';
 
 /**
  * Build the Fastify application. Takes injected dependencies so tests can
@@ -224,6 +228,13 @@ export interface ServerDeps extends JobsRouteDeps {
    *  the request-scoped principal channel for the materializer. Registered
    *  when auth is on. */
   workflowOptimization?: WorkflowOptimizationRouteDeps;
+  /** V2-017 T12: marketplace TRANSPORT routes — the §21/§22/§23
+   *  sharing/marketplace/install surface over the frozen V2-012 authority
+   *  (listing browse/read + revision history, create-or-converge + publish,
+   *  offer acceptance → entitlement, the version-access DECISION, customer
+   *  cancellation). Transport only; every marketplace decision stays the
+   *  composed DefaultMarketplaceService's. Registered when auth is on. */
+  marketplace?: MarketplaceRouteDeps;
 }
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -370,6 +381,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.workflowOptimization) {
     await workflowOptimizationRoutes(app, deps.workflowOptimization);
+  }
+  if (deps.auth && deps.marketplace) {
+    await marketplaceRoutes(app, deps.marketplace);
   }
   return app;
 }
