@@ -2903,6 +2903,97 @@ describe('WORK-020 invariants — /audit module boundaries', () => {
 });
 
 /**
+ * REALITY-REPAIR-001 invariants -- the real deployment composition serves
+ * the V2 product route groups (V2-REALITY-AUDIT-001 / F-001).
+ *
+ * The reality audit's release blocker F-001: api/server.ts registers the
+ * seven V2 product route groups only when their optional deps objects are
+ * passed, and the real deployment entry (src/index.ts — also the
+ * docker-compose CMD) passed NONE of them, so every V2 product surface
+ * 404'd on the deployed topology while migrations 0060–0062 DID run.
+ * The repair is composition-only (the bounded Work Order
+ * spec/architecture/v2/work-orders/REALITY-REPAIR-001.md): these pins lock
+ * the wiring so the gap cannot silently regress.
+ */
+describe('REALITY-REPAIR-001 invariants -- the real deployment composition serves the V2 product route groups', () => {
+  const indexSrc = readFileSync(join(SRC_ROOT, 'index.ts'), 'utf8');
+  const indexCodeOnly = indexSrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  // The composition function's body (the REALITY-REPAIR-001 surface only —
+  // the OTHER route groups in index.ts legitimately use
+  // app.deps.infrastructure for health wiring).
+  const composeStart = indexCodeOnly.indexOf('function composeV2ProductRouteDeps');
+  const composeEnd = indexCodeOnly.indexOf('async function main');
+  const composeBody = indexCodeOnly.slice(composeStart, composeEnd);
+
+  it('index.ts passes ALL SEVEN V2 product route-deps groups into the production buildServer', () => {
+    // The seven groups the audit recorded as the F-001 gap (V2-002, V2-005,
+    // V2-009, V2-006, V2-010, V2-011, V2-012 transport route deps).
+    for (const group of [
+      'workflowRepository',
+      'workflowRuns',
+      'workflowDeployments',
+      'teaching',
+      'reverseTeaching',
+      'workflowOptimization',
+      'marketplace',
+    ]) {
+      expect(
+        indexCodeOnly,
+        `index.ts must construct/pass the ${group} route-deps group into buildServer`,
+      ).toMatch(new RegExp(`${group}:\\s*\\{`));
+    }
+    // The groups are spread from ONE composed object over the shared
+    // database (the composition function — not seven ad-hoc literals).
+    expect(indexCodeOnly).toMatch(/composeV2ProductRouteDeps\(app\.deps\)/);
+    expect(indexCodeOnly).toMatch(/\.\.\.\(v2ProductRoutes \?\? \{\}\)/);
+  });
+
+  it('the composition is fail-closed on the shared database + membership repository (NOT on Redis-gated infrastructure)', () => {
+    // The gate must be the shared database exposure + the identity
+    // membership repository — NOT the infrastructure container
+    // (infrastructure is undefined in a DATABASE_URL-without-REDIS_URL
+    // deployment, which would silently re-lose the product routes — a
+    // partial recurrence of F-001).
+    expect(composeBody).toMatch(/const db = deps\.database;/);
+    expect(composeBody).toMatch(/const membershipRepository = deps\.membershipRepository;/);
+    expect(composeBody).toMatch(/if \(!db \|\| !membershipRepository\) return undefined;/);
+    expect(composeBody).not.toMatch(/infrastructure/);
+    // The degraded state is logged, never silent.
+    expect(indexCodeOnly).toMatch(/v2_product_routes\.unregistered/);
+  });
+
+  it('the composition consumes the frozen V2 authorities through their public barrels (no route/authority edits, no second client)', () => {
+    // V2-002/V2-005/V2-009 services are constructed from the barrels over
+    // the ONE shared db; V2-006/V2-010 over their reference stores; the
+    // V2-011/V2-012 transport routes compose their own services from the
+    // repository + memberships (their route files own that recipe).
+    expect(composeBody).toMatch(/new DefaultWorkflowRepositoryService\(\{/);
+    expect(composeBody).toMatch(/new DefaultWorkflowRunService\(\{/);
+    expect(composeBody).toMatch(/new DefaultWorkflowDeploymentService\(\{/);
+    expect(composeBody).toMatch(/new DefaultTeachingSessionService\(\{/);
+    expect(composeBody).toMatch(/new DefaultReverseTeachingSessionService\(\{/);
+    expect(composeBody).toMatch(/new DefaultNodeCapabilityService\(\{/);
+    // The memberships resolver is the identity authority's repository —
+    // never a second membership authority.
+    expect(composeBody).toMatch(/membershipRepository\.findByUserAndOrganization/);
+    // No V2 product service is constructed with a self-made database
+    // client (the composition must not import a database factory).
+    expect(indexCodeOnly).not.toMatch(/createDatabaseClient|createPgliteDatabaseClient/);
+  });
+
+  it('app.ts exposes the shared database client on AppDeps (the composition-root container, Redis-independent)', () => {
+    const appSrc = readFileSync(join(SRC_ROOT, 'app.ts'), 'utf8');
+    const appCodeOnly = appSrc.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The interface field + the deps object carry the EXISTING database
+    // local (the same one-DatabaseClient authority every repository uses).
+    expect(appCodeOnly).toMatch(/database\?: DatabaseClient;/);
+    // In the AppHandle deps literal, `database` sits right after
+    // `infrastructure` (the composition-root container carries it).
+    expect(appCodeOnly).toMatch(/\binfrastructure,\n\s*database,\n/);
+  });
+});
+
+/**
  * WORK-021 invariants -- /notifications module boundaries.
  */
 describe('WORK-021 invariants -- /notifications module boundaries', () => {

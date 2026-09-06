@@ -1,0 +1,110 @@
+{
+  "run": "REALITY-REPAIR-001 real-deployment browser smoke",
+  "startedAt": "2026-09-06T11:19:21.511Z",
+  "finishedAt": "2026-09-06T11:19:32.554Z",
+  "durationMs": 11043,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "transcript": [
+    {
+      "at": "2026-09-06T11:19:21.512Z",
+      "label": "REALITY-REPAIR-001 real-deployment browser smoke starting at 2026-09-06T11:19:21.511Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T11:19:21.513Z",
+      "label": "artifacts dir: /home/z/workflowos/spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-06T11:19:27.143Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 5617
+    },
+    {
+      "at": "2026-09-06T11:19:27.154Z",
+      "label": "a V2 product route answers on the real entry (GET /marketplace/listings is 401-not-404)",
+      "status": "PASS",
+      "ms": 11
+    },
+    {
+      "at": "2026-09-06T11:19:27.185Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 29
+    },
+    {
+      "at": "2026-09-06T11:19:27.604Z",
+      "label": "seed: register → login → org → public workflow → install → listing → publish (REAL routes)",
+      "status": "PASS",
+      "ms": 419
+    },
+    {
+      "at": "2026-09-06T11:19:30.216Z",
+      "label": "LEG1 the product login surface (email/password → session)",
+      "status": "PASS",
+      "ms": 2259
+    },
+    {
+      "at": "2026-09-06T11:19:30.233Z",
+      "label": "LEG2 Home renders behind the universal shell (attention surfaces)",
+      "status": "PASS",
+      "ms": 17
+    },
+    {
+      "at": "2026-09-06T11:19:30.908Z",
+      "label": "LEG3 the Workflows library lists the installed workflow",
+      "status": "PASS",
+      "ms": 504
+    },
+    {
+      "at": "2026-09-06T11:19:31.477Z",
+      "label": "LEG4 the workflow detail page (steps, immutable version, actions)",
+      "status": "PASS",
+      "ms": 500
+    },
+    {
+      "at": "2026-09-06T11:19:31.997Z",
+      "label": "LEG5 Explore lists the published marketplace listing",
+      "status": "PASS",
+      "ms": 391
+    },
+    {
+      "at": "2026-09-06T11:19:32.420Z",
+      "label": "LEG6 the listing detail page (back-nav + the version-and-trust region)",
+      "status": "PASS",
+      "ms": 373
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001/01-home.png",
+      "sha256": "f926044e5487ee97592e0053325330a3e84a987c076f58d8795d833d9939b7ae",
+      "bytes": 95039
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001/02-workflows.png",
+      "sha256": "aa2ae6e525e47a70126f26690922410af68391ab635a05a088751bd5984a3d90",
+      "bytes": 60707
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001/03-workflow-detail.png",
+      "sha256": "d32a8205bda6814c3ee3de1ec701cb734d664a7d8e864b0e26f323493f7c2db6",
+      "bytes": 99361
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001/04-explore.png",
+      "sha256": "f1f03e946b91bf1c04d9b7528e61213effc823eb68eda5953a5ff8734b9d281f",
+      "bytes": 47831
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-repair-001/05-listing-detail.png",
+      "sha256": "7255b04c5f0efeedee488ad535315d7303e59c67f87f68e5c3de0d09bf01fd62",
+      "bytes": 110584
+    }
+  ]
+}
