@@ -41,6 +41,18 @@ import TrustDisclosure from '../activity/TrustDisclosure';
  *     the honest Unavailable surface when the run-details read fails (the
  *     record-derived state word stays factual — a known fact is never
  *     discarded);
+ *   - REALITY-REPAIR-007 (F-008): the run lifecycle controls — the
+ *     EXISTING V2-005 lifecycle commands (pause/resume/cancel) composed
+ *     with their command envelope. "Approve" is the user-facing LABEL
+ *     for the existing resume-with-human-confirmation semantics at an
+ *     approval gate (V2-005 has NO separate approval command — none is
+ *     invented here). The offered actions only FOLLOW the frozen run
+ *     transition table (running → Pause; paused → Approve/Resume;
+ *     non-terminal → Stop with the §2.4 explicit choice; terminal →
+ *     nothing): idempotency and forbidden transitions stay enforced
+ *     SERVER-SIDE by the command envelopes — the backend owns every
+ *     transition decision, and a typed rejection renders verbatim as an
+ *     error, never as state and never as a fabricated success;
  *   - T10 F02 (§16 direct links): the surface presents the ?run=
  *     selected run (the Activity "Open the run" link) — by default the
  *     workflow's newest run; an earlier run is disclosed as such
@@ -273,6 +285,15 @@ export default function RunExperience({
   const [submitting, setSubmitting] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // REALITY-REPAIR-007 (F-008): the lifecycle-command surface state — one
+  // in-flight guard (no double command), one verbatim typed-rejection
+  // slot, and the §2.4 explicit-choice gate for the terminal Stop.
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<{
+    action: 'pause' | 'resume' | 'cancel';
+    message: string;
+  } | null>(null);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [historyState, setHistoryState] = useState<
     | { kind: 'idle' }
     | { kind: 'loading' }
@@ -318,6 +339,7 @@ export default function RunExperience({
   // timeline entry carries the executor-reported pause point in
   // detail.atStepId (the authoritative wire shape) — never guessed.
   let stateWord = run ? humanState(run) : null;
+  let waitingForApproval = false;
   if (run && run.state === 'paused' && historyState.kind === 'data') {
     const approvalIds = content ? approvalStepIdsFromContent(content) : new Set<string>();
     const pauses = historyState.history.timeline
@@ -330,8 +352,46 @@ export default function RunExperience({
         : null) ?? last?.stepId ?? null;
     if (atStepId && approvalIds.has(atStepId)) {
       stateWord = 'Waiting for you';
+      waitingForApproval = true;
     }
   }
+
+  // REALITY-REPAIR-007 (F-008): the run lifecycle command — the EXISTING
+  // V2-005 route with its deterministic envelope (the client surface owns
+  // the envelope shape; the BACKEND owns every transition decision). One
+  // in-flight guard prevents a double command; a typed rejection renders
+  // verbatim (never a fabricated success, never a parallel run state);
+  // the authoritative refetch (onRunsChanged) governs the next state
+  // word — never the command's echo.
+  const sendLifecycleCommand = useCallback(
+    async (command: 'pause' | 'resume' | 'cancel') => {
+      if (!run) return;
+      setLifecycleBusy(true);
+      setLifecycleError(null);
+      try {
+        if (command === 'pause') {
+          await workflowRuns.pause(run.id);
+        } else if (command === 'resume') {
+          // "Approve" is this command's user-facing label at an approval
+          // gate: the existing resume-with-human-confirmation semantics
+          // — no separate approval command exists (none invented).
+          await workflowRuns.resume(run.id);
+        } else {
+          await workflowRuns.cancel(run.id);
+        }
+        setStopConfirmOpen(false);
+        onRunsChanged();
+      } catch (err) {
+        // A typed command rejection: the honest error, verbatim — the
+        // typed wire identifier IS the ApiError message.
+        const message = err instanceof ApiError ? err.message : 'The run command could not be sent.';
+        setLifecycleError({ action: command, message });
+      } finally {
+        setLifecycleBusy(false);
+      }
+    },
+    [run, onRunsChanged],
+  );
 
   const runCommand = useCallback(async () => {
     if (!pinnedVersionId) return;
@@ -413,6 +473,92 @@ export default function RunExperience({
           {!isLatest && (
             <p className="mt-1 text-xs text-muted-foreground">
               An earlier run — the newest run appears in Recent activity.
+            </p>
+          )}
+          {/* REALITY-REPAIR-007 (F-008): the run lifecycle controls — the
+              EXISTING V2-005 commands (pause/resume/cancel) composed with
+              their command envelope. The offered actions only FOLLOW the
+              frozen transition table (the UI hides impossible actions; the
+              backend still decides and may reject): running → Pause;
+              paused → Approve (an approval gate — the resume label) or
+              Resume; non-terminal → Stop (the §2.4 explicit choice);
+              terminal → nothing. */}
+          {(run.state === 'running' || run.state === 'paused' || run.state === 'requested') && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {run.state === 'running' && (
+                <button
+                  type="button"
+                  disabled={lifecycleBusy}
+                  onClick={() => void sendLifecycleCommand('pause')}
+                  className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent disabled:opacity-50"
+                >
+                  {lifecycleBusy ? 'Pausing…' : 'Pause'}
+                </button>
+              )}
+              {run.state === 'paused' && (
+                <button
+                  type="button"
+                  disabled={lifecycleBusy}
+                  onClick={() => void sendLifecycleCommand('resume')}
+                  className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {waitingForApproval
+                    ? lifecycleBusy
+                      ? 'Approving…'
+                      : 'Approve'
+                    : lifecycleBusy
+                      ? 'Resuming…'
+                      : 'Resume'}
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={lifecycleBusy}
+                onClick={() => {
+                  setLifecycleError(null);
+                  setStopConfirmOpen((v) => !v);
+                }}
+                className="rounded-md border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent disabled:opacity-50"
+              >
+                Stop
+              </button>
+            </div>
+          )}
+          {/* The §2.4 explicit choice before the terminal cancel command —
+              the exact consequential-action pattern of the recovery
+              surface (one product vocabulary). */}
+          {stopConfirmOpen && run && (
+            <div className="mt-3 space-y-2 rounded-md bg-accent/40 p-3 text-sm">
+              <p>This ends the run — it can't be restarted. You can always run the workflow again.</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={lifecycleBusy}
+                  onClick={() => void sendLifecycleCommand('cancel')}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-50"
+                >
+                  {lifecycleBusy ? 'Stopping…' : 'Stop it'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStopConfirmOpen(false)}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent"
+                >
+                  Keep it going
+                </button>
+              </div>
+            </div>
+          )}
+          {/* A typed lifecycle rejection: the honest error, verbatim —
+              never a fabricated success and never a parallel run state. */}
+          {lifecycleError && (
+            <p role="alert" className="mt-3 text-sm text-destructive">
+              {lifecycleError.action === 'pause'
+                ? "Couldn't pause this run — "
+                : lifecycleError.action === 'cancel'
+                  ? "Couldn't stop this run — "
+                  : "Couldn't continue this run — "}
+              {lifecycleError.message}
             </p>
           )}
           {historyState.kind === 'loading' && (

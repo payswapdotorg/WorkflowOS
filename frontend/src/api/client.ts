@@ -479,6 +479,25 @@ export const workflowRuns = {
       },
     );
   },
+
+  /**
+   * REALITY-REPAIR-007 (F-008): pause a running run through the REAL
+   * V2-005 lifecycle command (running → paused — the only transition the
+   * frozen run state machine admits into paused; the backend owns every
+   * transition decision). The same deterministic command-envelope
+   * discipline as request/start/resume/cancel — modeled on the existing
+   * lifecycle consumers' exact shapes: typed, ApiError-preserving, zero
+   * wire invention.
+   */
+  pause: async (runId: string): Promise<{ run: ProductWorkflowRun; executed: boolean }> => {
+    return apiPost<{ run: ProductWorkflowRun; executed: boolean }>(
+      `/workflow-runs/runs/${runId}/pause`,
+      {
+        commandId: crypto.randomUUID(),
+        correlationId: crypto.randomUUID(),
+      },
+    );
+  },
 };
 
 // T3 (V2-017): the workflow library reads the tenant's installations with
