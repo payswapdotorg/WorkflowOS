@@ -167,7 +167,11 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
     expect(
       screen.getByText(/can't yet turn your description into executable steps/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/starting content/i)).toBeInTheDocument();
+    // REALITY-REPAIR-004 Slice A: the captured input is NEVER recorded as
+    // durable workflow content (the corrected copy).
+    expect(
+      screen.getByText(/never recorded as durable workflow content/i),
+    ).toBeInTheDocument();
     // Correction fields exist: the structured facts the user owns.
     expect(screen.getByRole('textbox', { name: /workflow name/i })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: /workflow slug/i })).toBeInTheDocument();
@@ -188,8 +192,8 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
       'Rename the file',
     ]);
     // The honest provenance note (UX spec §7: captures are never the durable
-    // workflow itself).
-    expect(screen.getByText(/recorded as the starting content/i)).toBeInTheDocument();
+    // workflow itself — the REALITY-REPAIR-004 corrected copy).
+    expect(screen.getByText(/never recorded as durable workflow content/i)).toBeInTheDocument();
   });
 
   it('Tell + Show: the preview shows both the description and the steps', async () => {
@@ -222,9 +226,12 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
         throw new Error('F-T5-001 violation: the create route must never be called from the captured-input flow');
       },
     });
-    // The honest missing-authority state.
-    expect(screen.getByText(/durable creation isn't available yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/WorkflowIR/i)).toBeInTheDocument();
+    // The honest missing-authority state (REALITY-REPAIR-004 Slice A: the
+    // heading is scoped to captured input — the truthful boundary).
+    expect(
+      screen.getByText(/durable creation isn't available for captured input/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/accepts workflowir content only/i)).toBeInTheDocument();
     expect(screen.getByText(/missing/i)).toBeInTheDocument();
     expect(screen.getByText(/nothing is committed/i)).toBeInTheDocument();
     // The deterministic no-fabricated-descriptor proof: no POST (no call of
@@ -251,5 +258,84 @@ describe('V2-017 T5 — Tell / Show / Tell + Show creation', () => {
       String(c[0]).includes('/workflow-repository/workflows'),
     );
     expect(createCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * REALITY-REPAIR-004 Slice A — the truthful creation boundary (F-004a).
+ *
+ * The audit's honesty defect (V2-REALITY-AUDIT-001 FINDING-004a): the
+ * preview promised "the durable workflow is created with immutable Version
+ * 1, and executable authoring happens later from the workflow surface" —
+ * false on both counts (no create POST is ever sent from the
+ * captured-input flow, and no authoring surface existed anywhere in the
+ * product).
+ *
+ * The corrected copy:
+ *   - states the true fail-closed fact EXPLICITLY — natural-language
+ *     capture is NOT converted into executable WorkflowIR (no generation
+ *     authority exists);
+ *   - removes the false Version-1 / "authoring happens later" promise;
+ *   - now that Slice B's bounded expert authoring exists, points the user
+ *     to the REAL expert authoring entry (/expert) instead of implying no
+ *     authoring path exists at all;
+ *   - PRESERVES the captured-input fail-closed behavior: the captured
+ *     input stays transient client-local state — never a create POST.
+ */
+describe('REALITY-REPAIR-004 Slice A — the truthful creation boundary', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('states the true boundary: natural-language capture is NOT converted into executable WorkflowIR — the false promise sentences are gone', async () => {
+    await reachPreview({ '/organizations': orgsOne });
+    // The true fail-closed fact, stated explicitly (Work Order Slice A).
+    expect(screen.getByText(/natural-language capture/i)).toBeInTheDocument();
+    expect(screen.getByText(/isn't converted into executable workflowir/i)).toBeInTheDocument();
+    expect(screen.getByText(/no generation authority exists/i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing is created from this page/i)).toBeInTheDocument();
+    // The F-004a false promise sentences are GONE.
+    expect(
+      screen.queryByText(/durable workflow is created with immutable version 1/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/executable authoring happens later/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/recorded as the starting content/i)).not.toBeInTheDocument();
+  });
+
+  it('points to the REAL expert authoring entry (/expert) while staying fail-closed — no create POST, the capture stays transient', async () => {
+    await reachPreview({
+      '/organizations': orgsOne,
+      // The authoring route is mocked ONLY to prove it is never called:
+      // any call here would carry a fabricated/non-WorkflowIR
+      // irSchemaVersion on a durable WorkflowVersion — the F-T5-001
+      // blocking violation (PRESERVED by this repair).
+      '/organizations/org-1/workflow-repository/workflows': () => {
+        throw new Error('F-T5-001 violation: the create route must never be called from the captured-input flow');
+      },
+    });
+    // The boundary card keeps the fail-closed facts (re-scoped truthfully:
+    // captured INPUT cannot create — not "no creation exists anywhere").
+    expect(
+      screen.getByText(/durable creation isn't available for captured input/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/nothing is committed/i)).toBeInTheDocument();
+    // The real expert authoring entry exists and points at /expert.
+    const expertEntry = screen.getByRole('link', {
+      name: /author a workflow in the expert workspace/i,
+    });
+    expect(expertEntry).toHaveAttribute('href', '/expert');
+    // The captured input STILL never becomes a create POST.
+    const fetchMock = vi.mocked(fetch);
+    const createCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes('/workflow-repository/workflows'),
+    );
+    expect(createCalls).toHaveLength(0);
+    expect(screen.queryByText(/workflow created/i)).not.toBeInTheDocument();
   });
 });

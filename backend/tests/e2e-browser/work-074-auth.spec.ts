@@ -256,6 +256,10 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     // The fail-closed durable boundary (F-T5-001): the preview surfaces the
     // honest missing-authority state — and NO create POST (with any
     // fabricated/non-WorkflowIR irSchemaVersion) is ever sent.
+    // REALITY-REPAIR-004 (F-004a): the boundary copy is now TRUTHFUL —
+    // durable creation is unavailable FOR CAPTURED INPUT (the NL→WorkflowIR
+    // generation authority is missing, deferred to a governed architecture
+    // change) while the REAL expert authoring path (Slice B) is pointed to.
     const createRequests: string[] = [];
     page.on('request', (request) => {
       if (request.url().includes('/workflow-repository/workflows')) {
@@ -265,9 +269,16 @@ test.describe('WORK-074 — fresh-browser identity journey', () => {
     await expect(
       page.getByRole('status', { name: 'Durable creation unavailable' }),
     ).toBeVisible();
-    await expect(page.getByText(/durable creation isn't available yet/i)).toBeVisible();
-    await expect(page.getByText(/WorkflowIR/i)).toBeVisible();
+    await expect(
+      page.getByText(/durable creation isn't available for captured input/i),
+    ).toBeVisible();
+    await expect(page.getByText(/WorkflowIR/i).first()).toBeVisible();
     await expect(page.getByText(/nothing is committed/i)).toBeVisible();
+    // The truthful expert path is offered (F-004b) — never a fabricated
+    // executable-authoring claim about the captured input itself.
+    await expect(
+      page.getByRole('link', { name: /author a workflow in the expert workspace/i }),
+    ).toHaveAttribute('href', '/expert');
     await expect(page.getByRole('button', { name: /create workflow/i })).toHaveCount(0);
     // The deterministic no-fabricated-descriptor proof: no request to the
     // authoring route ever left the page.

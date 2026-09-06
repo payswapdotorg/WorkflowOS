@@ -698,6 +698,61 @@ export const workflowRepository = {
     );
     return body.workflow;
   },
+
+  /**
+   * Create a workflow (born with immutable Version 1) in the organization —
+   * the EXISTING V2-002 createWorkflow command (REALITY-REPAIR-004 Slice B:
+   * the bounded expert authoring composes THIS, never a new authority).
+   *
+   * The `content` is the WorkflowIR JSON document THE AUTHOR OWNS — this
+   * client only transports it (the semantic validation stays server-side:
+   * V2-003 / the V2-002 typed rejections). The `protocol` must truthfully
+   * declare the version's irSchemaVersion. Create-or-converge: a duplicate
+   * submission converges on the existing durable identity (created=false)
+   * instead of diverging.
+   */
+  createWorkflow: async (
+    organizationId: string,
+    input: {
+      slug: string;
+      name: string;
+      description?: string;
+      visibility: string;
+      content: Record<string, unknown>;
+      protocol: { irSchemaVersion: string };
+    },
+  ): Promise<{
+    workflow: ProductWorkflow;
+    initialVersion: ProductWorkflowVersion;
+    created: boolean;
+  }> => {
+    return apiPost<{
+      workflow: ProductWorkflow;
+      initialVersion: ProductWorkflowVersion;
+      created: boolean;
+    }>(`/organizations/${organizationId}/workflow-repository/workflows`, input);
+  },
+
+  /**
+   * Create a NEW immutable version of an EXISTING workflow ("edit";
+   * owner-only) — the EXISTING V2-002 createVersion command. No route can
+   * ever mutate or delete a version (R6): the only edit is a new version.
+   * Same transport discipline as createWorkflow: the author owns the
+   * WorkflowIR content; typed server rejections surface through ApiError.
+   */
+  createVersion: async (
+    workflowId: string,
+    input: {
+      content: Record<string, unknown>;
+      protocol: { irSchemaVersion: string };
+      parentVersionId?: string;
+    },
+  ): Promise<{ version: ProductWorkflowVersion; created: boolean }> => {
+    return apiPost<{ version: ProductWorkflowVersion; created: boolean }>(
+      `/workflow-repository/workflows/${workflowId}/versions`,
+      input,
+    );
+  },
 };
 
 /** An immutable workflow version (the V2-002 wire shape). */
