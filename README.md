@@ -26,10 +26,17 @@ planning notes to determine what to implement next.
 
 ### Active program
 
-The current implementation frontier is **V2-017 — Universal Product UX**.
-Read the human-readable roadmap and V2-017 repository-only execution contract
-before starting or resuming work. The roadmap records task progress in a form
-that a human can audit; machine state remains the operational counterpart.
+V2-017 Universal Product UX is **complete**. The current V2 implementation
+frontier is **V2-DEPLOY-001 — WorkflowOS V2 Productionization**.
+
+Read:
+- [`spec/architecture/v2/deployment-roadmap.md`](spec/architecture/v2/deployment-roadmap.md) — V2 productionization sequence and provider strategy
+- [`spec/architecture/v2/work-orders/V2-DEPLOY-001.md`](spec/architecture/v2/work-orders/V2-DEPLOY-001.md) — governing productionization Work Order
+- [`docs/deployment/V2-PRODUCTIONIZATION.md`](docs/deployment/V2-PRODUCTIONIZATION.md) — deployment baseline
+
+The completed V2-017 roadmap remains authoritative for its historical task
+sequence; it must not be reopened merely because productionization is now in
+progress.
 
 ## Implementation rule
 
@@ -52,12 +59,12 @@ Any change to the architecture requires an Architecture Change Request and a
 new immutable architecture version. Implementation agents must not modify the
 frozen architecture inside ordinary Work Orders.
 
-## Current product-layer state
+## Current V2 product-layer state
 
-V2-017 Task 1 has merged through PR #173. Task 2 is the current implementation
-slice. Exact live status must always be re-read from GitHub and
-`spec/development-state/implementation-state.json`; this README is an entry
-point, not a substitute for current state.
+V2-017 Universal Product UX is complete through T16. Exact V2-017 task status
+must be re-read from GitHub and
+`spec/development-state/implementation-state.json` when historical UX evidence
+is required. The current forward implementation frontier is V2-DEPLOY-001.
 
 ## Quick start
 
@@ -86,7 +93,7 @@ with the dev database persisted under
 `backend/.workflowos-dev-data/pglite` (override with
 `WORKFLOWOS_DEV_DATABASE_DIR`). No Redis server is required either: the
 dev runtime substitutes the non-authoritative Redis layer (locks/cache) and
-the queue with in-memory dev implementations.
+ the queue with in-memory dev implementations.
 
 This path is dev-only. Production always uses a networked PostgreSQL via
 `DATABASE_URL` (see `.env.example` and
