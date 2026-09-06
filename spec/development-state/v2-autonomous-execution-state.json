@@ -6,30 +6,63 @@
   "executionManifest": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md",
   "agentInstructions": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-AGENT-INSTRUCTIONS.md",
   "activeWave": "PRE-DEPLOY-REALITY-REPAIR",
-  "updatedAt": "2026-09-06T16:03:00Z",
-  "scheduler": {"maxConcurrentSpecialists":3,"mergeAuthority":"ARCHITECT_ONLY","dependencyBarrier":"MERGED_OR_COMPLETE_ONLY","reviewAuthority":"ARCHITECT_ONLY","userRoutinePromptsRequired":false,"manualRebasePromptsRequired":false},
-  "reviewTrigger": {"statusValues":["IMPLEMENTING","VERIFYING","SYNCHRONIZING","READY_FOR_ARCHITECT_REVIEW","AWAITING_ARCHITECT_REVIEW","CHANGES_REQUESTED","BLOCKED_GOVERNANCE","MERGED"],"readyConditions":["workOrderImplementationComplete","deterministicVerificationPassing","requiredDogfoodingEvidencePersisted","requiredBrowserEvidencePersistedWhenApplicable","branchFreshAgainstCurrentMain","noPendingSynchronizationOrRepair","scopeAndArchitectureBoundariesUnchanged"],"invalidators":["prHeadChanged","mainAdvancedWithoutSuccessfulSynchronization","architectRequestedChanges","materialEvidenceChanged","scopeChanged"],"userTriggerTemplate":"ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>"},
-  "branchSynchronization": {"owner":"PERSISTENT_ZAI_ORCHESTRATOR","policy":"NO_MANUAL_REBASE_TAX","mechanicalConflicts":"AUTO_RESOLVE_ON_SAME_PR_BRANCH_AND_REVERIFY","semanticOrAuthorityConflicts":"BLOCK_AND_SURFACE_TO_ARCHITECT","siblingDependency":"FORBIDDEN","sameWorkOrderMultipleBranches":"FORBIDDEN","reviewHeadRequiresCurrentMain":true},
-  "frontier": {"nextEligible":["REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],"serialized":["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003"],"parallelAfterREALITY-REPAIR-003":["REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],"gatesAfterRepairs":["V2-REALITY-AUDIT-001-R6","V2-REALITY-AUDIT-001-R7"],"deploymentAfterR7":["DEP-001","DEP-002","DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010","DEP-011","DEP-012"]},
+  "updatedAt": "2026-09-06T23:45:00Z",
+  "scheduler": {
+    "maxConcurrentSpecialists": 3,
+    "mergeAuthority": "ARCHITECT_ONLY",
+    "dependencyBarrier": "MERGED_OR_COMPLETE_ONLY",
+    "reviewAuthority": "ARCHITECT_ONLY",
+    "userRoutinePromptsRequired": false,
+    "manualRebasePromptsRequired": false
+  },
+  "reviewTrigger": {
+    "statusValues": ["IMPLEMENTING","VERIFYING","SYNCHRONIZING","READY_FOR_ARCHITECT_REVIEW","AWAITING_ARCHITECT_REVIEW","CHANGES_REQUESTED","BLOCKED_GOVERNANCE","MERGED"],
+    "readyConditions": ["workOrderImplementationComplete","deterministicVerificationPassing","requiredDogfoodingEvidencePersisted","requiredBrowserEvidencePersistedWhenApplicable","branchFreshAgainstCurrentMain","noPendingSynchronizationOrRepair","scopeAndArchitectureBoundariesUnchanged"],
+    "invalidators": ["prHeadChanged","mainAdvancedWithoutSuccessfulSynchronization","architectRequestedChanges","materialEvidenceChanged","scopeChanged"],
+    "userTriggerTemplate": "ARCHITECT REVIEW: WorkflowOS PR #<N>, Work Order <WO>, head <SHA>"
+  },
+  "branchSynchronization": {
+    "owner": "PERSISTENT_ZAI_ORCHESTRATOR",
+    "policy": "NO_MANUAL_REBASE_TAX",
+    "mechanicalConflicts": "AUTO_RESOLVE_ON_SAME_PR_BRANCH_AND_REVERIFY",
+    "semanticOrAuthorityConflicts": "BLOCK_AND_SURFACE_TO_ARCHITECT",
+    "siblingDependency": "FORBIDDEN",
+    "sameWorkOrderMultipleBranches": "FORBIDDEN",
+    "reviewHeadRequiresCurrentMain": true
+  },
+  "frontier": {
+    "nextEligible": ["V2-REALITY-AUDIT-001-R6"],
+    "serialized": ["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003"],
+    "parallelAfterREALITY-REPAIR-003": ["REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],
+    "gatesAfterRepairs": ["V2-REALITY-AUDIT-001-R6","V2-REALITY-AUDIT-001-R7"],
+    "deploymentAfterR7": ["DEP-001","DEP-002","DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010","DEP-011","DEP-012"]
+  },
   "workOrders": {
-    "REALITY-REPAIR-001":{"status":"COMPLETE","dependencies":[],"mergedAs":{"pr":18,"mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
-    "REALITY-REPAIR-002":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-001"],"dispatch":{"issue":19,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":22,"mergeCommit":"773ca7d85e62736d011e48f0d40244cdaa5138a2"}},
+    "REALITY-REPAIR-001":{"status":"COMPLETE","dependencies":[],"mergedAs":{"pr":18,"head":"e7d172f08f71daa546db6c59dd9c04cb1c5e2c2f","mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
+    "REALITY-REPAIR-002":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-001"],"dispatch":{"issue":19,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":22,"head":"bce8ad35fd8bc5990ae6d411015d771a84ea5648","mergeCommit":"773ca7d85e62736d011e48f0d40244cdaa5138a2"}},
     "REALITY-REPAIR-003":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-002"],"dispatch":{"issue":23,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":24,"head":"2038d364e2b011496594345b130f061b6209439d","mergeCommit":"a9933dae2e18f07cbbf90aebc4ea2e01da2b2d63"}},
-    "REALITY-REPAIR-004":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":25,"basePolicy":"current-main-at-worker-start"}},
-    "REALITY-REPAIR-005":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":26,"basePolicy":"current-main-at-worker-start"}},
-    "REALITY-REPAIR-006":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":27,"basePolicy":"current-main-at-worker-start"}},
-    "REALITY-REPAIR-007":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":28,"basePolicy":"current-main-at-worker-start"}},
-    "REALITY-REPAIR-008":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":29,"basePolicy":"current-main-at-worker-start"}},
-    "REALITY-REPAIR-009":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":30,"basePolicy":"current-main-at-worker-start"}},
-    "V2-REALITY-AUDIT-001-R6":{"status":"GATED","dependencies":["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003","REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"]},
+    "REALITY-REPAIR-004":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":25,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":31,"head":"c3a0732ed6934cfe6a5dd69bc030cbd0c5f6d0cf","mergeCommit":"288dffd66fa25b527aafa609c7b4ed79ad946453"}},
+    "REALITY-REPAIR-005":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":26,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":32,"head":"4aa4099729c6fd3ea7e118d4407ce2eb9a02889c","mergeCommit":"ba95c837893b345fd3676a807d26315705ca25d2"}},
+    "REALITY-REPAIR-006":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":27,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":33,"head":"3674b7572b2e3a6139ecdbf70e52baa639d5ad0b","mergeCommit":"0dce4c883329548f387931cc2c00352bdb14534d"}},
+    "REALITY-REPAIR-007":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":28,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":34,"head":"feb0073aa0a5abb8bf98aa1268011b4dd7dc431b","mergeCommit":"a2cc8ec4613ba4db99241fb2b0e5f80d1d67ac1f"}},
+    "REALITY-REPAIR-008":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":29,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":35,"head":"04a501e95a74d1ea03e54d00d58829ee281d73d6","mergeCommit":"3ee3e22b2a1cff2b3a04905a67620a159d25736b"}},
+    "REALITY-REPAIR-009":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":30,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":36,"head":"883a6f7cc40008f1ce5ef88c540834b3cdd1d476","mergeCommit":"cbbcacfc9936e19091b0ce26d010f5744eeee781"}},
+    "V2-REALITY-AUDIT-001-R6":{"status":"AUTHORIZED","dependencies":["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003","REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],"dispatch":{"issue":15,"workOrder":"spec/architecture/v2/V2-REALITY-AUDIT-001.md","basePolicy":"current-main-at-dispatch"}},
     "V2-REALITY-AUDIT-001-R7":{"status":"GATED","dependencies":["V2-REALITY-AUDIT-001-R6"]},
     "DEP-001":{"status":"GATED","dependencies":["V2-REALITY-AUDIT-001-R7"]},"DEP-002":{"status":"GATED","dependencies":["DEP-001"]},"DEP-003":{"status":"GATED","dependencies":["DEP-002"]},"DEP-004":{"status":"GATED","dependencies":["DEP-002"]},"DEP-005":{"status":"GATED","dependencies":["DEP-002"]},"DEP-006":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005"]},"DEP-007":{"status":"GATED","dependencies":["DEP-002"]},"DEP-008":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-007"]},"DEP-009":{"status":"GATED","dependencies":["DEP-002","DEP-003","DEP-006"]},"DEP-010":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-008"]},"DEP-011":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010"]},"DEP-012":{"status":"GATED","dependencies":["DEP-011"]}
   },
-  "activeSpecialists":[],"reviewQueue":[],
+  "activeSpecialists":[],
+  "reviewQueue":[],
   "mergeHistory":[
     {"workOrder":"REALITY-REPAIR-001","pr":18,"head":"e7d172f08f71daa546db6c59dd9c04cb1c5e2c2f","mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076","mainAfterMerge":"915ed1d046be4b01bcb3b53badad2f892963d076","date":"2026-09-06T11:59:48Z"},
     {"workOrder":"REALITY-REPAIR-002","pr":22,"head":"bce8ad35fd8bc5990ae6d411015d771a84ea5648","mergeCommit":"773ca7d85e62736d011e48f0d40244cdaa5138a2","mainAfterMerge":"773ca7d85e62736d011e48f0d40244cdaa5138a2","date":"2026-09-06T14:48:28Z"},
-    {"workOrder":"REALITY-REPAIR-003","pr":24,"head":"2038d364e2b011496594345b130f061b6209439d","mergeCommit":"a9933dae2e18f07cbbf90aebc4ea2e01da2b2d63","mainAfterMerge":"a9933dae2e18f07cbbf90aebc4ea2e01da2b2d63","date":"2026-09-06T16:00:00Z"}
+    {"workOrder":"REALITY-REPAIR-003","pr":24,"head":"2038d364e2b011496594345b130f061b6209439d","mergeCommit":"a9933dae2e18f07cbbf90aebc4ea2e01da2b2d63","mainAfterMerge":"a9933dae2e18f07cbbf90aebc4ea2e01da2b2d63","date":"2026-09-06T16:00:00Z"},
+    {"workOrder":"REALITY-REPAIR-004","pr":31,"head":"c3a0732ed6934cfe6a5dd69bc030cbd0c5f6d0cf","mergeCommit":"288dffd66fa25b527aafa609c7b4ed79ad946453","mainAfterMerge":"288dffd66fa25b527aafa609c7b4ed79ad946453","date":"2026-09-06T19:05:00Z"},
+    {"workOrder":"REALITY-REPAIR-007","pr":34,"head":"feb0073aa0a5abb8bf98aa1268011b4dd7dc431b","mergeCommit":"a2cc8ec4613ba4db99241fb2b0e5f80d1d67ac1f","mainAfterMerge":"a2cc8ec4613ba4db99241fb2b0e5f80d1d67ac1f","date":"2026-09-06T19:33:08Z"},
+    {"workOrder":"REALITY-REPAIR-005","pr":32,"head":"4aa4099729c6fd3ea7e118d4407ce2eb9a02889c","mergeCommit":"ba95c837893b345fd3676a807d26315705ca25d2","mainAfterMerge":"ba95c837893b345fd3676a807d26315705ca25d2","date":"2026-09-06T23:39:00Z"},
+    {"workOrder":"REALITY-REPAIR-006","pr":33,"head":"3674b7572b2e3a6139ecdbf70e52baa639d5ad0b","mergeCommit":"0dce4c883329548f387931cc2c00352bdb14534d","mainAfterMerge":"0dce4c883329548f387931cc2c00352bdb14534d","date":"2026-09-06T23:40:00Z"},
+    {"workOrder":"REALITY-REPAIR-008","pr":35,"head":"04a501e95a74d1ea03e54d00d58829ee281d73d6","mergeCommit":"3ee3e22b2a1cff2b3a04905a67620a159d25736b","mainAfterMerge":"3ee3e22b2a1cff2b3a04905a67620a159d25736b","date":"2026-09-06T23:42:00Z"},
+    {"workOrder":"REALITY-REPAIR-009","pr":36,"head":"883a6f7cc40008f1ce5ef88c540834b3cdd1d476","mergeCommit":"cbbcacfc9936e19091b0ce26d010f5744eeee781","mainAfterMerge":"cbbcacfc9936e19091b0ce26d010f5744eeee781","date":"2026-09-06T23:44:00Z"}
   ],
-  "lastEvent":{"type":"WORK_ORDER_MERGED_AND_FRONTIER_ADVANCED","summary":"Architect accepted and merged REALITY-REPAIR-003 PR #24 at exact head 2038d364; main is now a9933dae. REALITY-REPAIR-004 through REALITY-REPAIR-009 are now the six eligible parallel successors, durably dispatched as Issues #25–#30 using current-main-at-worker-start. R6/R7 and production deployment remain gated until all required repairs are merged and the repeat audit/release decision passes.","date":"2026-09-06T16:03:00Z"}
+  "lastEvent": {"type":"REALITY_REPAIRS_COMPLETE_R6_AUTHORIZED","summary":"REALITY-REPAIR-001 through REALITY-REPAIR-009 are Architect-merged. The only eligible successor is V2-REALITY-AUDIT-001-R6, the required repeat real-browser audit; R7 and all production deployment Work Orders remain gated until R6 passes and Architect accepts the repeat-audit exit criteria.","date":"2026-09-06T23:45:00Z","main":"cbbcacfc9936e19091b0ce26d010f5744eeee781"}
 }
