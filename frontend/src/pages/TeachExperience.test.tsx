@@ -463,6 +463,280 @@ describe('V2-017 T9 — the Teach Me experience', () => {
     });
   });
 
+  describe('REALITY-REPAIR-008 — the practice-feedback step reference (F-009)', () => {
+    /**
+     * The audit's TEACH-2 topology, faithfully: the two-step lesson whose
+     * practice feedback named the WRONG step. The fixtures mirror the
+     * authority's own derivations VERBATIM so the regression pins the
+     * real wire shapes (listPracticeQuestions / attemptPractice), not
+     * client-invented copies:
+     *   - the practice questions exactly as the V2-006 service derives
+     *     them (id `pq-${nodeId}`, the step's own prompt, the distinct
+     *     declared-semantics options);
+     *   - the attempt feedback exactly as the service's fixed template
+     *     interpolates it (`… for step "${nodeId}".` — the attempted
+     *     step, never another).
+     *
+     * The defect (F-009): the TeachExperience practice-feedback template
+     * rendered ONE question-unscoped feedback state inside EVERY
+     * practice question's section, so the feedback under the
+     * `collect_posts` question could name `send_report` (the last
+     * attempted question's step). The repair: the feedback slot is bound
+     * to the question being assessed — each section renders only its own
+     * attempt's feedback, verbatim from the authority.
+     */
+    const TEACH2_LESSON = {
+      stepOrder: ['collect_posts', 'send_report'],
+      intent: {
+        startNodeId: 'collect_posts',
+        inputNames: [],
+        outputNames: [],
+        provenanceOrigin: 'authored',
+        disclosures: [],
+        statement: 'Collect the week’s posts and email the weekly report.',
+      },
+      prerequisites: [],
+      steps: [
+        lessonStep('collect_posts', 1),
+        lessonStep('send_report', 2),
+      ],
+      decisionPoints: [],
+      observations: [],
+      completionCriteria: [],
+      disclosures: [],
+    };
+
+    const TEACH2_QUESTIONS = [
+      {
+        // The authority's own derivation: id `pq-${step.nodeId}`, the
+        // step's own prompt, the distinct declared-semantics options.
+        id: 'pq-collect_posts',
+        kind: 'step_semantics',
+        nodeId: 'collect_posts',
+        prompt: 'Which declared semantics does the workflow assign to step "collect_posts"?',
+        options: ['github.repository.read', 'messaging.send'],
+      },
+      {
+        id: 'pq-send_report',
+        kind: 'step_semantics',
+        nodeId: 'send_report',
+        prompt: 'Which declared semantics does the workflow assign to step "send_report"?',
+        options: ['github.repository.read', 'messaging.send'],
+      },
+    ];
+
+    /** The declared semantics the V2-006 lesson derivation would yield. */
+    const TEACH2_SEMANTICS: Record<string, string> = {
+      collect_posts: 'github.repository.read',
+      send_report: 'messaging.send',
+    };
+
+    /**
+     * The practice-attempt route, grading exactly like the V2-006
+     * service (`answer.trim() === declaredSemantic`) and answering with
+     * its FIXED feedback templates verbatim — the feedback always names
+     * the ATTEMPTED step.
+     */
+    function teach2PracticeRoute(body?: unknown): Response {
+      const { nodeId, answer } = body as { nodeId: string; answer: string };
+      const declaredSemantic = TEACH2_SEMANTICS[nodeId] ?? '';
+      const correct = (answer ?? '').trim() === declaredSemantic;
+      return jsonResponse(200, {
+        session: session(),
+        result: correct
+          ? {
+              outcome: 'correct',
+              attemptId: `pa_${nodeId}`,
+              nodeId,
+              feedback: `Correct: the workflow declares exactly this semantics for step "${nodeId}".`,
+            }
+          : {
+              outcome: 'incorrect',
+              attemptId: `pa_${nodeId}`,
+              nodeId,
+              feedback: `Not the workflow declaration for step "${nodeId}". The workflow declares: "${declaredSemantic}". (The correction quotes the workflow own declared semantics.)`,
+              declaredSemantic,
+            },
+      });
+    }
+
+    function renderTeach2() {
+      return renderTeach({
+        routes: {
+          'POST /teaching-sessions/sessions': () =>
+            jsonResponse(201, {
+              session: session({ lesson: TEACH2_LESSON }),
+              created: true,
+            }),
+          'GET /teaching-sessions/sessions/ts_1/practice-questions': () =>
+            jsonResponse(200, { questions: TEACH2_QUESTIONS }),
+          'POST /teaching-sessions/sessions/ts_1/practice': teach2PracticeRoute,
+        },
+      });
+    }
+
+    /** The practice-question section whose prompt names `nodeId`. */
+    async function practiceSection(nodeId: string): Promise<HTMLElement> {
+      const panel = await opened();
+      const prompt = TEACH2_QUESTIONS.find((q) => q.nodeId === nodeId)!.prompt;
+      const sections = within(panel).getAllByRole('region', { name: 'Practice' });
+      const own = sections.find((section) => within(section).queryByText(prompt) !== null);
+      expect(own, `the practice section for step "${nodeId}"`).toBeDefined();
+      return own as HTMLElement;
+    }
+
+    it('the known collect_posts feedback case names collect_posts, not send_report (the Work Order regression)', async () => {
+      const { user, fetchMock } = renderTeach2();
+
+      // The learner attempts the send_report question first (wrong
+      // answer) — the authority answers with its verbatim feedback for
+      // the ATTEMPTED step.
+      const sendSection = await practiceSection('send_report');
+      await user.click(
+        within(sendSection).getByRole('radio', { name: 'github.repository.read' }),
+      );
+      await user.click(within(sendSection).getByRole('button', { name: 'Check' }));
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.some(
+            ([input, init]) =>
+              String(input).includes('/teaching-sessions/sessions/ts_1/practice') &&
+              (init?.method ?? 'GET') === 'POST',
+          ),
+        ).toBe(true),
+      );
+
+      // THE F-009 assertion: the send_report attempt's feedback must NOT
+      // render under the collect_posts question. (At base the single
+      // question-unscoped feedback state rendered inside EVERY practice
+      // section — the audited defect.)
+      const collectSection = await practiceSection('collect_posts');
+      expect(
+        within(collectSection).queryByText(/for step "send_report"/),
+        'the collect_posts question must not carry the send_report feedback',
+      ).toBeNull();
+
+      // The learner then answers the collect_posts question itself —
+      // the real wire carries the step actually being assessed.
+      await user.click(
+        within(collectSection).getByRole('radio', { name: 'github.repository.read' }),
+      );
+      await user.click(within(collectSection).getByRole('button', { name: 'Check' }));
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.some(
+            ([input, init]) =>
+              String(input).includes('/teaching-sessions/sessions/ts_1/practice') &&
+              (init?.method ?? 'GET') === 'POST' &&
+              String(init?.body ?? '').includes('"collect_posts"'),
+          ),
+        ).toBe(true),
+      );
+      const collectAttempt = JSON.parse(
+        String(
+          fetchMock.mock.calls
+            .filter(
+              ([input, init]) =>
+                String(input).includes('/teaching-sessions/sessions/ts_1/practice') &&
+                (init?.method ?? 'GET') === 'POST',
+            )
+            .map(([input, init]) => init?.body)
+            .find((body) => body !== undefined && JSON.parse(String(body)).nodeId === 'collect_posts'),
+        ),
+      );
+      expect(collectAttempt).toEqual({
+        nodeId: 'collect_posts',
+        answer: 'github.repository.read',
+      });
+
+      // The collect_posts question's feedback names collect_posts — the
+      // authority's own string for THAT attempt, verbatim.
+      await waitFor(() =>
+        expect(
+          within(collectSection).getByText(
+            'Correct: the workflow declares exactly this semantics for step "collect_posts".',
+          ),
+        ).toBeInTheDocument(),
+      );
+      expect(within(collectSection).queryByText(/for step "send_report"/)).toBeNull();
+    });
+
+    it('each practice question keeps its OWN attempt feedback after other questions are attempted (the derivation rule)', async () => {
+      const { user } = renderTeach2();
+
+      // Attempt the collect_posts question (correctly) first.
+      const collectSection = await practiceSection('collect_posts');
+      await user.click(
+        within(collectSection).getByRole('radio', { name: 'github.repository.read' }),
+      );
+      await user.click(within(collectSection).getByRole('button', { name: 'Check' }));
+      await waitFor(() =>
+        expect(
+          within(collectSection).getByText(
+            'Correct: the workflow declares exactly this semantics for step "collect_posts".',
+          ),
+        ).toBeInTheDocument(),
+      );
+
+      // Then attempt the send_report question (wrongly) — a NEW
+      // feedback exists for the OTHER question.
+      const sendSection = await practiceSection('send_report');
+      await user.click(
+        within(sendSection).getByRole('radio', { name: 'github.repository.read' }),
+      );
+      await user.click(within(sendSection).getByRole('button', { name: 'Check' }));
+      await waitFor(() =>
+        expect(
+          within(sendSection).getByText(/Not the workflow declaration for step "send_report"/),
+        ).toBeInTheDocument(),
+      );
+
+      // The derivation rule: a question's section shows the feedback of
+      // the step actually being assessed — the collect_posts question
+      // keeps ITS feedback and never shows the send_report one.
+      expect(
+        within(collectSection).queryByText(/for step "send_report"/),
+        'the collect_posts section must not adopt the send_report feedback',
+      ).toBeNull();
+      expect(
+        within(collectSection).getByText(
+          'Correct: the workflow declares exactly this semantics for step "collect_posts".',
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('a never-attempted practice question renders NO feedback while an attempted one renders its own', async () => {
+      const { user } = renderTeach2();
+
+      // Before any attempt: no feedback anywhere.
+      const collectSectionBefore = await practiceSection('collect_posts');
+      const sendSectionBefore = await practiceSection('send_report');
+      expect(within(collectSectionBefore).queryByText(/for step "/)).toBeNull();
+      expect(within(sendSectionBefore).queryByText(/for step "/)).toBeNull();
+
+      // Attempt ONLY the send_report question.
+      await user.click(
+        within(sendSectionBefore).getByRole('radio', { name: 'github.repository.read' }),
+      );
+      await user.click(within(sendSectionBefore).getByRole('button', { name: 'Check' }));
+      await waitFor(() =>
+        expect(
+          within(sendSectionBefore).getByText(
+            /Not the workflow declaration for step "send_report"/,
+          ),
+        ).toBeInTheDocument(),
+      );
+
+      // The never-attempted collect_posts question carries NO feedback
+      // at all (at base the shared state rendered the send_report
+      // feedback there — the audited wrong step reference).
+      expect(
+        within(collectSectionBefore).queryByText(/for step "/),
+        'an unattempted question must not render another question’s feedback',
+      ).toBeNull();
+    });
+  });
+
   describe('pause / resume (resumable)', () => {
     it('pauses through the real command, then resumes to the EXACT pending checkpoint', async () => {
       const { user, fetchMock } = renderTeach({
