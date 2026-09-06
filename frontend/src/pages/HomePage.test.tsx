@@ -444,3 +444,156 @@ describe('V2-017 T2 — workflow-first Home', () => {
     });
   });
 });
+
+/**
+ * REALITY-REPAIR-002 — the fresh-user zero-org condition (F-002 regression).
+ *
+ * Governing Work Order: spec/architecture/v2/work-orders/REALITY-REPAIR-002.md
+ * (parent gate V2-REALITY-AUDIT-001, Architect disposition F-002 ACCEPT).
+ *
+ * F-002 (the audit's release blocker): a fresh signup reaches Home with ZERO
+ * organizations while org-scoped product capabilities silently become
+ * ineffective — the UI renders "No workflows yet" (a derivably-empty state
+ * presented as though the user had simply not created anything) with NO path
+ * to create or select the organization every product action is scoped to.
+ *
+ * The repair: Home — the first-run landing — renders the explicit
+ * organization onboarding card when the organizations read succeeds and is
+ * empty. Creation goes through the EXISTING POST /organizations authority
+ * only; on success the Home surfaces re-aggregate across the created
+ * organization (the org-scoped reads now target it). The onboarding card
+ * NEVER renders for a failed read (that stays an honest error, never a fake
+ * empty) and never for a user who already has an organization.
+ */
+describe('REALITY-REPAIR-002 — fresh-user zero-org onboarding (F-002)', () => {
+  it('renders the explicit organization onboarding when the fresh user has zero organizations (the silent no-op repaired)', async () => {
+    renderHome({
+      '/organizations': emptyOrgs,
+      '/workflow-runs/runs': () => jsonResponse(200, { runs: [] }),
+    });
+    // The F-002 defect at base: zero orgs rendered ONLY the generic empty
+    // copy — no onboarding, no actionable target for any org-scoped action.
+    const onboarding = await screen.findByRole('region', {
+      name: 'Organization onboarding',
+    });
+    expect(onboarding).toBeVisible();
+    expect(
+      screen.getByRole('heading', { name: /set up your organization/i }),
+    ).toBeVisible();
+    expect(screen.getByLabelText(/organization name/i)).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: /create organization/i }),
+    ).toBeEnabled();
+    // The derivably-empty workflow copy may coexist (it is honest), but the
+    // onboarding states the real first-run reason: an organization is needed.
+    const workflowsSection = await screen.findByRole('region', {
+      name: 'Recent workflows',
+    });
+    await waitFor(() =>
+      expect(within(workflowsSection).getByText(/No workflows yet/i)).toBeInTheDocument(),
+    );
+  });
+
+  it('creates the organization through the EXISTING POST /organizations authority and re-scopes the Home reads to the created organization', async () => {
+    const user = userEvent.setup();
+    // The orgs read succeeds empty until the create command lands; the 201
+    // response is the authoritative record the surfaces then re-read.
+    let created = false;
+    const orgsHandler = () =>
+      jsonResponse(
+        200,
+        created
+          ? {
+              organizations: [
+                { id: 'org-new', name: 'Fresh User Co', roleId: 'owner' },
+              ],
+            }
+          : { organizations: [] },
+      );
+    const orgWorkflowReads: string[] = [];
+    const orgRunReads: string[] = [];
+    renderHome({
+      '/organizations': orgsHandler,
+      'POST /organizations': () => {
+        created = true;
+        return jsonResponse(201, {
+          organization: { id: 'org-new', name: 'Fresh User Co' },
+          roleId: 'owner',
+        });
+      },
+      '/workflow-repository/workflows': () => {
+        orgWorkflowReads.push('called');
+        return jsonResponse(200, { workflows: [] });
+      },
+      '/workflow-runs/runs': () => {
+        orgRunReads.push('called');
+        return jsonResponse(200, { runs: [] });
+      },
+    });
+
+    const onboarding = await screen.findByRole('region', {
+      name: 'Organization onboarding',
+    });
+    await user.type(
+      within(onboarding).getByLabelText(/organization name/i),
+      'Fresh User Co',
+    );
+    await user.click(
+      within(onboarding).getByRole('button', { name: /create organization/i }),
+    );
+
+    // The exact existing command: POST /organizations { name }.
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      '/api/organizations',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Fresh User Co' }),
+      }),
+    );
+    // The onboarding resolves (the card leaves the landing — the zero-org
+    // condition is gone), and the Home surfaces re-aggregate across the
+    // CREATED organization: the org-scoped reads now run for it.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('region', { name: 'Organization onboarding' }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(orgWorkflowReads.length).toBeGreaterThan(0));
+    await waitFor(() => expect(orgRunReads.length).toBeGreaterThan(0));
+    // Home remains honest: no fabricated workflows for the new org — the
+    // derivably-empty copy renders from the successful re-read.
+    const workflowsSection = await screen.findByRole('region', {
+      name: 'Recent workflows',
+    });
+    await waitFor(() =>
+      expect(within(workflowsSection).getByText(/No workflows yet/i)).toBeInTheDocument(),
+    );
+  });
+
+  it('renders NO onboarding when organizations exist (no unrelated UX for tenanted users)', async () => {
+    renderHome({
+      '/workflow-repository/workflows': workflows,
+      '/workflow-runs/runs': () => jsonResponse(200, { runs: [] }),
+      '/organizations': orgsOne,
+    });
+    await screen.findByRole('region', { name: 'Recent workflows' });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('region', { name: 'Organization onboarding' }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it('renders NO onboarding when the organizations read itself fails — a failed read is never a fake onboarding-empty', async () => {
+    renderHome({
+      '/organizations': () => jsonResponse(503, { error: 'unavailable' }),
+    });
+    await screen.findByRole('region', { name: 'Recent workflows' });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('region', { name: 'Organization onboarding' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: /create organization/i })).not.toBeInTheDocument();
+  });
+});
