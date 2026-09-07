@@ -2566,9 +2566,13 @@ async function auditJourney(
     'EXPECTED_UNAVAILABLE',
     async () => {
       await expect(
-        // The disclosure renders as one paragraph whose JSX line breaks become
-        // whitespace in the DOM — the pin matches whitespace-flexibly.
-        page.getByText(/Teaching activity isn.t shown here yet — teaching records don.t\s+offer a timeline read\. Device events aren.t shown here yet either\./i),
+        // The disclosure is ONE paragraph whose JSX line breaks split it
+        // into SEPARATE text nodes — Playwright matches regexes per text
+        // node, so the sentence is pinned as its two node-local halves.
+        page.getByText(/Teaching activity isn.t shown here yet — teaching records don.t/i),
+      ).toBeVisible();
+      await expect(
+        page.getByText(/offer a timeline read\. Device events aren.t shown here yet either\./i),
       ).toBeVisible();
     },
   );
