@@ -1203,7 +1203,7 @@ async function auditJourney(
       await expect(attention.getByText(/Nothing needs your attention right now\./i)).toBeVisible();
       const approvals = page.getByRole('region', { name: 'Pending approvals' });
       await expect(approvals.getByText(/No run is waiting at an approval step right now\./i)).toBeVisible();
-      const updates = page.getByRole('region', { name: 'Updates' });
+      const updates = page.getByRole('region', { name: 'Update available' });
       await expect(
         updates.getByText(/No updates available right now — an installed workflow stays pinned until you approve its update\./i),
       ).toBeVisible();
@@ -2214,7 +2214,10 @@ async function auditJourney(
       await expect(page.getByText(/Not run yet/i)).toBeVisible();
       await expect(page.getByText(/Runs when you start it/i)).toBeVisible();
       await expect(page.getByRole('region', { name: 'Access and safety' })).toBeVisible();
-      await expect(page.getByRole('region', { name: 'Updates' })).toBeVisible();
+      // The §19 section's accessible name is "Update available" (its h2
+      // heading reads "Updates"); it renders always — for the un-installed
+      // fork it carries the honest "No installed version yet" line.
+      await expect(page.getByRole('region', { name: 'Update available' })).toBeVisible();
       await expect(page.getByRole('region', { name: 'Improvements' })).toBeVisible();
       await expect(page.getByRole('region', { name: 'Primary actions' })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Teach Me' })).toBeVisible();
@@ -2433,7 +2436,7 @@ async function auditJourney(
     'PASS',
     async () => {
       await page.goto(`${FRONTEND_URL}/`);
-      const updates = page.getByRole('region', { name: 'Updates' });
+      const updates = page.getByRole('region', { name: 'Update available' });
       await expect(updates.getByText('Update available')).toBeVisible({ timeout: 20_000 });
       await expect(updates.getByText(WORKFLOW_NAME)).toBeVisible();
       await expect(updates.getByText(/Version 3 is available/i)).toBeVisible();
