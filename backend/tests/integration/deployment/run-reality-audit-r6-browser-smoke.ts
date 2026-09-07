@@ -1047,8 +1047,12 @@ async function main(): Promise<number> {
         // V2-012 — the marketplace listings read (auth-gated 200).
         const listings = await api(cookie, 'GET', '/marketplace/listings');
         expect(listings.status).toBe(200);
+        // The marketplace listings read nests each row as { listing: { id, ... } }
+        // (the create response's own shape) — assert against the nested id.
         expect(
-          (listings.json.listings as Array<{ id: string }>).some((l) => l.id === seed.listingId),
+          (listings.json.listings as Array<{ listing: { id: string } }>).some(
+            (l) => l.listing.id === seed.listingId,
+          ),
         ).toBe(true);
       },
     );
