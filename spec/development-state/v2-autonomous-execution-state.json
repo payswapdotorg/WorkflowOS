@@ -5,8 +5,8 @@
   "canonicalBaseState": "spec/development-state/v2-work-order-state.json",
   "executionManifest": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-ROADMAP.md",
   "agentInstructions": "spec/architecture/v2/V2-AUTONOMOUS-DELIVERY-AGENT-INSTRUCTIONS.md",
-  "activeWave": "PRE-DEPLOY-REALITY-REPAIR",
-  "updatedAt": "2026-09-07T06:35:00Z",
+  "activeWave": "PRODUCTIONIZATION",
+  "updatedAt": "2026-09-07T06:37:00Z",
   "scheduler": {
     "maxConcurrentSpecialists": 3,
     "mergeAuthority": "ARCHITECT_ONLY",
@@ -31,11 +31,11 @@
     "reviewHeadRequiresCurrentMain": true
   },
   "frontier": {
-    "nextEligible": ["V2-REALITY-AUDIT-001-R7"],
+    "nextEligible": ["DEP-001"],
     "serialized": ["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003"],
     "parallelAfterREALITY-REPAIR-003": ["REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],
-    "gatesAfterRepairs": ["V2-REALITY-AUDIT-001-R6","V2-REALITY-AUDIT-001-R7"],
-    "deploymentAfterR7": ["DEP-001","DEP-002","DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010","DEP-011","DEP-012"]
+    "gatesAfterRepairs":["V2-REALITY-AUDIT-001-R6","V2-REALITY-AUDIT-001-R7"],
+    "deploymentAfterR7":["DEP-001","DEP-002","DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010","DEP-011","DEP-012"]
   },
   "workOrders": {
     "REALITY-REPAIR-001":{"status":"COMPLETE","dependencies":[],"mergedAs":{"pr":18,"head":"e7d172f08f71daa546db6c59dd9c04cb1c5e2c2f","mergeCommit":"915ed1d046be4b01bcb3b53badad2f892963d076"}},
@@ -48,8 +48,9 @@
     "REALITY-REPAIR-008":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":29,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":35,"head":"04a501e95a74d1ea03e54d00d58829ee281d73d6","mergeCommit":"3ee3e22b2a1cff2b3a04905a67620a159d25736b"}},
     "REALITY-REPAIR-009":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-003"],"dispatch":{"issue":30,"basePolicy":"current-main-at-worker-start"},"mergedAs":{"pr":36,"head":"883a6f7cc40008f1ce5ef88c540834b3cdd1d476","mergeCommit":"cbbcacfc9936e19091b0ce26d010f5744eeee781"}},
     "V2-REALITY-AUDIT-001-R6":{"status":"COMPLETE","dependencies":["REALITY-REPAIR-001","REALITY-REPAIR-002","REALITY-REPAIR-003","REALITY-REPAIR-004","REALITY-REPAIR-005","REALITY-REPAIR-006","REALITY-REPAIR-007","REALITY-REPAIR-008","REALITY-REPAIR-009"],"dispatch":{"issue":15,"workOrder":"spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R6.md","basePolicy":"current-main-at-dispatch"},"mergedAs":{"pr":41,"head":"414867c9cc93b6fc6de20760758db6bd38cf95e3","mergeCommit":"ccbed23d072aae9906811024b8316c7fd99c4685"}},
-    "V2-REALITY-AUDIT-001-R7":{"status":"AUTHORIZED","dependencies":["V2-REALITY-AUDIT-001-R6"],"dispatch":{"issue":15,"workOrder":"spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R7.md","basePolicy":"current-main-at-dispatch"}},
-    "DEP-001":{"status":"GATED","dependencies":["V2-REALITY-AUDIT-001-R7"]},"DEP-002":{"status":"GATED","dependencies":["DEP-001"]},"DEP-003":{"status":"GATED","dependencies":["DEP-002"]},"DEP-004":{"status":"GATED","dependencies":["DEP-002"]},"DEP-005":{"status":"GATED","dependencies":["DEP-002"]},"DEP-006":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005"]},"DEP-007":{"status":"GATED","dependencies":["DEP-002"]},"DEP-008":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-007"]},"DEP-009":{"status":"GATED","dependencies":["DEP-002","DEP-003","DEP-006"]},"DEP-010":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-008"]},"DEP-011":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010"]},"DEP-012":{"status":"GATED","dependencies":["DEP-011"]}
+    "V2-REALITY-AUDIT-001-R7":{"status":"COMPLETE","dependencies":["V2-REALITY-AUDIT-001-R6"],"dispatch":{"issue":15,"workOrder":"spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R7.md","basePolicy":"current-main-at-dispatch"},"decision":"ACCEPT","decisionArtifact":"spec/architecture/v2/V2-REALITY-AUDIT-001-ARCHITECT-DISPOSITION.md"},
+    "DEP-001":{"status":"AUTHORIZED","dependencies":["V2-REALITY-AUDIT-001-R7"],"dispatch":{"workOrder":"spec/architecture/v2/work-orders/DEP-001.md","basePolicy":"current-main-at-dispatch"}},
+    "DEP-002":{"status":"GATED","dependencies":["DEP-001"]},"DEP-003":{"status":"GATED","dependencies":["DEP-002"]},"DEP-004":{"status":"GATED","dependencies":["DEP-002"]},"DEP-005":{"status":"GATED","dependencies":["DEP-002"]},"DEP-006":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005"]},"DEP-007":{"status":"GATED","dependencies":["DEP-002"]},"DEP-008":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-007"]},"DEP-009":{"status":"GATED","dependencies":["DEP-002","DEP-003","DEP-006"]},"DEP-010":{"status":"GATED","dependencies":["DEP-002","DEP-006","DEP-008"]},"DEP-011":{"status":"GATED","dependencies":["DEP-003","DEP-004","DEP-005","DEP-006","DEP-007","DEP-008","DEP-009","DEP-010"]},"DEP-012":{"status":"GATED","dependencies":["DEP-011"]}
   },
   "activeSpecialists":[],
   "reviewQueue":[],
@@ -65,10 +66,5 @@
     {"workOrder":"REALITY-REPAIR-009","pr":36,"head":"883a6f7cc40008f1ce5ef88c540834b3cdd1d476","mergeCommit":"cbbcacfc9936e19091b0ce26d010f5744eeee781","mainAfterMerge":"cbbcacfc9936e19091b0ce26d010f5744eeee781","date":"2026-09-06T23:43:33Z"},
     {"workOrder":"V2-REALITY-AUDIT-001-R6","pr":41,"head":"414867c9cc93b6fc6de20760758db6bd38cf95e3","mergeCommit":"ccbed23d072aae9906811024b8316c7fd99c4685","mainAfterMerge":"ccbed23d072aae9906811024b8316c7fd99c4685","date":"2026-09-07T06:33:55Z"}
   ],
-  "lastEvent": {
-    "type":"R6_REPEAT_AUDIT_PASSED_R7_AUTHORIZED",
-    "summary":"The full R6 repeat reality audit was Architect-accepted and merged as PR #41 at exact head 414867c9. The orchestrator recorded 48 journeys: 45 PASS, 3 EXPECTED_UNAVAILABLE, 0 FAIL, 0 BLOCKED. All nine reality repairs and all four original release blockers remain cleared on the real deployment topology. R7 is now the sole eligible release-readiness gate; all DEP-* work remains gated until R7 is explicitly accepted.",
-    "date":"2026-09-07T06:35:00Z",
-    "main":"ccbed23d072aae9906811024b8316c7fd99c4685"
-  }
+  "lastEvent":{"type":"R7_ACCEPTED_DEP001_AUTHORIZED","summary":"R6 passed and was Architect-accepted/merged as PR #41. The Architect has now accepted R7 after reviewing R6 evidence and the final main head. Productionization Work Order DEP-001 is the sole eligible next packet; all downstream DEP-* packets remain dependency-gated.","date":"2026-09-07T06:37:00Z","main":"ccbed23d072aae9906811024b8316c7fd99c4685"}
 }
