@@ -1203,7 +1203,7 @@ async function auditJourney(
       await expect(attention.getByText(/Nothing needs your attention right now\./i)).toBeVisible();
       const approvals = page.getByRole('region', { name: 'Pending approvals' });
       await expect(approvals.getByText(/No run is waiting at an approval step right now\./i)).toBeVisible();
-      const updates = page.getByRole('region', { name: 'Update available' });
+      const updates = page.getByRole('region', { name: 'Updates' });
       await expect(
         updates.getByText(/No updates available right now — an installed workflow stays pinned until you approve its update\./i),
       ).toBeVisible();
@@ -2436,7 +2436,7 @@ async function auditJourney(
     'PASS',
     async () => {
       await page.goto(`${FRONTEND_URL}/`);
-      const updates = page.getByRole('region', { name: 'Update available' });
+      const updates = page.getByRole('region', { name: 'Updates' });
       await expect(updates.getByText('Update available')).toBeVisible({ timeout: 20_000 });
       await expect(updates.getByText(WORKFLOW_NAME)).toBeVisible();
       await expect(updates.getByText(/Version 3 is available/i)).toBeVisible();
