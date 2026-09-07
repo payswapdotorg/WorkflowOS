@@ -2502,16 +2502,21 @@ async function auditJourney(
       expect(installations.status).toBe(200);
       // The installations read nests each row as { installation: {…},
       // pinnedVersion: {…} } (serializeInstallationDetail) — the workflowId
-      // lives at row.installation.workflowId (an orchestrator pin
-      // correction from the diagnostic run).
+      // lives at row.installation.workflowId. The re-pin is create-or-
+      // converge: the OLD v1 pin row transitions to status 'disabled' and
+      // the new pin row is 'enabled' (the UI's own "pinned · Enabled"
+      // presentation) — the audited assertion is on THE ENABLED pin
+      // (orchestrator pin corrections from the diagnostic runs).
       const pins = (
         installations.json.installations as Array<{
-          installation: { workflowId: string };
+          installation: { workflowId: string; status: string };
           pinnedVersion: { versionNumber: number };
         }>
       ).filter((i) => i.installation.workflowId === seed.workflowId);
       expect(pins.length).toBeGreaterThan(0);
-      expect(pins[0]!.pinnedVersion.versionNumber).toBe(3);
+      const enabled = pins.filter((i) => i.installation.status === 'enabled');
+      expect(enabled.length).toBe(1);
+      expect(enabled[0]!.pinnedVersion.versionNumber).toBe(3);
     },
   );
   await shot(page, '33-newest-version.png');
