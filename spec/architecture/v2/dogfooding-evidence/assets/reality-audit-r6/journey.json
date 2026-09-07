@@ -1,0 +1,858 @@
+{
+  "run": "V2-REALITY-AUDIT-001-R6 — the full-matrix repeat-audit browser run",
+  "workOrder": "spec/architecture/v2/work-orders/V2-REALITY-AUDIT-001-R6.md",
+  "startedAt": "2026-09-07T02:34:02.990Z",
+  "finishedAt": "2026-09-07T02:34:45.563Z",
+  "durationMs": 42573,
+  "exitCode": 0,
+  "backendPort": 3001,
+  "frontendPort": 5188,
+  "counts": {
+    "total": 48,
+    "pass": 45,
+    "expectedUnavailable": 3,
+    "fail": 0,
+    "blocked": 0
+  },
+  "failingJourneys": [],
+  "journeyMatrix": [
+    {
+      "id": "DEP-1",
+      "journey": "the real deployment entry serves the V2 product routes (F-001/RR-001)",
+      "expected": "the real entry: /health 200, /health/ready 200, POST /auth/password/register 201, and after a real login an auth-gated 200 for one read per V2 product route group (the RR-001 route list); GET /marketplace/listings answers 401-not-404 unauthenticated",
+      "observed": "health 200; health/ready 200; register 201; auth-gated 200s: V2-002 org workflows read, public workflow read, versions read, V2-005 runs read, V2-009 deployments read, V2-006 teaching session create+read, V2-010 reverse-teaching session create+read, V2-011 analyze+proposals, V2-012 marketplace listings; unauthenticated GET /marketplace/listings 401-not-404",
+      "status": "PASS"
+    },
+    {
+      "id": "AUTH-1",
+      "journey": "register through the real UI → Home",
+      "expected": "account + session; lands on Home",
+      "observed": "registered through the real register UI; landed on Home (\"What do you want to get done?\")",
+      "status": "PASS"
+    },
+    {
+      "id": "HOME-1",
+      "journey": "goal/search entry + mode buttons",
+      "expected": "entry renders with the three capture-mode buttons",
+      "observed": "the goal/search entry renders with the Describe it / Show me / Describe + show mode buttons (the RR-004-era honest labels)",
+      "status": "PASS"
+    },
+    {
+      "id": "HOME-2",
+      "journey": "attention: honest empty states when empty",
+      "expected": "honest empty states (the fresh zero-org session)",
+      "observed": "the fresh session renders the honest empty states: \"No workflows yet…\", \"Nothing needs your attention right now.\", \"No run is waiting at an approval step right now.\", \"No updates available right now…\"",
+      "status": "PASS"
+    },
+    {
+      "id": "HOME-5",
+      "journey": "attention: Device issues honest unavailable (F-006 assert-as-is)",
+      "expected": "honest unavailable — the deferral is the product decision, NOT a defect",
+      "observed": "the Device issues panel renders its honest Unavailable state (\"Unavailable\" + \"…they’ll appear once device status becomes part of the product\") — F-006 assert-as-is, unchanged",
+      "status": "EXPECTED_UNAVAILABLE"
+    },
+    {
+      "id": "AUTH-2",
+      "journey": "sign out → the login screen",
+      "expected": "login screen",
+      "observed": "Sign Out returned the consumer to the real login screen",
+      "status": "PASS"
+    },
+    {
+      "id": "AUTH-3",
+      "journey": "sign in with password → Home",
+      "expected": "Home",
+      "observed": "signed in with the password through the real login surface; landed on Home",
+      "status": "PASS"
+    },
+    {
+      "id": "AUTH-4",
+      "journey": "wrong password → the honest error",
+      "expected": "\"Invalid email or password.\"",
+      "observed": "the wrong password rendered the honest error \"Invalid email or password.\" (the uniform 401, no enumeration); the correct password then signed in",
+      "status": "PASS"
+    },
+    {
+      "id": "AUTH-5",
+      "journey": "duplicate registration → the honest error",
+      "expected": "\"An account with this email already exists. Try signing in.\"",
+      "observed": "the duplicate registration rendered the honest 409 error \"An account with this email already exists. Try signing in.\"",
+      "status": "PASS"
+    },
+    {
+      "id": "AUTH-6",
+      "journey": "session survives reload",
+      "expected": "session retained (HttpOnly cookie)",
+      "observed": "the session survived a full page reload (still on Home behind the shell)",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-1",
+      "journey": "Explore browse: listing cards render",
+      "expected": "card renders with price, model, publisher line, pinned version, trust sentence",
+      "observed": "the Explore card rendered: the listing name, $19.00 · One-time purchase, \"Listed by another organization\", Version 1, and the publication-is-not-proof sentence",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-2",
+      "journey": "listing detail: full §22 disclosure",
+      "expected": "offers + boundary, needs-access incl. the sensitive messaging.send, works-with, version-and-trust",
+      "observed": "the listing detail rendered the full §22 disclosure: $19.00 One-time purchase + the entitlement boundary, Needs access to (github.repository.read + the SENSITIVE messaging.send flag + line), Works with (cloud_allowed), Version and trust (the pinned-version + digest sentence + publication-not-proof)",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-3",
+      "journey": "purchase with NO organization → the first-run onboarding flow (F-002/RR-002)",
+      "expected": "no silent no-op: the actionable Organization onboarding renders in Your access; the org is created through the real UI; the per-org decision resolves",
+      "observed": "the no-org session at the listing: NO perpetual \"Checking your access…\" — the Organization onboarding rendered inside Your access (\"Set up your organization\"); the org was created through the real UI; the per-org decision resolved to the honest \"This listing has no free offer.\" denial (an actionable decision, never a silent no-op)",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-4",
+      "journey": "purchase with org → entitled",
+      "expected": "\"You're entitled to this workflow.\" + the one-time-purchase basis",
+      "observed": "\"Get workflow\" drove the REAL offer acceptance (the deterministic reference payment adapter settled the $19.00 charge); the decision re-read shows \"You’re entitled to this workflow.\" + \"Access through your one-time purchase.\"",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-5",
+      "journey": "install pinned version",
+      "expected": "installed, pinned; the execution-separate sentence",
+      "observed": "the EXISTING V2-002 Install pinned version 1 into the CONSUMER org: \"Installed — pinned to version 1\" + \"Running it stays a separate decision…\" + \"Open in your Workflows library\"",
+      "status": "PASS"
+    },
+    {
+      "id": "LIB-2",
+      "journey": "Installed tab: the REAL workflow name (F-007/RR-006)",
+      "expected": "installed cards with the workflow’s real name — never the generic fallback",
+      "observed": "the Installed tab card shows the REAL name \"R6 audit approval digest\" (never the generic \"Installed workflow\" fallback) + \"Version 1 — pinned\" + \"Enabled\" + the Open link",
+      "status": "PASS"
+    },
+    {
+      "id": "DET-2",
+      "journey": "INSTALLED (marketplace) workflow detail loads against caller-org reads (F-003/RR-003)",
+      "expected": "the detail loads (heading, description, Public line, steps, the consumer pin, honest no-facts states — no honest-error state) with ZERO publisher-org requests",
+      "observed": "the cross-org INSTALLED detail LOADED: heading + description + \"Public — any signed-in user\" + the 5 presentation-label steps + \"Installed: Version 1 — pinned · Enabled\" + \"Not run yet\" + \"not deployed yet\" + NO alert; the network capture: ZERO /api/organizations/{publisher}/ requests, the caller-org runs + installations reads present, the public workflow read present",
+      "status": "PASS"
+    },
+    {
+      "id": "CREATE-1",
+      "journey": "Tell creation → preview → the truthful boundary (F-004a/RR-004)",
+      "expected": "honest capture; the corrected boundary copy; the fail-closed commit boundary holds (ZERO create POSTs)",
+      "observed": "the Tell preview rendered \"Here’s what I understood\" with the corrected honest copy (\"Natural-language capture isn’t converted into executable WorkflowIR — no generation authority exists — so nothing is created from this page\", \"Durable creation isn’t available for captured input\", \"Nothing is committed\") — NO false promise; ZERO workflow-repository POSTs left the flow",
+      "status": "PASS"
+    },
+    {
+      "id": "CREATE-2",
+      "journey": "Show creation: honest no-recording note",
+      "expected": "\"No screen recording exists yet — describe what you did…\"; steps captured; the same boundary",
+      "observed": "the Show mode rendered the honest no-recording note; a demonstration step was captured and echoed in the preview; the same fail-closed boundary rendered",
+      "status": "PASS"
+    },
+    {
+      "id": "CREATE-3",
+      "journey": "Tell + Show combined capture, the same boundary, PLUS the RR-004 expert IR authoring path",
+      "expected": "combined capture, the fail-closed boundary, and the corrected expert entry leading to a REAL authoring surface: the expert authors a valid WorkflowIR through the V2-002 create path and the workflow appears in the library",
+      "observed": "the Tell+Show preview carried both inputs with the same boundary; the boundary’s expert entry navigated to /expert where the consumer authored a real WorkflowIR; the REAL V2-002 create route created \"R6 audit expert digest\" (\"born with immutable version 1\", a wfw_… id) and the created workflow resolves through the real reads",
+      "status": "PASS"
+    },
+    {
+      "id": "RUN-1",
+      "journey": "run preview → request → start (Running)",
+      "expected": "consequential preview then Running (the real V2-005 request + start through the browser)",
+      "observed": "the Run preview rendered the 5 steps + Version 1 + \"Approval required\" + Needs access to + \"Where it runs isn’t set up yet — this workflow has no deployment.\"; the confirm drove the REAL request+start; the run-status surface rendered Running (the API runs read agrees)",
+      "status": "PASS"
+    },
+    {
+      "id": "RUN-2",
+      "journey": "Running + trust disclosure",
+      "expected": "honest evidence state: \"How do you know?\" + \"No evidence records yet\" + the advanced surface",
+      "observed": "the run-status surface carries the §17 trust presentation: \"How do you know?\" + \"No evidence records yet for this run.\" + the \"Advanced details\" surface",
+      "status": "PASS"
+    },
+    {
+      "id": "RUN-3",
+      "journey": "run state survives reload",
+      "expected": "state retained (Running)",
+      "observed": "a full page reload re-derived the run-status surface with Running retained (the authoritative runs read)",
+      "status": "PASS"
+    },
+    {
+      "id": "RUN-4",
+      "journey": "the user drives the run lifecycle: Pause → Resume → the approval gate → Approve; Pause/Stop reachable (F-008/RR-007)",
+      "expected": "the user-facing Approve/Resume/Pause/Stop controls exist and drive the REAL V2-005 commands; the waiting run is resumable by the human",
+      "observed": "the user PAUSED (Paused, history-verified) → RESUMED (Running) → the run parked at the approval gate (\"Waiting for you\" + the Approve control) → the user’s APPROVE returned the run to execution (the ordered pause→resume→pause-at-review_gate→resumed timeline) → the Stop control opens the §2.4 explicit choice (\"Keep it going\" preserved the run)",
+      "status": "PASS"
+    },
+    {
+      "id": "HOME-3",
+      "journey": "attention: Pending approvals composes real approvals content (F-005/RR-005)",
+      "expected": "a pending approval appears with actionable language (the RR-005 composed surface)",
+      "observed": "Home’s Pending approvals showed the approval-waiting run: \"Waiting for you\" + the workflow name + \"It’s paused for your approval before it continues.\" + the \"Open the run\" link (href /workflows/{id}?run={runId}) — NO Unavailable claim, NO false \"not part of the product\" copy; Needs attention shows Paused; the Open-the-run deep link re-opened the waiting run and the user’s Approve closed it again (the loop is closable from Home too)",
+      "status": "PASS"
+    },
+    {
+      "id": "RUN-5",
+      "journey": "failure presentation + recovery (Try again works)",
+      "expected": "honest failure + recovery: the reason verbatim, \"Try again\" starts a new run, \"Edit workflow\" → /expert",
+      "observed": "the executor-side fail rendered \"Couldn’t complete\" + the recovery surface (\"I couldn’t finish this.\" + the reason verbatim + \"Try again\" + \"Edit workflow\" → /expert); \"Try again\" started a NEW run (Running, a distinct run id)",
+      "status": "PASS"
+    },
+    {
+      "id": "WHEN-1",
+      "journey": "schedule editor → save (\"Runs every day · 9:00 AM UTC\" + Pause; deployment + subscription created)",
+      "expected": "real V2-009 composition: the schedule sentence + Pause; the deployment + subscription created through the real routes",
+      "observed": "the When editor (On a schedule · Every day · 09:00 UTC) saved through the REAL create-or-converge routes: the subscription line \"Runs every day · 9:00 AM UTC\" with a Pause control; the caller-org deployment + schedule subscription verified through the real reads",
+      "status": "PASS"
+    },
+    {
+      "id": "TEACH-1",
+      "journey": "lesson + checkpoints + pause/resume",
+      "expected": "governed lesson flow: Start lesson → the steps → \"I've done it\" × the lesson → pause/resume mid-lesson → All steps confirmed",
+      "observed": "Teach Me opened (bound to the pinned Version 1); Start lesson → \"Step 1 of 5 — Collect the open tickets\"; a mid-lesson Pause → the paused note → Resume; 5 × \"I’ve done it\" → \"All steps confirmed\"",
+      "status": "PASS"
+    },
+    {
+      "id": "TEACH-2",
+      "journey": "practice feedback references the CORRECT step (F-009/RR-008)",
+      "expected": "the attempted question’s own verbatim feedback (the authority template names the ATTEMPTED step); the other question carries NO feedback",
+      "observed": "the send_report question answered wrong rendered its own verbatim feedback (naming send_report, quoting messaging.send); the collect_posts question’s section carried NO feedback; the collect_posts correct answer rendered \"Correct: … for step \\\"collect_posts\\\"\"; the wire carried the attempted nodeId",
+      "status": "PASS"
+    },
+    {
+      "id": "TEACH-3",
+      "journey": "assessment → Lesson complete",
+      "expected": "terminal on pass: \"Lesson complete\" with no lifecycle commands remaining",
+      "observed": "the exact-token assessment (5 ordered positions + 5 declared-semantics answers) passed → \"Lesson complete\"; no Pause/\"I've done it\" controls remain",
+      "status": "PASS"
+    },
+    {
+      "id": "TEACH-4",
+      "journey": "teaching evidence visibly separate from run evidence",
+      "expected": "the distinct Teaching evidence surface with the separation vocabulary",
+      "observed": "the \"Teaching evidence\" region rendered with \"Kept separate from run evidence — learning never counts as execution\"",
+      "status": "PASS"
+    },
+    {
+      "id": "MKT-6",
+      "journey": "Make my own (fork) with provenance",
+      "expected": "provenance-carrying copy: name input → \"Create copy\" → \"Open your copy\"; forkedFrom* verified through the real read",
+      "observed": "the \"Make it my own\" flow created the copy in the CONSUMER org (\"Open your copy\" appeared); the fork detail loads (Private — only you); the real read confirms forkedFromWorkflowId/forkedFromVersionId point at the publisher workflow + version 1",
+      "status": "PASS"
+    },
+    {
+      "id": "LIB-1",
+      "journey": "My Workflows tab: cards with facts",
+      "expected": "cards with facts (the fork + the expert-authored workflow: name, Last run, schedule word, Open)",
+      "observed": "the My Workflows tab lists the fork \"My R6 audit copy\" and the expert-authored \"R6 audit expert digest\" with the honest facts (\"Not run yet\", \"Runs when you start it\", the slug, the Open links)",
+      "status": "PASS"
+    },
+    {
+      "id": "LIB-3",
+      "journey": "Drafts / Archived: honest unavailable",
+      "expected": "honest Unavailable sections (never fabricated) — the workflow model carries no draft/archived state",
+      "observed": "the Drafts and Archived tabs render their honest Unavailable states (\"Drafts aren’t distinguishable in the workflow records yet — they’ll appear here once draft state becomes part of the product\" / the archived twin)",
+      "status": "EXPECTED_UNAVAILABLE"
+    },
+    {
+      "id": "DET-1",
+      "journey": "own-org workflow detail: full surface (the consumer’s fork + the publisher’s own-org content)",
+      "expected": "purpose, presentation steps, When/Where, Recent activity, Version, Access and safety, Updates, Improvements, primary actions — with real content on the publisher’s own-org pass",
+      "observed": "the consumer’s fork detail rendered the full surface (heading, Private line, the 5 steps, \"Runs when you start it\", \"Not run yet\", \"Version 1 — immutable\", \"No installs — run it from the library\", Access and safety, Updates, Improvements, Teach Me/Share/Edit); the publisher’s own-org detail (a second real browser session) rendered WITH content: the seeded schedule \"Runs every day · 9:00 AM UTC\" + Pause, Recent activity listing the run, \"Installed: Version 1 — pinned · Enabled\"",
+      "status": "PASS"
+    },
+    {
+      "id": "VER-1",
+      "journey": "update banner with pin language (v2 available)",
+      "expected": "banner + pin language: \"An update is available\", Version 2, \"Your installed version: Version 1 — pinned\", \"Nothing changes until you approve the update\"",
+      "observed": "the publisher shipped v2 (the task-text change) through the REAL createVersion route; the consumer’s detail shows the §19 banner: \"An update is available\" + Version 2 + \"Your installed version: Version 1 — pinned\" + \"Nothing changes until you approve the update\"",
+      "status": "PASS"
+    },
+    {
+      "id": "VER-2",
+      "journey": "Review update / What changed: the human-readable version diff (F-010/RR-009)",
+      "expected": "the EQUIVALENT posture stays \"Task-for-task equivalent - verified\"; the NON-EQUIVALENT posture renders the field-level readable diff (the step NAME, the field, the readable values — NO raw internal JSON) while the authoritative comparison payload remains on the wire",
+      "observed": "v1→v2 (the task-text change): \"Task-for-task equivalent - verified\" — no divergence block, no raw JSON; v1→v3 (the step-input literal change): \"Not equivalent\" + \"Where the versions differ: the step \\\"Collect the open tickets\\\" — its inputs\" + the readable Installed/New values (payswapdotorg/WorkflowOS → pectoraux/WorkflowOS) — NO \\\"!=\\\" blob, no raw node id; the wire capture shows the REAL V2-011 compare route answering with the raw internal envelope (equivalent:false, firstDivergence \\\"node collect_posts inputs: …\\\") while the rendered DOM never shows it",
+      "status": "PASS"
+    },
+    {
+      "id": "HOME-4",
+      "journey": "attention: Updates composes versions/installations reads (F-005/RR-005)",
+      "expected": "an installed-behind-head workflow appears in Updates with the pinned-never-auto-updated vocabulary + the Open-the-workflow link; NO adoption action on Home",
+      "observed": "Home’s Updates showed the installed-behind-head workflow: \"Update available\" + the name + \"Version 3 is available — your installed Version 1 stays pinned (it never auto-updates)\" + \"Nothing changes until you approve the update\" + the \"Open the workflow\" link — no adoption action on Home, no Unavailable claim",
+      "status": "PASS"
+    },
+    {
+      "id": "VER-3",
+      "journey": "approve update → new pin",
+      "expected": "\"You're on the newest version.\"; the Installed pin moves to Version 3 through the EXISTING commands",
+      "observed": "the user clicked \"Approve update\" → the EXISTING V2-002 install command re-pinned to Version 3 → \"You’re on the newest version.\" + \"Installed: Version 3 — pinned · Enabled\" (verified through the real installations read)",
+      "status": "PASS"
+    },
+    {
+      "id": "ACT-1",
+      "journey": "activity timeline: entries + links",
+      "expected": "version entries + run entries + \"Open the run\"",
+      "observed": "the Activity timeline lists the version entries (the fork + the expert workflow’s immutable v1s) and the run entries with their state words + the \"Open the run\" links",
+      "status": "PASS"
+    },
+    {
+      "id": "ACT-2",
+      "journey": "activity → run deep link",
+      "expected": "navigates to /workflows/:id?run=:runId and shows the run-status surface",
+      "observed": "the \"Open the run\" link navigated to /workflows/{id}?run={runId} and the run-status surface rendered the selected run",
+      "status": "PASS"
+    },
+    {
+      "id": "ACT-3",
+      "journey": "teaching/device on Activity: honest unavailable",
+      "expected": "\"Teaching activity isn’t shown here yet — teaching records don’t offer a timeline read. Device events aren’t shown here yet either.\"",
+      "observed": "the Activity page renders the honest teaching/device disclosure sentence verbatim (no fabricated timeline entries)",
+      "status": "EXPECTED_UNAVAILABLE"
+    },
+    {
+      "id": "EXPERT-1",
+      "journey": "expert bridge page renders",
+      "expected": "the bridge renders with the mode-crossing disclosure + the developer-workspace entry",
+      "observed": "the /expert surface renders the \"Developer workspace\" bridge card with the explicit mode-crossing sentence + the \"Open developer workspace\" link (and the RR-004 authoring surface beside it)",
+      "status": "PASS"
+    },
+    {
+      "id": "EXPERT-2",
+      "journey": "project creation through the UI",
+      "expected": "project created; the engineering shell renders",
+      "observed": "the project was created through the real /projects form (New Project → the org + name → Create) and the Project Overview shell rendered",
+      "status": "PASS"
+    },
+    {
+      "id": "EXPERT-3",
+      "journey": "engineering surfaces load against the REAL entry (the R0-R4 BLOCKED was a composition artifact)",
+      "expected": "the V1 engineering routes answer on the real entry: the Overview’s project + architectures reads resolve and the architect surface renders without \"Error: Not found\"",
+      "observed": "the project Overview consumed GET /projects/:id + GET /projects/:id/architectures and rendered (no ErrorState); the /projects/:id/architect surface rendered its \"Architect\" heading with NO \"Error: Not found\" — the V1 engineering routes were always wired in the real entry (R0-R4’s 404 was the product-test-composition artifact)",
+      "status": "PASS"
+    },
+    {
+      "id": "RESP-1",
+      "journey": "mobile 390×844: Home/Detail/Create/Explore render with no horizontal overflow",
+      "expected": "no horizontal overflow; the mobile primary nav present",
+      "observed": "at 390×844 all four surfaces rendered with documentElement.scrollWidth ≤ clientWidth (no horizontal overflow) and the mobile primary nav (Home / Workflows / Create / Explore / Activity) present",
+      "status": "PASS"
+    },
+    {
+      "id": "NET-1",
+      "journey": "in-app navigation while offline → honest degraded states",
+      "expected": "per-surface honest degraded states with Try again (never fabricated success)",
+      "observed": "offline in-app navigation rendered the honest degraded states: Workflows (\"Couldn’t load this right now.\" + Try again), Explore (\"Listings are unavailable\" + the not-an-empty-result note + Try again), Activity (\"Workflows unavailable — couldn’t load the workflow list.\" etc.), the workflow detail (\"Couldn’t load this workflow right now.\" + Try again — reached through client-side history); back online, \"Try again\" restored the surface",
+      "status": "PASS"
+    },
+    {
+      "id": "COMP-1",
+      "journey": "companion handoff deep link → the honest bridge",
+      "expected": "\"Companion not installed\" + instructions",
+      "observed": "the /companion/handoff deep link rendered the honest bridge: the \"Companion not installed\" badge + the \"WorkflowOS Companion not installed\" instruction card",
+      "status": "PASS"
+    }
+  ],
+  "transcript": [
+    {
+      "at": "2026-09-07T02:34:02.992Z",
+      "label": "V2-REALITY-AUDIT-001-R6 full-matrix repeat-audit browser runner starting at 2026-09-07T02:34:02.990Z",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-07T02:34:02.993Z",
+      "label": "artifacts dir: /home/z/wt-r6/spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6",
+      "status": "INFO",
+      "ms": 0
+    },
+    {
+      "at": "2026-09-07T02:34:08.839Z",
+      "label": "the REAL deployment entry boots (bun src/index.ts, pglite, role=all, :3001)",
+      "status": "PASS",
+      "ms": 5838
+    },
+    {
+      "at": "2026-09-07T02:34:08.867Z",
+      "label": "the ACTUAL product SPA is served (Vite dev server)",
+      "status": "PASS",
+      "ms": 28
+    },
+    {
+      "at": "2026-09-07T02:34:09.560Z",
+      "label": "seed: publisher register → login → org → public approval-gated workflow → one-time-priced listing → publish → own-org installation + deployment + subscription + started run (REAL routes; the consumer gets NOTHING pre-seeded)",
+      "status": "PASS",
+      "ms": 694
+    },
+    {
+      "at": "2026-09-07T02:34:09.808Z",
+      "label": "DEP-1 the real deployment entry serves the V2 product routes (F-001/RR-001)",
+      "status": "PASS",
+      "ms": 247
+    },
+    {
+      "at": "2026-09-07T02:34:12.564Z",
+      "label": "AUTH-1 register through the real UI → Home",
+      "status": "PASS",
+      "ms": 2258
+    },
+    {
+      "at": "2026-09-07T02:34:12.729Z",
+      "label": "HOME-1 goal/search entry + mode buttons",
+      "status": "PASS",
+      "ms": 17
+    },
+    {
+      "at": "2026-09-07T02:34:12.740Z",
+      "label": "HOME-2 attention: honest empty states when empty",
+      "status": "PASS",
+      "ms": 10
+    },
+    {
+      "at": "2026-09-07T02:34:12.843Z",
+      "label": "HOME-5 attention: Device issues honest unavailable (F-006 assert-as-is)",
+      "status": "PASS",
+      "ms": 5
+    },
+    {
+      "at": "2026-09-07T02:34:12.928Z",
+      "label": "AUTH-2 sign out → the login screen",
+      "status": "PASS",
+      "ms": 85
+    },
+    {
+      "at": "2026-09-07T02:34:13.098Z",
+      "label": "AUTH-3 sign in with password → Home",
+      "status": "PASS",
+      "ms": 170
+    },
+    {
+      "at": "2026-09-07T02:34:13.484Z",
+      "label": "AUTH-4 wrong password → the honest error",
+      "status": "PASS",
+      "ms": 386
+    },
+    {
+      "at": "2026-09-07T02:34:13.905Z",
+      "label": "AUTH-5 duplicate registration → the honest error",
+      "status": "PASS",
+      "ms": 420
+    },
+    {
+      "at": "2026-09-07T02:34:14.308Z",
+      "label": "AUTH-6 session survives reload",
+      "status": "PASS",
+      "ms": 403
+    },
+    {
+      "at": "2026-09-07T02:34:14.731Z",
+      "label": "MKT-1 Explore browse: listing cards render",
+      "status": "PASS",
+      "ms": 423
+    },
+    {
+      "at": "2026-09-07T02:34:15.216Z",
+      "label": "MKT-2 listing detail: full §22 disclosure",
+      "status": "PASS",
+      "ms": 406
+    },
+    {
+      "at": "2026-09-07T02:34:15.436Z",
+      "label": "MKT-3 purchase with NO organization → the first-run onboarding flow (F-002/RR-002)",
+      "status": "PASS",
+      "ms": 108
+    },
+    {
+      "at": "2026-09-07T02:34:15.620Z",
+      "label": "MKT-4 purchase with org → entitled",
+      "status": "PASS",
+      "ms": 79
+    },
+    {
+      "at": "2026-09-07T02:34:15.829Z",
+      "label": "MKT-5 install pinned version",
+      "status": "PASS",
+      "ms": 92
+    },
+    {
+      "at": "2026-09-07T02:34:16.526Z",
+      "label": "LIB-2 Installed tab: the REAL workflow name (F-007/RR-006)",
+      "status": "PASS",
+      "ms": 580
+    },
+    {
+      "at": "2026-09-07T02:34:17.304Z",
+      "label": "DET-2 INSTALLED (marketplace) workflow detail loads against caller-org reads (F-003/RR-003)",
+      "status": "PASS",
+      "ms": 726
+    },
+    {
+      "at": "2026-09-07T02:34:17.867Z",
+      "label": "CREATE-1 Tell creation → preview → the truthful boundary (F-004a/RR-004)",
+      "status": "PASS",
+      "ms": 445
+    },
+    {
+      "at": "2026-09-07T02:34:18.411Z",
+      "label": "CREATE-2 Show creation: honest no-recording note",
+      "status": "PASS",
+      "ms": 404
+    },
+    {
+      "at": "2026-09-07T02:34:19.110Z",
+      "label": "CREATE-3 Tell + Show combined capture, the same boundary, PLUS the RR-004 expert IR authoring path",
+      "status": "PASS",
+      "ms": 699
+    },
+    {
+      "at": "2026-09-07T02:34:20.190Z",
+      "label": "RUN-1 run preview → request → start (Running)",
+      "status": "PASS",
+      "ms": 926
+    },
+    {
+      "at": "2026-09-07T02:34:20.357Z",
+      "label": "RUN-2 Running + trust disclosure",
+      "status": "PASS",
+      "ms": 16
+    },
+    {
+      "at": "2026-09-07T02:34:21.020Z",
+      "label": "RUN-3 run state survives reload",
+      "status": "PASS",
+      "ms": 516
+    },
+    {
+      "at": "2026-09-07T02:34:22.641Z",
+      "label": "RUN-4 the user drives the run lifecycle: Pause → Resume → the approval gate → Approve; Pause/Stop reachable (F-008/RR-007)",
+      "status": "PASS",
+      "ms": 1621
+    },
+    {
+      "at": "2026-09-07T02:34:24.109Z",
+      "label": "HOME-3 attention: Pending approvals composes real approvals content (F-005/RR-005)",
+      "status": "PASS",
+      "ms": 1294
+    },
+    {
+      "at": "2026-09-07T02:34:26.069Z",
+      "label": "RUN-5 failure presentation + recovery (Try again works)",
+      "status": "PASS",
+      "ms": 1762
+    },
+    {
+      "at": "2026-09-07T02:34:26.581Z",
+      "label": "WHEN-1 schedule editor → save (\"Runs every day · 9:00 AM UTC\" + Pause; deployment + subscription created)",
+      "status": "PASS",
+      "ms": 343
+    },
+    {
+      "at": "2026-09-07T02:34:27.350Z",
+      "label": "TEACH-1 lesson + checkpoints + pause/resume",
+      "status": "PASS",
+      "ms": 631
+    },
+    {
+      "at": "2026-09-07T02:34:27.837Z",
+      "label": "TEACH-2 practice feedback references the CORRECT step (F-009/RR-008)",
+      "status": "PASS",
+      "ms": 223
+    },
+    {
+      "at": "2026-09-07T02:34:28.324Z",
+      "label": "TEACH-3 assessment → Lesson complete",
+      "status": "PASS",
+      "ms": 190
+    },
+    {
+      "at": "2026-09-07T02:34:28.329Z",
+      "label": "TEACH-4 teaching evidence visibly separate from run evidence",
+      "status": "PASS",
+      "ms": 4
+    },
+    {
+      "at": "2026-09-07T02:34:29.333Z",
+      "label": "MKT-6 Make my own (fork) with provenance",
+      "status": "PASS",
+      "ms": 836
+    },
+    {
+      "at": "2026-09-07T02:34:29.985Z",
+      "label": "LIB-1 My Workflows tab: cards with facts",
+      "status": "PASS",
+      "ms": 550
+    },
+    {
+      "at": "2026-09-07T02:34:30.094Z",
+      "label": "LIB-3 Drafts / Archived: honest unavailable",
+      "status": "PASS",
+      "ms": 50
+    },
+    {
+      "at": "2026-09-07T02:34:32.679Z",
+      "label": "DET-1 own-org workflow detail: full surface (the consumer’s fork + the publisher’s own-org content)",
+      "status": "PASS",
+      "ms": 2519
+    },
+    {
+      "at": "2026-09-07T02:34:33.205Z",
+      "label": "VER-1 update banner with pin language (v2 available)",
+      "status": "PASS",
+      "ms": 526
+    },
+    {
+      "at": "2026-09-07T02:34:34.558Z",
+      "label": "VER-2 Review update / What changed: the human-readable version diff (F-010/RR-009)",
+      "status": "PASS",
+      "ms": 1190
+    },
+    {
+      "at": "2026-09-07T02:34:35.146Z",
+      "label": "HOME-4 attention: Updates composes versions/installations reads (F-005/RR-005)",
+      "status": "PASS",
+      "ms": 588
+    },
+    {
+      "at": "2026-09-07T02:34:36.105Z",
+      "label": "VER-3 approve update → new pin",
+      "status": "PASS",
+      "ms": 856
+    },
+    {
+      "at": "2026-09-07T02:34:36.639Z",
+      "label": "ACT-1 activity timeline: entries + links",
+      "status": "PASS",
+      "ms": 401
+    },
+    {
+      "at": "2026-09-07T02:34:36.875Z",
+      "label": "ACT-2 activity → run deep link",
+      "status": "PASS",
+      "ms": 236
+    },
+    {
+      "at": "2026-09-07T02:34:37.174Z",
+      "label": "ACT-3 teaching/device on Activity: honest unavailable",
+      "status": "PASS",
+      "ms": 299
+    },
+    {
+      "at": "2026-09-07T02:34:37.603Z",
+      "label": "EXPERT-1 expert bridge page renders",
+      "status": "PASS",
+      "ms": 346
+    },
+    {
+      "at": "2026-09-07T02:34:38.055Z",
+      "label": "EXPERT-2 project creation through the UI",
+      "status": "PASS",
+      "ms": 281
+    },
+    {
+      "at": "2026-09-07T02:34:38.907Z",
+      "label": "EXPERT-3 engineering surfaces load against the REAL entry (the R0-R4 BLOCKED was a composition artifact)",
+      "status": "PASS",
+      "ms": 852
+    },
+    {
+      "at": "2026-09-07T02:34:40.993Z",
+      "label": "RESP-1 mobile 390×844: Home/Detail/Create/Explore render with no horizontal overflow",
+      "status": "PASS",
+      "ms": 1993
+    },
+    {
+      "at": "2026-09-07T02:34:42.821Z",
+      "label": "NET-1 in-app navigation while offline → honest degraded states",
+      "status": "PASS",
+      "ms": 1645
+    },
+    {
+      "at": "2026-09-07T02:34:45.491Z",
+      "label": "COMP-1 companion handoff deep link → the honest bridge",
+      "status": "PASS",
+      "ms": 2670
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/01-signup-home.png",
+      "sha256": "63d8bf75e9c6c733b03e8a2fe6cf20a333cdb394ff035dcb7d1d23e8e3b1a1d5",
+      "bytes": 87813
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/02-home-empty-attention.png",
+      "sha256": "c23dfe929d578aa12b7eb7eb1f71ce9ccc283f4edef47ec0b2ceb9cba4103c87",
+      "bytes": 114070
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/04-explore-cards.png",
+      "sha256": "73e0c9508f40bccb0a7d3ca749a45547bd4c77b805d9ca1c82af680da395f959",
+      "bytes": 46756
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/05-listing-disclosure.png",
+      "sha256": "45b0561c1566374f9480d1223fde0fdf23b4100b8dfd0fef775b15025df66701",
+      "bytes": 122992
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/06-no-org-onboarding.png",
+      "sha256": "f4a0519a239192ad8434d287aba3ef370a4a68f1c4091f43fef8c57f21f98896",
+      "bytes": 102334
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/07-purchased-entitled.png",
+      "sha256": "ac31225c8dd9cda46fffe2de871129423aa34c804c5bdd2edff28a209ca28df1",
+      "bytes": 109388
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/08-listing-installed.png",
+      "sha256": "c2affd9bfca914603847fd667ffa95ddc65b406daa31d917b2430e2f2bf96cdb",
+      "bytes": 118674
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/09-installed-real-name.png",
+      "sha256": "56d0f0fb400932651f3fcb1039b9c275842e795f72e0c2f776257c4454de6df4",
+      "bytes": 51605
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/10-installed-detail-loads.png",
+      "sha256": "49e5306e1261fba86226a93195d6e2574a4b0b5e56ecead44a7db293d49d61ad",
+      "bytes": 121014
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/11-create-boundary-tell.png",
+      "sha256": "b6d360daa1ec3ec933d6cc106366e3c69040d32791044b293ae8e439c1778a18",
+      "bytes": 167563
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/13-expert-authoring-created.png",
+      "sha256": "82e3e2a52ffc750ca9b97549a2ea6be157afc4afb8768dfe500ec675a3e7d89c",
+      "bytes": 165634
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/14-run-preview-running.png",
+      "sha256": "047a93ecee36e5ab38fc99c1e26ea50c8717fd5f8b6e74a387bef47ba630fba9",
+      "bytes": 140903
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/15-run-trust-how-know.png",
+      "sha256": "047a93ecee36e5ab38fc99c1e26ea50c8717fd5f8b6e74a387bef47ba630fba9",
+      "bytes": 140903
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/17-waiting-approve.png",
+      "sha256": "5cfbaf0c865e93126fe71b0d6095905ac261a81790c94aeb366b136f80dbb992",
+      "bytes": 140993
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/18-home-pending-approvals.png",
+      "sha256": "4905efd89a447c22caea7e00dd24a3b877738b5bb8e119557df52c9394a373c5",
+      "bytes": 123930
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/19-failed-recovery.png",
+      "sha256": "fdde139992305967a493f5c945d3af951c825779aec8bb4933abcbfccb94df11",
+      "bytes": 144817
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/20-when-scheduled.png",
+      "sha256": "fbfdf7e88c41e7f6ed1749fbed434988bd20599496cab3d90d3ee15e722ea8d7",
+      "bytes": 150248
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/21-teach-lesson.png",
+      "sha256": "1654eb494deb754760f0608ac5c6fca959a1f9d66a169f86326ed7f295fce79e",
+      "bytes": 342752
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/22-practice-correct-step.png",
+      "sha256": "d5c2b11a7ebcf415782bd19827977680c2c0de125ae8803df5a01c90da7175c8",
+      "bytes": 361003
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/23-lesson-complete.png",
+      "sha256": "aa00b64a48f1cd8d1b4b4f4d5913b10b74d995477d31fbd1ab97cab7e3dab387",
+      "bytes": 191053
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/24-fork-opened.png",
+      "sha256": "3a74ff65cd6f2fecbb2be12a42352b35dc02b2ba83f735e56d5a52112b053aa4",
+      "bytes": 112604
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/25-library-my-workflows.png",
+      "sha256": "310810671c8689648436e1ce1d391b7ee67059eb46ebc51e63940f6740862a26",
+      "bytes": 64427
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/26-drafts-archived-unavailable.png",
+      "sha256": "7b3294627cfb0cfccec77c41a6b08ed4fc7776d8e63a7098cc844e33806557e2",
+      "bytes": 49302
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/27-own-org-fork-detail.png",
+      "sha256": "3a74ff65cd6f2fecbb2be12a42352b35dc02b2ba83f735e56d5a52112b053aa4",
+      "bytes": 112604
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/28-publisher-own-org-detail.png",
+      "sha256": "1e96cd18bc200447699880b987e3985138e10913b6a9b23dd7ee0147358bc3f9",
+      "bytes": 146239
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/29-update-banner.png",
+      "sha256": "d66c5b9e9e8a19d194d98e39274581a8454a9cfdc1478b32b44c72800b87ee6f",
+      "bytes": 168190
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/30-equivalent-what-changed.png",
+      "sha256": "0797b820cd1812ac043856c64605d35bc1b09e674fbb0dc82ea6e6e7f7039598",
+      "bytes": 193993
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/32-human-readable-diff.png",
+      "sha256": "da6b9f31484562178e75a158ee295556698e8fe7aec4b80b78153eb653576e71",
+      "bytes": 220070
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/31-home-updates.png",
+      "sha256": "bfbe80d49ca98c92697c33c25760d3ac8f8550ae12640c2bdd69cb2956cab5b7",
+      "bytes": 108129
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/33-newest-version.png",
+      "sha256": "1680a0bd69955bca128a42e903da53119adc27a4d9028603f3e616212e685b0c",
+      "bytes": 158911
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/34-activity-timeline.png",
+      "sha256": "1639c3e6011dffac159012a9882cdf1c1d636377307df15356e421ada91cfa0e",
+      "bytes": 44066
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/35-expert-bridge.png",
+      "sha256": "1d909d0e042627121f2d69c1ead402827877663c20310c1e3403f0a55bf09fc7",
+      "bytes": 191555
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/36-project-created.png",
+      "sha256": "b030e8ef5bd141943f5b947e5a73478afe8ef0469d6be8c333f40b731726d408",
+      "bytes": 60935
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/37-responsive-390.png",
+      "sha256": "1680a0bd69955bca128a42e903da53119adc27a4d9028603f3e616212e685b0c",
+      "bytes": 158911
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/38-offline-degraded.png",
+      "sha256": "5639e28b8650e9c92963bde444000891e85003f4123bcb4b1b6a9e334c5d881f",
+      "bytes": 26081
+    },
+    {
+      "file": "spec/architecture/v2/dogfooding-evidence/assets/reality-audit-r6/39-companion-handoff.png",
+      "sha256": "8375f5457beb350bdc6fa1abfe5383d48fdde21eb362310ff58951f40d33a179",
+      "bytes": 70994
+    }
+  ]
+}
