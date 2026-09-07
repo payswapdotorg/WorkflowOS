@@ -2565,6 +2565,9 @@ async function auditJourney(
     () => 'the Activity page renders the honest teaching/device disclosure sentence verbatim (no fabricated timeline entries)',
     'EXPECTED_UNAVAILABLE',
     async () => {
+      // ACT-2's deep link lands on the workflow detail — return to the
+      // Activity page first (an orchestrator navigation-pin correction).
+      await page.goto(`${FRONTEND_URL}/activity`);
       await expect(
         // The disclosure is ONE paragraph whose JSX line breaks split it
         // into SEPARATE text nodes — Playwright matches regexes per text
