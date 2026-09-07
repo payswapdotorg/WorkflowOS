@@ -2500,12 +2500,16 @@ async function auditJourney(
         `/organizations/${consumerOrgId}/workflow-repository/installations`,
       );
       expect(installations.status).toBe(200);
+      // The installations read nests each row as { installation: {…},
+      // pinnedVersion: {…} } (serializeInstallationDetail) — the workflowId
+      // lives at row.installation.workflowId (an orchestrator pin
+      // correction from the diagnostic run).
       const pins = (
         installations.json.installations as Array<{
-          workflowId: string;
+          installation: { workflowId: string };
           pinnedVersion: { versionNumber: number };
         }>
-      ).filter((i) => i.workflowId === seed.workflowId);
+      ).filter((i) => i.installation.workflowId === seed.workflowId);
       expect(pins.length).toBeGreaterThan(0);
       expect(pins[0]!.pinnedVersion.versionNumber).toBe(3);
     },
