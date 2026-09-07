@@ -2192,7 +2192,7 @@ async function auditJourney(
     'own-org workflow detail: full surface (the consumer\u2019s fork + the publisher\u2019s own-org content)',
     'purpose, presentation steps, When/Where, Recent activity, Version, Access and safety, Updates, Improvements, primary actions — with real content on the publisher\u2019s own-org pass',
     () =>
-      'the consumer\u2019s fork detail rendered the full surface (heading, description, Private line, the 5 steps, "Runs when you start it", "Not run yet", "Version 1 — immutable", "No installs — run it from the library", Access and safety, Updates, Improvements, Teach Me/Share/Edit); the publisher\u2019s own-org detail (a second real browser session) rendered WITH content: the seeded schedule "Runs every day · 9:00 AM UTC" + Pause, Recent activity listing the run, "Installed: Version 1 — pinned · Enabled"',
+      'the consumer\u2019s fork detail rendered the full surface (heading, Private line, the 5 steps, "Runs when you start it", "Not run yet", "Version 1 — immutable", "No installs — run it from the library", Access and safety, Updates, Improvements, Teach Me/Share/Edit); the publisher\u2019s own-org detail (a second real browser session) rendered WITH content: the seeded schedule "Runs every day · 9:00 AM UTC" + Pause, Recent activity listing the run, "Installed: Version 1 — pinned · Enabled"',
     'PASS',
     async () => {
       // (a) The consumer's own-org fork detail — the full surface.
@@ -2200,7 +2200,12 @@ async function auditJourney(
       await expect(page.getByRole('heading', { name: FORK_NAME })).toBeVisible({
         timeout: 20_000,
       });
-      await expect(page.getByText(WORKFLOW_DESCRIPTION)).toBeVisible();
+      // The fork command carries the NAME only (the UI form sends no
+      // description; the service's description field is optional) — the
+      // fork's detail honestly omits the description paragraph (the page
+      // renders it only when present). The structural surface below is the
+      // audited expectation; the description assertion stays on the
+      // publisher's own-org pass (b), whose workflow carries it.
       await expect(page.getByText(/Private — only you/i)).toBeVisible();
       const steps = page.getByRole('list', { name: /what it does/i });
       await expect(steps.getByRole('listitem')).toHaveCount(5);
