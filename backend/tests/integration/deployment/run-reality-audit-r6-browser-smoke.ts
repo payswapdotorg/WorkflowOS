@@ -2308,10 +2308,22 @@ async function auditJourney(
 
   // ============ VER-2 — What changed (equivalent + human-readable) ============
   // The compare-response capture is armed BEFORE the reviews (the wire proof).
-  const compareResponses: Response[] = [];
+  // The wire capture snapshots the compare POSTs EAGERLY (method, status,
+  // and the parsed body at arrival): Playwright invalidates a Response's
+  // body after the page navigates away, so the proof must never read
+  // res.json() late (an orchestrator correction from the diagnostic run —
+  // the late read raced the page's navigation after the review surface).
+  const compareResponses: Array<{ method: string; status: number; body: unknown }> = [];
   const onCompareResponse = (res: Response) => {
     if (res.url().includes('/api/workflow-optimization/compare')) {
-      compareResponses.push(res);
+      void res
+        .json()
+        .then((body) => {
+          compareResponses.push({ method: res.request().method(), status: res.status(), body });
+        })
+        .catch(() => {
+          compareResponses.push({ method: res.request().method(), status: res.status(), body: null });
+        });
     }
   };
   page.on('response', onCompareResponse);
@@ -2386,21 +2398,27 @@ async function auditJourney(
       // internal envelopes (the v1→v2 EQUIVALENT result and the v1→v3
       // non-equivalent divergence) while the rendered DOM never shows
       // any of them.
+      // The eager snapshots may still be resolving; wait for at least two.
+      const captureDeadline = Date.now() + 10_000;
+      while (compareResponses.length < 2 && Date.now() < captureDeadline) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
       expect(compareResponses.length).toBeGreaterThanOrEqual(2);
       const domText = await page.getByRole('region', { name: 'Update available' }).innerText();
       const equivalents: boolean[] = [];
       for (const res of compareResponses) {
-        expect(res.request().method()).toBe('POST');
-        expect(res.status()).toBe(200);
-        const body = (await res.json()) as {
+        expect(res.method).toBe('POST');
+        expect(res.status).toBe(200);
+        const body = res.body as {
           comparison: { correctness: { equivalent: boolean; firstDivergence: string | null } };
-        };
-        equivalents.push(body.comparison.correctness.equivalent);
-        const divergence = body.comparison.correctness.firstDivergence;
+        } | null;
+        expect(body).not.toBeNull();
+        equivalents.push(body!.comparison.correctness.equivalent);
+        const divergence: string | null = body!.comparison.correctness.firstDivergence;
         // The v1→v2 compare: EQUIVALENT (the authority's own result,
         // unchanged by the repair). The v1→v3 compare: NON-equivalent
         // with the raw internal envelope the transport carries…
-        if (body.comparison.correctness.equivalent) {
+        if (body!.comparison.correctness.equivalent) {
           // The equivalent posture: the authority's own result — no
           // divergence to describe (the DOM showed "Task-for-task
           // equivalent - verified").
