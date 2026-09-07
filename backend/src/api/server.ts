@@ -42,6 +42,10 @@ import {
   type DevelopmentPlannerRouteDeps,
 } from './routes/development-planner.route.js';
 import {
+  feedbackConversionRoutes,
+  type FeedbackConversionRouteDeps,
+} from './routes/feedback-conversion.route.js';
+import {
   maintenanceRoutes,
   type MaintenanceRouteDeps,
 } from './routes/maintenance.route.js';
@@ -178,6 +182,19 @@ export interface ServerDeps extends JobsRouteDeps {
    *  verification / review state, NEVER starts execution, NEVER selects a
    *  provider. */
   developmentPlanner?: DevelopmentPlannerRouteDeps;
+  /** WORK-068: Feedback → Governed Work Items routes (the governed convert
+   *  mutation + the read-only assessment preview). Backend-authorized
+   *  (project.read / project.write). The conversion submits proposed Work
+   *  Items ONLY through the existing /work-items WorkItemRepository.create
+   *  intake; the public route constructs the governed decision
+   *  server-side (decidedBy = the authenticated principal; the caller
+   *  supplies only the decisionReason). The service re-derives the
+   *  assessment in the mutation path (no silent conversion), deduplicates
+   *  against the existing OPEN Work Items, and preserves the signal
+   *  provenance (metadata.feedbackConversion). The conversion NEVER
+   *  mutates the dependency graph, NEVER transitions workflow state, NEVER
+   *  starts execution, NEVER selects a provider. */
+  feedbackConversion?: FeedbackConversionRouteDeps;
   /** WORK-041: Maintenance + Project Health Engine route deps (the maintenance
    *  capability: POST evaluate/evaluate-async [user requests → planner] +
    *  POST scan/scan-async [detector trigger → detectors → planner] + GET
@@ -360,6 +377,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   }
   if (deps.auth && deps.developmentPlanner) {
     await developmentPlannerRoutes(app, deps.developmentPlanner);
+  }
+  if (deps.auth && deps.feedbackConversion) {
+    await feedbackConversionRoutes(app, deps.feedbackConversion);
   }
   if (deps.auth && deps.maintenance) {
     await maintenanceRoutes(app, deps.maintenance);

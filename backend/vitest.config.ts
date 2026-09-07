@@ -64,6 +64,13 @@ export default defineConfig({
       // tests/integration/engineering-signals/ and gate on
       // WORKFLOWOS_DATABASE_URL).
       'tests/engineering-signals/**/*.test.ts',
+      // WORK-068: the feedback→governed-Work-Item conversion suite (the
+      // conversion layer over the WORK-067 signals + the EXISTING /work-items
+      // intake — pure domain + composition + boundary/discrimination
+      // proofs; the real-stack route/intake integration test lives under
+      // tests/integration/feedback-conversion/ and gates on
+      // WORKFLOWOS_DATABASE_URL).
+      'tests/feedback-conversion/**/*.test.ts',
       // WORK-069: the progressive release decision suite (the feedback
       // binding layer — pure domain + composition tests; the real-PG
       // two-actor concurrency proofs live under

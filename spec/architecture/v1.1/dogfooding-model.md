@@ -306,3 +306,96 @@ product-defect fixes (findings F-3 and F-4) that do NOT gate the
 dogfood run, but they remove P2 UX defects a real customer would encounter.
 See `spec/architecture/v1.1/dogfooding-evidence/2026-08-30-onboarding-attempt.md`
 for the full experiment record and the finding→Work-Order mapping.
+
+## 9. The feedback→governed-Work-Item conversion model (WORK-068 — the implemented model)
+
+WORK-068 is the conversion layer that closes the dogfood loop's last edge:
+the engineering signals WORK-067 records become governed Work Items —
+through the EXISTING authorities, never around them. The implemented model
+(live at `backend/src/feedback-conversion/`, dispatched by Issue #12 on
+2026-09-06 after the V2-017 completion reconciliation):
+
+### 9.1 The canonical flow (as implemented)
+
+```text
+Engineering Signal (WORK-067 — advisory, provenance-bound)
+    ↓  listSignalsForProject / findSignal (read-only consumption)
+signal group (by logicalFailureKey — cross-environment merge)
+    ↓  assessSignalGroup (severity / scope / blast radius — discrete factors)
+assessment (recorded, explainable — never an opaque score)
+    ↓  matchOpenWorkItems (the OPEN Work Items of the target version)
+deduplication (FB- family + signal provenance → converge, never duplicate)
+    ↓  prioritizeProposal + deriveBacklogContext
+priority (relative to the existing backlog — rank + open counts recorded)
+    ↓  WorkItemRepository.create (the EXISTING /work-items intake — the
+    ↓  single creation path; evidence in metadata.feedbackConversion)
+PROPOSED Work Item (enters the existing governance lifecycle:
+    architecture checkpoint → agent execution → verification →
+    architect review → merge — the full lifecycle before any code change)
+```
+
+### 9.2 The governed decision boundary (no silent conversion)
+
+The conversion mutation structurally REQUIRES an explicit governed
+decision (`decidedBy` + `decisionReason` — validated fail-closed) and
+ALWAYS re-derives the assessment in the mutation path. A signal NEVER
+becomes a Work Item because it exists: there is no scheduler, no queue,
+no signal-ingestion hook, no autonomous loop. The public HTTP surface
+(POST `/projects/:projectId/feedback/convert`) constructs the decision
+server-side — `decidedBy` is the authenticated principal, never a
+caller-supplied field (forged decision-authority fields are REJECTED with
+400, not ignored). The read-only assessment preview
+(GET `/projects/:projectId/feedback/proposals`) can never mutate.
+
+### 9.3 The dedup identity (convergence, never duplication)
+
+The proposal identity is deterministic: `FB-<10 hex>` =
+sha256(organizationId | projectId | architectureVersionId |
+logicalFailureKey). The existing
+UNIQUE(architecture_version_id, work_item_id) DB constraint on
+wfos_work_items is the persistence-level fence — a concurrent duplicate
+INSERT throws 23505 → re-query → converge (the WORK-040 planner model).
+Deduplication considers the OPEN Work Items only: a COMPLETED family
+member does not block a recurring failure — the recurrence becomes NEW
+governed work with a distinct id (`FB-<10 hex>.R2`, `.R3`, …) and the
+recurrence chain recorded in the provenance.
+
+### 9.4 Provenance preservation (the reconstructable chain)
+
+Every created Work Item's `metadata.feedbackConversion` records: the
+originating signal ids, the logical failure key, the distinct sources and
+environments, the occurrence count, the first/last observation times, the
+recorded severities, the advisory regression evidence (verbatim from
+WORK-067 — never a verdict), the derived assessment (severity/scope/blast
+radius + factors), the priority + its explainable factors, the backlog
+context (open count + rank), the dedup key, the recurrence chain, the
+governed decision (decidedBy/decisionReason/decidedAt), and the full
+occurrence provenance (each WORK-067 occurrence id + its raw observation
+reference — never reduced to a hash).
+
+### 9.5 The boundary contract (the no-second-authority matrix)
+
+- The existing `/work-items` authority remains the ONE Work Item
+  authority — creation goes ONLY through `WorkItemRepository.create`; this
+  domain owns NO tables and declares NO parallel WorkItem model.
+- The existing continuous development planner (WORK-040) remains the ONE
+  planning authority — the conversion feeds it, never replaces it.
+- The existing `/workflows` authority owns the lifecycle — the converted
+  Work Item enters the SAME created state as any other item; the
+  conversion never transitions, executes, reviews, or merges anything.
+- WORK-067 remains the signal authority — consumed read-only.
+- WORK-069 (progressive release) and WORK-070 (architecture fitness) are
+  downstream consumers of the governed Work Items this model produces —
+  not implemented here, never pulled in.
+- The model is deterministic (sha256 identities, injected clock, discrete
+  factors) and fail-closed (typed rejections for missing scope, unknown
+  signals, a missing decision).
+
+The static-architecture suite pins 18 WORK-068 invariants; the
+discrimination suite proves the six required mutations fail their
+invariants (identity-scope stripping, the silent converter, the dropped
+provenance binding, the open-only dedup boundary, the parallel store, the
+skipped assessment). The real-stack integration proof exercises the real
+HTTP surface over the real WORK-067 service and the real
+PgWorkItemRepository intake. The durable activation dispatch is Issue #12
+(recorded in `spec/development-state/program-state.json`).
